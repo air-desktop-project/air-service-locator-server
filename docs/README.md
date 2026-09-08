@@ -43,8 +43,10 @@ savait déjà où écoutent les services, il saura maintenant qui les consulte e
 quelle heure. Un graphe d'usage horodaté en dit souvent plus long qu'un carnet
 d'adresses.
 
-D'où C18 : **on agrège, puis on jette**. Les compteurs survivent, le détail qui
-les a produits n'a pas à survivre avec eux.
+D'où C18 : **on agrège, puis on jette**. Les entrées brutes expirent à
+**quatre-vingt-dix jours**, les compteurs survivent — ils ne nomment personne. Le
+journal est la seule chose qu'une rupture de relation n'efface pas, parce que
+c'est souvent lui qui l'a motivée ; la rétention borne cette exception.
 
 ## Le modèle d'autorisation, en une phrase
 

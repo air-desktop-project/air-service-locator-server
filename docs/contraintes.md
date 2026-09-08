@@ -23,8 +23,8 @@ encore ».
 | C14 | Aucune authentification par secret partagé — des clés, et rien d'autre | Revue |
 | C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` — **à écrire** |
 | C16 | Une seule toolchain, celle d'Air, datée | `check-toolchain.sh` — **à écrire** |
-| C17 | Tout enregistrement porte son origine, et rompre une relation efface ce qui en vient | Essai — **à écrire** |
-| C18 | Le journal est agrégé puis jeté, et n'ouvre aucun canal temporel | Essai de temporisation — **à écrire** |
+| C17 | Tout enregistrement porte son origine, et rompre une relation efface ce qui en vient — **sauf le journal** | Essai — **à écrire** |
+| C18 | Le journal expire à 90 jours, et n'ouvre aucun canal temporel | Essai de temporisation, et supervision de l'âge — **à écrire** |
 
 ---
 
@@ -330,6 +330,23 @@ Deux règles que le code doit tenir, et qu'un essai peut vérifier :
   qui se contenterait de compter ce qui a été supprimé ne verrait pas ce qui a
   été oublié.
 
+### L'exception, et il n'y en a qu'une : le JOURNAL
+
+**Les lignes de journal survivent à une rupture** ([`journal.md`](journal.md)
+§5 bis). Ce qui motive une rupture est souvent ce que le journal a enregistré —
+un pair qui affirme hors de son autorité, un balayage, un volume anormal.
+**Effacer le journal en rompant détruirait la preuve au moment précis où l'on
+s'en sert.**
+
+Cette exception doit être écrite dans l'essai de C17, et pas seulement ici. Un
+essai qui vérifierait « plus rien de cette origine » sans l'exclure échouerait —
+ou pire, ferait écrire le code qui efface les lignes de journal pour le
+satisfaire.
+
+**Elle est bornée par C18** : le journal survit à la rupture, mais il expire
+quand même à quatre-vingt-dix jours. L'exception dure le temps d'une enquête,
+pas le temps d'une archive.
+
 **L'origine ne se déduit pas de l'autorité**, même si C11 fait aujourd'hui
 coïncider les deux. Un champ qui repose sur l'invariant d'un autre se trompera le
 jour où cet invariant bougera.
@@ -357,10 +374,17 @@ son autorité (C11).
 **Mais un journal de qui interroge quoi et quand est un actif à part, et cette
 contrainte est ce qui l'empêche de devenir une archive comportementale.**
 
-- **Les agrégats survivent, les entrées brutes non.** Un compteur « 4 812
-  résolutions cette semaine » ne nomme personne, et c'est pourtant lui qu'on
-  regarde. La durée de rétention du brut n'est pas encore fixée — **c'est le
-  manque le plus important de ce document**, parce qu'à défaut elle est infinie.
+- **Les entrées brutes expirent à QUATRE-VINGT-DIX JOURS ; les agrégats
+  survivent sans limite.** Un compteur « 4 812 résolutions cette semaine » ne
+  nomme personne, et c'est pourtant lui qu'on regarde. Un trimestre couvre une
+  saison et laisse le temps de découvrir un abus lent ; c'est aussi long pour un
+  graphe d'usage horodaté, et c'est le prix assumé.
+- **L'expiration s'exécute, et son ARRÊT est une alarme.** Une rétention qui
+  repose sur une intention est une rétention infinie. La supervision doit porter
+  sur **l'âge de l'entrée la plus ancienne**, jamais sur le fait que le travail
+  « a tourné » : un travail qui tourne et n'efface rien passe tous les contrôles
+  de la seconde sorte, et l'on découvre trois ans plus tard qu'on détenait trois
+  ans.
 - **La journalisation reste HORS du chemin de réponse.** Un chemin qui écrirait
   davantage sur un succès que sur un refus rendrait le temps de réponse
   dépendant du résultat, et rouvrirait exactement le canal que **C9** ferme.

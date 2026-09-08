@@ -79,19 +79,38 @@ se rattrape pas.
 permanente.** Ce n'est presque jamais une décision : c'est ce qui arrive quand
 personne ne tranche.
 
-La forme qui répond au besoin sans le coût :
-
 | | Ce qu'on garde | Combien de temps |
 |---|---|---|
-| **Entrées brutes** | Chaque requête, avec son demandeur | **Court** — le temps du diagnostic et de la détection d'abus |
-| **Agrégats** | Des compteurs : volumes, taux de refus, pics | **Long** — ils ne nomment personne |
+| **Entrées brutes** | Chaque requête, avec son demandeur | **90 jours** |
+| **Agrégats** | Des compteurs : volumes, taux de refus, pics | Sans limite — ils ne nomment personne |
 
 **Agréger puis jeter.** Les statistiques imposées survivent ; le détail qui les
 a produites n'a pas à survivre avec elles. Un compteur « 4 812 résolutions cette
 semaine » ne dit rien de personne, et c'est pourtant lui qu'on regarde.
 
-**La durée des entrées brutes n'est pas décidée.** Elle doit l'être, et elle doit
-être écrite dans la documentation d'exploitation — pas seulement dans le code.
+### Quatre-vingt-dix jours — ce que ça achète, ce que ça coûte
+
+**Ce que ça achète.** Un trimestre couvre une saison entière : on voit un cycle,
+et pas seulement une semaine. Surtout, **un abus se découvre souvent longtemps
+après** — un balayage lent, un compte qui dérive, un pair qui insiste. Trente
+jours laisseraient l'enquête arriver après les faits.
+
+**Ce que ça coûte, et il faut le dire.** Quatre-vingt-dix jours d'activité
+horodatée, c'est long pour un graphe d'usage. Pendant ce trimestre, la base
+répond à « qui a consulté quoi, et quand », pour tout le monde.
+
+### L'expiration s'exécute, et son échec se voit
+
+**Une rétention qui repose sur une intention est une rétention infinie.**
+
+Ce qui la fait tenir n'est pas la valeur écrite ici : c'est un travail
+d'expiration qui tourne, et **dont l'arrêt est une alarme**. Un nettoyage qui
+cesse silencieusement ne se remarque pas — la base grossit, ce qu'on ne regarde
+pas —, et l'on découvre trois ans plus tard qu'on détenait trois ans.
+
+La supervision doit donc porter sur **l'âge de l'entrée la plus ancienne**, pas
+sur le fait que le travail « a tourné ». Un travail qui tourne et n'efface rien
+passe tous les contrôles de la seconde sorte.
 
 ---
 
@@ -137,6 +156,35 @@ fédération, détient l'historique de qui consulte quoi.
 
 ---
 
+## 5 bis. Le journal survit à une rupture — et c'est une exception à C17
+
+**C17 dit que rompre une relation de confiance efface tout enregistrement dont
+l'origine est cette relation. LE JOURNAL EN EST EXCLU.**
+
+**Pourquoi.** Ce qui motive une rupture est souvent ce que le journal a
+enregistré : un pair qui affirme hors de son autorité (C11), un balayage, un
+volume anormal. **Effacer le journal en rompant, ce serait détruire la preuve au
+moment précis où l'on s'en sert.** On ne peut ni établir ce qui s'est passé, ni
+le montrer à qui que ce soit, ni décider plus tard de rétablir la relation en
+connaissance de cause.
+
+**Ce que cela coûte, et qui n'est pas éludé.** On conserve des lignes qui
+concernent les utilisateurs d'un annuaire avec lequel on n'a plus aucun lien —
+et qui, eux, n'ont plus aucun moyen de les consulter (§4), puisque la relation
+qui les rattachait n'existe plus.
+
+**Et c'est la rétention qui rend cette exception tenable.** Le journal survit à
+la rupture, mais **il expire quand même à quatre-vingt-dix jours** (§3).
+L'exception est donc bornée par construction : elle dure le temps d'une enquête,
+pas le temps d'une archive. Les deux décisions se répondent, et ni l'une ni
+l'autre ne tiendrait seule — une rétention infinie ferait de cette exception un
+dossier permanent sur des inconnus.
+
+**Les agrégats, eux, survivent sans limite** et ne posent pas la question : ils
+ne nomment personne.
+
+---
+
 ## 6. Ce que la journalisation ne doit PAS casser
 
 **C9 — les réponses en temps constant.** Un chemin qui journalise davantage sur
@@ -156,17 +204,12 @@ qu'on refuse d'héberger ici.
 
 ## 7. Ce qui n'est pas décidé
 
-1. **La durée de rétention des entrées brutes** (§3). C'est le manque le plus
-   important : sans elle, la rétention est infinie par défaut.
-2. **L'adresse source est-elle conservée ?** (§2.3)
-3. **Le résultat rendu est-il conservé ?** (§2.3)
-4. **L'utilisateur voit-il qui a résolu ses services ?** (§4) — proposé, pas
+1. **L'adresse source est-elle conservée ?** (§2.3)
+2. **Le résultat rendu est-il conservé ?** (§2.3)
+3. **L'utilisateur voit-il qui a résolu ses services ?** (§4) — proposé, pas
    confirmé.
-5. **Où vivent les agrégats**, et s'ils sortent de la machine. Un système de
+4. **Où vivent les agrégats**, et s'ils sortent de la machine. Un système de
    statistiques tiers ferait sortir ce que §6 interdit de faire sortir.
-6. **Que devient le journal quand une relation de confiance est rompue ?** C17
-   efface les enregistrements dont l'origine est la relation révoquée. **Les
-   lignes de journal en font-elles partie ?** Les effacer perd la trace d'abus
-   éventuels — qui est précisément ce qui a pu motiver la rupture. Les garder
-   conserve des données sur les utilisateurs d'un annuaire avec lequel on n'a
-   plus de lien. **Les deux se défendent, et il faut choisir.**
+5. **Que voit un utilisateur de SON journal après quatre-vingt-dix jours ?**
+   Rien, par construction. Il faut que l'application le dise, plutôt que de
+   laisser croire à un historique complet.

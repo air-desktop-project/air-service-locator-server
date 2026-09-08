@@ -176,6 +176,12 @@ l'accord de personne, et surtout pas du pair qu'il coupe.
 **Quand la relation est rompue, TOUT enregistrement dont l'origine est cette
 relation disparaît.** Pas suspendu, pas marqué : effacé.
 
+**Une seule exception : le JOURNAL** ([`journal.md`](journal.md) §5 bis). Ce qui
+motive une rupture est souvent ce que le journal a enregistré ; l'effacer en
+rompant détruirait la preuve au moment où l'on s'en sert. L'exception est bornée
+par la rétention — quatre-vingt-dix jours — donc elle dure le temps d'une
+enquête, pas le temps d'une archive.
+
 Cela exige que **chaque enregistrement répliqué porte son ORIGINE** — la relation
 par laquelle il est entré. C'est un champ du modèle, pas une commodité
 d'implémentation, et c'est ce qui rend la rupture complète plutôt
@@ -393,8 +399,3 @@ Rassemblé, plutôt que dispersé.
    Un flux entre pairs de confiance n'a pas les mêmes besoins qu'une requête de
    client.
 6. **La migration d'un compte d'un annuaire à un autre.**
-7. **Le journal survit-il à une rupture ?** C17 efface les enregistrements dont
-   l'origine est la relation révoquée ; les lignes de journal en font-elles
-   partie ? Les effacer perd la trace des abus qui ont pu MOTIVER la rupture ;
-   les garder conserve des données sur les utilisateurs d'un annuaire avec lequel
-   on n'a plus de lien ([`journal.md`](journal.md) §7).
