@@ -98,10 +98,36 @@ jobs:
           cargo --version
           rustc --version
 
+      # ── EN PREMIER, ET INSTANTANÉ ────────────────────────────────────────
+      #
+      # Un verdict rendu par la mauvaise toolchain ne vaut rien. L'apprendre
+      # après trois minutes, c'est jeter les trois minutes.
+      #
+      # Ici, `air` n'existe pas : le contrôle ne compare qu'à la valeur écrite
+      # dans le script, et il le DIT. La dérive avec Air ne se voit qu'en local.
+      - name: check-toolchain
+        run: ./scripts/check-toolchain.sh
+
+      # ── LES ÉTAGES (C1) ──────────────────────────────────────────────────
+      #
+      # Une seconde, et il dit une chose que la compilation ne dira jamais :
+      # qu'un codec a commencé à lire un fichier. Le mettre après ferait
+      # attendre trois minutes pour l'apprendre.
+      - name: check-etages
+        run: ./scripts/check-etages.sh
+
       # CE QUI RÉPOND VITE RÉPOND TÔT. Une erreur de type se lit en une seconde ;
       # l'apprendre après trois minutes de lints ne l'apprend pas mieux.
       - name: check-compile
         run: ./scripts/check-compile.sh
+
+      # ── LA PILE (C15) ────────────────────────────────────────────────────
+      #
+      # Après la compilation, parce qu'il lit le graphe RÉSOLU : les dépendances
+      # transitives, celles que personne n'a déclarées et que personne ne
+      # regarde. C'est là que ce genre de crate entre.
+      - name: check-pile
+        run: ./scripts/check-pile.sh
 
       - name: check-clippy
         run: ./scripts/check-clippy.sh

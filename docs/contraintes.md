@@ -7,7 +7,7 @@ encore ».
 
 | | Contrainte | Contrôle |
 |---|---|---|
-| C1 | Étages 1 et 2 sans entrée-sortie | `check-etages.sh` — **à écrire** |
+| C1 | Étages 1 et 2 sans entrée-sortie | `check-etages.sh` |
 | C2 | 100 % de couverture aux étages 1 et 2 | `check-couverture.sh` — **à écrire** |
 | C3 | Tout décodeur est fuzzé | `check-fuzz.sh` — **à écrire** |
 | C4 | `asl-client` reste mince | `check-client.sh` — **à écrire** |
@@ -18,11 +18,11 @@ encore ».
 | C9 | Réponses en temps constant sur les chemins d'autorisation | Essai — **à écrire** |
 | C10 | Rien ne se lit sans autorisation nominative | Essai — **à écrire** |
 | C11 | Un annuaire n'accepte d'un pair que ce dont ce pair est l'autorité | Essai — **à écrire** |
-| C12 | La surface publique d'`asl-client` traverse une ABI C, et elle est stable | `check-abi.sh` — **à écrire** |
+| C12 | La surface publique d'`asl-client` traverse une ABI C, et elle est stable | `check-abi.sh` (dépôt client) |
 | C13 | Aucune donnée personnelle hébergée, hors l'alias public choisi | Revue, et le schéma du magasin |
 | C14 | Aucune authentification par secret partagé — des clés, et rien d'autre | Revue |
-| C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` — **à écrire** |
-| C16 | Une seule toolchain, celle d'Air, datée | `check-toolchain.sh` — **à écrire** |
+| C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` |
+| C16 | Une seule toolchain, celle d'Air, datée | `check-toolchain.sh` |
 | C17 | Tout enregistrement porte son origine, et rompre une relation efface ce qui en vient — **sauf le journal** | Essai — **à écrire** |
 | C18 | Le journal expire à 90 jours, et n'ouvre aucun canal temporel | Essai de temporisation, et supervision de l'âge — **à écrire** |
 
@@ -58,8 +58,17 @@ choses le paient ici, et ce ne sont pas des considérations d'élégance :
   « Ouvrir une connexion TCP et voir » est une entrée-sortie. Les mêler rendrait
   la première inéprouvable sans réseau.
 
-`check-etages.sh` devra refuser toute mention de `std::net`, `std::fs`,
-`std::time::SystemTime` et `tokio` dans les crates des étages 1 et 2.
+**`check-etages.sh` existe.** Il refuse `std::fs`, `std::net`, `std::io`,
+`std::process`, `std::thread`, `SystemTime`, `Instant` et `tokio` dans les
+sources des étages 1 et 2, et refuse aussi ces crates dans leurs manifestes.
+
+**Et il ferme le trou dont ce genre de liste souffre toujours** : il lit les
+membres du workspace et EXIGE que chacun soit classé dans un étage. On ne peut
+donc pas ajouter une crate sans la classer — c'est ainsi qu'une entrée-sortie
+serait entrée sans que personne ne la voie.
+
+Ce qu'il ne peut pas voir : une entrée-sortie atteinte à travers une dépendance
+dont le nom ne dit rien. La revue reste nécessaire.
 
 ## C2 — 100 % de couverture aux étages 1 et 2
 
@@ -220,9 +229,23 @@ impose deux choses qu'une bibliothèque Rust ordinaire n'a pas à respecter :
   la fois. Une signature retirée casse du code que nous ne voyons pas, dans cinq
   écosystèmes qui ne se mettent pas à jour au même rythme.
 
-`check-abi.sh` devra comparer l'en-tête C généré à celui du dernier commit et
-**exiger une justification écrite pour toute suppression**. Un ajout est libre ;
-c'est le retrait qui casse.
+**`check-abi.sh` existe**, dans le dépôt client. Il ne compare PAS un en-tête
+généré : il lit les symboles réellement exportés par `libasl_client_ffi.so` et
+les compare au registre committé `crates/asl-client-ffi/abi.txt`.
+
+Le binaire plutôt que l'en-tête, et c'est plus fort : un en-tête décrit ce que le
+code PRÉTEND exporter, `nm` dit ce qu'il exporte. Un `#[no_mangle]` oublié, un
+`crate-type` mal formé, une fonction rendue conditionnelle par une feature — rien
+de cela ne se voit dans un en-tête.
+
+Un ajout fait échouer le contrôle avec un message doux : la décision d'ajouter est
+libre, **c'est l'inscription au registre qui est exigée** — un registre en retard
+ne protège plus rien. Un retrait échoue avec un message dur.
+
+**Ce qu'il ne juge PAS : les signatures.** Changer un `int32_t` en `int64_t` sans
+renommer la fonction casse les cinq liaisons sans qu'il bronche. Le jour où la
+première fonction existera, il faudra soit un en-tête committé en plus, soit la
+discipline de renommer ce qu'on change.
 
 ## C13 — Aucune donnée personnelle hébergée, hors l'alias public choisi
 
@@ -279,9 +302,17 @@ contrôle de flux, QPACK, extinction en deux temps — écrits sur tokio, **sans
 ligne de C**, et déjà éprouvés par un autre produit.
 
 **Réimplémenter QUIC est le genre de décision qui paraît raisonnable un
-après-midi et coûte deux ans.** `check-pile.sh` devra refuser toute crate tierce
-de QUIC ou de HTTP/3 dans le graphe, et refuser un module local qui en
-réimplémenterait une partie.
+après-midi et coûte deux ans.** Tirer une pile tierce paraît encore plus
+raisonnable — et ferait entrer, en une ligne de manifeste, des dépendances C et
+un calendrier de publication qui ne sont pas les nôtres.
+
+**`check-pile.sh` existe**, dans les deux dépôts Rust. Il lit le graphe RÉSOLU,
+donc les dépendances transitives — celles que personne n'a déclarées et que
+personne ne regarde, et c'est par là que ce genre de crate entre.
+
+Ce qu'il ne peut pas voir : une réimplémentation LOCALE. Un module qui écrirait
+une poignée de main QUIC dans nos propres crates lui est invisible ; cela relève
+de la revue.
 
 **CES CRATES ONT VOCATION À MIGRER DANS `air`.** Elles sont tirées d'
 `air-mail-server` aujourd'hui parce que c'est là qu'elles vivent ; le jour où
@@ -308,9 +339,14 @@ Il aurait tort globalement, pour deux raisons :
    — ce qui ne compile QUE sur nightly. Découvrir ce jour-là que le code ne passe
    pas la toolchain d'Air serait le découvrir trop tard.
 
-`check-toolchain.sh` devra comparer ce fichier à celui d'Air et échouer sur tout
-écart. Il n'existe pas ; tant qu'il n'existe pas, la contrainte tient par la
-lecture de ce document, ce qui est peu.
+**`check-toolchain.sh` existe**, dans les deux dépôts. Il vérifie trois choses :
+que `rust-toolchain.toml` déclare la version attendue, que la toolchain
+RÉELLEMENT ACTIVE est celle-là — un pin que rustup n'honore pas ne pin rien —, et
+que le dépôt `air` déclare la même.
+
+**Le troisième contrôle ne tourne pas en CI**, où `air` est absent : le script le
+DIT au lieu de rendre un vert muet. La dérive avec Air ne se voit donc qu'en
+local, et c'est une limite qu'il faut connaître.
 
 ## C17 — Tout enregistrement porte son origine
 
