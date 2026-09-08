@@ -22,6 +22,18 @@ En attendant, l'annuaire **mesure** la joignabilité et la dit, plutôt que de l
 supposer. C'est ce qui apprend à un administrateur que son daemon ne tient pas
 l'exigence, au lieu qu'il l'apprenne le jour où quelqu'un s'en plaint.
 
+## Le modèle d'autorisation, en une phrase
+
+**Rien ne se lit anonymement : l'accès est une arête entre deux comptes.** A
+saisit l'identifiant public de B — que B lui a transmis hors de l'annuaire — et
+lui accorde une portée ; B est notifié, et ses machines déclarées peuvent
+résoudre. Il n'y a aucun jeton porteur qui circule, donc rien à récupérer quand
+on retire : on retire l'arête (`modele.md` §2.5).
+
+Le corollaire tient dans le code : **toute réponse de résolution se calcule à
+partir du compte propriétaire de la machine qui demande**, jamais à partir de ce
+que la requête désigne (contrainte C10).
+
 ## Ce qui reste ouvert
 
 Rassemblé plutôt que dispersé : `modele.md` §6 — les sous-comptes d'entreprise,

@@ -16,6 +16,7 @@ encore ».
 | C7 | Aucune donnée biométrique ne traverse le réseau | Revue |
 | C8 | Refus de démarrer en root | Essai |
 | C9 | Réponses en temps constant sur les chemins d'autorisation | Essai — **à écrire** |
+| C10 | Rien ne se lit sans autorisation nominative | Essai — **à écrire** |
 
 ---
 
@@ -130,17 +131,35 @@ jamais en gardant `uid 0`.
 
 ## C9 — Les chemins d'autorisation répondent en temps constant
 
-Une clé de découverte inconnue et un service inexistant doivent rendre **la même
-réponse, après le même délai**.
+**Un service hors de la portée du demandeur et un service inexistant rendent la
+même réponse, après le même délai.**
 
-Sans cela, la différence de temps de réponse dit à un inconnu qu'une machine
-existe — et c'est précisément ce qu'il cherchait. L'annuaire sait où écoutent
-des services qui, par construction, ne publient pas leur port : **c'est une
-cible de reconnaissance**, et le seul endroit de ce produit où une fuite
-d'information est aussi utile à un attaquant que le contenu lui-même.
+Sans cela, l'écart de temps de réponse apprend à un demandeur authentifié que la
+machine d'un autre existe, alors qu'il n'y a aucun droit dessus — et c'est tout
+ce qu'il cherchait. L'annuaire sait où écoutent des services qui, par
+construction, ne publient pas leur port : **c'est une cible de reconnaissance**,
+et le seul endroit de ce produit où une fuite d'information est aussi utile à un
+attaquant que le contenu lui-même.
 
-Cela vaut aussi pour la comparaison des secrets d'annonce et des clés : une
-comparaison qui s'arrête au premier octet différent est une fuite.
+Cela vaut aussi pour la comparaison des secrets de machine : une comparaison qui
+s'arrête au premier octet différent est une fuite.
+
+## C10 — Rien ne se lit sans autorisation nominative
+
+**Il n'existe aucune requête de résolution qui rende quoi que ce soit sans un
+secret de machine valide.** Pas de mode anonyme, pas de jeton porteur qu'on se
+passe, pas de service « public » — l'accès est une arête entre deux comptes
+(`modele.md` §2.5), et elle se révoque en la retirant.
+
+La conséquence à tenir dans le code : **toute réponse de résolution se calcule à
+partir du compte propriétaire de la machine qui demande**, jamais à partir de ce
+que la requête désigne. Un chemin qui rendrait un service parce que son
+identifiant a été fourni — plutôt que parce que le demandeur y a droit — serait
+la faille entière de ce produit, et elle passerait tous les essais qui ne la
+cherchent pas.
+
+Un essai par chemin de lecture, avec un compte tiers non autorisé, est le seul
+contrôle qui vaille. **À écrire avec le premier chemin de lecture.**
 
 ---
 

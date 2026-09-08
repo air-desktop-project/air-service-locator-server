@@ -17,8 +17,8 @@
 //! # Les verbes, arrêtés par `docs/protocole.md` §2
 //!
 //! Créer un compte, enrôler un appareil de plus, révoquer, déclarer une machine,
-//! remplacer son secret d'annonce, lister les services, émettre et révoquer une
-//! clé de découverte.
+//! remplacer son secret de machine, lister les services, **accorder et révoquer
+//! une autorisation à un autre compte**, et déposer un jeton de poussée.
 //!
 //! **Il n'y a pas de mot de passe dans ce produit.** Un compte est un jeu
 //! d'appareils enrôlés, et toute requête est signée par une clé qui vit dans le

@@ -23,6 +23,19 @@
 //! dernier port connu, abandon — est une décision de spécification, mais elle
 //! sera prise ici.
 //!
+//! # Ce que le porteur doit poser sur la machine
+//!
+//! **Un secret de machine, `sm-…`, et rien d'autre** (`docs/modele.md` §2.3).
+//! Le même objet des deux côtés : la machine qui héberge le daemon le porte avec
+//! la capacité `annonce`, celle qui consomme le porte avec la capacité
+//! `lecture`. Une machine n'est pas « une machine à daemon » — c'est n'importe
+//! quelle machine d'un utilisateur.
+//!
+//! **Il n'y a aucun mode anonyme à implémenter** (contrainte C10) : une
+//! résolution sans secret valide n'existe pas, et un client qui prévoirait un
+//! chemin de repli « sans authentification » coderait une porte que le serveur
+//! n'ouvre pas.
+//!
 //! # État
 //!
-//! Vide.
+//! Vide. Spécifié, pas écrit.

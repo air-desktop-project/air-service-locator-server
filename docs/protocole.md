@@ -52,7 +52,8 @@ Trois messages, et rien de plus.
 }
 ```
 
-Autorisation : `Authorization: Bearer sm-…`, le secret d'annonce de la machine.
+Autorisation : `Authorization: Bearer sm-…`, le secret de la machine — qui doit
+porter la capacité `annonce` (`modele.md` §2.3).
 
 **`adresses_locales` ne sert PAS à joindre le daemon depuis l'Internet** — c'est
 `vu_depuis` qui compte pour cela. Il est là pour deux autres raisons :
@@ -166,29 +167,44 @@ acceptation ne se resserre jamais sans casser des comptes existants.
 |---|---|
 | `POST /v1/comptes` | Crée le compte et enrôle le premier appareil. Rend `u-…`. |
 | `POST /v1/appareils` | Enrôle un appareil de plus. **Signé par un appareil déjà enrôlé.** |
+| `PUT /v1/appareils/{a}/poussee` | Dépose ou renouvelle le jeton APNs / FCM. |
 | `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. |
-| `POST /v1/machines` | Déclare une machine. **Rend le secret d'annonce, UNE SEULE FOIS.** |
-| `POST /v1/machines/{m}/secret` | Le remplace. Invalide l'ancien à la seconde. |
+| `POST /v1/machines` | Déclare une machine, avec ses **capacités** (`annonce`, `lecture`). **Rend le secret de machine, UNE SEULE FOIS.** |
+| `PATCH /v1/machines/{m}` | Change le nom ou les capacités. |
+| `POST /v1/machines/{m}/secret` | Remplace le secret. Invalide l'ancien à la seconde. |
 | `GET /v1/machines/{m}/services` | Les services, leurs candidats, leur état et la date de la dernière sonde. |
-| `POST /v1/cles` | Émet une clé de découverte. Portée + étiquette. |
-| `DELETE /v1/cles/{k}` | La révoque. |
+| `GET /v1/utilisateurs/{u}` | **Confirme qu'un identifiant existe**, et rien d'autre : ni nom, ni machines, ni services. Sert à ce qu'une faute de frappe ne produise pas une autorisation muette. |
+| `POST /v1/autorisations` | Accorde. Bénéficiaire `u-…`, portée, étiquette. Déclenche la notification. |
+| `GET /v1/autorisations` | Les deux sens : ce que j'ai accordé, ce qu'on m'a accordé. |
+| `DELETE /v1/autorisations/{g}` | Révoque. Effet immédiat. |
+
+**`GET /v1/utilisateurs/{u}` ne rend qu'un booléen, et c'est délibéré.** Il
+confirme l'existence à qui détient déjà l'identifiant — 128 bits, donné par son
+porteur. Il ne rend jamais de nom : il n'y a rien, dans ce produit, qui permette
+de retrouver un compte autrement que par son identifiant.
 
 ---
 
-## 3. La voie de la découverte — le client d'un daemon
+## 3. La voie de la résolution — la machine qui cherche un port
 
-Le troisième public, et le moins évident : le programme qui veut JOINDRE un
-daemon. Il n'a pas de compte, tourne souvent sur une autre machine, et n'a
-d'autre besoin que « donne-moi où me connecter ».
+Le troisième public : le programme qui veut JOINDRE un daemon. Il tourne sur une
+machine de B, et **il ne s'agit plus d'un inconnu** — c'est une machine déclarée,
+portant la capacité `lecture`, et agissant au nom d'un compte.
 
 ```
 GET /v1/ou/{machine}/{service}
-Authorization: Bearer k-…        (sauf si le service est en découverte publique)
+Authorization: Bearer sm-…        (le secret de la machine QUI DEMANDE)
 ```
+
+**Rien ne s'interroge anonymement.** Le secret authentifie la machine, la
+machine désigne son propriétaire, et l'annuaire ne rend que ce que ce
+propriétaire a le droit de voir : ses propres services, et ceux qu'une
+autorisation lui a accordés (`modele.md` §2.5).
 
 ```jsonc
 {
   "service": "s-4k9m2p7r1t6v3x8z5b0d2f4h6j",
+  "machine": { "identifiant": "m-7q2h…", "nom": "grenier" },
   "etat": "annonce",
   "annonce_a": "2026-09-08T13:02:11Z",
   "candidats": [
@@ -200,9 +216,25 @@ Authorization: Bearer k-…        (sauf si le service est en découverte publiq
 }
 ```
 
-**Les candidats sont ORDONNÉS, et le client les essaie dans l'ordre.** Ce n'est
-pas au client de deviner lequel vaut : l'annuaire sait lequel il a sondé avec
-succès, et le met en tête.
+### Résoudre les cinq instances d'un coup
+
+Le scénario du produit n'est pas « un service » mais « le même daemon sur cinq
+machines ». Demander une machine à la fois obligerait B à connaître les cinq
+identifiants, et à les tenir à jour quand A en ajoute une sixième.
+
+```
+GET /v1/ou?service=depot-de-messages
+```
+
+Rend **toutes** les instances portant ce nom que le demandeur a le droit de
+voir, chacune avec sa machine et ses candidats. C'est la forme que le client
+emploiera en pratique ; la forme par machine reste pour désigner une instance
+précise.
+
+### Les candidats sont ordonnés
+
+**Le client les essaie dans l'ordre.** Ce n'est pas à lui de deviner lequel
+vaut : l'annuaire sait lequel il a sondé avec succès, et le met en tête.
 
 **La joignabilité depuis l'Internet est l'exigence du produit** (`modele.md`
 §1) — mais l'annuaire la MESURE, il ne la garantit pas. `joignable_a` dit
@@ -212,12 +244,24 @@ se tromperait de coupable.
 
 ### Ce qui rend l'annuaire non énumérable
 
-- Un identifiant de machine porte **128 bits** : il ne se devine pas.
-- Une clé de découverte est exigée par défaut, **révocable**, et sa portée est
-  un service ou un compte.
-- Une clé inconnue et un service inexistant rendent **la même réponse**, après
-  **le même délai**. Sans cela, la différence de temps de réponse dit à un
-  inconnu que la machine existe — et c'est tout ce qu'il cherchait.
+- **Aucune lecture anonyme.** C'est la première barrière, et la seule qui compte
+  vraiment : il n'existe aucune requête qui rende quoi que ce soit sans un
+  secret de machine valide.
+- Un identifiant porte **128 bits** : il ne se devine pas.
+- **Un service hors de la portée du demandeur et un service inexistant rendent
+  la même réponse, après le même délai** (contrainte C9). Sans cela, l'écart de
+  temps dit à B que la machine d'A existe alors qu'il n'y a pas droit — et c'est
+  tout ce qu'il cherchait.
+
+### Ce qu'une machine `lecture` compromise donne à celui qui la prend
+
+Tout ce que son propriétaire a le droit de voir : ses services, et **ceux que
+ses amis lui ont accordés** — donc des adresses IP de machines qui ne lui
+appartiennent pas.
+
+C'est la raison pour laquelle les capacités ne sont pas cumulées par défaut
+(`modele.md` §2.3), et pourquoi le remplacement du secret d'une machine est une
+opération visible dans l'application plutôt qu'enfouie dans un menu.
 
 ---
 

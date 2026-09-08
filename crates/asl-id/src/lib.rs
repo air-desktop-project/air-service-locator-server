@@ -22,8 +22,8 @@
 //! # La forme, arrêtée par `docs/modele.md` §2
 //!
 //! Un préfixe d'une lettre, un tiret, puis 26 caractères portant 128 bits :
-//! `u-` utilisateur, `a-` appareil, `m-` machine, `s-` service, `k-` clé de
-//! découverte. Le secret d'annonce, `sm-`, porte 256 bits sur 52 caractères.
+//! `u-` utilisateur, `a-` appareil, `m-` machine, `s-` service, `g-`
+//! autorisation. Le secret de machine, `sm-`, porte 256 bits sur 52 caractères.
 //!
 //! **L'alphabet est le base32 de Crockford**, et ce n'est pas un goût : ces
 //! chaînes se recopient à la main dans des fichiers de configuration. Crockford
@@ -33,8 +33,13 @@
 //!
 //! **128 bits ne se devinent pas**, ce qui ferme l'énumération. Mais un
 //! identifiant N'EST PAS UN SECRET (voir ci-dessus) : ce qui autorise une
-//! lecture est une clé de découverte, révocable — un identifiant, lui, ne se
-//! change pas.
+//! lecture est une AUTORISATION entre deux comptes, révocable — un identifiant,
+//! lui, ne se change pas.
+//!
+//! **L'identifiant d'utilisateur a un emploi de plus, et il gouverne sa forme** :
+//! il se transmet de la main à la main, par SMS ou à voix haute, pour qu'un ami
+//! vous accorde l'accès à ses services. C'est celui des cinq qu'un humain
+//! recopiera le plus souvent, et la raison pour laquelle l'alphabet compte.
 //!
 //! # État
 //!

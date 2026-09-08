@@ -53,9 +53,15 @@ l'application iOS ou Android.
 
 | Champ | Ce que c'est |
 |---|---|
-| `identifiant` | `u-` + 26 caractères. **Public.** |
+| `identifiant` | `u-` + 26 caractères. **Public — c'est ce qu'on donne à un ami pour qu'il vous autorise.** |
 | `appareils` | Les téléphones enrôlés qui peuvent administrer ce compte. |
-| `machines` | Les machines en gestion. |
+| `machines` | Les machines en gestion — celles qui servent comme celles qui consomment. |
+
+**L'identifiant public a un seul emploi, et c'est lui qui le justifie** : il se
+transmet hors de l'annuaire — SMS, courriel, à voix haute — pour qu'un autre
+utilisateur vous accorde l'accès à ses services (§2.5). L'annuaire ne connaît
+donc ni votre numéro, ni votre adresse : il n'y a aucun annuaire d'utilisateurs
+à énumérer, et rien ne se cherche par nom.
 
 ### 2.2 Appareil
 
@@ -66,6 +72,7 @@ jamais l'utilisateur : il n'y a pas de mot de passe dans ce produit.
 |---|---|
 | `identifiant` | `a-` + 26 caractères. |
 | `clé publique` | La partie publique d'une clé qui vit dans le matériel sécurisé du téléphone et ne peut être employée qu'après une confirmation biométrique. |
+| `jeton de poussée` | APNs ou FCM, pour les notifications (§2.6). Lié à l'appareil, révoqué avec lui. |
 | `enrôlé le` | Date. |
 | `révoqué le` | Date, ou vide. |
 
@@ -77,22 +84,53 @@ second ; elle ne l'impose pas.
 
 Déclarée par un utilisateur depuis l'application.
 
+**Une machine n'est PAS forcément une machine qui héberge un daemon.** C'est
+n'importe quelle machine d'un utilisateur — celle qui *sert* un service comme
+celle qui le *consomme*. B, qui veut joindre les services d'A, déclare ses
+propres machines exactement comme A a déclaré les siennes.
+
+C'est ce que le scénario impose : les machines n'ont pas de biométrie, et une
+machine qui interroge l'annuaire doit pourtant prouver qu'elle agit au nom d'un
+compte. Elle le prouve avec un secret, comme celle qui annonce.
+
 | Champ | Ce que c'est |
 |---|---|
 | `identifiant` | `m-` + 26 caractères. **Public.** |
 | `nom` | Libre, 1 à 64 caractères. Pour l'humain, jamais pour la machine. |
 | `propriétaire` | Un utilisateur. |
-| `secret d'annonce` | `sm-` + 52 caractères. **Montré UNE SEULE FOIS**, à la déclaration. |
+| `capacités` | `annonce`, `lecture`, ou les deux. Choisies à la déclaration, modifiables. |
+| `secret de machine` | `sm-` + 52 caractères. **Montré UNE SEULE FOIS**, à la déclaration. |
 
-**Le secret d'annonce est ce que l'administrateur copie dans le fichier de
-configuration des daemons de cette machine.** Il est par MACHINE et non par
-daemon : un daemon quelconque doit pouvoir s'annoncer sans qu'on ait déclaré
-d'avance qu'il existerait — c'est l'énoncé même du produit.
+#### Les capacités, et pourquoi elles ne sont pas cumulées par défaut
+
+| Capacité | Ce qu'elle ouvre |
+|---|---|
+| `annonce` | Les daemons de cette machine peuvent annoncer et rafraîchir des services. |
+| `lecture` | Cette machine peut demander à l'annuaire où joindre un service — les siens, et ceux qui ont été accordés à son propriétaire (§2.5). |
+
+**Une machine qui porte les deux a un rayon de dégât plus large qu'une machine
+qui n'en porte qu'une.** Un daemon compromis sur une machine `annonce` peut
+usurper le nom d'un autre daemon de la même machine. Le même daemon compromis
+sur une machine `annonce + lecture` peut **en plus** énumérer tout ce que son
+propriétaire a le droit de voir — y compris les services que des amis lui ont
+accordés, sur des machines qui ne lui appartiennent pas.
+
+L'application demande donc explicitement à la déclaration, et ne coche rien
+d'avance. Les machines d'A qui hébergent le daemon portent `annonce` ; les
+machines de B qui le consomment portent `lecture`.
+
+#### Le secret de machine
+
+**C'est ce que l'administrateur copie sur la machine** — dans le fichier de
+configuration des daemons, ou dans celui du client.
+
+Il est par MACHINE et non par daemon : un daemon quelconque doit pouvoir
+s'annoncer sans qu'on ait déclaré d'avance qu'il existerait — c'est l'énoncé
+même du produit.
 
 Le prix est réel et se dit : **tout daemon tournant sur cette machine peut
 s'annoncer sous n'importe quel nom.** Le secret ne sépare pas les daemons entre
-eux, il sépare cette machine des autres. Un daemon compromis peut donc usurper
-le nom d'un autre daemon de la MÊME machine — et pas au-delà.
+eux, il sépare cette machine des autres.
 
 Il se remplace depuis l'application. Le remplacement invalide immédiatement
 l'ancien : les daemons cessent de rafraîchir, leurs baux expirent, et il faut
@@ -125,28 +163,92 @@ Le prix, là encore : deux daemons du même nom sur la même machine se chassent
 l'un l'autre indéfiniment. C'est visible — la date d'annonce oscille — et
 l'application le signale.
 
-### 2.5 Clé de découverte
+### 2.5 Autorisation
 
-Ce qui autorise un tiers à interroger l'annuaire au sujet d'un service.
+**Rien ne s'interroge anonymement.** Pour obtenir l'adresse d'un service, il
+faut prouver qu'on agit au nom d'un compte enregistré — et que ce compte a été
+autorisé.
+
+Une autorisation est **une arête entre deux comptes**, pas un jeton qui circule.
 
 | Champ | Ce que c'est |
 |---|---|
-| `clé` | `k-` + 26 caractères. |
-| `portée` | Un service, ou toutes les machines d'un utilisateur. |
-| `émise le` / `révoquée le` | Dates. |
-| `étiquette` | Libre — « poste de Marie », « CI », pour savoir ce qu'on révoque. |
+| `identifiant` | `g-` + 26 caractères. |
+| `accordée par` | Le compte qui possède les services. |
+| `accordée à` | Le compte bénéficiaire. |
+| `portée` | Tous les services du compte, une machine, ou un service. |
+| `étiquette` | Libre — pour savoir ce qu'on révoque six mois plus tard. |
+| `accordée le` / `révoquée le` | Dates. |
 
-**Pourquoi une clé plutôt que l'identifiant de machine.** Le client d'un daemon
-est souvent une autre machine, sans compte : lui demander de s'authentifier
-fermerait le cas d'usage. Mais laisser l'identifiant de machine servir de
-sésame en ferait un demi-secret — un identifiant qu'on recopie à la main dans
-des fichiers de configuration, qui apparaît dans des journaux, et **qui ne se
-change pas**. Une clé, elle, se révoque sans rien changer d'autre.
+#### Le scénario qu'elle sert, et qui la définit
 
-**La découverte anonyme existe, et elle est explicite.** Un service peut être
-marqué `découverte: publique` : n'importe qui connaissant l'identifiant de
-machine et le nom du service obtient alors ses candidats. Ce n'est pas le
-défaut, et l'application le dit en clair au moment où on le coche.
+A possède cinq machines, chacune faisant tourner une instance du même daemon,
+sur cinq ports et cinq adresses différents. A ne veut pas que ces instances
+soient publiques.
+
+1. B se crée un compte et obtient son identifiant public `u-…`.
+2. **B transmet cet identifiant à A hors de l'annuaire** — SMS, courriel, à voix
+   haute. L'annuaire ne connaît ni le numéro de B ni son adresse, et n'a donc
+   aucun annuaire d'utilisateurs à énumérer.
+3. A saisit `u-…` dans son application, choisit la portée, et accorde.
+4. **B est notifié** (§2.6), et voit l'autorisation dans son application.
+5. Chacune des machines de B portant la capacité `lecture` peut désormais
+   demander à l'annuaire où joindre les cinq instances.
+
+#### Pourquoi une arête entre comptes plutôt qu'un jeton porteur
+
+Un jeton porteur qu'on donne à un ami est un jeton qu'on ne récupère pas : il se
+recopie, se transmet, apparaît dans un fichier de configuration sauvegardé. On
+ne sait jamais combien de copies existent, ni qui les détient.
+
+Une arête, elle, **nomme le bénéficiaire**. On voit à qui on a donné, on retire
+à qui on veut, et retirer suffit — il n'y a rien à récupérer. C'est aussi la
+seule forme qui permette de répondre à « qui peut voir mes services ? », qui est
+la question qu'un utilisateur se pose vraiment.
+
+#### Ce que le bénéficiaire voit, et qu'il faut dire à celui qui accorde
+
+Accorder n'est pas neutre. B voit alors :
+
+- **les noms des machines** d'A qui portent les services concernés,
+- **les noms des services**,
+- **les adresses et ports** — donc des adresses IP réelles d'A,
+- **l'état et la date de dernière joignabilité**.
+
+L'application doit l'énoncer au moment où A accorde, et non dans une page
+d'aide. Un utilisateur qui apprend après coup qu'il a révélé l'adresse de son
+domicile n'a pas consenti, il a cliqué.
+
+#### La saisie d'un identifiant confirme qu'il existe
+
+Quand A saisit l'identifiant de B, l'application doit dire si l'identifiant est
+valide — sans quoi une faute de frappe produit une autorisation muette accordée
+à personne, et A croit avoir partagé.
+
+**Cela révèle donc l'existence d'un compte à qui connaît son identifiant.** C'est
+acceptable, et pour une raison précise : un identifiant porte 128 bits, il ne se
+devine pas, et quiconque le détient le tient de son porteur. L'annuaire ne rend
+jamais rien à partir d'autre chose — ni un nom, ni un courriel, ni un numéro.
+
+### 2.6 Notification
+
+B doit apprendre qu'A l'a autorisé, sans avoir à ouvrir son application au bon
+moment.
+
+L'annuaire pousse donc une notification vers les appareils enrôlés de B — APNs
+sur iOS, FCM sur Android. Chaque appareil enrôle un jeton de poussée, qui est
+lié à l'appareil et se révoque avec lui.
+
+**La notification est une commodité, jamais la source de vérité.** Elle peut
+être refusée par l'utilisateur, perdue par la plate-forme, ou arriver en retard.
+L'autorisation existe dès qu'A l'a accordée ; la liste dans l'application de B
+est ce qui fait foi. Un produit qui ferait dépendre un droit d'accès de
+l'arrivée d'un message chez Apple ou chez Google reposerait sur un service qu'il
+ne contrôle pas.
+
+**Son contenu est délibérément pauvre** : « <identifiant> vous a accordé
+l'accès à des services ». Ni nom de machine, ni adresse — une notification
+s'affiche sur un écran verrouillé, devant qui se trouve là.
 
 ---
 
@@ -289,3 +391,16 @@ Nommé ici plutôt que supposé ailleurs.
    dit.
 4. **La rétention.** Combien de temps garde-t-on un service expiré, et son
    historique de joignabilité ?
+5. **Le bénéficiaire peut-il refuser ?** La v1 le notifie et lui montre
+   l'autorisation ; elle ne lui demande rien. Recevoir un droit d'accès ne
+   nuit pas — mais B doit au moins pouvoir **masquer** une autorisation qu'il
+   ne veut pas voir, et cela n'est pas spécifié.
+6. **La découverte publique.** Un service qu'on voudrait joignable par tous,
+   sans autorisation nominative, n'existe pas en v1 : tout passe par une arête
+   entre comptes. C'est le choix sûr, et il ferme un cas d'usage réel (un
+   service ouvert, une démonstration). À rouvrir seulement si le besoin se
+   présente vraiment — l'ouvrir « au cas où » ferait exister le mode anonyme
+   que tout le reste de ce modèle évite.
+7. **Ce que devient une autorisation quand une machine change de capacités.**
+   Retirer `lecture` à une machine de B doit-il couper ses résolutions en cours,
+   ou seulement les suivantes ?

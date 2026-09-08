@@ -25,12 +25,23 @@
 //! - **L'attestation manquante ou en échec fait REFUSER** en v1, et c'est
 //!   journalisé. Un refus se relâche plus tard ; une acceptation ne se resserre
 //!   jamais sans casser des comptes déjà ouverts.
-//! - **Un daemon ne fait pas de biométrie.** Il porte le *secret d'annonce* de
-//!   sa machine, posé par l'application mobile à la déclaration et montré une
-//!   seule fois. Il est par MACHINE et non par daemon — l'énoncé du produit veut
-//!   qu'un daemon quelconque puisse s'annoncer sans avoir été déclaré d'avance.
-//!   Le prix : tout daemon de cette machine peut s'annoncer sous n'importe quel
-//!   nom, et pas au-delà.
+//! - **Un daemon ne fait pas de biométrie.** Il porte le *secret de machine*,
+//!   posé par l'application mobile à la déclaration et montré une seule fois. Il
+//!   est par MACHINE et non par daemon — l'énoncé du produit veut qu'un daemon
+//!   quelconque puisse s'annoncer sans avoir été déclaré d'avance. Le prix :
+//!   tout daemon de cette machine peut s'annoncer sous n'importe quel nom.
+//! - **Le même secret sert à LIRE**, quand la machine porte la capacité
+//!   `lecture` — c'est ainsi qu'une machine sans biométrie prouve qu'elle agit
+//!   au nom d'un compte. Les deux capacités ne sont pas cumulées par défaut :
+//!   une machine qui porte les deux laisse, si elle est prise, énumérer tout ce
+//!   que son propriétaire a le droit de voir, y compris les services que des
+//!   amis lui ont accordés sur des machines qui ne sont pas les siennes.
+//! - **Rien ne se lit sans autorisation nominative** (contrainte C10). Toute
+//!   réponse de résolution se calcule à partir du compte propriétaire de la
+//!   machine qui demande, JAMAIS à partir de ce que la requête désigne. Un
+//!   chemin qui rendrait un service parce que son identifiant a été fourni
+//!   serait la faille entière de ce produit, et il passerait tous les essais qui
+//!   ne la cherchent pas.
 //! - **Un appareil ne peut pas se révoquer lui-même.** Sinon un téléphone volé
 //!   et déverrouillé révoque les autres et confisque le compte.
 //!
