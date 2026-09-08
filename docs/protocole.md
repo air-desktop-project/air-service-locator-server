@@ -220,6 +220,14 @@ acceptation ne se resserre jamais sans casser des comptes existants.
 | `POST /v1/autorisations` | Accorde. Bénéficiaire `u-…`, portée, étiquette. Déclenche la notification. |
 | `GET /v1/autorisations` | Les deux sens : ce que j'ai accordé, ce qu'on m'a accordé. |
 | `DELETE /v1/autorisations/{g}` | Révoque. Effet immédiat. |
+| `GET /v1/expositions` | **Ce qui est exposé de MOI**, relation par relation. Tout utilisateur, pas seulement l'administrateur. |
+| `DELETE /v1/expositions/{relation}` | **Retire mes enregistrements** de cette exposition. Portée : tout mon compte, ou telle machine. |
+
+Les verbes d'administration d'une exposition — ce que l'annuaire expose à un pair,
+et ce qu'il en prend — sont réservés à l'administrateur de l'annuaire et ne
+figurent pas ici : ils relèvent de son exploitation, pas de l'application mobile.
+**Les deux verbes ci-dessus, si.** Ils sont ce qui rend le retrait effectif, et un
+droit de retrait sans écran est une mention dans un document.
 
 **`GET /v1/utilisateurs/{u}` ne rend qu'un booléen, et c'est délibéré.** Il
 confirme l'existence à qui détient déjà l'identifiant — 128 bits, donné par son

@@ -268,75 +268,116 @@ peut en déclarer un nouveau à tout moment, et une souscription qui prétendrai
 filtrer serait fausse dès le premier démarrage. La machine est la plus petite
 unité stable.
 
-### 5.2 Ce que la sélection NE dit PAS, et qu'il faut trancher
+### 5.2 Les deux côtés : l'administrateur expose, l'utilisateur retire
 
-**IL Y A DEUX CÔTÉS, ET UN SEUL EST DÉCIDÉ.**
+**Il y a deux côtés, et ils appartiennent à deux personnes différentes.**
 
-Ce qui est décidé : l'administrateur qui reçoit choisit ce qu'il PREND.
+| | Qui décide | Ce qu'il décide |
+|---|---|---|
+| **Exposer** | L'administrateur de l'annuaire qui donne | Ce qu'il rend disponible à un pair donné |
+| **Prendre** | L'administrateur de l'annuaire qui reçoit | Ce qu'il souscrit parmi ce qui est exposé |
+| **Retirer** | **L'utilisateur** | Ses propres enregistrements, hors d'une exposition |
 
-Ce qui ne l'est pas : l'administrateur qui donne choisit-il ce qu'il EXPOSE ?
-Sans ce second côté, l'administrateur d'un annuaire peut livrer à un pair la
-liste complète des machines de tous ses utilisateurs, **sans qu'aucun d'eux le
-sache**.
+**L'utilisateur voit ce qui est exposé de lui, par relation, et peut le
+retirer.** Le retrait suit la même chaîne que la sélection : tout son compte, ou
+telle de ses machines.
 
-Cela heurte deux choses écrites ailleurs :
+#### Pourquoi ce partage plutôt qu'un autre
 
-- **La possession.** `modele.md` dit qu'un utilisateur POSSÈDE ses machines. Une
-  réplication décidée entièrement entre administrateurs traite ces machines comme
-  la propriété de l'annuaire.
-- **Ce qu'accorder révèle.** `modele.md` §2.5 exige qu'on énonce à A ce qu'il
-  révèle quand il autorise B. Une réplication d'annuaire à annuaire révèle
-  strictement plus — noms de machines, noms de services — et n'énonce rien.
+Deux positions plus simples étaient possibles, et chacune casse quelque chose.
 
-Trois réponses possibles, et elles ne se valent pas :
+**« L'administrateur décide seul »** se défend en entreprise, où les machines
+appartiennent à l'entreprise. Mais les racines hébergent des particuliers, et
+`modele.md` affirme qu'un utilisateur POSSÈDE ses machines. Un administrateur qui
+livrerait la liste des machines de tous ses utilisateurs sans qu'aucun le sache
+traiterait cette possession comme une fiction.
 
-| | Ce que ça donne |
+**« L'utilisateur consent d'abord »** respecte la possession, et rend le produit
+inutilisable en entreprise : chaque nouvelle relation exigerait de réunir des
+centaines d'accords avant que quoi que ce soit circule.
+
+**Le partage retenu tranche autrement : rien ne bloque, mais rien n'est
+invisible.**
+
+#### CE QUE CELA COÛTE, ET IL FAUT LE DIRE ICI
+
+**C'est un retrait, pas un consentement.** L'exposition prend effet quand
+l'administrateur la décide ; le retrait, quand l'utilisateur le décide. **Entre
+les deux, les données ont circulé.**
+
+Il y a donc une fenêtre — celle qui sépare l'exposition du moment où l'utilisateur
+regarde — pendant laquelle un pair a reçu, et gardé, ce qu'il a reçu. **Retirer
+arrête le flux et demande l'effacement ; cela ne défait pas ce qui a déjà été
+copié.** C'est exactement la limite énoncée pour la rupture (§4.4), et elle vaut
+ici pour la même raison.
+
+**Ce qui réduit cette fenêtre, et devrait être fait :** notifier l'utilisateur
+quand une exposition nouvelle le couvre. La machinerie existe déjà — c'est celle
+qui l'avertit d'une autorisation reçue (`modele.md` §2.6). Sans elle, « voir »
+suppose qu'il pense à regarder, et un droit de retrait qu'on ignore n'en est pas
+un.
+
+#### Le retrait est une rupture partielle
+
+Techniquement, il fait la même chose que §4.4, sur un sous-ensemble : le pair
+doit effacer les enregistrements concernés. Le flux de synchronisation porte donc
+un **retrait** aussi bien qu'un ajout, et le récepteur l'applique comme il
+applique une rupture.
+
+**On ne peut pas l'y forcer.** On cesse d'affirmer, on demande l'effacement, et un
+pair qui n'obéirait pas ne se distinguerait de rien. Une raison de plus de
+n'exposer que ce qu'on a délibérément choisi d'exposer.
+
+### 5.3 L'état vivant ne traverse PAS la fédération — l'hybride
+
+**Décidé.** On réplique l'arbre durable ; l'état vivant se demande à l'annuaire
+d'autorité au moment de résoudre.
+
+| | |
 |---|---|
-| **L'administrateur décide seul** | Cohérent en entreprise, où les machines appartiennent à l'entreprise. Intenable sur une racine, qui héberge des particuliers. |
-| **L'utilisateur consent, par annuaire pair** | Respecte la possession. Coûte un écran, et une décision de plus à chaque nouvelle relation. |
-| **L'administrateur décide, l'utilisateur voit et peut retirer** | Le compromis : rien ne bloque, mais rien n'est invisible. |
+| **La souscription dit** | ce qui existe, et qui y a droit |
+| **La résolution dit** | où c'est, maintenant |
 
-**Ce n'est pas tranché.** La question n'est pas technique : elle demande de dire
-si un annuaire d'entreprise possède les machines de ses utilisateurs, ou seulement
-les recense.
+**Pourquoi.** Répliquer un port qui change à chaque redémarrage de daemon, c'est
+distribuer une information fausse dès qu'elle arrive — l'argument exact du §3, et
+il ne devient pas meilleur en franchissant une frontière d'annuaire. Il empire :
+la donnée traverse un lien plus lent, entre deux autorités distinctes.
 
-### 5.3 L'état vivant — la question que la réplication rouvre
+#### Ce que cela coûte, nommé
 
-**§3 dit que le bail et la joignabilité NE SE RÉPLIQUENT PAS.** Cette décision
-tenait pour les racines, et elle tient toujours : ces données changent en
-permanence et se reconstruisent seules.
+**Si l'annuaire d'autorité est tombé, la résolution échoue.** Un pair ne peut pas
+répondre à sa place.
 
-Mais elle laisse la réplication sélective à moitié utile. Y aura répliqué qu'un
-service `depot-de-messages` existe sur telle machine d'A — et **pas où il écoute
-en ce moment**, qui est la seule chose que le client demande.
+Mais la perte est plus petite qu'il n'y paraît, pour deux raisons :
 
-Deux lectures, et il faut choisir :
+- Si l'annuaire d'A est tombé, **les daemons d'A n'y sont plus connectés** : leurs
+  baux sont tombés avec. Il n'y avait rien de juste à répondre.
+- **L'arbre durable est répliqué, lui.** L'annuaire de B sait donc que le service
+  EXISTE et que B y a droit — il peut répondre « annuaire d'autorité injoignable »
+  au lieu de « service inconnu ». **Ces deux réponses n'appellent pas le même
+  geste** de la part de celui qui les lit, et les confondre enverrait un
+  administrateur chercher une faute de configuration là où il y a une panne
+  distante.
 
-| | Ce que ça coûte |
-|---|---|
-| **Hybride** — on réplique l'arbre durable, on demande l'état vivant à l'annuaire d'autorité au moment de résoudre | Une dépendance de X à la résolution ; mais l'état rendu est exact, et rien de volatile ne traverse la fédération. |
-| **Tout répliquer** — les candidats et l'état suivent | Y répond seul, même si X est tombé ; mais chaque redémarrage de daemon pousse une mise à jour à travers toute la fédération, et une réponse périmée donne un port faux. |
+#### Et cela décide qui détient le graphe d'usage
 
-**ET CE CHOIX DÉCIDE AUSSI DE QUI DÉTIENT LE GRAPHE D'USAGE.** Toutes les
-requêtes sont journalisées ([`journal.md`](journal.md)) : celui qui sert la
-résolution est celui qui accumule l'historique de qui consulte quoi.
+Toutes les requêtes sont journalisées ([`journal.md`](journal.md)). Celui qui sert
+la résolution est celui qui accumule l'historique : **avec l'hybride, c'est
+l'annuaire du propriétaire du SERVICE**, pas celui du demandeur.
 
-| | Qui journalise les résolutions de B |
-|---|---|
-| **Hybride** | L'annuaire d'A — le propriétaire du service |
-| **Réplication complète** | L'annuaire de B — le propriétaire du demandeur |
+A voit donc qui consulte ses services — ce qui est cohérent avec le fait que son
+propre daemon verra la connexion. Et **l'annuaire de B n'accumule rien** sur ce
+que B va chercher ailleurs, ce qui est le meilleur des deux côtés.
 
-Ce n'est pas un détail d'implémentation, et cela ne se déduit pas de la
-fraîcheur des données.
+#### Une optimisation nommée et repoussée
 
-**Ma lecture est l'hybride**, et elle découle de ce qui est déjà écrit : la
-souscription dit *ce qui existe et qui y a droit*, la résolution dit *où c'est
-maintenant*. Répliquer un port qui change à chaque redémarrage, c'est distribuer
-une information fausse dès qu'elle arrive — l'argument exact du §3.
+Les annuaires pairs pourraient tenir une connexion QUIC entre eux, et l'annuaire
+d'autorité **pousser** les changements de candidats pour les services auxquels un
+pair a des abonnés. On aurait la fraîcheur sans la dépendance à la résolution.
 
-**Mais c'est une lecture, pas ta décision**, et elle mérite d'être confirmée
-parce qu'elle décide si un annuaire pair peut répondre quand l'annuaire
-d'autorité est tombé.
+Ce n'est pas de la v1 : cela suppose de savoir qui s'intéresse à quoi, donc de
+tenir un état de plus — et cet état-là, lui, dirait à A quels de ses services
+intéressent qui, en permanence.
 
 ---
 
@@ -385,17 +426,15 @@ négligeable et sa latence sans importance.
 
 Rassemblé, plutôt que dispersé.
 
-1. **Le côté « ce que j'expose »** de la réplication sélective (§5.2), et si
-   l'utilisateur a son mot à dire sur les machines qu'il possède.
-2. **L'état vivant traverse-t-il la fédération ?** (§5.3) — l'hybride est
-   proposé, pas confirmé.
-3. **L'index des annuaires est-il énumérable ?** Les racines recensent tous les
+1. **L'index des annuaires est-il énumérable ?** Les racines recensent tous les
    annuaires. Peut-on en demander la liste, ou seulement en résoudre un dont on
    connaît l'identifiant ? C'est la même question que celle de l'alias
    (`modele.md` §2.1), à l'échelle des annuaires.
-4. **Les racines sont-elles joignables en IPv4 ?** Deux adresses IPv6 dans le
+2. **Les racines sont-elles joignables en IPv4 ?** Deux adresses IPv6 dans le
    code excluent un annuaire sur un réseau IPv4 (§2).
-5. **Le transport de la synchronisation.** QUIC comme le reste, probablement.
+3. **Le transport de la synchronisation.** QUIC comme le reste, probablement.
    Un flux entre pairs de confiance n'a pas les mêmes besoins qu'une requête de
    client.
-6. **La migration d'un compte d'un annuaire à un autre.**
+4. **La migration d'un compte d'un annuaire à un autre.**
+5. **L'utilisateur est-il notifié d'une exposition nouvelle qui le couvre ?**
+   (§5.2) — proposé, parce qu'un droit de retrait qu'on ignore n'en est pas un.

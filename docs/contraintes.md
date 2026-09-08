@@ -330,6 +330,18 @@ Deux règles que le code doit tenir, et qu'un essai peut vérifier :
   qui se contenterait de compter ce qui a été supprimé ne verrait pas ce qui a
   été oublié.
 
+### Le RETRAIT est une rupture partielle, et obéit aux mêmes règles
+
+Un utilisateur peut retirer ses enregistrements d'une exposition
+(`modele.md` §2.8). Le pair doit alors les effacer, exactement comme il efface
+sur une rupture — le flux de synchronisation porte donc un **retrait** au même
+titre qu'un ajout.
+
+**Et la même limite s'applique** : on cesse d'affirmer, on demande l'effacement,
+et un pair qui n'obéirait pas ne se distinguerait de rien. C'est pourquoi ce qui
+compte n'est pas la mécanique du retrait mais **la retenue à l'exposition** :
+n'exposer que ce qu'on a délibérément choisi d'exposer.
+
 ### L'exception, et il n'y en a qu'une : le JOURNAL
 
 **Les lignes de journal survivent à une rupture** ([`journal.md`](journal.md)

@@ -133,26 +133,23 @@ le moins est qu'ils puissent voir ce qu'on a noté d'eux.
 
 ## 5. Le journal traverse la fédération, et c'est nouveau
 
-Sous la lecture hybride (`annuaires.md` §5.3), une résolution portant sur un
-service d'A est servie par l'annuaire d'A. **Cet annuaire journalise alors
-l'activité d'un utilisateur qu'il ne possède pas** — B est un compte de Y, et son
-comportement s'inscrit chez X.
+L'état vivant ne traverse pas la fédération (`annuaires.md` §5.3) : une
+résolution portant sur un service d'A est servie par l'annuaire d'A. **Cet
+annuaire journalise donc l'activité d'un utilisateur qu'il ne possède pas** — B
+est un compte de Y, et son comportement s'inscrit chez X.
 
 **Cela n'est pas un défaut à corriger, c'est une conséquence à énoncer.** Elle
 doit apparaître au moment où B se voit accorder l'accès : utiliser un service
 hébergé ailleurs, c'est laisser une trace ailleurs.
 
-**Et cela change la portée de la question ouverte d'`annuaires.md` §5.3.** Le
-choix entre l'hybride et la réplication complète ne décide pas seulement de la
-fraîcheur des données ni de la résistance à la panne :
+**C'est le propriétaire du SERVICE qui détient l'historique**, jamais celui du
+demandeur. Deux conséquences, et elles vont dans le bon sens :
 
-| | Qui accumule le graphe d'usage |
-|---|---|
-| **Hybride** | L'annuaire d'A — donc le propriétaire du service |
-| **Réplication complète** | L'annuaire de B — donc le propriétaire du demandeur |
+- A voit qui consulte ses services — ce qui est cohérent, puisque son propre
+  daemon verra la connexion de toute façon.
+- **L'annuaire de B n'accumule rien** sur ce que B va chercher ailleurs.
 
-Ce n'est pas un détail d'implémentation. C'est le choix de qui, dans une
-fédération, détient l'historique de qui consulte quoi.
+C'était l'un des deux critères du choix de l'hybride, à côté de la fraîcheur.
 
 ---
 

@@ -363,7 +363,34 @@ Tout ceci — l'ancre de confiance, l'entremise, la réplication sélective, et 
 qui ne se synchronise surtout pas — a son propre document :
 **[`annuaires.md`](annuaires.md)**.
 
-### 2.8 L'origine — un champ que TOUT enregistrement porte
+### 2.8 Exposition
+
+Ce qu'un annuaire rend disponible à un pair donné.
+
+| Champ | Ce que c'est |
+|---|---|
+| `relation` | La relation de confiance concernée. |
+| `portée` | Tout l'annuaire, quelques utilisateurs, ou quelques machines — la chaîne de possession (`annuaires.md` §5.1). |
+| `retraits` | Ce que des utilisateurs en ont soustrait. |
+
+**Trois décisions distinctes, prises par trois personnes :** l'administrateur qui
+donne décide de ce qu'il EXPOSE ; celui qui reçoit décide de ce qu'il PREND
+là-dedans ; **l'utilisateur décide de ce qu'il RETIRE** — son compte entier, ou
+telle de ses machines.
+
+**C'est un retrait, pas un consentement, et la différence est réelle.**
+L'exposition prend effet quand l'administrateur la décide ; le retrait, quand
+l'utilisateur le décide. Entre les deux, les données ont circulé — et retirer
+arrête le flux sans défaire ce qui a déjà été copié.
+
+**L'application doit donc montrer à un utilisateur ce qui est exposé de lui, par
+relation**, et le lui notifier quand une exposition nouvelle le couvre. Un droit
+de retrait qu'on ignore n'en est pas un.
+
+Le raisonnement complet — pourquoi ce partage plutôt qu'un consentement préalable,
+et ce qu'il coûte — est dans [`annuaires.md`](annuaires.md) §5.2.
+
+### 2.9 L'origine — un champ que TOUT enregistrement porte
 
 **Ce n'est pas un objet, c'est une colonne sur tous les autres**, et elle est là
 pour une raison unique et suffisante : rompre une relation de confiance efface
