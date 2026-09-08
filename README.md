@@ -6,13 +6,33 @@ Rust.
 > ## État : une arborescence, et rien d'autre
 >
 > **Ce dépôt ne sert rien.** Il compile, il est formaté, il est linté, et il
-> porte deux gates de CI — mais ses neuf crates sont des coquilles qui ne
+> porte deux gates de CI — mais ses huit crates sont des coquilles qui ne
 > contiennent que leur intention.
 >
 > C'est délibéré. L'arborescence a été posée AVANT les spécifications, et
 > `docs/` consigne ce qui n'est pas décidé plutôt que d'inventer ce qui l'aurait
 > été. Le binaire `asl-server` le dit lui-même quand on le lance, plutôt que de
 > démarrer une boucle vide qui aurait l'air de servir.
+
+## Ce que les spécifications ont arrêté
+
+Elles sont écrites, dans [`docs/`](docs/). Les quatre décisions qui gouvernent
+tout le reste :
+
+- **IPv6 d'abord, IPv4 en repli.** Ce n'est pas une préférence : une machine
+  avec une IPv6 publique n'est derrière aucun NAT et tient l'exigence de
+  joignabilité sans rien faire. Le NAT est le cas dégradé d'IPv4.
+- **HTTP/3 sur QUIC, connexion tenue.** Le daemon garde une connexion ouverte ;
+  la connexion *est* le bail. Un arrêt propre devient instantané, et l'annuaire
+  peut parler au daemon.
+- **L'accès est une arête entre deux comptes**, jamais un jeton porteur. Rien ne
+  se lit anonymement.
+- **L'annuaire n'affirme jamais ce qu'il n'a pas mesuré.** Le mot « en ligne »
+  n'apparaît nulle part : `annoncé`, `joignable` (avec sa date), `parti`.
+
+Et il y a **plusieurs annuaires** : deux racines répliquées appartenant à
+air-desktop-project, et des annuaires tiers qui peuvent demander à s'y rattacher
+([`docs/annuaires.md`](docs/annuaires.md)).
 
 ## Le problème
 
@@ -39,7 +59,8 @@ puis **l'annonce** ; ses clients **le demandent** avant de se connecter.
 
 | Dépôt | Ce qu'il porte |
 |---|---|
-| `air-service-locator-server` | Ce dépôt — le service, en Rust. |
+| `air-service-locator-server` | Ce dépôt — le service, en Rust. **Et les spécifications.** |
+| `air-service-locator-client` | La bibliothèque que les daemons lient, ses liaisons et l'utilitaire `asl`. |
 | `air-service-locator-ios` | L'application iOS (Swift). |
 | `air-service-locator-android` | L'application Android (Kotlin). |
 
@@ -65,7 +86,12 @@ compte. Le raisonnement complet est en tête de [`Cargo.toml`](Cargo.toml).
 | 2. Décisions | `asl-annuaire`, `asl-auth` | Attendre. Elles reçoivent l'heure, elles ne la demandent pas. |
 | 3. Exécution | `asl-store`, `asl-loop-tokio` | Décider quoi que ce soit. |
 | Binaire | `asl-server` | Avoir une logique à lui. |
-| Tiers | `asl-client` | Dépendre de l'étage 2 ou 3 — un daemon qui s'annonce n'embarque pas la base de données de l'annuaire. |
+
+`asl-client` **a quitté ce dépôt** pour `air-service-locator-client` : c'est un
+produit à part, avec ses liaisons Python, Ruby, C++, Kotlin et Swift, son
+utilitaire en ligne de commande, et ses contraintes d'ABI. Il tire d'ici
+`asl-id` et `asl-proto`, et rien d'autre — la frontière de dépôt rend littérale
+la règle qui n'était qu'un conseil.
 
 ## Les barrières
 

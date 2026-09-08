@@ -4,7 +4,8 @@
 |---|---|
 | [`modele.md`](modele.md) | Les objets, les candidats d'adresse, le bail, et ce que « joignable » veut dire exactement. |
 | [`protocole.md`](protocole.md) | Les trois conversations : le daemon, les applications mobiles, et le client qui cherche un port. |
-| [`contraintes.md`](contraintes.md) | Les neuf règles que le code doit tenir, et ce qui les fait respecter. |
+| [`annuaires.md`](annuaires.md) | Réplication entre les racines, fédération avec les annuaires rattachés, et ce qui ne se synchronise surtout pas. |
+| [`contraintes.md`](contraintes.md) | Les douze règles que le code doit tenir, et ce qui les fait respecter. |
 
 **Ils sont dans CE dépôt, et pas dans les trois.** Le modèle et le protocole
 gouvernent aussi les deux applications mobiles ; les recopier ferait trois
@@ -33,6 +34,14 @@ on retire : on retire l'arête (`modele.md` §2.5).
 Le corollaire tient dans le code : **toute réponse de résolution se calcule à
 partir du compte propriétaire de la machine qui demande**, jamais à partir de ce
 que la requête désigne (contrainte C10).
+
+## Le transport, en une phrase
+
+**HTTP/3 sur QUIC, IPv6 d'abord.** Le daemon TIENT une connexion et la maintient
+par un keepalive : la connexion *est* le bail. Un arrêt propre est alors
+instantané, le mapping NAT reste ouvert sans mécanisme séparé, et l'annuaire
+peut parler au daemon — ce qui laisse ouverte la route du rendez-vous que le
+perçage de NAT exigera (`protocole.md` §0).
 
 ## Ce qui reste ouvert
 

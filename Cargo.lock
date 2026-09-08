@@ -15,10 +15,6 @@ name = "asl-auth"
 version = "0.1.0"
 
 [[package]]
-name = "asl-client"
-version = "0.1.0"
-
-[[package]]
 name = "asl-id"
 version = "0.1.0"
 

@@ -16,13 +16,26 @@ but du produit. Un client quelconque, où qu'il soit, doit pouvoir ouvrir une
 connexion vers le point d'écoute que l'annuaire lui donne ; un annuaire qui
 rendrait des adresses inatteignables ne servirait à rien.
 
-Les machines qui portent les daemons sont de deux sortes, et **une seule tient
-cette exigence toute seule** :
+### IPv6 d'abord, IPv4 en repli — et ce n'est pas une préférence
 
-| | Exigence tenue ? |
+**C'est la réponse principale à l'exigence.** Une machine qui a une adresse IPv6
+publique n'est derrière aucun NAT : il n'y a rien à traverser, juste un pare-feu
+à ouvrir. Le port qu'elle annonce est le port par lequel on l'atteint.
+
+Le NAT n'est donc pas le cas général, c'est **le cas dégradé d'IPv4**. Cela
+change la forme du produit : au lieu d'un annuaire qui doit résoudre un problème
+de traversée, on a un annuaire qui fonctionne pleinement sur IPv6 et qui, sur
+IPv4, mesure et rapporte ce qu'il constate.
+
+| Cas | Exigence tenue ? |
 |---|---|
-| Adresse IPv4 ou IPv6 publique | Oui, sans rien faire. |
-| Derrière un NAT | **Non**, et *comment* l'y amener n'est pas décidé — c'est la question ouverte la plus lourde du produit (§6.3). |
+| IPv6 publique | **Oui**, sans rien faire. C'est la voie normale. |
+| IPv4 publique, ou port redirigé | Oui. |
+| IPv4 derrière un NAT | **Non**, et *comment* l'y amener n'est pas décidé (§6.3). |
+
+**Partout où des adresses sont rendues, IPv6 vient en premier** — candidats de
+résolution, ordre d'essai, ordre de sonde. IPv4 est le repli, et il est nommé
+comme tel plutôt que traité à égalité.
 
 Ce que cela impose au modèle **dès maintenant**, quelle que soit la réponse
 qu'on donnera plus tard :
@@ -250,6 +263,30 @@ ne contrôle pas.
 l'accès à des services ». Ni nom de machine, ni adresse — une notification
 s'affiche sur un écran verrouillé, devant qui se trouve là.
 
+### 2.7 Annuaire
+
+**Un annuaire appartient à un utilisateur**, et il y en a plusieurs.
+
+| Champ | Ce que c'est |
+|---|---|
+| `identifiant` | `n-` + 26 caractères. |
+| `propriétaire` | Un utilisateur. Les deux annuaires racines appartiennent à air-desktop-project. |
+| `clé de signature` | Ce avec quoi il signe les enregistrements dont il est l'autorité. |
+| `rôle` | `racine` ou `rattaché`. |
+
+Deux annuaires racines sont fournis par air-desktop-project — **deux, pour ne
+pas être un point de panne unique**. D'autres utilisateurs et d'autres
+entreprises sont encouragés à déployer le leur, et peuvent demander à s'y
+rattacher.
+
+**Le rattachement est approuvé à la main**, par le propriétaire des racines. Ce
+n'est pas une friction à éliminer : c'est la seule barrière entre un réseau
+d'annuaires et n'importe qui qui déclarerait être l'autorité de n'importe quoi.
+
+Tout ceci — la réplication entre les racines, la fédération avec les annuaires
+rattachés, ce qui se synchronise et ce qui ne se synchronise pas — a son propre
+document : **[`annuaires.md`](annuaires.md)**.
+
 ---
 
 ## 3. Les candidats, et pourquoi ce mot
@@ -261,6 +298,10 @@ confond jamais :
 |---|---|---|
 | `annoncé` | Le daemon le dit : ses adresses locales et ses ports d'écoute. | Vrai sur le réseau du daemon. Souvent faux ailleurs. |
 | `réflexif` | L'annuaire l'OBSERVE : l'adresse source de la connexion d'annonce. | Vrai vu de l'annuaire. Réutilisable par un tiers **seulement si le NAT est indépendant du point distant**. |
+
+**Les candidats sont rendus IPv6 d'abord**, IPv4 ensuite (§1). Un candidat IPv6
+public est le seul qui tienne l'exigence sans rien supposer du réseau qui le
+sépare de son client.
 
 **Le candidat réflexif n'a pas la même valeur en TCP et en UDP, et c'est une
 propriété du réseau, pas un choix.**
@@ -282,25 +323,52 @@ voie d'annonce UDP, et pourquoi la v1 ne la promet pas.
 
 ## 4. Le bail, et ce que « en ligne » veut dire
 
-### 4.1 Le bail
+### 4.1 La connexion tenue, et le keepalive
 
-L'annuaire n'enregistre pas un état, il accorde un **bail** : le daemon annonce,
-l'annuaire lui accorde une durée, le daemon rafraîchit avant qu'elle expire.
+**Le daemon TIENT une connexion QUIC ouverte vers l'annuaire**, et la maintient
+par un keepalive. Il n'y a pas de réannonce périodique : la connexion *est* le
+bail.
 
-| | Valeur | Pourquoi celle-là |
+Ce que cela apporte, et qui ne s'obtient pas autrement :
+
+- **Un arrêt propre est instantané.** Le daemon ferme la connexion, l'annuaire
+  le sait dans la milliseconde. Aucune fenêtre d'état faux.
+- **Une coupure est détectée en un délai d'inactivité**, pas en un bail.
+- **Le mapping NAT reste ouvert** par le keepalive lui-même, sans mécanisme
+  séparé.
+- **L'annuaire peut PARLER au daemon.** C'est ce qui rendrait possible, plus
+  tard, un rendez-vous pour un perçage de NAT (§6.3) : les deux extrémités sont
+  déjà en ligne au même instant. Sans connexion tenue, cette route serait
+  fermée d'avance.
+
+#### Le delta — proposé, à MESURER
+
+| | Valeur de départ | D'où elle vient |
 |---|---|---|
-| Durée du bail | **90 s** | |
-| Cadence de rafraîchissement | **30 s** | **TROIS occasions de rafraîchir avant l'expiration.** Une perte de paquet ou une seconde de latence ne doit pas faire basculer un daemon sain hors ligne — une fausse alerte coûte plus cher qu'une détection tardive. |
-| Détection d'un arrêt brutal | ≤ 90 s | |
+| Keepalive | **15 s** | La RFC 4787 recommande qu'un mapping UDP vive au moins deux minutes. **Le parc réel ne la respecte pas** : beaucoup d'équipements grand public expirent en 30 s, certains en 20. WireGuard et WebRTC se sont arrêtés autour de 15-25 s pour la même raison. |
+| Délai d'inactivité QUIC | **45 s** | **Trois keepalives manqués avant de conclure.** Une perte de paquet ou une seconde de latence ne doit pas faire basculer un daemon sain hors ligne : une fausse alerte coûte plus cher qu'une détection tardive. |
 
-Ces valeurs sont **rendues par l'annuaire, pas figées dans le client** : la
-réponse à une annonce porte la durée accordée et la cadence attendue.
-`asl-client` les lit. Sans cela, changer la cadence exigerait de mettre à jour
-tous les daemons installés chez des tiers — ce qui ne se produira jamais.
+**Ces valeurs sont un point de départ, pas une conclusion, et la différence
+compte.** Le bon delta ne se déduit pas — il se mesure, sur des NAT réels, avec
+des daemons réels. La campagne à mener : tenir une connexion, allonger
+progressivement l'intervalle, et noter à partir de quand le mapping meurt, par
+type d'équipement. Tant qu'elle n'a pas eu lieu, 15 s est un choix prudent et
+c'est tout ce qu'on peut en dire.
 
-**La voie UDP, quand elle existera, aura une cadence PLUS COURTE — 25 s.** Elle
-n'obéit pas au même besoin : elle doit maintenir ouvert un mapping NAT, et
-beaucoup de NAT en expirent un en 30 secondes.
+**Sur IPv6, la question ne se pose pas de la même façon** : il n'y a pas de
+mapping à maintenir, seulement un état de pare-feu, généralement plus généreux.
+Le keepalive y sert à détecter une coupure, pas à tenir une porte ouverte — et
+pourrait donc être plus lent. La v1 ne fait pas cette distinction ; elle est
+notée parce qu'elle sera la première optimisation qui vaille.
+
+#### Les valeurs viennent du serveur
+
+**L'annuaire annonce le keepalive attendu et le délai d'inactivité ; le client
+les applique.** Rien n'est figé dans `asl-client`.
+
+Sans cela, changer le delta après la campagne de mesure exigerait de mettre à
+jour tous les daemons installés chez des tiers — ce qui ne se produira jamais.
+C'est la seule raison, et elle suffit.
 
 ### 4.2 Les trois états, et le mot qui est banni
 
@@ -311,20 +379,31 @@ derrière un NAT, les deux diffèrent, et c'est le cas courant.
 
 | État | Ce qu'il affirme, exactement |
 |---|---|
-| `annoncé` | Le bail court. **Le daemon dit qu'il écoute.** L'annuaire n'a rien vérifié. |
+| `annoncé` | La connexion du daemon est tenue. **Le daemon dit qu'il écoute** — et l'annuaire sait qu'il est vivant, ce qui n'est pas la même chose que joignable. |
 | `joignable` | L'annuaire a lui-même ouvert une connexion vers un candidat et l'a vue aboutir, à telle date, sur tel candidat. |
-| `expiré` | Le bail n'a pas été rafraîchi. Le daemon est mort, coupé, ou son réseau est tombé — l'annuaire ne sait pas lequel. |
+| `parti` | La connexion est fermée. Proprement — le daemon l'a dit — ou par expiration du délai d'inactivité. **L'annuaire distingue les deux et le rend**, parce qu'un arrêt volontaire et une coupure réseau n'appellent pas la même réaction chez celui qui regarde. |
 
 **`joignable` porte toujours sa date et son candidat.** Un « joignable » sans
 date est un mensonge à retardement : il décrit le passé au présent.
 
 ### 4.3 La sonde de joignabilité
 
-**L'annuaire sonde lui-même, une fois par bail accordé** — pas en continu.
+**LE KEEPALIVE NE REMPLACE PAS LA SONDE**, et c'est le point à ne pas confondre.
 
-Une connexion TCP ouverte puis refermée aussitôt, vers chaque candidat TCP.
-Elle ne transmet rien et ne parle aucun protocole applicatif : elle répond à une
-seule question, « le trois-temps aboutit-il ? ».
+Le keepalive prouve que le daemon est vivant et que *sa* connexion vers
+l'annuaire fonctionne. Il ne prouve **rien** sur la capacité d'un tiers à
+atteindre le port de service : une connexion sortante réussit là où une
+connexion entrante échoue, et c'est précisément le cas derrière un NAT. Deux
+choses différentes, deux mesures différentes.
+
+**L'annuaire sonde donc lui-même, à l'annonce et à chaque changement de
+candidat** — pas à chaque keepalive. La connexion tenue rend cela naturel : il
+n'y a plus de « renouvellement de bail » périodique auquel accrocher une sonde,
+et il n'en faut pas.
+
+Une connexion TCP ouverte puis refermée aussitôt, vers chaque candidat TCP,
+**IPv6 d'abord**. Elle ne transmet rien et ne parle aucun protocole applicatif :
+elle répond à une seule question, « le trois-temps aboutit-il ? ».
 
 **Pourquoi ce coût est justifié.** Sans sonde, l'annuaire ne peut rendre que
 `annoncé`, et un administrateur derrière un NAT découvre que son service est
@@ -344,10 +423,14 @@ protocole sans rien ajouter.
   depuis notre machine peut ne pas l'être depuis ailleurs — pare-feu de sortie,
   filtrage par pays, NAT restreint qui n'a ouvert que pour nous. `joignable`
   dit donc « depuis l'annuaire », et l'API le nomme ainsi.
-- Elle a un **coût sur le réseau du propriétaire** : une connexion par service
-  et par bail. Vers un port qu'il a lui-même déclaré, et donc autorisée — mais
-  elle se voit dans ses journaux, et la documentation d'installation doit le
-  dire avant qu'il la découvre.
+- Elle a un **coût sur le réseau du propriétaire** : une connexion par service à
+  l'annonce, et à chaque fois qu'un candidat change. Vers un port qu'il a
+  lui-même déclaré, et donc autorisée — mais elle se voit dans ses journaux, et
+  la documentation d'installation doit le dire avant qu'il la découvre.
+
+**Ce coût a beaucoup baissé** en passant du bail périodique à la connexion
+tenue : une sonde par démarrage de daemon, au lieu d'une toutes les
+quatre-vingt-dix secondes à perpétuité.
 
 ---
 

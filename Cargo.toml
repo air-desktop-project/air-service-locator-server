@@ -23,9 +23,12 @@
 #     question d'horloge. Si l'horloge est un appel système au fond d'une boucle,
 #     il faut attendre une minute pour éprouver une expiration ; si c'est un
 #     paramètre de l'étage 2, l'essai la pilote en trois lignes.
-#   — LE CLIENT EMBARQUÉ. `asl-client` est lié par des daemons tiers. Tout ce
-#     qu'il partage avec le serveur doit être de l'étage 1, sinon un daemon qui
-#     s'annonce tirerait la base de données de l'annuaire.
+#   — LE CLIENT EMBARQUÉ. `asl-client` vit dans `air-service-locator-client` et
+#     tire d'ici `asl-id` et `asl-proto`, et RIEN D'AUTRE. Tout ce que le client
+#     partage avec le serveur doit être de l'étage 1, sinon un daemon qui
+#     s'annonce tirerait la base de données de l'annuaire. La frontière de dépôt
+#     rend cette règle littérale : ce qui n'est pas à l'étage 1 est hors de
+#     portée, et non plus seulement déconseillé.
 #
 # Les étages 1 et 2 visent le 100 % de couverture : une machine à états se pilote
 # pas à pas depuis un essai, une boucle asynchrone ne se pilote pas — on l'attend.
@@ -51,9 +54,19 @@ members = [
     "crates/asl-loop-tokio",
     # Binaire
     "crates/asl-server",
-    # Bibliothèque tierce — ce qu'un daemon lie pour s'annoncer
-    "crates/asl-client",
 ]
+
+# `asl-client` A QUITTÉ CE DÉPÔT pour `air-service-locator-client`.
+#
+# Ce n'est pas un rangement : cette bibliothèque est un PRODUIT à part. Elle est
+# liée par des daemons tiers, elle porte des liaisons Python, Ruby, C++, Kotlin
+# et Swift, et un utilitaire en ligne de commande. Son rythme de publication,
+# ses contraintes d'ABI (C12) et son public n'ont rien de commun avec ceux d'un
+# serveur qu'on déploie sur ses propres machines.
+#
+# `asl-id` et `asl-proto` restent ICI et le dépôt client les tire par une
+# dépendance `git` épinglée : ce dépôt porte les spécifications, donc il porte
+# la grammaire qu'elles décrivent.
 
 [workspace.package]
 # Version en LOCKSTEP : toutes les crates la partagent via `version.workspace`.
@@ -75,7 +88,6 @@ repository = "https://github.com/air-desktop-project/air-service-locator-server"
 asl-annuaire = { path = "crates/asl-annuaire", version = "0.1.0" }
 asl-api = { path = "crates/asl-api", version = "0.1.0" }
 asl-auth = { path = "crates/asl-auth", version = "0.1.0" }
-asl-client = { path = "crates/asl-client", version = "0.1.0" }
 asl-id = { path = "crates/asl-id", version = "0.1.0" }
 asl-loop-tokio = { path = "crates/asl-loop-tokio", version = "0.1.0" }
 asl-proto = { path = "crates/asl-proto", version = "0.1.0" }

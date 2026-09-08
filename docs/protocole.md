@@ -8,129 +8,160 @@ dans [`modele.md`](modele.md). Ce document ne le redéfinit pas.
 
 ---
 
-## 0. Le transport, et la décision qui le fixe
+## 0. Le transport
 
-**v1 : HTTPS sur TLS 1.3, corps JSON, pour les trois voies.**
+**HTTP/3 sur QUIC, pour les trois voies. IPv6 d'abord, IPv4 en repli.**
 
-Les raisons, dans l'ordre où elles pèsent :
+Ce n'est pas un compromis entre des options : c'est ce que le produit exige, et
+ce que nous pouvons nous permettre parce que **nous tenons les deux bouts** — la
+bibliothèque cliente est de nous, le serveur aussi.
 
-1. **`asl-client` est embarqué par des daemons tiers.** Ce qu'il tire, un tiers
-   l'embarque. Un client HTTPS est ce qui coûte le moins à imposer à quelqu'un
-   qui voulait juste annoncer un numéro de port.
-2. **HTTPS traverse ce qui existe.** Un daemon derrière un proxy d'entreprise
-   n'a aucune autre voie. Un protocole qui échouerait là échouerait précisément
-   chez les administrateurs que ce produit vise.
-3. **Il se débogue avec `curl`.** Le premier utilisateur qui écrira un daemon
-   n'aura pas nos outils.
+### Ce que QUIC donne ici, et qu'aucun autre transport ne donne
 
-**Ce que cela coûte, et qui n'est pas caché** : une poignée de main TLS toutes
-les trente secondes si la connexion n'est pas tenue ouverte. `asl-client`
-maintient donc une connexion persistante et rouvre à la coupure — ce qui ramène
-le coût à quelques centaines d'octets par rafraîchissement.
+| | Pourquoi ça compte pour CE produit |
+|---|---|
+| **Connexion tenue, à coût faible** | Le daemon garde une connexion ouverte plutôt que de réannoncer périodiquement. C'est le bail (`modele.md` §4.1). |
+| **Le keepalive maintient le mapping NAT** | Sur IPv4 dégradé, c'est le même mécanisme qui tient la connexion et la porte. Rien de séparé à écrire. |
+| **L'annuaire peut PARLER au daemon** | Les deux extrémités sont en ligne au même instant. C'est ce qui laisse ouverte la route du rendez-vous pour un perçage de NAT (`modele.md` §6.3), qu'un protocole requête-réponse fermerait d'avance. |
+| **Migration de connexion** | Une machine qui change d'adresse — bascule 4G, renumérotation IPv6 — ne perd pas son bail. Sur un transport ordinaire, elle apparaîtrait partie. |
+| **Reprise à zéro aller-retour** | Une reconnexion après coupure coûte presque rien, et la bascule d'un annuaire à l'autre s'en trouve rapide (`annuaires.md` §3). |
 
-**Ce que cela ne permet PAS**, et qui justifie la voie réservée en §4 : obtenir
-un candidat réflexif UDP utilisable. Cela exige d'annoncer depuis la socket
-d'écoute, ce qu'une requête HTTPS ne fait pas (`modele.md` §3).
+### Ce que cela coûte, et il faut le regarder en face
+
+**QUIC est la dépendance la plus lourde qu'on puisse imposer à un daemon
+tiers.** C'était l'argument contre, et il ne disparaît pas parce qu'on a choisi
+autrement — il se paie autrement : par la qualité de la bibliothèque cliente.
+
+Deux choses le rendent tenable :
+
+1. **La pile QUIC existe déjà.** `air-mail-server` en porte une, écrite ici,
+   **sans une ligne de C** — poignée de main, chiffrement des paquets, flux,
+   contrôle de flux, QPACK, extinction en deux temps, et HTTP/3 au-dessus. C'est
+   du code éprouvé par un autre produit, et c'est ce qui change ce choix d'un
+   pari en une réutilisation.
+2. **Les liaisons sont un livrable, pas une arrière-pensée.** Python, Ruby, C++,
+   Kotlin, Swift. Un développeur qui écrit un daemon ne doit jamais avoir à
+   savoir que sa découverte de service passe par QUIC.
+
+### IPv6 d'abord
+
+L'annuaire écoute sur les deux. Le client tente **IPv6 en premier**, et ne
+retombe sur IPv4 qu'après échec.
+
+**C'est plus qu'un ordre de préférence** (`modele.md` §1) : une machine qui a une
+IPv6 publique n'est derrière aucun NAT, et tient l'exigence de joignabilité sans
+rien faire. IPv4 est le chemin où les problèmes commencent, et le nommer
+« repli » plutôt que « alternative » garde cette asymétrie visible dans le code.
+
+### Le cadrage
+
+**JSON** au-dessus de HTTP/3 en v1. Il se lit, se débogue, et ne coûte rien à
+l'échelle où ce produit vit. Un cadrage binaire est nommé et repoussé (§4.3) —
+et **`asl-proto` est la seule crate qui verrait la différence**, ce qui est
+exactement pourquoi elle est séparée.
 
 ---
 
 ## 1. La voie du daemon — `asl-proto`, `asl-client`
 
-Trois messages, et rien de plus.
+**Le daemon ouvre une connexion QUIC et la TIENT.** Tout ce qui suit passe
+dedans.
 
-### 1.1 Annoncer — `POST /v1/annonce`
+### 1.1 S'annoncer
+
+À l'ouverture de la connexion, authentifiée par le secret de la machine — qui
+doit porter la capacité `annonce` (`modele.md` §2.3) :
 
 ```jsonc
 {
   "machine": "m-7q2h8k3m9x4v6b1n5r0t2w8y3z",
-  "service": "sauvegarde",
+  "service": "depot-de-messages",
   "points": [
     { "protocole": "tcp", "port": 49152 },
     { "protocole": "udp", "port": 49152 }
   ],
-  "adresses_locales": ["192.168.1.20", "fe80::1c2d:3e4f:5a6b:7c8d"]
+  "adresses_locales": ["2001:db8::1c2d", "192.168.1.20"]
 }
 ```
-
-Autorisation : `Authorization: Bearer sm-…`, le secret de la machine — qui doit
-porter la capacité `annonce` (`modele.md` §2.3).
-
-**`adresses_locales` ne sert PAS à joindre le daemon depuis l'Internet** — c'est
-`vu_depuis` qui compte pour cela. Il est là pour deux autres raisons :
-
-1. **Il permet à l'annuaire de trancher que la machine est derrière un NAT**, en
-   comparant ce que le daemon dit avec ce qu'il observe. Le daemon peut le faire
-   lui-même, mais l'annuaire est le seul à pouvoir le lui AFFIRMER.
-2. Un client qui se trouve sur le même réseau y gagne une route directe. Ce
-   n'est pas le cas visé par le produit, et cela ne coûte rien.
 
 La réponse :
 
 ```jsonc
 {
   "service": "s-4k9m2p7r1t6v3x8z5b0d2f4h6j",
-  "bail_secondes": 90,
-  "rafraichir_dans_secondes": 30,
-  "vu_depuis": { "adresse": "203.0.113.4", "port": 61003 },
+  "keepalive_secondes": 15,
+  "inactivite_secondes": 45,
+  "vu_depuis": { "adresse": "2001:db8::1c2d", "port": 51840, "famille": "ipv6" },
+  "derriere_nat": false,
   "joignabilite": [
     { "protocole": "tcp", "port": 49152, "verdict": "joignable",
-      "candidat": "203.0.113.4:49152", "a": "2026-09-08T13:02:11Z" },
+      "candidat": "[2001:db8::1c2d]:49152", "a": "2026-09-08T13:02:11Z" },
     { "protocole": "udp", "port": 49152, "verdict": "non_sonde",
       "raison": "l'UDP ne se sonde pas" }
   ]
 }
 ```
 
-**`vu_depuis` et `joignabilite` sont la moitié utile de cette réponse**, et non
-un ornement de diagnostic.
+**`vu_depuis`, `derriere_nat` et `joignabilite` sont la moitié utile de cette
+réponse**, et non un ornement de diagnostic.
 
-- `vu_depuis` dit au daemon **s'il est derrière un NAT** : il lui suffit de
-  comparer avec ses propres adresses. Aucun autre moyen ne le lui apprend.
+- `vu_depuis` dit au daemon **sous quelle adresse l'annuaire l'a vu**. Aucun
+  autre moyen ne le lui apprend.
+- `derriere_nat` est le verdict que l'annuaire est **seul** à pouvoir rendre : il
+  compare ce que le daemon annonce avec ce qu'il observe. En IPv6 il vaut
+  presque toujours `false`, et c'est le signe que tout va bien.
 - `joignabilite` lui dit **si quelqu'un peut réellement l'atteindre**, à la
   seconde où il démarre — et non le jour où un utilisateur s'en plaint.
 
-Un daemon bien écrit journalise les deux à son démarrage. La documentation
-d'installation le recommandera, parce que c'est ce qui transforme une panne de
-réseau silencieuse en une ligne de journal lisible.
+**Les valeurs de temps viennent du serveur** et ne sont pas figées dans le
+client : le bon delta de keepalive se mesure et n'est pas encore mesuré
+(`modele.md` §4.1). Le figer côté client exigerait de mettre à jour tous les
+daemons installés chez des tiers — ce qui ne se produira jamais.
 
-### 1.2 Rafraîchir — `POST /v1/annonce`
+### 1.2 Tenir — le keepalive
 
-**Le même message.** Il n'y a pas de verbe « rafraîchir » : réannoncer EST
-rafraîchir, et cela n'est pas une économie de conception.
+**La connexion EST le bail.** Il n'y a pas de verbe « rafraîchir » : le
+keepalive QUIC suffit, et il n'y a rien à écrire au-dessus.
 
-Un daemon qui redémarre après une coupure ne sait pas si son bail court encore.
-Avec deux verbes, il devrait le demander pour choisir lequel employer — un
-aller-retour de plus, et une branche de code de plus, pour une question dont la
-réponse ne change rien à ce qu'il veut. Avec un seul, il annonce, et l'annuaire
-tranche.
+Un daemon dont un point d'écoute change réannonce dans la même connexion. Une
+réannonce du même nom remplace la précédente (`modele.md` §2.4), et **déclenche
+une nouvelle sonde** puisque les candidats ont changé.
 
-L'annuaire ne resonde PAS à chaque rafraîchissement : une fois par bail accordé,
-et à chaque changement de candidat.
+### 1.3 Partir
 
-### 1.3 Se retirer — `DELETE /v1/annonce/{service}`
+**Fermer la connexion suffit, et c'est instantané.** L'extinction QUIC en deux
+temps distingue un arrêt propre d'une coupure : l'annuaire rend `parti
+(volontaire)` dans un cas, `parti (inactivité)` dans l'autre — deux choses que
+celui qui regarde ne traitera pas pareil.
 
-Un arrêt propre se dit. **Mais le silence suffit** : une machine qu'on débranche
-ne dit rien, et le retrait n'est donc jamais une condition de correction. Il
-n'est qu'une politesse qui évite jusqu'à quatre-vingt-dix secondes d'état faux.
+C'est le gain le plus net du transport tenu. Avec des annonces périodiques, un
+daemon arrêté proprement restait faussement présent jusqu'à l'expiration de son
+bail.
 
 ### 1.4 Reprise — ce que fait `asl-client` quand l'annuaire ne répond pas
 
-**L'annuaire injoignable NE DOIT PAS empêcher un daemon de démarrer.** C'est la
-règle qui gouverne toute cette section : un service de découverte en panne
-rendrait sinon indisponibles tous les daemons qui en dépendent, ce qui est la
-faute exacte que ce genre de composant existe pour ne pas commettre.
+**L'annuaire injoignable NE DOIT PAS empêcher un daemon de démarrer.** Un
+service de découverte en panne rendrait sinon indisponibles tous les daemons qui
+en dépendent — la faute exacte que ce genre de composant existe pour ne pas
+commettre.
 
 `asl-client` :
 
-1. **rend la main immédiatement** ; l'annonce se fait en arrière-plan ;
-2. **réessaie avec un recul exponentiel** — 1 s, 2 s, 4 s… plafonné à la
-   cadence de rafraîchissement, **avec un bruit aléatoire de ±20 %** ;
-3. **n'abandonne jamais.** Un daemon qui tourne depuis un mois doit se
+1. **rend la main immédiatement** ; la connexion s'établit en arrière-plan ;
+2. **essaie les annuaires dans l'ordre**, IPv6 avant IPv4, et bascule sur le
+   second dès que le premier ne répond pas ;
+3. **réessaie avec un recul exponentiel** — 1 s, 2 s, 4 s… plafonné, **avec un
+   bruit aléatoire de ±20 %** ;
+4. **n'abandonne jamais.** Un daemon qui tourne depuis un mois doit se
    réannoncer tout seul quand l'annuaire revient.
 
 **Le bruit aléatoire n'est pas du raffinement.** Sans lui, mille daemons dont
-l'annuaire vient de tomber réessaient à la même seconde, et le remettent à
+l'annuaire vient de tomber se reconnectent à la même seconde et le remettent à
 terre à l'instant où il se relève. Il coûte une ligne.
+
+**C'est aussi le mécanisme de bascule entre les deux racines**, et il n'y en a
+pas d'autre : l'état vivant n'est délibérément pas répliqué, parce qu'il se
+reconstruit ici, tout seul, en un keepalive (`annuaires.md` §3).
 
 ---
 
@@ -267,18 +298,26 @@ opération visible dans l'application plutôt qu'enfouie dans un menu.
 
 ## 4. Ce qui est nommé et repoussé
 
-### 4.1 La voie d'annonce UDP
+### 4.1 La sonde réflexive UDP
 
-**C'est la seule façon d'obtenir un candidat réflexif UDP utilisable** : il faut
-annoncer *depuis la socket d'écoute*, ce qu'une requête HTTPS ne fait pas.
+Le problème reste entier : **le candidat réflexif de la connexion QUIC est celui
+de la socket QUIC, pas celui du service.** Un daemon qui sert en UDP sur 49152 a
+une socket QUIC distincte, avec son propre mapping NAT — savoir sous quelle
+adresse celle-là est vue n'apprend rien sur l'autre.
 
-Elle apporterait aussi le maintien du mapping NAT — d'où la cadence de 25 s
-plutôt que 30 (`modele.md` §4.1).
+**La connexion tenue ouvre pourtant une solution simple**, qu'un protocole
+requête-réponse n'aurait pas permise : l'annuaire **demande au daemon**, dans la
+connexion, d'émettre un datagramme *depuis la socket de service* vers une
+adresse qu'il lui donne. Il observe alors le mapping de CETTE socket, et rend au
+daemon le candidat réflexif de son service.
 
-Elle exige d'écrire nous-mêmes retransmission, anti-rejeu et chiffrement. **Ce
-n'est pas un travail de v1**, et le faire à moitié serait pire que ne pas le
-faire : un rafraîchissement rejouable permettrait de maintenir en vie le bail
-d'un daemon mort.
+C'est le mécanisme de STUN, obtenu presque gratuitement parce que le canal de
+commande existe déjà.
+
+**Ce n'est pas un travail de v1** — il faut un point d'écoute d'observation, un
+jeton à usage unique dans le datagramme pour qu'on ne puisse pas faire attribuer
+n'importe quel mapping à n'importe qui, et une borne sur ce qu'un daemon peut
+faire émettre. Mais c'est désormais une extension, et non un second protocole.
 
 ### 4.2 La traversée de NAT
 
@@ -287,8 +326,11 @@ percer. Les trois suites possibles et leur coût sont dans `modele.md` §6.3.
 
 ### 4.3 Un cadrage binaire
 
-Le JSON coûte quelques centaines d'octets par rafraîchissement. À mille daemons
-c'est négligeable ; à un million cela cesse de l'être. **Le jour où ce calcul
-changera, c'est le cadrage qui changera, pas l'architecture** : `asl-proto` est
-la seule crate qui verrait la différence, et c'est exactement pourquoi elle est
-séparée.
+Le JSON coûte quelques centaines d'octets à l'annonce — et **plus rien ensuite**,
+puisque le keepalive est celui de QUIC et ne transporte aucun corps. Le calcul
+qui aurait rendu un cadrage binaire intéressant a donc largement perdu de sa
+force en passant à la connexion tenue.
+
+**Le jour où il redeviendrait vrai, c'est le cadrage qui changerait, pas
+l'architecture** : `asl-proto` est la seule crate qui verrait la différence, et
+c'est exactement pourquoi elle est séparée.
