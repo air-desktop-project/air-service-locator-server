@@ -14,7 +14,17 @@
 //! Elle ne sert rien. Elle décrit des requêtes et des réponses ; ce qui les
 //! transporte est à l'étage 3, ce qui les autorise est dans `asl-auth`.
 //!
+//! # Les verbes, arrêtés par `docs/protocole.md` §2
+//!
+//! Créer un compte, enrôler un appareil de plus, révoquer, déclarer une machine,
+//! remplacer son secret d'annonce, lister les services, émettre et révoquer une
+//! clé de découverte.
+//!
+//! **Il n'y a pas de mot de passe dans ce produit.** Un compte est un jeu
+//! d'appareils enrôlés, et toute requête est signée par une clé qui vit dans le
+//! matériel sécurisé d'un téléphone. Aucun champ de cette API ne porte un
+//! booléen d'authentification (contrainte C7).
+//!
 //! # État
 //!
-//! Vide. Les écrans des deux applications ne sont pas arrêtés, et une API écrite
-//! avant eux décrirait des besoins supposés.
+//! Vide. Spécifié, pas écrit.

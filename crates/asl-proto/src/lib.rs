@@ -16,7 +16,16 @@
 //! workspace (`cast_possible_truncation`, `arithmetic_side_effects`) sont là pour
 //! cela : ils voient une conversion douteuse, jamais une borne oubliée.
 //!
+//! # Le cadrage, arrêté par `docs/protocole.md` §0
+//!
+//! **JSON sur HTTPS en v1**, pour les trois voies. La raison qui pèse le plus
+//! n'est pas la simplicité : c'est que cette crate est liée par `asl-client`,
+//! donc par des daemons tiers, et qu'un client HTTPS est ce qui coûte le moins
+//! à imposer à quelqu'un qui voulait juste annoncer un numéro de port.
+//!
+//! Un cadrage binaire est nommé et repoussé (§4.3). **Cette crate est la seule
+//! qui verrait la différence** — c'est exactement pourquoi elle est séparée.
+//!
 //! # État
 //!
-//! Vide. Le protocole n'est pas spécifié — ni son cadrage, ni son transport, ni
-//! sa reprise après coupure (`docs/protocole.md`).
+//! Vide. Spécifié, pas écrit.

@@ -19,7 +19,23 @@
 //! Elle est liée AUSSI BIEN par le serveur que par `asl-client`, donc par des
 //! daemons tiers. Tout ce qu'on y met, un tiers l'embarque.
 //!
+//! # La forme, arrêtée par `docs/modele.md` §2
+//!
+//! Un préfixe d'une lettre, un tiret, puis 26 caractères portant 128 bits :
+//! `u-` utilisateur, `a-` appareil, `m-` machine, `s-` service, `k-` clé de
+//! découverte. Le secret d'annonce, `sm-`, porte 256 bits sur 52 caractères.
+//!
+//! **L'alphabet est le base32 de Crockford**, et ce n'est pas un goût : ces
+//! chaînes se recopient à la main dans des fichiers de configuration. Crockford
+//! retire `I`, `L`, `O` et `U` — les quatre que l'œil confond avec `1`, `0` et
+//! `V` — et relit indifféremment la majuscule et la minuscule. Un base64 y
+//! ferait perdre une machine sur une transcription.
+//!
+//! **128 bits ne se devinent pas**, ce qui ferme l'énumération. Mais un
+//! identifiant N'EST PAS UN SECRET (voir ci-dessus) : ce qui autorise une
+//! lecture est une clé de découverte, révocable — un identifiant, lui, ne se
+//! change pas.
+//!
 //! # État
 //!
-//! Vide. La forme des identifiants n'est pas arrêtée — c'est une décision des
-//! spécifications (`docs/modele.md`), pas de ce fichier.
+//! Vide. Spécifié, pas écrit.

@@ -20,14 +20,27 @@
 //! Confondre les deux mènerait à un serveur qui croit vérifier une identité
 //! alors qu'il fait confiance à un booléen envoyé par le client.
 //!
-//! # Ce qui reste à trancher
+//! # Ce qui est arrêté par `docs/protocole.md` §2 et `docs/modele.md` §2
 //!
-//! - Quelle attestation matérielle exiger, et quel est le repli quand elle
-//!   manque : refus, ou compte dégradé ?
-//! - Un daemon ne fait pas de biométrie. Par quoi s'authentifie-t-il, et
-//!   comment ce secret arrive-t-il sur la machine ?
-//! - La perte d'un appareil : que révoque-t-on, et qui peut le faire ?
+//! - **L'attestation manquante ou en échec fait REFUSER** en v1, et c'est
+//!   journalisé. Un refus se relâche plus tard ; une acceptation ne se resserre
+//!   jamais sans casser des comptes déjà ouverts.
+//! - **Un daemon ne fait pas de biométrie.** Il porte le *secret d'annonce* de
+//!   sa machine, posé par l'application mobile à la déclaration et montré une
+//!   seule fois. Il est par MACHINE et non par daemon — l'énoncé du produit veut
+//!   qu'un daemon quelconque puisse s'annoncer sans avoir été déclaré d'avance.
+//!   Le prix : tout daemon de cette machine peut s'annoncer sous n'importe quel
+//!   nom, et pas au-delà.
+//! - **Un appareil ne peut pas se révoquer lui-même.** Sinon un téléphone volé
+//!   et déverrouillé révoque les autres et confisque le compte.
+//!
+//! # Les comparaisons se font en temps constant (contrainte C9)
+//!
+//! Une clé inconnue et un service inexistant rendent la même réponse après le
+//! même délai. L'annuaire sait où écoutent des services qui ne publient pas leur
+//! port : un écart de temps de réponse dit à un inconnu qu'une machine existe,
+//! et c'est tout ce qu'il cherchait.
 //!
 //! # État
 //!
-//! Vide.
+//! Vide. Spécifié, pas écrit.

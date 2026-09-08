@@ -12,15 +12,25 @@
 //! d'une boucle, éprouver une expiration coûterait d'attendre réellement le
 //! délai ; en paramètre, l'essai la pilote en trois lignes.
 //!
-//! # Ce qui reste à trancher, et qui ne peut pas l'être ici
+//! # Les trois règles arrêtées par `docs/modele.md`
 //!
-//! - Un daemon qui s'arrête proprement le dit-il, ou laisse-t-il son bail
-//!   expirer ? Les deux, probablement — mais le silence doit alors suffire.
-//! - Que vaut une annonce dont le port a changé depuis la précédente ?
-//! - Deux daemons du même nom sur la même machine : conflit, ou remplacement ?
+//! - **Une deuxième annonce du même nom REMPLACE la première** (§2.4). C'est ce
+//!   qu'un redémarrage exige : un daemon qui revient avec un nouveau port doit
+//!   pouvoir le dire, et non se heurter à son propre fantôme. Un conflit ferait
+//!   échouer le cas nominal.
+//! - **Le retrait est une politesse, jamais une condition** (§4.1). Une machine
+//!   qu'on débranche ne dit rien ; le silence doit donc suffire.
+//! - **Le mot « en ligne » est banni** (§4.2, contrainte C6). Trois états
+//!   seulement : `annoncé` — le bail court, l'annuaire n'a rien vérifié ;
+//!   `joignable` — l'annuaire a lui-même atteint tel candidat, à telle date ;
+//!   `expiré`. Confondre les deux premiers ferait afficher « en ligne » pour un
+//!   daemon derrière un NAT que personne ne peut joindre, et son administrateur
+//!   chercherait le défaut partout sauf là où il est.
 //!
-//! Ces questions sont celles des spécifications (`docs/modele.md`).
+//! **La sonde de joignabilité DÉCIDE ici et AGIT à l'étage 3** (contrainte C1) :
+//! « faut-il sonder ce candidat, et que conclure du résultat ? » est une
+//! décision pure ; « ouvrir une connexion TCP et voir » est une entrée-sortie.
 //!
 //! # État
 //!
-//! Vide.
+//! Vide. Spécifié, pas écrit.
