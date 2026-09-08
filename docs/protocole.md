@@ -34,11 +34,19 @@ autrement — il se paie autrement : par la qualité de la bibliothèque cliente
 
 Deux choses le rendent tenable :
 
-1. **La pile QUIC existe déjà.** `air-mail-server` en porte une, écrite ici,
-   **sans une ligne de C** — poignée de main, chiffrement des paquets, flux,
-   contrôle de flux, QPACK, extinction en deux temps, et HTTP/3 au-dessus. C'est
-   du code éprouvé par un autre produit, et c'est ce qui change ce choix d'un
-   pari en une réutilisation.
+1. **La pile QUIC existe déjà, et on la RÉUTILISE** (contrainte C15).
+   `ams-quic`, `ams-quic-crypto`, `ams-quic-tls`, `ams-proto-quic`,
+   `ams-proto-h3`, `ams-h3`, `ams-quic-client` — écrites pour
+   `air-mail-server`, sur tokio, **sans une ligne de C**, et déjà éprouvées par
+   un autre produit.
+
+   **Elles sont réutilisables parce qu'elles ont été écrites comme des CODECS**
+   (C1) : des octets vers des messages, et retour, sans posséder de socket. Une
+   pile qui aurait mêlé sa boucle à sa grammaire ne se transplanterait pas.
+
+   Elles ont vocation à **migrer dans `air`**. La dépendance pointe aujourd'hui
+   vers `air-mail-server` parce que c'est là qu'elles vivent ; ce jour-là, c'est
+   la source qui changera, pas le code.
 2. **Les liaisons sont un livrable, pas une arrière-pensée.** Python, Ruby, C++,
    Kotlin, Swift. Un développeur qui écrit un daemon ne doit jamais avoir à
    savoir que sa découverte de service passe par QUIC.
@@ -200,9 +208,13 @@ acceptation ne se resserre jamais sans casser des comptes existants.
 | `POST /v1/appareils` | Enrôle un appareil de plus. **Signé par un appareil déjà enrôlé.** |
 | `PUT /v1/appareils/{a}/poussee` | Dépose ou renouvelle le jeton APNs / FCM. |
 | `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. |
-| `POST /v1/machines` | Déclare une machine, avec ses **capacités** (`annonce`, `lecture`). **Rend le secret de machine, UNE SEULE FOIS.** |
+| `POST /v1/machines` | Déclare une machine, avec ses **capacités** (`annonce`, `lecture`). **Rend un code d'enrôlement** — court, à usage unique, valable quelques minutes. |
 | `PATCH /v1/machines/{m}` | Change le nom ou les capacités. |
-| `POST /v1/machines/{m}/secret` | Remplace le secret. Invalide l'ancien à la seconde. |
+| `POST /v1/machines/{m}/enrolement` | Émet un nouveau code, pour ré-enrôler une machine dont la clé a été révoquée ou perdue. |
+| `DELETE /v1/machines/{m}/cle` | Révoque la clé. Effet immédiat : connexions fermées, baux tombés. |
+| `PUT /v1/alias` | Enregistre ou change l'alias public. **La seule donnée que l'utilisateur nous confie.** |
+| `DELETE /v1/alias` | Le retire. |
+| `GET /v1/alias/{alias}` | Rend l'identifiant, **et rien d'autre**. Public — c'est l'emploi de l'alias, et son coût (`modele.md` §2.1). |
 | `GET /v1/machines/{m}/services` | Les services, leurs candidats, leur état et la date de la dernière sonde. |
 | `GET /v1/utilisateurs/{u}` | **Confirme qu'un identifiant existe**, et rien d'autre : ni nom, ni machines, ni services. Sert à ce qu'une faute de frappe ne produise pas une autorisation muette. |
 | `POST /v1/autorisations` | Accorde. Bénéficiaire `u-…`, portée, étiquette. Déclenche la notification. |
@@ -224,13 +236,21 @@ portant la capacité `lecture`, et agissant au nom d'un compte.
 
 ```
 GET /v1/ou/{machine}/{service}
-Authorization: Bearer sm-…        (le secret de la machine QUI DEMANDE)
+        (dans une connexion QUIC authentifiée par la CLÉ de la machine
+         qui demande, laquelle doit porter la capacité `lecture`)
 ```
 
-**Rien ne s'interroge anonymement.** Le secret authentifie la machine, la
-machine désigne son propriétaire, et l'annuaire ne rend que ce que ce
-propriétaire a le droit de voir : ses propres services, et ceux qu'une
-autorisation lui a accordés (`modele.md` §2.5).
+**Rien ne s'interroge anonymement, et rien ne s'interroge sur présentation d'un
+jeton.** La signature authentifie la machine, la machine désigne son
+propriétaire, et l'annuaire ne rend que ce que ce propriétaire a le droit de
+voir : ses propres services, et ceux qu'une autorisation lui a accordés
+(`modele.md` §2.5).
+
+**L'authentification est portée par la CONNEXION, pas par la requête**, et c'est
+un effet direct du transport tenu : la clé est prouvée une fois à
+l'établissement, puis toutes les requêtes de cette connexion en héritent. Il n'y
+a pas de jeton à joindre, donc pas de jeton à intercepter, à rejouer, ni à
+expirer.
 
 ```jsonc
 {
@@ -276,9 +296,11 @@ se tromperait de coupable.
 ### Ce qui rend l'annuaire non énumérable
 
 - **Aucune lecture anonyme.** C'est la première barrière, et la seule qui compte
-  vraiment : il n'existe aucune requête qui rende quoi que ce soit sans un
-  secret de machine valide.
+  vraiment : il n'existe aucune requête de résolution qui rende quoi que ce soit
+  hors d'une connexion authentifiée par une clé de machine.
 - Un identifiant porte **128 bits** : il ne se devine pas.
+- **L'alias est la seule surface énumérable**, et il ne rend qu'un identifiant —
+  jamais une machine, jamais un service, jamais un état (`modele.md` §2.1).
 - **Un service hors de la portée du demandeur et un service inexistant rendent
   la même réponse, après le même délai** (contrainte C9). Sans cela, l'écart de
   temps dit à B que la machine d'A existe alors qu'il n'y a pas droit — et c'est

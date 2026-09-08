@@ -3,7 +3,6 @@ name = "asl-store"
 description = "Persistance de l'annuaire — comptes, machines, baux."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true

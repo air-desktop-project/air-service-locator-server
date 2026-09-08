@@ -73,10 +73,19 @@ members = [
 # Un seul numéro à incrémenter, donc aucune dérive possible entre les paquets.
 version = "0.1.0"
 edition = "2024"
+# PAS DE `rust-version`, ET C'EST DÉLIBÉRÉ.
+#
+# Ce champ déclare une version MINIMALE, ce qui n'a de sens que si l'on accepte
+# d'être compilé par plusieurs toolchains. Ici `rust-toolchain.toml` en épingle
+# UNE, datée, celle d'Air : il n'y a pas d'intervalle à déclarer, et un
+# `rust-version` en inventerait un que personne ne vérifie.
+#
+# Il redeviendra utile le jour où ces crates seront publiées sur crates.io — un
+# consommateur, lui, a bien une toolchain à lui.
 # Égale au `channel` de `rust-toolchain.toml`. Les deux bougent ensemble : ce
 # champ fait échouer le build avec un message clair si quelqu'un compile avec une
 # toolchain plus ancienne que celle sur laquelle le projet est vérifié.
-rust-version = "1.98.0"
+rust-version = "1.90.0"
 license = "MPL-2.0"
 authors = ["air-service-locator contributors"]
 repository = "https://github.com/air-desktop-project/air-service-locator-server"
@@ -97,6 +106,24 @@ asl-store = { path = "crates/asl-store", version = "0.1.0" }
 # LES DÉPENDANCES EXTERNES n'entrent qu'au moment où une crate les consomme. Le
 # graphe est donc VIDE aujourd'hui, et cette section restera vide tant que rien
 # n'aura été écrit qui en ait besoin.
+#
+# ── CE QUI Y ENTRERA, ET QUI EST DÉJÀ DÉCIDÉ (contrainte C15) ──────────────
+#
+# La pile QUIC et HTTP/3 d'`air-mail-server` : `ams-quic`, `ams-quic-crypto`,
+# `ams-quic-tls`, `ams-proto-quic`, `ams-proto-h3`, `ams-h3`, `ams-quic-client`.
+# Elles ne sont PAS déclarées ici, et c'est la règle ci-dessus qui l'exige :
+# aucune crate ne les consomme encore, et une dépendance posée d'avance
+# affirmerait un assemblage qui n'existe pas.
+#
+# **Elles ont vocation à migrer dans `air`.** Elles seront donc tirées par une
+# dépendance `git` ÉPINGLÉE vers `air-mail-server` dans un premier temps, puis
+# vers `air`. Épinglée, parce qu'une dépendance `git` échappe à `cargo audit` et
+# qu'un amont qui bouge sans prévenir casserait la vérification ; datée dans son
+# commentaire, pour qu'on sache quand la revoir.
+#
+# **Aucune crate tierce de QUIC ou de HTTP/3 n'entrera jamais** — ni un module
+# local qui en réimplémenterait une partie. Réimplémenter QUIC est le genre de
+# décision qui paraît raisonnable un après-midi et coûte deux ans.
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "forbid"

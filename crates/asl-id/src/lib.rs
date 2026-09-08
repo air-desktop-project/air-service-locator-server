@@ -23,7 +23,13 @@
 //!
 //! Un préfixe d'une lettre, un tiret, puis 26 caractères portant 128 bits :
 //! `u-` utilisateur, `a-` appareil, `m-` machine, `s-` service, `g-`
-//! autorisation. Le secret de machine, `sm-`, porte 256 bits sur 52 caractères.
+//! autorisation.
+//!
+//! **Il n'y a PAS d'identifiant de secret dans cette liste**, et c'est le point :
+//! aucune authentification de ce produit ne repose sur un secret partagé
+//! (contrainte C14). Une machine détient une paire de clés Ed25519 ; ce qui se
+//! recopie à la main est un CODE D'ENRÔLEMENT à usage unique, qui vit quelques
+//! minutes et n'ouvre qu'une opération.
 //!
 //! **L'alphabet est le base32 de Crockford**, et ce n'est pas un goût : ces
 //! chaînes se recopient à la main dans des fichiers de configuration. Crockford

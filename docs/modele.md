@@ -70,11 +70,37 @@ l'application iOS ou Android.
 | `appareils` | Les téléphones enrôlés qui peuvent administrer ce compte. |
 | `machines` | Les machines en gestion — celles qui servent comme celles qui consomment. |
 
-**L'identifiant public a un seul emploi, et c'est lui qui le justifie** : il se
-transmet hors de l'annuaire — SMS, courriel, à voix haute — pour qu'un autre
-utilisateur vous accorde l'accès à ses services (§2.5). L'annuaire ne connaît
-donc ni votre numéro, ni votre adresse : il n'y a aucun annuaire d'utilisateurs
-à énumérer, et rien ne se cherche par nom.
+| `alias` | **Facultatif.** Unique, public, choisi. Sert à être retrouvé (voir ci-dessous). |
+
+### Aucune donnée personnelle n'est hébergée
+
+**Pas de courriel. Pas de numéro. Pas de nom. Pas de mot de passe.** Un compte
+est un identifiant, un jeu de clés publiques, et rien d'autre.
+
+Ce n'est pas une posture : c'est ce qui rend cet annuaire tenable. Il sait déjà
+où écoutent des services qui ne publient pas leur port ; y ajouter une identité
+civile ferait de sa base la cible la plus intéressante du produit. **Ce qu'on
+n'héberge pas ne fuit pas, ne se subpoena pas, et ne se perd pas.**
+
+### L'alias public — la seule exception, et elle est choisie
+
+Un utilisateur PEUT enregistrer un **alias** : une chaîne unique et publique,
+pour qu'un autre utilisateur le retrouve sans avoir à recopier 26 caractères.
+
+**Ce que l'alias coûte, et qu'il faut dire au moment de le choisir :**
+
+- Il est **public par construction**. C'est son emploi : `alias → identifiant`
+  est une requête que quiconque peut faire.
+- Donc l'espace des alias **est énumérable**, contrairement au reste de
+  l'annuaire. Un inconnu peut essayer des alias et découvrir lesquels existent.
+- Il ne rend **rien d'autre que l'identifiant** — ni machines, ni services, ni
+  état. Savoir qu'un alias existe n'ouvre aucune porte : l'accès reste une
+  autorisation nominative (§2.5).
+
+**L'alias est facultatif, et le rester est une position tenable.** Un utilisateur
+qui ne l'enregistre pas n'est trouvable que par son identifiant, transmis de la
+main à la main — SMS, courriel, à voix haute. C'est le mode le plus discret, et
+il doit rester le défaut.
 
 ### 2.2 Appareil
 
@@ -112,7 +138,7 @@ compte. Elle le prouve avec un secret, comme celle qui annonce.
 | `nom` | Libre, 1 à 64 caractères. Pour l'humain, jamais pour la machine. |
 | `propriétaire` | Un utilisateur. |
 | `capacités` | `annonce`, `lecture`, ou les deux. Choisies à la déclaration, modifiables. |
-| `secret de machine` | `sm-` + 52 caractères. **Montré UNE SEULE FOIS**, à la déclaration. |
+| `clé publique` | Ed25519. **La partie privée est générée SUR la machine et n'en sort jamais.** |
 
 #### Les capacités, et pourquoi elles ne sont pas cumulées par défaut
 
@@ -132,23 +158,53 @@ L'application demande donc explicitement à la déclaration, et ne coche rien
 d'avance. Les machines d'A qui hébergent le daemon portent `annonce` ; les
 machines de B qui le consomment portent `lecture`.
 
-#### Le secret de machine
+#### La clé de machine — et pourquoi ce n'est PAS un secret partagé
 
-**C'est ce que l'administrateur copie sur la machine** — dans le fichier de
-configuration des daemons, ou dans celui du client.
+**Il n'y a aucune authentification par secret partagé dans ce produit**, pas plus
+pour une machine que pour un humain. Une machine détient une **paire de clés
+Ed25519** dont la partie privée est générée sur place et **ne quitte jamais la
+machine**. L'annuaire ne connaît que la partie publique.
 
-Il est par MACHINE et non par daemon : un daemon quelconque doit pouvoir
+Un secret partagé — un jeton porteur qu'on recopie — a trois défauts qu'aucune
+précaution ne rattrape : il existe en deux exemplaires au moins, il transite au
+moment où on le pose, et **quiconque l'intercepte devient la machine**. Une
+signature, elle, prouve la détention sans jamais transmettre ce qui est détenu.
+
+Elle est par MACHINE et non par daemon : un daemon quelconque doit pouvoir
 s'annoncer sans qu'on ait déclaré d'avance qu'il existerait — c'est l'énoncé
-même du produit.
+même du produit. Le prix se dit : **tout daemon tournant sur cette machine et
+capable de lire la clé peut s'annoncer sous n'importe quel nom.** La clé ne
+sépare pas les daemons entre eux, elle sépare cette machine des autres.
 
-Le prix est réel et se dit : **tout daemon tournant sur cette machine peut
-s'annoncer sous n'importe quel nom.** Le secret ne sépare pas les daemons entre
-eux, il sépare cette machine des autres.
+#### L'enrôlement — comment la clé publique arrive à l'annuaire
 
-Il se remplace depuis l'application. Le remplacement invalide immédiatement
-l'ancien : les daemons cessent de rafraîchir, leurs baux expirent, et il faut
-repasser sur la machine. C'est l'opération à faire quand une machine est
-compromise, et elle est délibérément visible.
+La difficulté est réelle : la machine génère sa clé, mais rien ne dit à
+l'annuaire que **cette** clé est bien celle d'une machine de **cet** utilisateur.
+
+1. L'application affiche un **code d'enrôlement** — court, à usage unique, valable
+   quelques minutes.
+2. L'administrateur le saisit sur la machine : `asl enrole <code>`.
+3. La machine **génère sa paire de clés**, et présente sa clé publique avec le
+   code.
+4. L'annuaire lie la clé au compte, et le code est consommé.
+
+**Le code d'enrôlement EST un secret partagé, et il faut le dire plutôt que de
+prétendre le contraire.** Ce qui le rend acceptable est qu'il n'authentifie rien
+sur la durée : il ne sert qu'une fois, il expire en quelques minutes, et il
+n'ouvre qu'une seule opération — lier une clé. Le justificatif durable est la
+clé, et elle, personne ne l'a jamais transmise.
+
+**Le sens de la saisie n'est pas arbitraire** : c'est un code court qu'on tape
+sur un terminal, et non une clé publique de 44 caractères qu'on recopierait dans
+un téléphone. La direction est choisie pour l'humain qui fait le geste.
+
+#### Révoquer
+
+Se fait depuis l'application, et prend effet à la seconde : les connexions de la
+machine sont fermées, ses baux tombent. Il faut alors ré-enrôler sur place.
+
+C'est l'opération à faire quand une machine est compromise, et elle est
+délibérément visible plutôt qu'enfouie dans un menu.
 
 ### 2.4 Service
 
@@ -232,16 +288,21 @@ L'application doit l'énoncer au moment où A accorde, et non dans une page
 d'aide. Un utilisateur qui apprend après coup qu'il a révélé l'adresse de son
 domicile n'a pas consenti, il a cliqué.
 
-#### La saisie d'un identifiant confirme qu'il existe
+#### La saisie confirme que le destinataire existe
 
-Quand A saisit l'identifiant de B, l'application doit dire si l'identifiant est
-valide — sans quoi une faute de frappe produit une autorisation muette accordée
-à personne, et A croit avoir partagé.
+Quand A saisit l'identifiant de B — **ou son alias** —, l'application doit dire
+si le destinataire est valide. Sans quoi une faute de frappe produit une
+autorisation muette accordée à personne, et A croit avoir partagé.
 
-**Cela révèle donc l'existence d'un compte à qui connaît son identifiant.** C'est
-acceptable, et pour une raison précise : un identifiant porte 128 bits, il ne se
-devine pas, et quiconque le détient le tient de son porteur. L'annuaire ne rend
-jamais rien à partir d'autre chose — ni un nom, ni un courriel, ni un numéro.
+Les deux chemins n'ont pas le même coût :
+
+| Ce que A saisit | Ce que cela révèle |
+|---|---|
+| Un **identifiant** `u-…` | L'existence d'un compte, à qui détient déjà 128 bits qu'il ne peut pas deviner et qu'il tient de son porteur. Sans conséquence. |
+| Un **alias** | L'existence d'un compte derrière un nom **devinable**. C'est le prix assumé de l'alias, et la raison pour laquelle il est facultatif (§2.1). |
+
+**L'annuaire ne rend jamais rien à partir d'autre chose** — ni courriel, ni
+numéro, ni nom : il ne les a pas.
 
 ### 2.6 Notification
 
@@ -457,7 +518,7 @@ Nommé ici plutôt que supposé ailleurs.
    des comptes subordonnés, une délégation par machine, des rôles — dépend de la
    taille des parcs réels, qu'on ne connaît pas encore.
 2. **Le transfert d'une machine.** Non couvert : on retire, on redéclare, on
-   repose le secret d'annonce. Suffisant tant qu'une machine change rarement de
+   ré-enrôle la machine. Suffisant tant qu'une machine change rarement de
    mains.
 3. **COMMENT une machine derrière un NAT devient joignable depuis l'Internet.**
    C'est l'exigence du §1, et c'est la question ouverte la plus lourde du

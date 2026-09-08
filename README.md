@@ -27,6 +27,18 @@ tout le reste :
   peut parler au daemon.
 - **L'accès est une arête entre deux comptes**, jamais un jeton porteur. Rien ne
   se lit anonymement.
+- **Des clés, et rien d'autre.** Aucun mot de passe, aucun secret partagé : une
+  machine détient une paire Ed25519 générée sur place dont la partie privée ne
+  sort jamais, un téléphone détient une clé dans son matériel sécurisé.
+- **Aucune donnée personnelle hébergée.** Ni courriel, ni numéro, ni nom. La
+  seule exception est un **alias public**, facultatif, qui sert à être retrouvé
+  et ne rend qu'un identifiant.
+- **La pile QUIC et HTTP/3 est celle d'`air-mail-server`**, réutilisée et jamais
+  réécrite — elle est transplantable parce qu'elle a été écrite comme un codec
+  sans entrée-sortie. Elle migrera dans `air`.
+- **Une seule toolchain, celle d'Air** : `nightly-2026-07-11`. Ce dépôt n'a
+  besoin de rien de ce que nightly apporte — et c'est justement pour cela que la
+  contrainte se violerait par inadvertance.
 - **L'annuaire n'affirme jamais ce qu'il n'a pas mesuré.** Le mot « en ligne »
   n'apparaît nulle part : `annoncé`, `joignable` (avec sa date), `parti`.
 

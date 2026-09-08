@@ -19,10 +19,29 @@ encore ».
 | C10 | Rien ne se lit sans autorisation nominative | Essai — **à écrire** |
 | C11 | Un annuaire n'accepte d'un pair que ce dont ce pair est l'autorité | Essai — **à écrire** |
 | C12 | La surface publique d'`asl-client` traverse une ABI C, et elle est stable | `check-abi.sh` — **à écrire** |
+| C13 | Aucune donnée personnelle hébergée, hors l'alias public choisi | Revue, et le schéma du magasin |
+| C14 | Aucune authentification par secret partagé — des clés, et rien d'autre | Revue |
+| C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` — **à écrire** |
+| C16 | Une seule toolchain, celle d'Air, datée | `check-toolchain.sh` — **à écrire** |
 
 ---
 
-## C1 — Les étages 1 et 2 ne font aucune entrée-sortie
+## C1 — Tout protocole est un CODEC, et les étages 1 et 2 ne font aucune entrée-sortie
+
+**Un protocole de ce produit est une fonction des octets vers des messages, et
+retour.** Pas un objet qui possède une socket, pas une boucle qui attend. Cette
+formulation est plus forte que « pas d'entrée-sortie » : elle dit *ce qu'est* un
+protocole ici, et pas seulement ce qu'il n'a pas le droit de faire.
+
+Ce qu'elle achète est direct : **un codec s'éprouve entièrement depuis un
+essai**, tampon par tampon, y compris sur les cas qu'un réseau ne produit
+qu'une fois par an — un message coupé au milieu d'un entier, un champ répété, une
+longueur qui déborde. Un protocole qui possède sa socket ne s'éprouve qu'en
+simulant un réseau, ce qui mesure la simulation.
+
+**C'est aussi ce qui rend la pile QUIC d'`air-mail-server` réutilisable ici**
+(C15) : elle a été écrite sous cette règle, donc elle ne traîne aucune boucle
+derrière elle.
 
 Le découpage du workspace le suppose (cf. l'en-tête de `Cargo.toml`). Deux
 choses le paient ici, et ce ne sont pas des considérations d'élégance :
@@ -154,10 +173,10 @@ s'arrête au premier octet différent est une fuite.
 
 ## C10 — Rien ne se lit sans autorisation nominative
 
-**Il n'existe aucune requête de résolution qui rende quoi que ce soit sans un
-secret de machine valide.** Pas de mode anonyme, pas de jeton porteur qu'on se
-passe, pas de service « public » — l'accès est une arête entre deux comptes
-(`modele.md` §2.5), et elle se révoque en la retirant.
+**Il n'existe aucune requête de résolution qui rende quoi que ce soit hors d'une
+connexion authentifiée par une clé de machine.** Pas de mode anonyme, pas de
+jeton porteur qu'on se passe, pas de service « public » — l'accès est une arête
+entre deux comptes (`modele.md` §2.5), et elle se révoque en la retirant.
 
 La conséquence à tenir dans le code : **toute réponse de résolution se calcule à
 partir du compte propriétaire de la machine qui demande**, jamais à partir de ce
@@ -202,6 +221,94 @@ impose deux choses qu'une bibliothèque Rust ordinaire n'a pas à respecter :
 `check-abi.sh` devra comparer l'en-tête C généré à celui du dernier commit et
 **exiger une justification écrite pour toute suppression**. Un ajout est libre ;
 c'est le retrait qui casse.
+
+## C13 — Aucune donnée personnelle hébergée, hors l'alias public choisi
+
+**Pas de courriel, pas de numéro, pas de nom, pas de mot de passe.** Un compte
+est un identifiant, un jeu de clés publiques, et rien d'autre.
+
+Ce n'est pas une posture. Cet annuaire sait déjà où écoutent des services qui ne
+publient pas leur port ; y ajouter une identité civile ferait de sa base la cible
+la plus intéressante du produit. **Ce qu'on n'héberge pas ne fuit pas, ne se
+réquisitionne pas, et ne se perd pas.**
+
+La seule exception est l'**alias public**, et elle est choisie par l'utilisateur,
+facultative, et publique par construction (`modele.md` §2.1). Il ne rend qu'un
+identifiant — jamais une machine, jamais un service, jamais un état.
+
+**Le contrôle est le schéma du magasin.** Une colonne qui porterait un courriel
+« pour la récupération de compte » ou un nom « pour l'affichage » violerait cette
+contrainte, et c'est par là qu'elle tombera si elle tombe — jamais par une
+décision explicite, toujours par une commodité.
+
+## C14 — Aucune authentification par secret partagé
+
+**Des clés, et rien d'autre.** Ni mot de passe, ni jeton porteur durable, ni
+secret d'API.
+
+| Qui | Ce qu'il détient |
+|---|---|
+| Un utilisateur | Rien. Il n'a pas d'identifiants à retenir. |
+| Un **appareil** | Une clé dans le matériel sécurisé du téléphone, débloquée par la biométrie. |
+| Une **machine** | Une paire de clés Ed25519, générée sur place, dont la partie privée ne sort jamais. |
+| Un **annuaire pair** | Sa clé de signature (C11). |
+
+Un secret partagé a trois défauts qu'aucune précaution ne rattrape : il existe en
+deux exemplaires au moins, il transite au moment où on le pose, et **quiconque
+l'intercepte devient son porteur**. Une signature prouve la détention sans
+transmettre ce qui est détenu.
+
+**La seule chose qui ressemble à un secret partagé est le code d'enrôlement**
+d'une machine, et il est nommé comme tel plutôt que déguisé : à usage unique,
+valable quelques minutes, et il n'ouvre qu'une opération — lier une clé. Le
+justificatif durable est la clé.
+
+**Ed25519**, pur Rust, aucune dépendance C. Ce que cette contrainte ne couvre pas
+encore : les signatures ne sont **pas** post-quantiques. L'échange de clés de
+QUIC l'est — `air-mail-server` porte un KEX hybride X25519 + ML-KEM-768 — mais
+signer avec ML-DSA est une décision à prendre, pas une case à cocher, et elle
+n'est pas prise.
+
+## C15 — La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite
+
+`ams-quic`, `ams-quic-crypto`, `ams-quic-tls`, `ams-proto-quic`, `ams-proto-h3`,
+`ams-h3`, `ams-quic-client`. Poignée de main, chiffrement des paquets, flux,
+contrôle de flux, QPACK, extinction en deux temps — écrits sur tokio, **sans une
+ligne de C**, et déjà éprouvés par un autre produit.
+
+**Réimplémenter QUIC est le genre de décision qui paraît raisonnable un
+après-midi et coûte deux ans.** `check-pile.sh` devra refuser toute crate tierce
+de QUIC ou de HTTP/3 dans le graphe, et refuser un module local qui en
+réimplémenterait une partie.
+
+**CES CRATES ONT VOCATION À MIGRER DANS `air`.** Elles sont tirées d'
+`air-mail-server` aujourd'hui parce que c'est là qu'elles vivent ; le jour où
+elles seront dans `air`, c'est la source qui change, pas le code. La dépendance
+doit donc être épinglée et **documentée comme provisoire**, exactement comme
+celle du dépôt client vers celui-ci.
+
+## C16 — Une seule toolchain, celle d'Air, datée
+
+`nightly-2026-07-11`, égale à `~/Code/air/rust-toolchain.toml`.
+
+**Ce dépôt n'a besoin de rien de ce que nightly apporte**, et c'est justement ce
+qui rend la contrainte facile à violer par inadvertance — quelqu'un remarquera
+qu'il pourrait revenir sur stable, et aura raison localement.
+
+Il aurait tort globalement, pour deux raisons :
+
+1. **La pile QUIC migrera dans `air`** (C15), où elle sera compilée par cette
+   toolchain-là. Deux pins, ce sont deux LLVM, et les profils de couverture que
+   l'un écrit, l'autre ne sait pas les relire. **Air a payé cette panne le
+   2026-08-15** avec trois toolchains dans un même dépôt.
+2. **Il y aura une version `linux-air`** de tous ces composants, sur la
+   bibliothèque standard de `linux-air`, une cible JSON custom et `-Z build-std`
+   — ce qui ne compile QUE sur nightly. Découvrir ce jour-là que le code ne passe
+   pas la toolchain d'Air serait le découvrir trop tard.
+
+`check-toolchain.sh` devra comparer ce fichier à celui d'Air et échouer sur tout
+écart. Il n'existe pas ; tant qu'il n'existe pas, la contrainte tient par la
+lecture de ce document, ce qui est peu.
 
 ---
 

@@ -17,13 +17,20 @@
 //! # Les verbes, arrêtés par `docs/protocole.md` §2
 //!
 //! Créer un compte, enrôler un appareil de plus, révoquer, déclarer une machine,
-//! remplacer son secret de machine, lister les services, **accorder et révoquer
-//! une autorisation à un autre compte**, et déposer un jeton de poussée.
+//! émettre un code d'enrôlement, révoquer une clé de machine, lister les
+//! services, **accorder et révoquer une autorisation à un autre compte**,
+//! enregistrer un alias public, et déposer un jeton de poussée.
 //!
-//! **Il n'y a pas de mot de passe dans ce produit.** Un compte est un jeu
-//! d'appareils enrôlés, et toute requête est signée par une clé qui vit dans le
-//! matériel sécurisé d'un téléphone. Aucun champ de cette API ne porte un
-//! booléen d'authentification (contrainte C7).
+//! **Il n'y a pas de mot de passe dans ce produit, et aucun secret partagé**
+//! (contrainte C14). Un compte est un jeu d'appareils enrôlés, et toute requête
+//! est signée par une clé qui vit dans le matériel sécurisé d'un téléphone.
+//! Aucun champ de cette API ne porte un booléen d'authentification (C7).
+//!
+//! **Et cette API n'accepte AUCUNE donnée personnelle** (C13) : ni courriel, ni
+//! numéro, ni nom. La seule chose qu'un utilisateur nous confie est un alias
+//! public, facultatif, qui ne rend qu'un identifiant. Un champ ajouté ici
+//! « pour la récupération de compte » serait la façon dont cette contrainte
+//! tombera si elle tombe.
 //!
 //! # État
 //!

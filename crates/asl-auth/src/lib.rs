@@ -25,17 +25,27 @@
 //! - **L'attestation manquante ou en échec fait REFUSER** en v1, et c'est
 //!   journalisé. Un refus se relâche plus tard ; une acceptation ne se resserre
 //!   jamais sans casser des comptes déjà ouverts.
-//! - **Un daemon ne fait pas de biométrie.** Il porte le *secret de machine*,
-//!   posé par l'application mobile à la déclaration et montré une seule fois. Il
-//!   est par MACHINE et non par daemon — l'énoncé du produit veut qu'un daemon
-//!   quelconque puisse s'annoncer sans avoir été déclaré d'avance. Le prix :
-//!   tout daemon de cette machine peut s'annoncer sous n'importe quel nom.
-//! - **Le même secret sert à LIRE**, quand la machine porte la capacité
-//!   `lecture` — c'est ainsi qu'une machine sans biométrie prouve qu'elle agit
-//!   au nom d'un compte. Les deux capacités ne sont pas cumulées par défaut :
-//!   une machine qui porte les deux laisse, si elle est prise, énumérer tout ce
-//!   que son propriétaire a le droit de voir, y compris les services que des
-//!   amis lui ont accordés sur des machines qui ne sont pas les siennes.
+//! - **Un daemon ne fait pas de biométrie.** Sa machine détient une **paire de
+//!   clés Ed25519**, générée sur place, dont la partie privée ne sort jamais.
+//!   L'annuaire ne connaît que la partie publique. Elle est par MACHINE et non
+//!   par daemon — l'énoncé du produit veut qu'un daemon quelconque puisse
+//!   s'annoncer sans avoir été déclaré d'avance. Le prix : tout daemon de cette
+//!   machine capable de lire la clé peut s'annoncer sous n'importe quel nom.
+//! - **AUCUN SECRET PARTAGÉ** (contrainte C14). Un jeton porteur existe en deux
+//!   exemplaires au moins, transite au moment où on le pose, et quiconque
+//!   l'intercepte devient son porteur. Une signature prouve la détention sans
+//!   transmettre ce qui est détenu. La seule exception est le **code
+//!   d'enrôlement**, nommé comme tel plutôt que déguisé : à usage unique,
+//!   valable quelques minutes, et il n'ouvre qu'une opération — lier une clé.
+//! - **La même clé sert à LIRE**, quand la machine porte la capacité `lecture`.
+//!   Les deux capacités ne sont pas cumulées par défaut : une machine qui porte
+//!   les deux laisse, si elle est prise, énumérer tout ce que son propriétaire a
+//!   le droit de voir, y compris les services que des amis lui ont accordés sur
+//!   des machines qui ne sont pas les siennes.
+//! - **L'authentification est portée par la CONNEXION, pas par la requête.** La
+//!   clé est prouvée une fois à l'établissement de la connexion QUIC, et toutes
+//!   les requêtes en héritent. Pas de jeton à joindre, donc pas de jeton à
+//!   intercepter ni à rejouer.
 //! - **Rien ne se lit sans autorisation nominative** (contrainte C10). Toute
 //!   réponse de résolution se calcule à partir du compte propriétaire de la
 //!   machine qui demande, JAMAIS à partir de ce que la requête désigne. Un

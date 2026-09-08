@@ -3,7 +3,6 @@ name = "asl-loop-tokio"
 description = "La boucle d'entrées-sorties : sockets, horloge, et rien qui décide."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true

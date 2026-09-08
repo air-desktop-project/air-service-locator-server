@@ -5,7 +5,7 @@
 | [`modele.md`](modele.md) | Les objets, les candidats d'adresse, le bail, et ce que « joignable » veut dire exactement. |
 | [`protocole.md`](protocole.md) | Les trois conversations : le daemon, les applications mobiles, et le client qui cherche un port. |
 | [`annuaires.md`](annuaires.md) | Réplication entre les racines, fédération avec les annuaires rattachés, et ce qui ne se synchronise surtout pas. |
-| [`contraintes.md`](contraintes.md) | Les douze règles que le code doit tenir, et ce qui les fait respecter. |
+| [`contraintes.md`](contraintes.md) | Les seize règles que le code doit tenir, et ce qui les fait respecter. |
 
 **Ils sont dans CE dépôt, et pas dans les trois.** Le modèle et le protocole
 gouvernent aussi les deux applications mobiles ; les recopier ferait trois
@@ -22,6 +22,17 @@ question ouverte la plus lourde du produit (`modele.md` §6.3).
 En attendant, l'annuaire **mesure** la joignabilité et la dit, plutôt que de la
 supposer. C'est ce qui apprend à un administrateur que son daemon ne tient pas
 l'exigence, au lieu qu'il l'apprenne le jour où quelqu'un s'en plaint.
+
+## Ce que nous n'hébergeons pas
+
+**Aucune donnée personnelle.** Pas de courriel, pas de numéro, pas de nom, pas de
+mot de passe. Un compte est un identifiant, un jeu de clés publiques, et rien
+d'autre — la seule exception est un **alias public**, facultatif et choisi, qui
+sert à être retrouvé et ne rend qu'un identifiant (C13).
+
+**Et aucune authentification par secret partagé** : des clés, et rien d'autre
+(C14). Une machine détient une paire Ed25519 générée sur place dont la partie
+privée ne sort jamais ; un téléphone détient une clé dans son matériel sécurisé.
 
 ## Le modèle d'autorisation, en une phrase
 

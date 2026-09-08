@@ -3,7 +3,6 @@ name = "asl-id"
 description = "Identifiants publics d'utilisateur, de machine et de service : forme, encodage, validation."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
