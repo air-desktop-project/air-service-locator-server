@@ -42,8 +42,11 @@ tout le reste :
 - **L'annuaire n'affirme jamais ce qu'il n'a pas mesuré.** Le mot « en ligne »
   n'apparaît nulle part : `annoncé`, `joignable` (avec sa date), `parti`.
 
-Et il y a **plusieurs annuaires** : deux racines répliquées appartenant à
-air-desktop-project, et des annuaires tiers qui peuvent demander à s'y rattacher
+Et il y a **plusieurs annuaires**. Deux racines, sur deux adresses IPv6 dont les
+clés sont inscrites dans le code, servent de **registre et d'entremetteur** : un
+annuaire neuf s'y fait recenser, ce qui ne lui donne accès à rien. **La confiance
+est ensuite bilatérale**, acceptée par les deux administrateurs concernés, et
+chacun choisit ce qu'il réplique chez lui en suivant la chaîne de possession
 ([`docs/annuaires.md`](docs/annuaires.md)).
 
 ## Le problème

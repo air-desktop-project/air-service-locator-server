@@ -2,37 +2,38 @@
 
 Un annuaire appartient à un utilisateur. Il y en a plusieurs, et ils se parlent.
 
-**Ce document est le moins avancé des quatre.** Il pose la distinction qui
-gouverne tout, ce qui se synchronise et ce qui ne doit surtout pas se
-synchroniser, et le chemin du rattachement. Le reste est nommé comme ouvert
-plutôt que supposé résolu — la synchronisation entre autorités distinctes est le
-sujet où une décision prise à la légère coûte le plus cher, et le plus tard.
+**Ce document est le moins avancé des quatre.** Il pose les trois relations qu'il
+ne faut pas confondre, l'ancre de confiance, ce qui se réplique et ce qui ne doit
+surtout pas se répliquer. Le reste est nommé comme ouvert plutôt que supposé
+résolu — la synchronisation entre autorités distinctes est le sujet où une
+décision prise à la légère coûte le plus cher, et le plus tard.
 
 ---
 
-## 1. DEUX problèmes, et les confondre serait la faute
+## 1. TROIS relations, et les confondre serait la faute
 
-Ils ont l'air du même — « faire que deux annuaires aient les mêmes données » — et
-ils n'ont ni le même modèle de confiance, ni les mêmes garanties, ni le même
-protocole.
+Elles ont l'air de la même — « faire que deux annuaires aient les mêmes
+données » — et elles n'ont ni le même modèle de confiance, ni la même portée, ni
+le même protocole.
 
-| | **Réplication** | **Fédération** |
-|---|---|---|
-| Entre qui | Les deux annuaires racines | Une racine et un annuaire rattaché |
-| Autorité | **La même.** Les deux racines sont interchangeables. | **Différentes.** Chacun fait foi pour ce qui lui appartient. |
-| Ce qu'on craint | Une panne | **Un pair qui ment** |
-| Confiance | Totale | **Aucune, hors de son périmètre d'autorité** |
-| But | Ne pas être un point de panne unique | Que les comptes de deux mondes puissent se joindre |
+| | **Réplication des racines** | **Enregistrement** | **Confiance bilatérale** |
+|---|---|---|---|
+| Entre qui | Les deux racines | Un annuaire et une racine | Deux annuaires quelconques |
+| Autorité | **La même** | Différentes | Différentes |
+| Ce qui circule | Tout | **L'existence de l'annuaire, et rien d'autre** | Ce que les deux administrateurs ont choisi |
+| Qui décide | Personne — c'est de la haute disponibilité | L'annuaire qui s'enregistre | **Les DEUX administrateurs** |
+| Ce qu'on craint | Une panne | Un annuaire qui usurpe une identité | Un pair qui ment |
 
-**Un annuaire rattaché n'est pas une réplique.** Il a ses propres utilisateurs,
-ses propres machines, ses propres services, et il en est l'autorité. Ce qu'il
-échange avec une racine est une **assertion signée** au sujet de ce qui lui
-appartient — pas un extrait de base de données.
+**S'enregistrer auprès d'une racine ne donne accès à RIEN.** C'est se faire
+recenser, pour que d'autres annuaires puissent vous trouver et vous proposer une
+relation. Une racine est un **registre et un entremetteur**, pas un dépositaire :
+elle ne détient pas les données des annuaires qu'elle recense.
 
-Traiter la fédération avec le protocole de réplication reviendrait à donner à
-chaque entreprise rattachée le droit d'écrire dans les comptes des autres.
-
----
+**La confiance n'est pas centrale, elle est bilatérale.** Ce sont les
+administrateurs des deux annuaires concernés qui l'acceptent, jamais le
+propriétaire des racines. Il ne joue aucun rôle d'arbitre, et ne doit pas en
+jouer : un réseau où le fondateur décide qui parle à qui n'est pas une
+fédération.
 
 ## 2. L'autorité
 
@@ -49,15 +50,41 @@ compte a été créé.
   silence : une assertion hors périmètre est soit un défaut, soit une attaque, et
   les deux méritent d'être vues.
 
+### L'ancre de confiance — deux adresses ET deux clés
+
+Les deux racines vivent sur **deux adresses IPv6 connues de tout annuaire**,
+inscrites dans le code. C'est le point de départ : un annuaire neuf n'a rien
+d'autre.
+
+**Une adresse ne suffit pas, et l'oublier serait la faille de tout l'édifice.**
+Qui détourne une route parle depuis cette adresse. Ce qui est épinglé dans le
+code, ce sont donc **les CLÉS PUBLIQUES des deux racines**, et l'adresse n'est
+qu'un moyen de les joindre. Un annuaire qui répond sur la bonne adresse sans
+pouvoir signer n'est pas une racine.
+
+Deux conséquences qu'il faut regarder en face :
+
+- **Ces adresses ne se renumérotent pas.** Elles sont dans du code déployé chez
+  des tiers qui ne se mettent pas à jour. Elles doivent venir d'une allocation
+  qu'on ne perd pas en changeant d'hébergeur.
+- **Une racine joignable seulement en IPv6 exclut un annuaire sur un réseau
+  IPv4.** C'est cohérent avec « IPv6 d'abord » (`modele.md` §1) et c'est un
+  choix plus dur : ici IPv4 n'est pas un repli dégradé, il est absent. À
+  confirmer, parce que cela décide qui peut déployer un annuaire.
+
 ### Comment on sait à qui demander
 
 Un identifiant porte 128 bits d'aléa et **ne dit pas d'où il vient**. C'est un
 choix, et il a une contrepartie : il faut un moyen de savoir quel annuaire fait
 autorité pour un compte donné.
 
-**Les racines tiennent cet index.** Un annuaire rattaché déclare aux racines les
-identifiants dont il est l'autorité ; une résolution qui ne trouve pas chez soi
-demande aux racines à qui s'adresser.
+**Les racines tiennent l'index DES ANNUAIRES**, pas celui des comptes. Elles
+savent quels annuaires existent et comment les joindre ; c'est ce qui leur
+permet de jouer les entremetteurs (§4).
+
+Savoir quel annuaire fait autorité pour un compte donné est une autre question,
+et elle se pose différemment selon ce qu'on a répliqué (§5) : un annuaire qui a
+souscrit aux comptes d'un pair sait déjà à qui ils appartiennent.
 
 L'autre forme — **faire porter l'annuaire par l'identifiant** (`u-<annuaire>-<aléa>`)
 — éviterait cet index et rendrait la résolution autonome. Elle a été écartée
@@ -68,9 +95,11 @@ où le coût de l'index se mesurera.
 
 ---
 
-## 3. Ce qui se synchronise, et ce qui NE SE SYNCHRONISE PAS
+## 3. Ce qui se synchronise ENTRE LES RACINES, et ce qui ne s'y synchronise pas
 
-**C'est la décision qui rend tout le reste tenable.**
+**C'est la décision qui rend tout le reste tenable.** Elle porte ici sur les deux
+racines, qui ont la même autorité ; la réplication entre pairs de confiance est
+sélective et relève du §5.
 
 | | Se synchronise ? |
 |---|---|
@@ -104,67 +133,125 @@ qui serait faux plus longtemps sans que rien ne le signale.
 
 ---
 
-## 4. Le rattachement
+## 4. S'enregistrer, puis se faire connaître
 
-Le chemin, tel que l'énoncé le fixe :
+**Deux étapes distinctes, et la première ne donne accès à rien.**
 
-1. Une entreprise ou un utilisateur **déploie son annuaire**.
-2. Il **demande à air-desktop-project** le rattachement aux deux racines.
-3. **Le propriétaire des racines accepte** — à la main, en connaissance de
-   cause.
-4. Les clés sont échangées, et la synchronisation commence.
+### 4.1 L'enregistrement auprès d'une racine
 
-**L'approbation manuelle n'est pas une friction à supprimer.** C'est la seule
-barrière entre un réseau d'annuaires et n'importe qui se déclarant l'autorité de
-n'importe quoi. Elle doit rester manuelle tant que le nombre d'annuaires le
-permet, et le jour où il ne le permettra plus, c'est un autre problème qu'il
-faudra résoudre — pas celui-là qu'il faudra automatiser.
+1. Une entreprise ou un particulier **déploie son annuaire**.
+2. Il **s'enregistre auprès d'au moins une racine** — les deux adresses IPv6
+   sont dans le code, les deux clés publiques aussi (§2).
+3. La racine le recense : identifiant, clé publique, comment le joindre.
 
-### Ce qu'un annuaire rattaché obtient, et ce qu'il ne peut pas faire
+C'est tout. **Aucune donnée n'est échangée, aucune confiance n'est accordée.**
+S'enregistrer, c'est figurer dans un annuaire d'annuaires.
 
-| Il peut | Il ne peut pas |
-|---|---|
-| Affirmer ce dont il est l'autorité | Affirmer quoi que ce soit sur un compte d'un autre annuaire |
-| Résoudre pour ses propres utilisateurs les services qu'on leur a accordés | Voir un service que personne n'a accordé à l'un de ses utilisateurs |
-| Se faire connaître des racines comme autorité de ses identifiants | Revendiquer un identifiant déjà attribué ailleurs |
+**Une seule racine suffit** — les deux se répliquent (§1). S'enregistrer auprès
+des deux ne fait qu'accélérer la propagation.
 
-### Ce que la révocation d'un rattachement doit faire
+### 4.2 L'entremise
 
-**Non décidé, et c'est un manque à combler avant tout déploiement fédéré.** Les
-questions : que deviennent les autorisations croisées déjà accordées ? Les
-comptes de l'annuaire retiré disparaissent-ils des racines, ou restent-ils
-visibles comme injoignables ? Une révocation se propage-t-elle à l'autre racine
-avant ou après avoir pris effet ?
+Un administrateur qui veut parler à un autre annuaire le trouve par la racine,
+et lui fait porter la demande. **La racine transporte, elle ne tranche pas.**
+
+C'est ce qui la rend utile sans la rendre centrale : sans elle, deux
+administrateurs devraient s'échanger clés et adresses hors bande, et un réseau
+qui exige un canal hors bande pour chaque nouvelle relation ne grandit pas.
+
+### 4.3 La relation de confiance
+
+**Ce sont les DEUX administrateurs qui l'acceptent**, et personne d'autre. Le
+propriétaire des racines n'arbitre rien.
+
+Une fois la relation établie, **chaque administrateur décide de ce qu'il veut
+voir se répliquer chez lui** (§5). La relation n'est pas symétrique : X peut
+tout prendre de Y sans que Y prenne quoi que ce soit de X.
 
 ---
 
-## 5. La résolution entre annuaires
+## 5. La réplication sélective
 
-A a ses services sur l'annuaire X. B a son compte sur l'annuaire Y. A a autorisé
-B. **C'est le cas que la fédération existe pour servir**, et c'est celui qui
-reste le plus ouvert.
+### 5.1 Ce sur quoi la sélection porte
 
-Deux formes, et elles ne se valent pas :
+La possession est une chaîne, et la sélection la suit :
 
-| | **Y relaie la question à X** | **Y a répliqué ce que X lui a accordé** |
-|---|---|---|
-| Fraîcheur | Exacte | En retard d'une synchronisation |
-| X est en panne | La résolution échoue | La résolution marche, avec des données peut-être fausses |
-| Ce que X apprend | **Que B résout, et quand** | Rien |
-| Ce que Y détient | Rien de durable | Des adresses IP de machines d'A |
+```
+utilisateur  ──possède──▶  machines  ──possèdent──▶  services
+```
 
-**Le troisième critère est celui qu'on oublie, et c'est peut-être le plus
-important** : dans la forme « relais », X voit passer chaque résolution, donc
-sait quand B se connecte aux services d'A. C'est une trace d'usage que personne
-n'a demandée.
+Un administrateur souscrit **à un niveau de cet arbre**, et tire ce qui pend en
+dessous :
 
-Dans la forme « réplication », c'est Y qui détient durablement des adresses de
-machines d'A — un annuaire tiers, dont A n'a jamais rien approuvé d'autre que
-d'autoriser B.
+| Ce qu'il choisit | Ce qu'il obtient |
+|---|---|
+| Tout l'annuaire distant | Tous les utilisateurs, donc toutes leurs machines et tous leurs services |
+| Quelques utilisateurs | Leurs machines et leurs services |
+| Quelques machines de quelques utilisateurs | Ces machines et leurs services seulement |
 
-**Aucune des deux n'est choisie ici.** Le choix demande de savoir ce qu'on
-préfère fuiter, et cela ne se tranche pas en écrivant un document — cela se
-tranche en sachant qui déploiera des annuaires, et pour qui.
+**La sélection ne descend jamais sous la machine.** On ne souscrit pas à « trois
+services d'une machine » : les services d'une machine vont et viennent, un daemon
+peut en déclarer un nouveau à tout moment, et une souscription qui prétendrait les
+filtrer serait fausse dès le premier démarrage. La machine est la plus petite
+unité stable.
+
+### 5.2 Ce que la sélection NE dit PAS, et qu'il faut trancher
+
+**IL Y A DEUX CÔTÉS, ET UN SEUL EST DÉCIDÉ.**
+
+Ce qui est décidé : l'administrateur qui reçoit choisit ce qu'il PREND.
+
+Ce qui ne l'est pas : l'administrateur qui donne choisit-il ce qu'il EXPOSE ?
+Sans ce second côté, l'administrateur d'un annuaire peut livrer à un pair la
+liste complète des machines de tous ses utilisateurs, **sans qu'aucun d'eux le
+sache**.
+
+Cela heurte deux choses écrites ailleurs :
+
+- **La possession.** `modele.md` dit qu'un utilisateur POSSÈDE ses machines. Une
+  réplication décidée entièrement entre administrateurs traite ces machines comme
+  la propriété de l'annuaire.
+- **Ce qu'accorder révèle.** `modele.md` §2.5 exige qu'on énonce à A ce qu'il
+  révèle quand il autorise B. Une réplication d'annuaire à annuaire révèle
+  strictement plus — noms de machines, noms de services — et n'énonce rien.
+
+Trois réponses possibles, et elles ne se valent pas :
+
+| | Ce que ça donne |
+|---|---|
+| **L'administrateur décide seul** | Cohérent en entreprise, où les machines appartiennent à l'entreprise. Intenable sur une racine, qui héberge des particuliers. |
+| **L'utilisateur consent, par annuaire pair** | Respecte la possession. Coûte un écran, et une décision de plus à chaque nouvelle relation. |
+| **L'administrateur décide, l'utilisateur voit et peut retirer** | Le compromis : rien ne bloque, mais rien n'est invisible. |
+
+**Ce n'est pas tranché.** La question n'est pas technique : elle demande de dire
+si un annuaire d'entreprise possède les machines de ses utilisateurs, ou seulement
+les recense.
+
+### 5.3 L'état vivant — la question que la réplication rouvre
+
+**§3 dit que le bail et la joignabilité NE SE RÉPLIQUENT PAS.** Cette décision
+tenait pour les racines, et elle tient toujours : ces données changent en
+permanence et se reconstruisent seules.
+
+Mais elle laisse la réplication sélective à moitié utile. Y aura répliqué qu'un
+service `depot-de-messages` existe sur telle machine d'A — et **pas où il écoute
+en ce moment**, qui est la seule chose que le client demande.
+
+Deux lectures, et il faut choisir :
+
+| | Ce que ça coûte |
+|---|---|
+| **Hybride** — on réplique l'arbre durable, on demande l'état vivant à l'annuaire d'autorité au moment de résoudre | Une dépendance de X à la résolution ; mais l'état rendu est exact, et rien de volatile ne traverse la fédération. |
+| **Tout répliquer** — les candidats et l'état suivent | Y répond seul, même si X est tombé ; mais chaque redémarrage de daemon pousse une mise à jour à travers toute la fédération, et une réponse périmée donne un port faux. |
+
+**Ma lecture est l'hybride**, et elle découle de ce qui est déjà écrit : la
+souscription dit *ce qui existe et qui y a droit*, la résolution dit *où c'est
+maintenant*. Répliquer un port qui change à chaque redémarrage, c'est distribuer
+une information fausse dès qu'elle arrive — l'argument exact du §3.
+
+**Mais c'est une lecture, pas ta décision**, et elle mérite d'être confirmée
+parce qu'elle décide si un annuaire pair peut répondre quand l'annuaire
+d'autorité est tombé.
 
 ---
 
@@ -172,20 +259,30 @@ tranche en sachant qui déploiera des annuaires, et pour qui.
 
 Rassemblé, plutôt que dispersé.
 
-1. **La forme de la résolution inter-annuaires** (§5).
-2. **La révocation d'un rattachement** (§4).
-3. **Le conflit entre les deux racines.** Elles ont la même autorité : que se
-   passe-t-il quand elles divergent — partition réseau, écriture concurrente sur
-   le même compte ? Il faut un ordre, et il n'est pas choisi. **Deux répliques
-   n'ont pas de majorité** : un quorum à deux ne départage rien, ce qui est la
-   difficulté propre à ce nombre-là et qu'il faut regarder en face plutôt que
-   d'espérer qu'elle ne se présente pas.
-4. **Le transport de la synchronisation.** QUIC comme le reste, probablement.
-   Mais un flux entre pairs de confiance n'a pas les mêmes besoins qu'une requête
-   de client, et rien n'oblige à ce que ce soit le même protocole applicatif.
-5. **Ce qu'un annuaire rattaché journalise et conserve** des comptes d'autres
-   annuaires. Sans règle, chacun décidera pour soi, et c'est ainsi qu'une
-   fédération devient un réseau de copies incontrôlées.
-6. **La migration d'un compte d'un annuaire à un autre.** Écartée du choix
-   d'identifiants au §2 — donc censée être possible. Elle n'est spécifiée nulle
-   part.
+1. **Le côté « ce que j'expose »** de la réplication sélective (§5.2), et si
+   l'utilisateur a son mot à dire sur les machines qu'il possède.
+2. **L'état vivant traverse-t-il la fédération ?** (§5.3) — l'hybride est
+   proposé, pas confirmé.
+3. **La rupture d'une relation de confiance.** Elle est bilatérale, donc elle se
+   rompt bilatéralement — mais que deviennent les enregistrements déjà répliqués,
+   et les autorisations croisées qui s'appuyaient dessus ? **Le cas qui dimensionne
+   tout est la clé d'un annuaire compromise** : pour pouvoir dire « rien de signé
+   après telle date ne vaut », il faut que TOUTE assertion porte un horodatage
+   signé et que la révocation porte une date d'effet. **C'est un champ du format,
+   pas une procédure — on ne l'ajoute pas après déploiement.**
+4. **Le conflit entre les deux racines.** Elles ont la même autorité : que se
+   passe-t-il quand elles divergent ? **Deux répliques n'ont pas de majorité** —
+   un quorum à deux ne départage rien, et bloque toute écriture dès qu'une tombe.
+   Le découpage durable/volatile réduit fortement l'enjeu : seules les écritures
+   rares et humaines demandent un ordre. Les pistes, par coût : un témoin qui
+   vote sans porter de données, ou primaire/secondaire à promotion manuelle.
+5. **L'index des annuaires est-il énumérable ?** Les racines recensent tous les
+   annuaires. Peut-on en demander la liste, ou seulement en résoudre un dont on
+   connaît l'identifiant ? C'est la même question que celle de l'alias
+   (`modele.md` §2.1), à l'échelle des annuaires.
+6. **Les racines sont-elles joignables en IPv4 ?** Deux adresses IPv6 dans le
+   code excluent un annuaire sur un réseau IPv4 (§2).
+7. **Le transport de la synchronisation.** QUIC comme le reste, probablement.
+   Un flux entre pairs de confiance n'a pas les mêmes besoins qu'une requête de
+   client.
+8. **La migration d'un compte d'un annuaire à un autre.**

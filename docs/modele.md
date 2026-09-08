@@ -333,20 +333,35 @@ s'affiche sur un écran verrouillé, devant qui se trouve là.
 | `identifiant` | `n-` + 26 caractères. |
 | `propriétaire` | Un utilisateur. Les deux annuaires racines appartiennent à air-desktop-project. |
 | `clé de signature` | Ce avec quoi il signe les enregistrements dont il est l'autorité. |
-| `rôle` | `racine` ou `rattaché`. |
+| `rôle` | `racine` ou `ordinaire`. |
+| `pairs` | Les annuaires avec qui une relation de confiance est établie, et ce qui se réplique dans chaque sens. |
 
 Deux annuaires racines sont fournis par air-desktop-project — **deux, pour ne
 pas être un point de panne unique**. D'autres utilisateurs et d'autres
 entreprises sont encouragés à déployer le leur, et peuvent demander à s'y
 rattacher.
 
-**Le rattachement est approuvé à la main**, par le propriétaire des racines. Ce
-n'est pas une friction à éliminer : c'est la seule barrière entre un réseau
-d'annuaires et n'importe qui qui déclarerait être l'autorité de n'importe quoi.
+**Les racines sont un REGISTRE et un ENTREMETTEUR, pas un dépositaire.** Elles
+vivent sur deux adresses IPv6 connues de tout annuaire, dont les clés publiques
+sont inscrites dans le code — c'est l'ancre de confiance, et une adresse seule
+n'y suffirait pas : qui détourne une route parle depuis cette adresse.
 
-Tout ceci — la réplication entre les racines, la fédération avec les annuaires
-rattachés, ce qui se synchronise et ce qui ne se synchronise pas — a son propre
-document : **[`annuaires.md`](annuaires.md)**.
+Un annuaire neuf s'enregistre auprès d'au moins une racine. **Cela ne lui donne
+accès à rien** : c'est figurer dans un annuaire d'annuaires, pour que d'autres
+puissent le trouver.
+
+**La confiance est BILATÉRALE, et le propriétaire des racines n'arbitre rien.**
+Ce sont les administrateurs des deux annuaires concernés qui acceptent leur
+relation ; la racine ne fait que porter la demande. Un réseau où le fondateur
+déciderait qui parle à qui ne serait pas une fédération.
+
+Une fois la relation établie, **chaque administrateur choisit ce qu'il réplique
+chez lui**, en suivant la chaîne de possession — un utilisateur possède ses
+machines, ses machines possèdent leurs services.
+
+Tout ceci — l'ancre de confiance, l'entremise, la réplication sélective, et ce
+qui ne se synchronise surtout pas — a son propre document :
+**[`annuaires.md`](annuaires.md)**.
 
 ---
 
