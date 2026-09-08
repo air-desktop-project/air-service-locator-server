@@ -5,12 +5,25 @@
 //! Elle lit, elle écrit, elle attend. Elle ne décide de rien : les règles de
 //! l'annuaire vivent dans `asl-annuaire`, qui ne sait pas qu'un disque existe.
 //!
+//! # DEUX CONTRAINTES PÈSENT SUR LE SCHÉMA, ET C'EST ICI QU'ELLES TOMBERONT
+//!
+//! - **Aucune donnée personnelle** (contrainte C13). Ni courriel, ni numéro, ni
+//!   nom. Une colonne ajoutée « pour la récupération de compte » ou « pour
+//!   l'affichage » violerait la contrainte, et c'est ainsi qu'elle cédera si elle
+//!   cède : jamais par une décision, toujours par une commodité.
+//! - **Tout enregistrement porte son ORIGINE** (contrainte C17) — `locale`, ou la
+//!   relation de confiance par laquelle il est entré. Rompre une relation efface
+//!   tout ce qui en venait, et un chemin d'écriture qui laisserait l'origine vide
+//!   créerait un enregistrement que nulle rupture n'atteint.
+//!
 //! # Ce qui reste à trancher
 //!
 //! Le support n'est pas choisi, et il ne se choisit pas avant de savoir ce que
-//! l'annuaire écrit et à quelle cadence. Un bail rafraîchi toutes les trente
-//! secondes par mille daemons n'appelle pas le même magasin qu'un compte créé
-//! une fois par mois.
+//! l'annuaire écrit et à quelle cadence. Le découpage aide : **l'état vivant —
+//! baux, candidats, joignabilité — n'est PAS répliqué** (`annuaires.md` §3), et
+//! seules les écritures durables, rares et humaines, passent par le quorum des
+//! deux racines et de leur témoin. Ce sont deux régimes très différents, et rien
+//! n'oblige à les servir avec le même magasin.
 //!
 //! # État
 //!

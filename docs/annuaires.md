@@ -168,6 +168,73 @@ Une fois la relation établie, **chaque administrateur décide de ce qu'il veut
 voir se répliquer chez lui** (§5). La relation n'est pas symétrique : X peut
 tout prendre de Y sans que Y prenne quoi que ce soit de X.
 
+### 4.4 Rompre une relation
+
+**Un administrateur d'annuaire décide seul de rompre.** Il n'a besoin de
+l'accord de personne, et surtout pas du pair qu'il coupe.
+
+**Quand la relation est rompue, TOUT enregistrement dont l'origine est cette
+relation disparaît.** Pas suspendu, pas marqué : effacé.
+
+Cela exige que **chaque enregistrement répliqué porte son ORIGINE** — la relation
+par laquelle il est entré. C'est un champ du modèle, pas une commodité
+d'implémentation, et c'est ce qui rend la rupture complète plutôt
+qu'approximative : on n'a pas à deviner ce qui venait de qui, on le sait.
+
+#### Ce que cette règle règle d'un coup
+
+**Le cas de la clé compromise.** Si la clé d'un pair est volée, tout ce qu'il a
+jamais affirmé devient suspect. Avec une révocation par origine, on n'a rien à
+trier : on rompt, et tout ce qui venait de lui s'en va. Il n'y a pas de « valide
+avant telle date, forgé après » à départager.
+
+**C'EST PLUS SIMPLE QUE CE QUI ÉTAIT ENVISAGÉ ICI, et il faut le dire** : une
+version antérieure de ce document réclamait des assertions horodatées et une
+révocation à date d'effet, pour pouvoir garder le passé légitime. Effacer par
+origine rend cette machinerie inutile.
+
+#### L'horodatage reste nécessaire, mais pour autre chose
+
+Pas pour révoquer — pour **empêcher le rejeu à l'intérieur d'une relation
+vivante**. Sans marqueur monotone, une assertion signée et capturée peut être
+rejouée plus tard et ressusciter un enregistrement qu'on avait retiré. Il faut
+donc un numéro de séquence ou un horodatage **par relation**, et le récepteur
+refuse ce qui recule.
+
+C'est une exigence du flux de synchronisation, pas du modèle de confiance. Elle
+est plus faible que celle qu'on croyait avoir, et elle est réelle.
+
+#### Pas de cascade, et C11 l'explique déjà
+
+Si Y a répliqué des enregistrements de X, Y peut-il les ré-exporter vers Z — et
+une rupture X↔Y doit-elle alors cascader jusqu'à Z ?
+
+**Non, et la question ne se pose même pas** : C11 interdit déjà d'accepter d'un
+pair ce dont il n'est pas l'autorité. Y n'est pas l'autorité des comptes de X, et
+ne peut donc rien en dire à Z. **Il n'y a pas de réplication transitive, donc pas
+de cascade.**
+
+#### La limite honnête
+
+Rompre **arrête le flux ; cela n'efface rien chez le pair**. On applique la règle
+chez soi, il l'applique chez lui — et s'il ne l'applique pas, on n'a aucun moyen
+de le savoir.
+
+Ce que d'autres ont appris, ils l'ont appris. C'est une raison de plus de ne
+répliquer que ce qu'on a délibérément choisi de répliquer : moins on distribue,
+moins on a à regretter.
+
+#### Ce que l'utilisateur voit
+
+L'effacement est complet, donc **une machine de B qui résolvait un service d'A ne
+trouve plus rien** — et l'application ne pourrait rien expliquer, puisque
+l'enregistrement a disparu.
+
+**La relation elle-même laisse donc une trace** : « relation avec l'annuaire X
+rompue le … ». Pas les données, juste le fait. Sans cela, un accès disparaît sans
+raison lisible, et personne ne saura jamais s'il s'agit d'une rupture ou d'une
+panne.
+
 ---
 
 ## 5. La réplication sélective
@@ -255,7 +322,48 @@ d'autorité est tombé.
 
 ---
 
-## 6. Ce qui n'est pas décidé
+## 6. Les deux racines et le témoin
+
+**Deux répliques n'ont pas de majorité.** Un consensus par quorum exige plus de
+la moitié des votants : à deux, cela fait deux, et la panne d'une seule bloque
+toute écriture. On obtiendrait exactement ce qu'on voulait éviter — un point de
+panne unique, avec deux machines au lieu d'une.
+
+**La solution est un TÉMOIN : un troisième votant qui ne porte aucune donnée.**
+
+| | |
+|---|---|
+| Ce qu'il fait | Il vote. Rien d'autre. |
+| Ce qu'il détient | Rien — ni comptes, ni machines, ni services, ni baux. |
+| Ce qu'il coûte | Presque rien : ni disque, ni bande passante. |
+| Ce qu'il apporte | Une majorité de deux sur trois, donc **une panne tolérée** et une bascule automatique sans risque de double primaire. |
+
+Les deux racines restent les **seules porteuses de données**, ce qui préserve
+l'intention : elles sont deux, pas trois.
+
+**Le témoin doit être indépendant**, et c'est la seule exigence qui compte à son
+sujet : autre machine, autre hébergeur, autre chemin réseau. Un témoin qui tombe
+en même temps que la racine qu'il devait départager n'arbitre rien — il ajoute
+une pièce sans ajouter de garantie.
+
+### L'enjeu est bien plus faible qu'il n'y paraît
+
+Ce n'est pas une conception distribuée à mener de bout en bout, et c'est le
+découpage du §3 qui le réduit :
+
+| Ce qui s'écrit | Fréquence | Demande un ordre ? |
+|---|---|---|
+| Créer un compte, déclarer une machine, accorder, nouer une relation | Rare, déclenché par un humain | **Oui** |
+| Annonces, baux, joignabilité | En permanence | **Non** — local à chaque racine, non répliqué |
+
+**Le chemin chaud ne passe pas par le quorum du tout.** Un daemon reconnecté sur
+la seconde racine y annonce, et cette écriture n'a à être ordonnée avec rien. Le
+quorum ne sert qu'à des écritures rares et humaines — ce qui rend son coût
+négligeable et sa latence sans importance.
+
+---
+
+## 7. Ce qui n'est pas décidé
 
 Rassemblé, plutôt que dispersé.
 
@@ -263,26 +371,13 @@ Rassemblé, plutôt que dispersé.
    l'utilisateur a son mot à dire sur les machines qu'il possède.
 2. **L'état vivant traverse-t-il la fédération ?** (§5.3) — l'hybride est
    proposé, pas confirmé.
-3. **La rupture d'une relation de confiance.** Elle est bilatérale, donc elle se
-   rompt bilatéralement — mais que deviennent les enregistrements déjà répliqués,
-   et les autorisations croisées qui s'appuyaient dessus ? **Le cas qui dimensionne
-   tout est la clé d'un annuaire compromise** : pour pouvoir dire « rien de signé
-   après telle date ne vaut », il faut que TOUTE assertion porte un horodatage
-   signé et que la révocation porte une date d'effet. **C'est un champ du format,
-   pas une procédure — on ne l'ajoute pas après déploiement.**
-4. **Le conflit entre les deux racines.** Elles ont la même autorité : que se
-   passe-t-il quand elles divergent ? **Deux répliques n'ont pas de majorité** —
-   un quorum à deux ne départage rien, et bloque toute écriture dès qu'une tombe.
-   Le découpage durable/volatile réduit fortement l'enjeu : seules les écritures
-   rares et humaines demandent un ordre. Les pistes, par coût : un témoin qui
-   vote sans porter de données, ou primaire/secondaire à promotion manuelle.
-5. **L'index des annuaires est-il énumérable ?** Les racines recensent tous les
+3. **L'index des annuaires est-il énumérable ?** Les racines recensent tous les
    annuaires. Peut-on en demander la liste, ou seulement en résoudre un dont on
    connaît l'identifiant ? C'est la même question que celle de l'alias
    (`modele.md` §2.1), à l'échelle des annuaires.
-6. **Les racines sont-elles joignables en IPv4 ?** Deux adresses IPv6 dans le
+4. **Les racines sont-elles joignables en IPv4 ?** Deux adresses IPv6 dans le
    code excluent un annuaire sur un réseau IPv4 (§2).
-7. **Le transport de la synchronisation.** QUIC comme le reste, probablement.
+5. **Le transport de la synchronisation.** QUIC comme le reste, probablement.
    Un flux entre pairs de confiance n'a pas les mêmes besoins qu'une requête de
    client.
-8. **La migration d'un compte d'un annuaire à un autre.**
+6. **La migration d'un compte d'un annuaire à un autre.**

@@ -23,6 +23,7 @@ encore ».
 | C14 | Aucune authentification par secret partagé — des clés, et rien d'autre | Revue |
 | C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` — **à écrire** |
 | C16 | Une seule toolchain, celle d'Air, datée | `check-toolchain.sh` — **à écrire** |
+| C17 | Tout enregistrement porte son origine, et rompre une relation efface ce qui en vient | Essai — **à écrire** |
 
 ---
 
@@ -309,6 +310,41 @@ Il aurait tort globalement, pour deux raisons :
 `check-toolchain.sh` devra comparer ce fichier à celui d'Air et échouer sur tout
 écart. Il n'existe pas ; tant qu'il n'existe pas, la contrainte tient par la
 lecture de ce document, ce qui est peu.
+
+## C17 — Tout enregistrement porte son origine
+
+**Une colonne sur tous les enregistrements, et une seule raison** : rompre une
+relation de confiance efface tout ce qui en venait (`annuaires.md` §4.4). Sans
+elle, la rupture serait approximative — il faudrait deviner ce qui venait de qui,
+et ce qu'on ne saurait pas rattacher resterait.
+
+Deux règles que le code doit tenir, et qu'un essai peut vérifier :
+
+- **Aucun enregistrement n'entre sans origine.** Un chemin d'écriture qui la
+  laisserait vide créerait un enregistrement que nulle rupture n'atteint. C'est
+  la seule façon dont cette contrainte tombera, et elle tombera par un `INSERT`
+  ajouté à la hâte, jamais par une décision.
+- **Rompre efface, et l'essai qui compte le vérifie à l'envers** : après une
+  rupture, aucun enregistrement ne doit subsister avec cette origine. Un essai
+  qui se contenterait de compter ce qui a été supprimé ne verrait pas ce qui a
+  été oublié.
+
+**L'origine ne se déduit pas de l'autorité**, même si C11 fait aujourd'hui
+coïncider les deux. Un champ qui repose sur l'invariant d'un autre se trompera le
+jour où cet invariant bougera.
+
+### L'anti-rejeu, qui est une exigence distincte et plus faible
+
+Effacer par origine rend inutile la machinerie qu'on croyait devoir écrire —
+assertions horodatées, révocations à date d'effet, tri du passé légitime et du
+passé forgé. **Il n'y a rien à trier : on rompt, et tout part.**
+
+Il reste un besoin, plus modeste : **empêcher le rejeu à l'intérieur d'une
+relation vivante**. Sans marqueur monotone, une assertion signée et capturée peut
+être rejouée plus tard et ressusciter un enregistrement retiré. Un numéro de
+séquence **par relation**, et un récepteur qui refuse ce qui recule, suffisent.
+
+C'est une exigence du flux de synchronisation, pas du modèle de confiance.
 
 ---
 

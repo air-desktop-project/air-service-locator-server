@@ -5,7 +5,7 @@
 | [`modele.md`](modele.md) | Les objets, les candidats d'adresse, le bail, et ce que « joignable » veut dire exactement. |
 | [`protocole.md`](protocole.md) | Les trois conversations : le daemon, les applications mobiles, et le client qui cherche un port. |
 | [`annuaires.md`](annuaires.md) | Réplication entre les racines, fédération avec les annuaires rattachés, et ce qui ne se synchronise surtout pas. |
-| [`contraintes.md`](contraintes.md) | Les seize règles que le code doit tenir, et ce qui les fait respecter. |
+| [`contraintes.md`](contraintes.md) | Les dix-sept règles que le code doit tenir, et ce qui les fait respecter. |
 
 **Ils sont dans CE dépôt, et pas dans les trois.** Le modèle et le protocole
 gouvernent aussi les deux applications mobiles ; les recopier ferait trois

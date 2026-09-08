@@ -363,6 +363,31 @@ Tout ceci — l'ancre de confiance, l'entremise, la réplication sélective, et 
 qui ne se synchronise surtout pas — a son propre document :
 **[`annuaires.md`](annuaires.md)**.
 
+### 2.8 L'origine — un champ que TOUT enregistrement porte
+
+**Ce n'est pas un objet, c'est une colonne sur tous les autres**, et elle est là
+pour une raison unique et suffisante : rompre une relation de confiance efface
+tout ce qui en venait.
+
+| Valeur | Ce que ça veut dire |
+|---|---|
+| `locale` | Cet annuaire en est l'autorité. |
+| Une relation de confiance | L'enregistrement est entré par là. |
+
+**Sans ce champ, une rupture serait approximative** : il faudrait deviner ce qui
+venait de qui, et ce qu'on ne saurait pas rattacher resterait. Avec lui, la
+rupture est un effacement, et l'effacement est complet.
+
+**Il ne se déduit pas de l'autorité, même si aujourd'hui les deux coïncident.**
+C11 interdit d'accepter d'un pair ce dont il n'est pas l'autorité, donc un
+enregistrement d'un compte de X ne peut être entré que par la relation avec X.
+Cela restera vrai tant que C11 tiendra — et un champ qui repose sur l'invariant
+d'un autre est un champ qui se trompera le jour où cet invariant bougera.
+
+**Il n'y a pas de réplication transitive**, et donc pas de cascade à gérer : Y
+n'est pas l'autorité des comptes de X et ne peut rien en dire à Z. Une rupture
+X↔Y ne se propage nulle part, parce que rien ne s'est propagé.
+
 ---
 
 ## 3. Les candidats, et pourquoi ce mot
