@@ -16,6 +16,16 @@
 //!   tout ce qui en venait, et un chemin d'écriture qui laisserait l'origine vide
 //!   créerait un enregistrement que nulle rupture n'atteint.
 //!
+//! **Et le JOURNAL est un troisième régime**, distinct des deux autres : écriture
+//! en append à chaque requête, lecture rare, agrégation périodique, et
+//! **expiration** (contrainte C18). Rien de tout cela ne ressemble à la
+//! persistance d'un compte. Le confondre avec elle donnerait un magasin qui fait
+//! mal les deux.
+//!
+//! **Il s'écrit HORS du chemin de réponse** : un journal qui coûterait plus cher
+//! sur un succès que sur un refus rendrait le temps de réponse dépendant du
+//! résultat, et rouvrirait le canal que C9 ferme.
+//!
 //! # Ce qui reste à trancher
 //!
 //! Le support n'est pas choisi, et il ne se choisit pas avant de savoir ce que

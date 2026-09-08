@@ -5,7 +5,8 @@
 | [`modele.md`](modele.md) | Les objets, les candidats d'adresse, le bail, et ce que « joignable » veut dire exactement. |
 | [`protocole.md`](protocole.md) | Les trois conversations : le daemon, les applications mobiles, et le client qui cherche un port. |
 | [`annuaires.md`](annuaires.md) | Réplication entre les racines, fédération avec les annuaires rattachés, et ce qui ne se synchronise surtout pas. |
-| [`contraintes.md`](contraintes.md) | Les dix-sept règles que le code doit tenir, et ce qui les fait respecter. |
+| [`journal.md`](journal.md) | Ce qui est journalisé, ce qu'on en garde, et pourquoi c'est un actif à part. |
+| [`contraintes.md`](contraintes.md) | Les dix-huit règles que le code doit tenir, et ce qui les fait respecter. |
 
 **Ils sont dans CE dépôt, et pas dans les trois.** Le modèle et le protocole
 gouvernent aussi les deux applications mobiles ; les recopier ferait trois
@@ -33,6 +34,17 @@ sert à être retrouvé et ne rend qu'un identifiant (C13).
 **Et aucune authentification par secret partagé** : des clés, et rien d'autre
 (C14). Une machine détient une paire Ed25519 générée sur place dont la partie
 privée ne sort jamais ; un téléphone détient une clé dans son matériel sécurisé.
+
+## Ce que nous journalisons
+
+**Toutes les requêtes, et toutes les réplications** — qui, quoi, quand
+([`journal.md`](journal.md)). C'est utile, et c'est un actif à part : l'annuaire
+savait déjà où écoutent les services, il saura maintenant qui les consulte et à
+quelle heure. Un graphe d'usage horodaté en dit souvent plus long qu'un carnet
+d'adresses.
+
+D'où C18 : **on agrège, puis on jette**. Les compteurs survivent, le détail qui
+les a produits n'a pas à survivre avec eux.
 
 ## Le modèle d'autorisation, en une phrase
 

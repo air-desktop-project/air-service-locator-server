@@ -24,6 +24,7 @@ encore ».
 | C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` — **à écrire** |
 | C16 | Une seule toolchain, celle d'Air, datée | `check-toolchain.sh` — **à écrire** |
 | C17 | Tout enregistrement porte son origine, et rompre une relation efface ce qui en vient | Essai — **à écrire** |
+| C18 | Le journal est agrégé puis jeté, et n'ouvre aucun canal temporel | Essai de temporisation — **à écrire** |
 
 ---
 
@@ -346,9 +347,34 @@ séquence **par relation**, et un récepteur qui refuse ce qui recule, suffisent
 
 C'est une exigence du flux de synchronisation, pas du modèle de confiance.
 
----
+## C18 — Le journal est agrégé puis jeté, et n'ouvre aucun canal temporel
 
-## Ce qui n'est PAS une contrainte de ce dépôt
+Toutes les requêtes sont journalisées, et les réplications aussi
+([`journal.md`](journal.md)). C'est imposé, et c'est utile — statistiques,
+détection d'abus, diagnostic, et la PREUVE qu'un pair a tenté d'affirmer hors de
+son autorité (C11).
+
+**Mais un journal de qui interroge quoi et quand est un actif à part, et cette
+contrainte est ce qui l'empêche de devenir une archive comportementale.**
+
+- **Les agrégats survivent, les entrées brutes non.** Un compteur « 4 812
+  résolutions cette semaine » ne nomme personne, et c'est pourtant lui qu'on
+  regarde. La durée de rétention du brut n'est pas encore fixée — **c'est le
+  manque le plus important de ce document**, parce qu'à défaut elle est infinie.
+- **La journalisation reste HORS du chemin de réponse.** Un chemin qui écrirait
+  davantage sur un succès que sur un refus rendrait le temps de réponse
+  dépendant du résultat, et rouvrirait exactement le canal que **C9** ferme.
+  Aucune relecture n'attrape cette régression ; un essai de temporisation
+  l'attrape.
+- **Le journal n'est pas la porte par laquelle C13 tombe.** Une ligne qui
+  emporterait un alias, un nom de machine ou un nom de service vers un système
+  de statistiques externe hébergerait ailleurs ce qu'on refuse d'héberger ici.
+
+**Ce qui n'est PAS retenu par défaut** : l'adresse source du demandeur, et les
+candidats servis. Le premier est le champ le plus identifiant du lot ; le second
+ferait du journal une carte historique de l'infrastructure de tout le monde,
+alors que la base courante n'en garde que l'état présent. **C'est le réglage
+qu'on peut relâcher plus tard ; l'inverse ne se rattrape pas.**
 
 **« Aucune ligne de C » DANS LE SERVEUR.** Elle est posée pour `asl-client`
 (C4), où elle est structurelle. Côté serveur elle ne l'est pas — et ce n'est pas

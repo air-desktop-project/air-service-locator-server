@@ -311,6 +311,18 @@ Deux lectures, et il faut choisir :
 | **Hybride** — on réplique l'arbre durable, on demande l'état vivant à l'annuaire d'autorité au moment de résoudre | Une dépendance de X à la résolution ; mais l'état rendu est exact, et rien de volatile ne traverse la fédération. |
 | **Tout répliquer** — les candidats et l'état suivent | Y répond seul, même si X est tombé ; mais chaque redémarrage de daemon pousse une mise à jour à travers toute la fédération, et une réponse périmée donne un port faux. |
 
+**ET CE CHOIX DÉCIDE AUSSI DE QUI DÉTIENT LE GRAPHE D'USAGE.** Toutes les
+requêtes sont journalisées ([`journal.md`](journal.md)) : celui qui sert la
+résolution est celui qui accumule l'historique de qui consulte quoi.
+
+| | Qui journalise les résolutions de B |
+|---|---|
+| **Hybride** | L'annuaire d'A — le propriétaire du service |
+| **Réplication complète** | L'annuaire de B — le propriétaire du demandeur |
+
+Ce n'est pas un détail d'implémentation, et cela ne se déduit pas de la
+fraîcheur des données.
+
 **Ma lecture est l'hybride**, et elle découle de ce qui est déjà écrit : la
 souscription dit *ce qui existe et qui y a droit*, la résolution dit *où c'est
 maintenant*. Répliquer un port qui change à chaque redémarrage, c'est distribuer
@@ -381,3 +393,8 @@ Rassemblé, plutôt que dispersé.
    Un flux entre pairs de confiance n'a pas les mêmes besoins qu'une requête de
    client.
 6. **La migration d'un compte d'un annuaire à un autre.**
+7. **Le journal survit-il à une rupture ?** C17 efface les enregistrements dont
+   l'origine est la relation révoquée ; les lignes de journal en font-elles
+   partie ? Les effacer perd la trace des abus qui ont pu MOTIVER la rupture ;
+   les garder conserve des données sur les utilisateurs d'un annuaire avec lequel
+   on n'a plus de lien ([`journal.md`](journal.md) §7).
