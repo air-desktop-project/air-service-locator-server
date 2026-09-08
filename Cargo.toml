@@ -1,0 +1,106 @@
+# Manifeste du workspace air-service-locator-server.
+#
+# Un ANNUAIRE DE SERVICES : des daemons annoncent le port sur lequel ils
+# écoutent, et leurs clients retrouvent ce port sans qu'il ait jamais été fixé
+# d'avance. Tous les paquets vivent sous `crates/`.
+#
+# LE DÉCOUPAGE EST CELUI D'`air-mail-server`, ET POUR LA MÊME RAISON : ce qui
+# décide ne doit pas savoir lire une socket. Trois étages, et la frontière entre
+# le deuxième et le troisième est la seule qui compte.
+#
+#   1. GRAMMAIRES   `asl-id`, `asl-proto`, `asl-api` — des octets vers des
+#                   messages, et retour. Aucune socket, aucun fichier, aucune
+#                   horloge.
+#   2. DÉCISIONS    `asl-annuaire`, `asl-auth` — des machines à états. Elles
+#                   reçoivent des messages et l'heure ; elles rendent des
+#                   réponses et des ACTIONS. Elles n'attendent jamais.
+#   3. EXÉCUTION    `asl-loop-tokio`, `asl-store` — les seules crates qui lisent,
+#                   écrivent et attendent. Elles ne décident de rien.
+#
+# CE DÉCOUPAGE N'EST PAS DE L'ÉLÉGANCE, IL PAIE DEUX CHOSES ICI :
+#
+#   — L'EXPIRATION D'UN BAIL. « Ce daemon est-il encore en ligne ? » est une
+#     question d'horloge. Si l'horloge est un appel système au fond d'une boucle,
+#     il faut attendre une minute pour éprouver une expiration ; si c'est un
+#     paramètre de l'étage 2, l'essai la pilote en trois lignes.
+#   — LE CLIENT EMBARQUÉ. `asl-client` est lié par des daemons tiers. Tout ce
+#     qu'il partage avec le serveur doit être de l'étage 1, sinon un daemon qui
+#     s'annonce tirerait la base de données de l'annuaire.
+#
+# Les étages 1 et 2 visent le 100 % de couverture : une machine à états se pilote
+# pas à pas depuis un essai, une boucle asynchrone ne se pilote pas — on l'attend.
+# L'étage 3 en est hors, non par indulgence, mais parce qu'y atteindre 100 %
+# exigerait de simuler des pannes du noyau, ce qui mesure la simulation.
+#
+# LES CRATES SONT AUJOURD'HUI DES COQUILLES. Elles portent leur intention et rien
+# d'autre : les spécifications ne sont pas écrites (`docs/`), et poser du code
+# avant elles affirmerait des décisions que personne n'a prises.
+
+[workspace]
+resolver = "3"
+members = [
+    # Étage 1 — grammaires, sans entrée-sortie
+    "crates/asl-id",
+    "crates/asl-proto",
+    "crates/asl-api",
+    # Étage 2 — décisions, sans entrée-sortie
+    "crates/asl-annuaire",
+    "crates/asl-auth",
+    # Étage 3 — exécution
+    "crates/asl-store",
+    "crates/asl-loop-tokio",
+    # Binaire
+    "crates/asl-server",
+    # Bibliothèque tierce — ce qu'un daemon lie pour s'annoncer
+    "crates/asl-client",
+]
+
+[workspace.package]
+# Version en LOCKSTEP : toutes les crates la partagent via `version.workspace`.
+# Un seul numéro à incrémenter, donc aucune dérive possible entre les paquets.
+version = "0.1.0"
+edition = "2024"
+# Égale au `channel` de `rust-toolchain.toml`. Les deux bougent ensemble : ce
+# champ fait échouer le build avec un message clair si quelqu'un compile avec une
+# toolchain plus ancienne que celle sur laquelle le projet est vérifié.
+rust-version = "1.98.0"
+license = "MPL-2.0"
+authors = ["air-service-locator contributors"]
+repository = "https://github.com/air-desktop-project/air-service-locator-server"
+
+[workspace.dependencies]
+# Les arêtes INTERNES ne se déclarent qu'à mesure qu'elles servent : une
+# dépendance posée d'avance affirmerait un assemblage qui n'existe pas. Les neuf
+# crates sont donc listées, mais AUCUNE ne dépend encore d'une autre.
+asl-annuaire = { path = "crates/asl-annuaire", version = "0.1.0" }
+asl-api = { path = "crates/asl-api", version = "0.1.0" }
+asl-auth = { path = "crates/asl-auth", version = "0.1.0" }
+asl-client = { path = "crates/asl-client", version = "0.1.0" }
+asl-id = { path = "crates/asl-id", version = "0.1.0" }
+asl-loop-tokio = { path = "crates/asl-loop-tokio", version = "0.1.0" }
+asl-proto = { path = "crates/asl-proto", version = "0.1.0" }
+asl-server = { path = "crates/asl-server", version = "0.1.0" }
+asl-store = { path = "crates/asl-store", version = "0.1.0" }
+
+# LES DÉPENDANCES EXTERNES n'entrent qu'au moment où une crate les consomme. Le
+# graphe est donc VIDE aujourd'hui, et cette section restera vide tant que rien
+# n'aura été écrit qui en ait besoin.
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Les longueurs et les numéros de port viennent du RÉSEAU. Un décodeur qui lit un
+# port annoncé ne doit ni allouer, ni indexer, ni boucler sur cette valeur : il
+# doit la REFUSER quand elle sort de ses bornes. Une conversion qui tronque ou qui
+# perd un signe est ici une faille, pas une imprécision — d'où le `deny`.
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_lossless = "deny"
+arithmetic_side_effects = "deny"
+
+[profile.release]
+debug = "line-tables-only"
+lto = "thin"
+codegen-units = 1

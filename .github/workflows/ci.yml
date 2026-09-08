@@ -1,0 +1,126 @@
+# CI d'air-service-locator-server — vérification et gate DCO, sur runner
+# GitHub-hosted.
+#
+# POURQUOI GITHUB-HOSTED : stable épinglée, zéro dépendance externe, aucune cible
+# exotique. La contrainte la plus faible qui suffit.
+#
+# PAS DE CACHE CARGO, et ici la raison tient encore : le graphe ne compte AUCUNE
+# crate tierce. Il n'y a rien à mettre en cache que la compilation de nos neuf
+# crates, qui dure quelques secondes. À reconsidérer le jour où la première crate
+# tierce entrera — et ce commentaire doit alors être corrigé, pas contourné.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Chaque commit de `main` a SON groupe de concurrence ; les PR partagent le leur
+# par branche.
+#
+# CE N'EST PAS UNE PRÉFÉRENCE, C'EST UNE LEÇON PAYÉE SUR `air-mail-server`.
+# `cancel-in-progress: false` protège la course QUI TOURNE, jamais celle QUI
+# ATTEND : dans un même groupe, GitHub ne garde qu'une seule course en file, et
+# l'arrivée d'une troisième poussée annule la deuxième AVANT QUE LE MOINDRE
+# TRAVAIL NE DÉMARRE. Le 2026-09-06, un commit intégré y a perdu son verdict —
+# `gh run view` ne montrait aucun job, juste `cancelled`.
+#
+# Un commit intégré sans verdict est exactement ce qu'une CI existe pour éviter,
+# et la consigne « lire la CI après chaque poussée » n'y peut rien : le verdict
+# n'existe pas.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'partage' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Un avertissement non traité est une régression qui attend son heure.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ── Le gate DCO ────────────────────────────────────────────────────────────
+  #
+  # Séparé de la vérification du code, et volontairement : il dure quelques
+  # secondes, ne compile rien, et son verdict porte sur les MESSAGES de commit.
+  # Le noyer dans le job de build rendrait son échec illisible.
+  dco:
+    name: DCO et paternité
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Historique COMPLET, exigé par le gate : sans lui, `origin/main`
+          # n'existe pas dans le clone et la plage `base..HEAD` ne peut pas être
+          # formée.
+          fetch-depth: 0
+
+      - name: Déterminer la base de comparaison
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="origin/${{ github.base_ref }}"
+          else
+            # Sur un push, l'ancien sommet de la branche. Vaut quarante zéros
+            # lorsque la branche vient d'être créée : dans ce cas on laisse le
+            # script résoudre lui-même, et il dira honnêtement ce qu'il a vu.
+            base="${{ github.event.before }}"
+            case "$base" in
+              0000000000000000000000000000000000000000) base="" ;;
+            esac
+            if [ -n "$base" ] && ! git rev-parse --verify --quiet "$base" >/dev/null; then
+              base=""
+            fi
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: check-dco
+        run: ./scripts/check-dco.sh "${{ steps.base.outputs.base }}"
+
+  # ── La vérification du code ────────────────────────────────────────────────
+  verification:
+    name: compile, clippy, tests, format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Aucune action tierce d'installation de toolchain : `rust-toolchain.toml`
+      # épingle la version ET ses composants, et `rustup` l'honore tout seul à la
+      # première invocation de `cargo`. On le fait ici, explicitement, pour que
+      # l'installation soit une étape visible plutôt qu'un effet de bord de
+      # l'étape suivante.
+      - name: Toolchain épinglée
+        run: |
+          rustup show active-toolchain
+          cargo --version
+          rustc --version
+
+      # CE QUI RÉPOND VITE RÉPOND TÔT. Une erreur de type se lit en une seconde ;
+      # l'apprendre après trois minutes de lints ne l'apprend pas mieux.
+      - name: check-compile
+        run: ./scripts/check-compile.sh
+
+      - name: check-clippy
+        run: ./scripts/check-clippy.sh
+
+      - name: cargo build
+        run: cargo build --workspace --locked
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      # ── LE FORMATAGE, EN DERNIER, ET C'EST UNE LEÇON PAYÉE ────────────────
+      #
+      # Sur `air-mail-server`, il était en PREMIER. Il a échoué le 2026-09-04, et
+      # il est resté rouge SEIZE POUSSÉES — pendant lesquelles clippy, le build et
+      # les essais N'ONT PAS TOURNÉ UNE SEULE FOIS, puisqu'une étape qui échoue
+      # arrête celles qui la suivent.
+      #
+      # UNE FAUTE DE FORME NE DOIT PAS CACHER UNE FAUTE DE FOND. Le job échoue
+      # toujours si le formatage cloche — c'est une barrière, pas un avis — mais
+      # tout ce qui juge le CODE a déjà parlé quand il le fait.
+      - name: check-format
+        run: ./scripts/check-format.sh
