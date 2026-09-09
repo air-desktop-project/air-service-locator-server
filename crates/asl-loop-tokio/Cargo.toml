@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+asl-cle.workspace = true
 asl-session.workspace = true
 asl-store.workspace = true
 ams-proto-http.workspace = true
@@ -39,6 +40,7 @@ tokio.workspace = true
 # **c'est un vrai client QUIC**, qui parle sur une vraie socket : rien d'autre ne
 # peut éprouver cette boucle de bout en bout.
 ams-quic-client.workspace = true
+asl-cle.workspace = true
 
 # Pour DÉCODER la réponse plutôt que d'y chercher des octets : `cache-control:
 # no-store` est une entrée de la table statique de QPACK, et ne voyage donc pas

@@ -162,6 +162,11 @@ asl-store = { path = "crates/asl-store", version = "0.1.0" }
 ed25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }
 subtle = { version = "2", default-features = false }
 
+# `sha2` POUR UN SEUL USAGE : l'empreinte du certificat qui sert de liaison de
+# canal (`asl-cle`). Elle est DÉJÀ dans le graphe — `ams-quic-crypto` la tire —
+# et elle est en Rust pur.
+sha2 = { version = "0.11", default-features = false }
+
 # ── LA PILE QUIC ET HTTP/3, GREFFÉE DEPUIS `air-mail-server` (C15) ─────────
 #
 # Elles sont tirées par une dépendance `git` ÉPINGLÉE SUR UN COMMIT, jamais sur

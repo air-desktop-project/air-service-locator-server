@@ -175,6 +175,7 @@ version = "0.1.0"
 dependencies = [
  "asl-id",
  "ed25519-dalek",
+ "sha2",
 ]
 
 [[package]]
@@ -193,6 +194,7 @@ dependencies = [
  "ams-quic-client",
  "ams-quic-tls",
  "ams-tls",
+ "asl-cle",
  "asl-id",
  "asl-registre",
  "asl-session",
@@ -221,6 +223,7 @@ name = "asl-server"
 version = "0.1.0"
 dependencies = [
  "ams-quic-client",
+ "asl-cle",
  "asl-id",
  "asl-loop-tokio",
  "asl-proto",
@@ -237,6 +240,7 @@ dependencies = [
  "ams-h3",
  "ams-proto-http",
  "asl-api",
+ "asl-cle",
  "asl-id",
  "asl-registre",
 ]

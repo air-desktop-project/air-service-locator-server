@@ -20,7 +20,7 @@ encore ».
 | C11 | Un annuaire n'accepte d'un pair que ce dont ce pair est l'autorité | Essai — **à écrire** |
 | C12 | La surface publique d'`asl-client` traverse une ABI C, et elle est stable | `check-abi.sh` (dépôt client) |
 | C13 | Aucune donnée personnelle hébergée, hors l'alias public choisi | Revue, et **le schéma d'`asl-registre`** — une colonne qui n'existe pas ne se remplit pas |
-| C14 | Aucune authentification par secret partagé — des clés, et rien d'autre | `asl-cle`, une cible de fuzz, et la revue |
+| C14 | Aucune authentification par secret partagé — des clés, et rien d'autre | `asl-cle`, `asl-session` (défi + liaison), une cible de fuzz, et un essai de bout en bout |
 | C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` : aucune pile tierce, et la greffe épinglée sur UN commit |
 | C16 | Une seule toolchain, celle d'Air, datée | `check-toolchain.sh` |
 | C17 | Tout enregistrement porte son origine, et rompre une relation efface ce qui en vient — **sauf le journal** | `asl-registre` : le type ; `asl-store` : trois essais |

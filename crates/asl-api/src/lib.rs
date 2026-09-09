@@ -109,6 +109,18 @@ pub enum Exigence {
 /// Ce qu'une requête désigne.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ressource<'a> {
+    /// `/v1/defi` — le défi d'authentification de CETTE connexion.
+    ///
+    /// # POURQUOI UNE RESSOURCE, ET NON UNE POIGNÉE DE MAIN À PART
+    ///
+    /// L'authentification est portée par la CONNEXION (`protocole.md` §3), et
+    /// elle pourrait donc vivre hors d'HTTP — dans un flux QUIC à nous, par
+    /// exemple. La faire passer par l'API ordinaire évite un second cadrage, un
+    /// second analyseur, et un second endroit où se tromper.
+    ///
+    /// `GET` tire un défi ; `POST` rapporte la signature. **Elle n'exige aucune
+    /// preuve**, et pour cause : c'est elle qui la produit.
+    Defi,
     /// `/v1/comptes` — créer un compte et enrôler son premier appareil.
     Comptes,
     /// `/v1/utilisateurs/{u}` — **confirmer qu'un identifiant existe**, et rien
@@ -195,6 +207,7 @@ impl Ressource<'_> {
     #[must_use]
     pub const fn verbes(&self) -> &'static [Methode] {
         match self {
+            Self::Defi => &[Methode::Get, Methode::Post],
             Self::Comptes | Self::Appareils | Self::Machines => &[Methode::Post],
             Self::Utilisateur { .. }
             | Self::ServicesMachine { .. }
@@ -234,7 +247,9 @@ impl Ressource<'_> {
     #[must_use]
     pub const fn exigence(&self) -> Exigence {
         match self {
-            Self::Comptes | Self::AliasResolu { .. } | Self::Utilisateur { .. } => Exigence::Aucune,
+            Self::Defi | Self::Comptes | Self::AliasResolu { .. } | Self::Utilisateur { .. } => {
+                Exigence::Aucune
+            }
             Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
             _ => Exigence::Appareil,
         }
@@ -479,6 +494,7 @@ fn service_de_la_requete(requete: &[u8]) -> Result<NomService<'_>, Erreur> {
 /// La table des chemins.
 fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, Erreur> {
     match segments {
+        ["v1", "defi"] => Ok(Ressource::Defi),
         ["v1", "comptes"] => Ok(Ressource::Comptes),
         ["v1", "utilisateurs", compte] => Ok(Ressource::Utilisateur {
             compte: identifiant(compte, Genre::Utilisateur)?,

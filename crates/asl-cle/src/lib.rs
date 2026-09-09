@@ -66,6 +66,7 @@ use asl_id::{Genre, Identifiant};
 use ed25519_dalek::{
     Signature as SignatureDalek, Signer as _, SigningKey, Verifier as _, VerifyingKey,
 };
+use sha2::{Digest as _, Sha256};
 
 /// Le séparateur de domaine, en octets.
 ///
@@ -118,8 +119,47 @@ impl Defi {
 
 /// Ce qui lie une signature à SA connexion.
 ///
-/// Doit être un *exporter* TLS de la connexion en cours. Voir l'en-tête du
-/// module pour ce qui arrive si le transport n'en fournit pas.
+/// # DEUX SOURCES POSSIBLES, ET ELLES N'ACHÈTENT PAS LA MÊME CHOSE
+///
+/// **Le plus fort est un *exporter* TLS** (RFC 5705) : il dérive des secrets de
+/// la poignée de main, donc il est propre à CETTE session et personne d'autre ne
+/// peut le calculer. C'est ce que ce type devrait porter, et ce qu'il portera.
+///
+/// **Ce qu'il porte aujourd'hui est l'empreinte du certificat du serveur**
+/// ([`liaison_depuis_certificat`]), et il faut dire pourquoi et ce que cela
+/// coûte. La pile QUIC que ce produit emprunte **n'expose aucun exporteur** :
+/// `ams_quic_tls::Connection` ne rend ni `export_keying_material` ni rien qui
+/// s'en approche. L'y ajouter est une tranche dans un autre dépôt, et une
+/// tranche qui a son propre régime de couverture.
+///
+/// ## CE QUE L'EMPREINTE DU CERTIFICAT FERME QUAND MÊME
+///
+/// **Exactement la menace que ce module nomme** : un intermédiaire qui
+/// transmettrait le défi du vrai annuaire à la machine, puis la signature en
+/// retour. Pour parler TLS avec la machine, cet intermédiaire doit présenter un
+/// certificat qu'elle accepte — donc le SIEN. La machine lie alors sa signature
+/// à ce certificat-là, et le vrai annuaire, qui vérifie contre le sien, refuse.
+///
+/// Le seul intermédiaire que cela n'arrête pas est celui qui détient la clé
+/// privée du serveur — mais celui-là **est** le serveur, et aucune liaison de
+/// canal n'y peut rien.
+///
+/// ## CE QU'ELLE N'ACHÈTE PAS, ET QU'UN EXPORTEUR ACHÈTERAIT
+///
+/// Elle lie à une IDENTITÉ, pas à une SESSION. Deux conséquences, toutes deux
+/// vraies aujourd'hui et à surveiller :
+///
+///   1. **Deux serveurs qui partagent un certificat partagent une liaison.** Un
+///      répartiteur de charge, ou deux annuaires servant le même certificat, se
+///      confondraient. Ce n'est pas notre cas — `scripts/ca.sh` émet un
+///      certificat par nom —, et cela cesserait de l'être sans qu'on y pense.
+///   2. **Deux connexions au même serveur partagent une liaison.** C'est le
+///      DÉFI qui les sépare : il est tiré par le serveur, propre à la connexion,
+///      et à usage unique. Sans lui, l'empreinte seule ne vaudrait rien.
+///
+/// Autrement dit : le défi et la liaison se tiennent l'un l'autre ici, là où un
+/// exporteur suffirait seul. C'est la raison de plus de ne pas relâcher le
+/// « à usage unique » du défi.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiaisonDeCanal([u8; LIAISON_OCTETS]);
 
@@ -135,6 +175,30 @@ impl LiaisonDeCanal {
     pub const fn octets(&self) -> &[u8; LIAISON_OCTETS] {
         &self.0
     }
+}
+
+/// L'empreinte d'un certificat de serveur, comme liaison de canal.
+///
+/// # POURQUOI CETTE FONCTION VIT ICI, ET NON LÀ OÙ LE CERTIFICAT EST LU
+///
+/// **Les deux côtés doivent la calculer identiquement.** Le serveur la dérive de
+/// son propre certificat, le client de celui qu'il a vérifié ; si les deux
+/// dérivations divergeaient d'un octet, aucune signature ne vérifierait plus, et
+/// la panne serait indiscernable d'une clé fausse.
+///
+/// C'est la même raison qui met [`message_a_signer`] ici plutôt que dans chaque
+/// camp : **une composition écrite deux fois finit par différer.**
+///
+/// SHA-256 du DER, tel quel. C'est `tls-server-end-point` de RFC 5929 pour un
+/// certificat signé en SHA-256 ou plus faible ; nos certificats sont Ed25519, et
+/// RFC 5929 §4.1 renvoie alors à SHA-256 par défaut.
+#[must_use]
+pub fn liaison_depuis_certificat(der: &[u8]) -> LiaisonDeCanal {
+    let mut condensat = Sha256::new();
+    condensat.update(der);
+    let mut octets = [0_u8; LIAISON_OCTETS];
+    octets.copy_from_slice(&condensat.finalize());
+    LiaisonDeCanal::depuis_octets(octets)
 }
 
 /// Une signature Ed25519.

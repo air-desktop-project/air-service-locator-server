@@ -522,3 +522,29 @@ fn une_requete_qui_n_est_pas_de_l_utf8_est_refusee() {
         Err(Erreur::RequeteInvalide)
     );
 }
+
+// ── Le défi ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn le_defi_se_route_et_sert_les_deux_verbes() {
+    // `GET` tire un défi, `POST` rapporte la signature. Rien d'autre.
+    for (methode, sert) in [
+        (Methode::Get, true),
+        (Methode::Post, true),
+        (Methode::Put, false),
+        (Methode::Patch, false),
+        (Methode::Delete, false),
+    ] {
+        let resolu = resoudre(methode, b"/v1/defi").expect("la cible se route");
+        assert_eq!(resolu.ressource, Ressource::Defi);
+        assert_eq!(resolu.sert, sert, "{methode:?}");
+    }
+}
+
+#[test]
+fn le_defi_n_exige_aucune_preuve_et_c_est_le_point() {
+    // **C'EST ELLE QUI PRODUIT LA PREUVE.** Si elle en exigeait une, aucune
+    // connexion ne pourrait jamais s'authentifier.
+    let resolu = resoudre(Methode::Get, b"/v1/defi").expect("la cible se route");
+    assert_eq!(resolu.exigence, Exigence::Aucune);
+}

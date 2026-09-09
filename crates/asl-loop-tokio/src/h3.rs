@@ -36,6 +36,7 @@ use ams_h3::{Http3, Reponse};
 use ams_proto_http::RequestHead;
 use ams_proto_quic::StreamId;
 use ams_quic_tls::Connection;
+use asl_cle::{ClePublique, Defi, LiaisonDeCanal};
 use asl_session::{Besoin, Session, Trouvaille};
 use asl_store::Entrepot;
 
@@ -43,7 +44,6 @@ use crate::pont::Pont;
 use crate::quic::{Application, maintenant};
 
 /// Ce qu'on tient pour une connexion vivante.
-#[derive(Default)]
 struct ParConnexion {
     /// Le conducteur HTTP/3 : flux de contrôle, QPACK, cadrage.
     conducteur: Http3,
@@ -64,6 +64,17 @@ struct Service<'a> {
     session: &'a mut Session,
     /// Ce qui se souvient.
     entrepot: &'a Entrepot,
+    /// De quoi tirer un défi, si le noyau en a donné.
+    ///
+    /// **L'ENTROPIE EST UNE ENTRÉE-SORTIE**, donc elle est ici et pas à
+    /// l'étage 2. Le défi est tiré à chaque requête, qu'il serve ou non : le
+    /// tirer paresseusement demanderait de savoir d'avance si la session en
+    /// aura besoin, ce qui est précisément ce qu'elle seule sait.
+    ///
+    /// **`None` QUAND LE NOYAU A REFUSÉ**, et surtout pas un défi de repli : un
+    /// défi prévisible ne défie personne, et se replier en silence serait pire
+    /// que de rendre l'erreur. `asl-session` répond alors `500`.
+    defi: Option<Defi>,
 }
 
 impl ams_h3::Service for Service<'_> {
@@ -73,10 +84,9 @@ impl ams_h3::Service for Service<'_> {
         corps: &[u8],
         sortie: &'o mut [u8],
     ) -> Reponse<'o> {
-        let _ = &self.session;
-        let besoin = asl_session::besoin(tete, corps);
+        let besoin = asl_session::besoin(self.session, tete, corps);
         let trouvaille = self.chercher(&besoin);
-        asl_session::repondre(&besoin, &trouvaille, sortie)
+        asl_session::repondre(self.session, &besoin, &trouvaille, self.defi, sortie)
     }
 }
 
@@ -93,7 +103,19 @@ impl Service<'_> {
     /// journal, quand il existera.
     fn chercher(&self, besoin: &Besoin<'_>) -> Trouvaille {
         match besoin {
-            Besoin::Deja(_) => Trouvaille::Rien,
+            Besoin::Deja(_) | Besoin::DefiATirer => Trouvaille::Rien,
+
+            // **LA CLÉ VIENT DE L'ENREGISTREMENT DE LA MACHINE**, et rien
+            // d'autre : une machine inconnue, une clé illisible et une
+            // signature fausse donnent le même refus, et c'est `asl-session`
+            // qui le compose.
+            Besoin::ClePourPreuve { machine, .. } => match self.entrepot.machine(*machine) {
+                Ok(Some(rangee)) => match ClePublique::depuis_octets(rangee.cle) {
+                    Ok(cle) => Trouvaille::Cle(cle),
+                    Err(_) => Trouvaille::Rien,
+                },
+                Ok(None) | Err(_) => Trouvaille::Rien,
+            },
             Besoin::Compte(qui) => match self.entrepot.compte(*qui) {
                 Ok(Some(compte)) => Trouvaille::Compte {
                     qui: *qui,
@@ -124,17 +146,38 @@ pub struct Annuaire<'a> {
     connexions: HashMap<Vec<u8>, ParConnexion>,
     /// Ce qui se souvient, partagé par toutes les connexions.
     entrepot: &'a Entrepot,
+    /// À quoi les signatures de ce serveur sont liées.
+    ///
+    /// **L'EMPREINTE DE NOTRE CERTIFICAT**, calculée une fois au démarrage.
+    /// Voir `asl_cle::LiaisonDeCanal` pour ce qu'elle ferme et ce qu'elle ne
+    /// ferme pas.
+    liaison: LiaisonDeCanal,
+    /// De quoi tirer un défi.
+    ///
+    /// `Send + Sync` : l'écoute tourne dans une tâche, et ce qu'elle tient doit
+    /// pouvoir y aller avec elle.
+    tirer_un_defi: &'a (dyn Fn() -> Option<Defi> + Send + Sync),
     /// Combien de connexions ont parlé HTTP/3.
     servies: u64,
 }
 
 impl<'a> Annuaire<'a> {
     /// Une application neuve, servant depuis cet entrepôt.
+    ///
+    /// `liaison` est l'empreinte du certificat que ce serveur présente ;
+    /// `tirer_un_defi` rend trente-deux octets imprévisibles, ou `None` si le noyau
+    /// a refusé — auquel cas la réponse sera `500`, jamais un défi de repli.
     #[must_use]
-    pub fn new(entrepot: &'a Entrepot) -> Self {
+    pub fn new(
+        entrepot: &'a Entrepot,
+        liaison: LiaisonDeCanal,
+        tirer_un_defi: &'a (dyn Fn() -> Option<Defi> + Send + Sync),
+    ) -> Self {
         Self {
             connexions: HashMap::new(),
             entrepot,
+            liaison,
+            tirer_un_defi,
             servies: 0,
         }
     }
@@ -157,7 +200,11 @@ impl<'a> Annuaire<'a> {
 impl Application for Annuaire<'_> {
     fn a_l_etablissement(&mut self, connexion: &mut Connection, _pair: SocketAddr) {
         let clef = connexion.local_id().as_bytes().to_vec();
-        let etat = self.connexions.entry(clef).or_default();
+        let liaison = self.liaison;
+        let etat = self.connexions.entry(clef).or_insert_with(|| ParConnexion {
+            conducteur: Http3::default(),
+            session: Session::new(liaison),
+        });
         self.servies = self.servies.saturating_add(1);
         // §6.2.1 : notre flux de contrôle et nos réglages, tout de suite — puis
         // les deux flux QPACK de §4.2 de RFC 9204.
@@ -181,6 +228,7 @@ impl Application for Annuaire<'_> {
         let mut service = Service {
             session,
             entrepot: self.entrepot,
+            defi: (self.tirer_un_defi)(),
         };
         if let Err(faute) = conducteur.on_readable(&mut Pont(connexion), &mut service, flux) {
             Self::condamner(connexion, &faute);

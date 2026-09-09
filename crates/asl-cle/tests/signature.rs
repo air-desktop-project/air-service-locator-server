@@ -238,3 +238,60 @@ fn les_valeurs_rendent_ce_qu_on_leur_a_donne() {
     assert_eq!(Defi::depuis_octets(*d.octets()), d);
     assert_eq!(LiaisonDeCanal::depuis_octets(*l.octets()), l);
 }
+
+// ── La liaison de canal tirée du certificat ─────────────────────────────────
+
+#[test]
+fn deux_certificats_differents_donnent_deux_liaisons() {
+    // **C'EST TOUTE LA PROPRIÉTÉ.** Si deux certificats donnaient la même
+    // liaison, un intermédiaire au certificat distinct passerait.
+    assert_ne!(
+        asl_cle::liaison_depuis_certificat(b"un certificat"),
+        asl_cle::liaison_depuis_certificat(b"un autre certificat")
+    );
+}
+
+#[test]
+fn le_meme_certificat_donne_la_meme_liaison() {
+    // Sans cela, aucune signature ne vérifierait jamais — et la panne serait
+    // indiscernable d'une clé fausse.
+    assert_eq!(
+        asl_cle::liaison_depuis_certificat(b"le certificat"),
+        asl_cle::liaison_depuis_certificat(b"le certificat")
+    );
+}
+
+#[test]
+fn un_certificat_vide_donne_quand_meme_une_liaison() {
+    // Un condensat de rien est un condensat valide. C'est au chargement du
+    // certificat de refuser le vide, pas ici : ce module condense ce qu'on lui
+    // donne, et n'a pas d'opinion sur ce qu'est un certificat.
+    let vide = asl_cle::liaison_depuis_certificat(b"");
+    assert_ne!(vide.octets(), &[0_u8; asl_cle::LIAISON_OCTETS]);
+}
+
+#[test]
+fn une_signature_faite_pour_un_autre_certificat_ne_vaut_pas_ici() {
+    // **L'ESSAI QUI JUSTIFIE LA LIAISON.** La même machine, le même défi, deux
+    // certificats : c'est exactement la manœuvre de l'intermédiaire qui
+    // transmettrait un défi et rapporterait la signature.
+    let secrete = asl_cle::CleSecrete::depuis_entropie([9; 32]);
+    let publique = secrete.publique();
+    let machine = asl_id::Identifiant::depuis_entropie(asl_id::Genre::Machine, [1; 16]);
+    let defi = asl_cle::Defi::depuis_octets([2; 32]);
+
+    let chez_nous = asl_cle::liaison_depuis_certificat(b"le certificat de l'annuaire");
+    let chez_l_intrus = asl_cle::liaison_depuis_certificat(b"le certificat de l'intrus");
+
+    let signee = secrete
+        .signer(machine, &defi, &chez_l_intrus)
+        .expect("une machine signe");
+    assert!(
+        !publique.verifie(machine, &defi, &chez_nous, &signee),
+        "une signature faite pour un autre certificat a été acceptée"
+    );
+    assert!(
+        publique.verifie(machine, &defi, &chez_l_intrus, &signee),
+        "et elle vaut bien pour celui pour lequel elle a été faite"
+    );
+}

@@ -153,6 +153,7 @@ version = "0.1.0"
 dependencies = [
  "asl-id",
  "ed25519-dalek",
+ "sha2",
 ]
 
 [[package]]
@@ -180,6 +181,7 @@ dependencies = [
  "ams-h3",
  "ams-proto-http",
  "asl-api",
+ "asl-cle",
  "asl-id",
  "asl-registre",
 ]

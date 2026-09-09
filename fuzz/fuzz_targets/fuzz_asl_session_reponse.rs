@@ -16,8 +16,9 @@
 //! 1. **Rien ne panique**, pour toute taille de tampon, de zéro à cent.
 //! 2. **RIEN NE DÉBORDE.** Le corps et chaque valeur de champ vivent dans le
 //!    tampon, donc aucun ne peut être plus long que lui.
-//! 3. **LE STATUT EST L'UN DES CINQ QU'ON ÉMET.** Un statut inattendu voudrait
-//!    dire qu'un chemin de décision a échappé à la table.
+//! 3. **LE STATUT EST L'UN DE CEUX QU'ON ÉMET.** Un statut inattendu voudrait
+//!    dire qu'un chemin de décision a échappé à la table. `200` y est depuis que
+//!    `/v1/defi` rend un défi ; `401` depuis que `MachineLecture` est tenue.
 //! 4. **UNE LONGUEUR TRONQUÉE N'EST JAMAIS ÉMISE.** `content-length` vaut
 //!    exactement la longueur du corps de ce statut, ou n'est pas là. C'est
 //!    l'invariant que `composer` a été écrit pour tenir : un « 5 » pour
@@ -34,7 +35,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
-use asl_session::Trouvaille;
+use asl_session::{Session, Trouvaille};
 
 /// Ce qu'on soumet.
 #[derive(Arbitrary, Debug)]
@@ -76,8 +77,10 @@ fn champ<'a>(reponse: &ams_h3::Reponse<'a>, nom: &[u8]) -> Option<&'a [u8]> {
 }
 
 /// Les cinq statuts que ce module émet, et rien d'autre.
-const ATTENDUS: [StatusCode; 5] = [
+const ATTENDUS: [StatusCode; 7] = [
+    StatusCode::OK,
     StatusCode::BAD_REQUEST,
+    StatusCode::UNAUTHORIZED,
     StatusCode::NOT_FOUND,
     StatusCode::METHOD_NOT_ALLOWED,
     StatusCode::CONTENT_TOO_LARGE,
@@ -98,8 +101,16 @@ fuzz_target!(|entree: Entree| {
     // **LA TROUVAILLE EST TOUJOURS `Rien` ICI**, et c'est délibéré : cette
     // cible éprouve la COMPOSITION, pas l'entrepôt. Ce qui vient de la base
     // n'est pas contrôlé par un inconnu ; ce qui l'est, c'est la requête.
-    let besoin = asl_session::besoin(&tete_reelle, entree.corps);
-    let reponse = asl_session::repondre(&besoin, &Trouvaille::Rien, &mut sortie);
+    // **UNE SESSION NEUVE À CHAQUE ENTRÉE**, et un défi FIXE : ce qui est
+    // éprouvé ici est la composition, pas le tirage — celui-là l'est dans
+    // `asl-server::entropie`. Une session neuve n'a authentifié personne, donc
+    // cette cible explore les chemins d'un pair NON authentifié : ce sont ceux
+    // qu'un inconnu atteint.
+    let mut session = Session::new(asl_cle::liaison_depuis_certificat(b"le certificat"));
+    let defi = Some(asl_cle::Defi::depuis_octets([0x5A; 32]));
+    let besoin = asl_session::besoin(&session, &tete_reelle, entree.corps);
+    let reponse =
+        asl_session::repondre(&mut session, &besoin, &Trouvaille::Rien, defi, &mut sortie);
     let statut = reponse.status();
 
     // ── PROPRIÉTÉ 3 ─────────────────────────────────────────────────────────
@@ -168,8 +179,16 @@ fuzz_target!(|entree: Entree| {
 
         if let Some(tete_get) = tete(b"GET", entree.cible) {
             let mut autre = vec![0_u8; taille];
-            let besoin_get = asl_session::besoin(&tete_get, entree.corps);
-            let par_get = asl_session::repondre(&besoin_get, &Trouvaille::Rien, &mut autre);
+            let mut session_get =
+                Session::new(asl_cle::liaison_depuis_certificat(b"le certificat"));
+            let besoin_get = asl_session::besoin(&session_get, &tete_get, entree.corps);
+            let par_get = asl_session::repondre(
+                &mut session_get,
+                &besoin_get,
+                &Trouvaille::Rien,
+                defi,
+                &mut autre,
+            );
             assert_eq!(
                 par_get.status(),
                 statut,

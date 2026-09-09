@@ -60,6 +60,7 @@ const fn methode(brut: u8) -> Methode {
 /// Le chemin canonique d'une ressource, recomposé depuis ce qu'on en a compris.
 fn chemin_de(ressource: &Ressource<'_>) -> String {
     match ressource {
+        Ressource::Defi => "/v1/defi".to_owned(),
         Ressource::Comptes => "/v1/comptes".to_owned(),
         Ressource::Utilisateur { compte } => format!("/v1/utilisateurs/{compte}"),
         Ressource::Appareils => "/v1/appareils".to_owned(),
@@ -162,7 +163,10 @@ fuzz_target!(|entree: Entree| {
         assert!(
             matches!(
                 ressource,
-                Ressource::Comptes | Ressource::AliasResolu { .. } | Ressource::Utilisateur { .. }
+                Ressource::Defi
+                    | Ressource::Comptes
+                    | Ressource::AliasResolu { .. }
+                    | Ressource::Utilisateur { .. }
             ),
             "une ressource inattendue n'exige rien : {ressource:?}"
         );

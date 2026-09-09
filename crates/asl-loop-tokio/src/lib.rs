@@ -86,3 +86,29 @@ pub fn configuration_tls(
     configuration.alpn_protocols = ams_tls::alpn_h3();
     Ok(configuration)
 }
+
+/// L'empreinte du certificat de tête, comme liaison de canal.
+///
+/// # POURQUOI CELUI DE TÊTE, ET POURQUOI CETTE FONCTION EXISTE
+///
+/// Une chaîne PEM porte le certificat du serveur **en premier**, puis ses
+/// intermédiaires (§4.4.2 de RFC 8446). C'est le premier qui identifie ce
+/// serveur-ci ; lier à un intermédiaire lierait à tous ceux qu'il a signés,
+/// c'est-à-dire à rien de particulier.
+///
+/// La convention vit ici plutôt que chez l'appelant parce que **le client doit
+/// appliquer la même**, et qu'une convention écrite deux fois finit par
+/// différer. Voir `asl_cle::LiaisonDeCanal` pour ce que cette liaison ferme et
+/// ce qu'elle ne ferme pas.
+///
+/// Rend `None` si la chaîne ne porte aucun certificat lisible — ce qui n'arrive
+/// pas après [`configuration_tls`], qui l'aurait déjà refusée.
+#[must_use]
+pub fn liaison_du_certificat(chaine_pem: &[u8]) -> Option<asl_cle::LiaisonDeCanal> {
+    use rustls::pki_types::pem::PemObject as _;
+
+    let premier = rustls::pki_types::CertificateDer::pem_slice_iter(chaine_pem)
+        .next()?
+        .ok()?;
+    Some(asl_cle::liaison_depuis_certificat(&premier))
+}

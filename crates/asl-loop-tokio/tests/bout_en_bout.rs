@@ -103,8 +103,12 @@ async fn lever(
     let adresse = socket.local_addr().expect("une adresse");
 
     let (dire_stop, entendre_stop) = tokio::sync::oneshot::channel();
+    let liaison = asl_loop_tokio::liaison_du_certificat(chaine).expect("un certificat de tête");
     let tache = tokio::spawn(async move {
-        let mut application = Annuaire::new(&entrepot);
+        // Un défi FIXE dans l'essai : ce qui est éprouvé ici est le transport,
+        // pas la qualité du tirage — celle-là l'est dans `asl-server::entropie`.
+        let tirer = || Some(asl_cle::Defi::depuis_octets([0x5A; 32]));
+        let mut application = Annuaire::new(&entrepot, liaison, &tirer);
         let arret = async {
             let _ = entendre_stop.await;
         };
@@ -373,6 +377,109 @@ async fn un_alias_que_personne_ne_porte_revient_en_404() {
     let brut = client.recu(0).to_vec();
 
     assert_eq!(champ(&champs(&brut), b":status"), Some(&b"404"[..]));
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn une_machine_s_authentifie_de_bout_en_bout() {
+    // **LA CHAÎNE CRYPTOGRAPHIQUE ENTIÈRE**, sur une vraie socket : le client
+    // tire un défi, le signe avec sa clé Ed25519 en le liant au certificat du
+    // serveur, et la connexion devient authentifiée.
+    let (autorite, racine, chaine, cle) = materiel("authentifie");
+    let (base, fichier) = entrepot("authentifie");
+
+    // La machine et sa clé. L'annuaire ne connaît que la PUBLIQUE.
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0x33; 32]);
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0x44; 16]);
+    let proprietaire = Identifiant::depuis_entropie(Genre::Utilisateur, [0x55; 16]);
+    base.poser_machine(
+        machine,
+        &asl_registre::Machine {
+            provenance: Provenance::Ici,
+            proprietaire,
+            cle: secrete.publique().octets(),
+            annonce: true,
+            lecture: true,
+        },
+    )
+    .expect("la machine est écrite");
+
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let mut client =
+        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    for _ in 0..64_u32 {
+        client.parler().await;
+        if !client.ecouter().await {
+            break;
+        }
+    }
+
+    // ── SANS PREUVE, UNE LECTURE EST REFUSÉE ────────────────────────────────
+    ams_quic_client::envoyer_une_requete(&mut client, 0, 17, b"/v1/ou?service=imap", None, b"")
+        .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut client, 0).await;
+    assert_eq!(
+        champ(&champs(client.recu(0)), b":status"),
+        Some(&b"401"[..]),
+        "une lecture sans preuve doit être refusée"
+    );
+
+    // ── LE DÉFI ─────────────────────────────────────────────────────────────
+    ams_quic_client::envoyer_une_requete(&mut client, 4, 17, b"/v1/defi", None, b"").await;
+    let octets = ams_quic_client::attendre_la_reponse(&mut client, 4).await;
+    assert_eq!(
+        octets.len(),
+        asl_cle::DEFI_OCTETS,
+        "un défi fait trente-deux octets : {octets:?}"
+    );
+    let mut brut = [0_u8; asl_cle::DEFI_OCTETS];
+    brut.copy_from_slice(&octets);
+    let defi = asl_cle::Defi::depuis_octets(brut);
+
+    // ── LA PREUVE ───────────────────────────────────────────────────────────
+    //
+    // Le client lie sa signature au certificat qu'il a VÉRIFIÉ — ici, la
+    // racine n'en porte qu'un, celui du serveur de banc.
+    let liaison = asl_loop_tokio::liaison_du_certificat(&chaine).expect("un certificat de tête");
+    let signature = secrete
+        .signer(machine, &defi, &liaison)
+        .expect("la machine signe");
+    let mut preuve = Vec::with_capacity(81);
+    preuve.push(Genre::Machine.prefixe());
+    preuve.extend_from_slice(machine.octets());
+    preuve.extend_from_slice(signature.octets());
+
+    ams_quic_client::envoyer_avec_media(
+        &mut client,
+        8,
+        20, // `:method: POST`
+        b"/v1/defi",
+        None,
+        &preuve,
+        b"application/octet-stream",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut client, 8).await;
+    assert_eq!(
+        champ(&champs(client.recu(8)), b":status"),
+        Some(&b"204"[..]),
+        "la preuve a été refusée"
+    );
+
+    // ── ET LA MÊME LECTURE N'EST PLUS REFUSÉE POUR DÉFAUT DE PREUVE ─────────
+    ams_quic_client::envoyer_une_requete(&mut client, 12, 17, b"/v1/ou?service=imap", None, b"")
+        .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut client, 12).await;
+    let apres = champs(client.recu(12));
+    assert_ne!(
+        champ(&apres, b":status"),
+        Some(&b"401"[..]),
+        "la connexion est authentifiée, le refus ne peut plus être celui-là : {apres:?}"
+    );
 
     let _ = dire_stop.send(());
     let _ = tache.await;
