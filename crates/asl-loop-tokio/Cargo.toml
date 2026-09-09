@@ -8,9 +8,11 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+asl-annuaire.workspace = true
 asl-auth.workspace = true
 asl-cle.workspace = true
 asl-id.workspace = true
+asl-proto.workspace = true
 asl-registre.workspace = true
 asl-session.workspace = true
 asl-store.workspace = true

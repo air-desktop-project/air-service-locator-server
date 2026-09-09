@@ -108,7 +108,8 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         // défi prévisible ne défie personne. Le client reçoit alors un `500`,
         // qui dit la vérité — la panne est de notre côté.
         let tirer = || entropie::un_defi().ok();
-        let mut application = Annuaire::new(&entrepot, liaison, &tirer);
+        let nommer = || entropie::un_identifiant().ok();
+        let mut application = Annuaire::new(&entrepot, liaison, &tirer, &nommer);
         let comptes = servir_quic(
             socket,
             tls,

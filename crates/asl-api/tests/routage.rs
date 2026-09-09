@@ -548,3 +548,34 @@ fn le_defi_n_exige_aucune_preuve_et_c_est_le_point() {
     let resolu = resoudre(Methode::Get, b"/v1/defi").expect("la cible se route");
     assert_eq!(resolu.exigence, Exigence::Aucune);
 }
+
+// ── L'annonce ───────────────────────────────────────────────────────────────
+
+#[test]
+fn l_annonce_n_a_qu_un_verbe() {
+    // **PAS DE `DELETE`** : fermer la connexion suffit, et un verbe de retrait
+    // ferait deux façons de dire la même chose. Pas de `PUT` non plus : la
+    // connexion EST le bail.
+    for (methode, sert) in [
+        (Methode::Post, true),
+        (Methode::Get, false),
+        (Methode::Put, false),
+        (Methode::Patch, false),
+        (Methode::Delete, false),
+    ] {
+        let resolu = resoudre(methode, b"/v1/annonce").expect("la cible se route");
+        assert_eq!(resolu.ressource, Ressource::Annonce);
+        assert_eq!(resolu.sert, sert, "{methode:?}");
+    }
+}
+
+#[test]
+fn l_annonce_exige_la_capacite_d_annoncer_et_non_celle_de_lire() {
+    // **LES DEUX CAPACITÉS NE SE CONFONDENT PAS** : un daemon qui annonce n'a
+    // aucune raison de pouvoir interroger l'annuaire, et réciproquement.
+    let annonce = resoudre(Methode::Post, b"/v1/annonce").expect("la cible se route");
+    assert_eq!(annonce.exigence, Exigence::MachineAnnonce);
+
+    let lecture = resoudre(Methode::Get, b"/v1/ou?service=imap").expect("la cible se route");
+    assert_eq!(lecture.exigence, Exigence::MachineLecture);
+}

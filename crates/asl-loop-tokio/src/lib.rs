@@ -39,6 +39,7 @@
 //! | [`pont`] | Marie `ams_h3::Transport` et `ams_quic_tls::Connection`. |
 //! | [`h3`] | Présente `asl-session` à `ams-h3`, connexion par connexion. |
 //! | [`privileges`] | Le refus de tourner en root (C8). |
+//! | [`vivier`] | L'état VIVANT des annonces — en mémoire, jamais sur disque. |
 //!
 //! # CE QUI MANQUE ENCORE
 //!
@@ -49,6 +50,7 @@ pub mod h3;
 pub mod pont;
 pub mod privileges;
 pub mod quic;
+pub mod vivier;
 
 pub use h3::Annuaire;
 pub use pont::Pont;
@@ -56,6 +58,7 @@ pub use privileges::{EstRoot, refuser_root};
 pub use quic::{
     Application, Comptes, GRACE_EXTINCTION_US, SansApplication, maintenant, servir_quic,
 };
+pub use vivier::Vivier;
 
 /// Monte la configuration TLS d'un annuaire, ALPN comprise.
 ///

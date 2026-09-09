@@ -60,6 +60,7 @@ const fn methode(brut: u8) -> Methode {
 /// Le chemin canonique d'une ressource, recomposé depuis ce qu'on en a compris.
 fn chemin_de(ressource: &Ressource<'_>) -> String {
     match ressource {
+        Ressource::Annonce => "/v1/annonce".to_owned(),
         Ressource::Defi => "/v1/defi".to_owned(),
         Ressource::Comptes => "/v1/comptes".to_owned(),
         Ressource::Utilisateur { compte } => format!("/v1/utilisateurs/{compte}"),

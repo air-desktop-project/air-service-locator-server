@@ -35,6 +35,21 @@ pub fn un_defi() -> io::Result<Defi> {
     Ok(Defi::depuis_octets(octets))
 }
 
+/// Tire seize octets, pour un identifiant.
+///
+/// **LE MÊME CSPRNG QUE LES DÉFIS**, et pour une raison voisine : un
+/// identifiant de service qui se devine laisserait deviner ce qui existe, et
+/// C10 tient précisément à ce que rien ne le laisse deviner.
+///
+/// # Errors
+///
+/// [`io::Error`] si le noyau refuse de fournir de l'entropie.
+pub fn un_identifiant() -> io::Result<[u8; 16]> {
+    let mut octets = [0_u8; 16];
+    remplir(&mut octets)?;
+    Ok(octets)
+}
+
 /// Remplit ces octets depuis le noyau, entièrement.
 fn remplir(quoi: &mut [u8]) -> io::Result<()> {
     let mut ecrits = 0_usize;
@@ -64,7 +79,7 @@ fn remplir(quoi: &mut [u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{remplir, un_defi};
+    use super::{remplir, un_defi, un_identifiant};
 
     #[test]
     fn deux_defis_ne_se_ressemblent_pas() {
@@ -82,6 +97,14 @@ mod tests {
         // 2^256 ; celui-ci l'attrape tout de suite.
         let defi = un_defi().expect("le noyau fournit");
         assert_ne!(defi.octets(), &[0_u8; asl_cle::DEFI_OCTETS]);
+    }
+
+    #[test]
+    fn deux_identifiants_ne_se_ressemblent_pas() {
+        let un = un_identifiant().expect("le noyau fournit");
+        let autre = un_identifiant().expect("le noyau fournit");
+        assert_ne!(un, autre);
+        assert_ne!(un, [0_u8; 16]);
     }
 
     #[test]

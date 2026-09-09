@@ -41,6 +41,8 @@ use asl_id::Identifiant;
 use asl_session::{Besoin, Resolution, Session, Trouvaille};
 use asl_store::Entrepot;
 
+use crate::vivier::Vivier;
+
 use crate::pont::Pont;
 use crate::quic::{Application, maintenant};
 
@@ -65,6 +67,20 @@ struct Service<'a> {
     session: &'a mut Session,
     /// Ce qui se souvient.
     entrepot: &'a Entrepot,
+    /// Ce qui vit.
+    vivier: &'a mut Vivier,
+    /// L'identifiant local de la connexion, pour attribuer les annonces.
+    connexion: Vec<u8>,
+    /// De quoi tirer un identifiant de service, si l'annonce en crée un.
+    tirer_un_identifiant: &'a (dyn Fn() -> Option<[u8; 16]> + Send + Sync),
+    /// Le corps de la requête, pour l'annonce qui doit le décoder.
+    corps: Vec<u8>,
+    /// D'où l'on VOIT ce pair.
+    ///
+    /// **C'est le seul fait qu'on ait constaté plutôt qu'entendu**, et c'est ce
+    /// qui permet le verdict de NAT : `asl-annuaire` compare cette adresse à
+    /// celles que le daemon annonce.
+    vu_depuis: asl_proto::VuDepuis,
     /// De quoi tirer un défi, si le noyau en a donné.
     ///
     /// **L'ENTROPIE EST UNE ENTRÉE-SORTIE**, donc elle est ici et pas à
@@ -86,6 +102,7 @@ impl ams_h3::Service for Service<'_> {
         sortie: &'o mut [u8],
     ) -> Reponse<'o> {
         let besoin = asl_session::besoin(self.session, tete, corps);
+        self.corps = corps.to_vec();
         let trouvaille = self.chercher(&besoin);
         asl_session::repondre(self.session, &besoin, &trouvaille, self.defi, sortie)
     }
@@ -102,9 +119,14 @@ impl Service<'_> {
     /// RÉPONSE dirait à un inconnu que notre base a un problème, et c'est
     /// précisément ce qu'on ne veut pas lui apprendre. La distinction ira au
     /// journal, quand il existera.
-    fn chercher(&self, besoin: &Besoin<'_>) -> Trouvaille {
+    fn chercher(&mut self, besoin: &Besoin<'_>) -> Trouvaille {
         match besoin {
             Besoin::Deja(_) | Besoin::DefiATirer => Trouvaille::Rien,
+
+            // **C'EST ICI QUE L'ANNONCE VIT.** Voir `annoncer`.
+            Besoin::Annoncer => self
+                .annoncer()
+                .map_or(Trouvaille::Rien, Trouvaille::Annoncee),
 
             // **LA CLÉ VIENT DE L'ENREGISTREMENT DE LA MACHINE**, et rien
             // d'autre : une machine inconnue, une clé illisible et une
@@ -152,6 +174,98 @@ impl Service<'_> {
 }
 
 impl Service<'_> {
+    /// Prend une annonce, ouvre sa session vivante, et compose la réponse.
+    ///
+    /// # POURQUOI TOUT CECI EST À L'ÉTAGE 3
+    ///
+    /// Une annonce OUVRE de l'état vivant, qui n'existe qu'en mémoire et
+    /// n'appartient qu'à cette connexion. Ce qui DÉCIDE reste ailleurs et reste
+    /// pur : `asl_auth::decider_annonce` pour la permission,
+    /// `asl_annuaire::Session::ouvrir` pour tout le reste — le bail, le verdict
+    /// de NAT, les candidats. Cette fonction ne fait que les appeler dans
+    /// l'ordre, et ranger ce qu'ils rendent.
+    ///
+    /// Rend `None` sur un refus ou un message mal formé ; `asl-session` en fait
+    /// un `403`.
+    fn annoncer(&mut self) -> Option<Vec<u8>> {
+        // ── LE DEMANDEUR, ET SA PERMISSION ──────────────────────────────────
+        let qui = self.session.machine()?;
+        let rangee = self.entrepot.machine(qui).ok().flatten()?;
+        let demandeur = asl_auth::Machine::nouvelle(
+            qui,
+            rangee.proprietaire,
+            asl_auth::Capacites {
+                annonce: rangee.annonce,
+                lecture: rangee.lecture,
+            },
+        )
+        .ok()?;
+        if asl_auth::decider_annonce(&demandeur) == asl_auth::Decision::Refuser {
+            return None;
+        }
+
+        // ── LE MESSAGE ──────────────────────────────────────────────────────
+        let mut tampons = asl_proto::cadrage::Tampons::nouveaux();
+        let annonce = asl_proto::Annonce::decoder(&self.corps, &mut tampons).ok()?;
+
+        // **UNE MACHINE N'ANNONCE QUE POUR ELLE-MÊME.** Le message porte un
+        // identifiant de machine ; s'il n'est pas celui qui a prouvé sa clé sur
+        // CETTE connexion, c'est une usurpation, et elle se refuse ici.
+        if annonce.machine != qui {
+            return None;
+        }
+
+        // ── LE SERVICE : CELUI QUI EXISTE, OU UN NEUF ───────────────────────
+        //
+        // Un daemon n'a pas à déclarer son service avant de l'annoncer : la
+        // première annonce d'un nom le crée. L'exiger d'abord obligerait à
+        // passer par l'application mobile pour lancer un daemon, ce qu'aucun
+        // déploiement automatisé ne peut faire.
+        let nom = annonce.service.as_str();
+        let service = match self.entrepot.service_par_nom(qui, nom).ok()? {
+            Some(deja) => deja,
+            None => {
+                let neuf = Identifiant::depuis_entropie(
+                    asl_id::Genre::Service,
+                    (self.tirer_un_identifiant)()?,
+                );
+                self.entrepot
+                    .poser_service(
+                        neuf,
+                        &asl_registre::Service {
+                            provenance: asl_registre::Provenance::Ici,
+                            machine: qui,
+                            nom: asl_registre::NomRange::nouveau(nom).ok()?,
+                        },
+                    )
+                    .ok()?;
+                neuf
+            }
+        };
+
+        // ── LA SESSION VIVANTE ──────────────────────────────────────────────
+        let (vivante, _ordres) = asl_annuaire::Session::ouvrir(
+            service,
+            BAIL_PAR_DEFAUT,
+            &annonce,
+            self.vu_depuis,
+            instant(),
+        )
+        .ok()?;
+
+        // **LES ORDRES DE SONDE NE SONT PAS ENCORE EXÉCUTÉS**, et c'est écrit
+        // plutôt que tu. `asl_proto::Verdict::EnCours` existe exactement pour
+        // cela : l'annuaire répond sans avoir sondé, et dit qu'il n'a pas
+        // sondé. Sonder est une tranche à part — elle ouvre des connexions TCP
+        // vers des tiers, avec ses délais et ses refus.
+        let mut sortie = alloc_reponse();
+        let combien = vivante.reponse().ok()?.encoder(&mut sortie).ok()?;
+        sortie.truncate(combien);
+
+        self.vivier.poser(service, &self.connexion, vivante);
+        Some(sortie)
+    }
+
     /// Rassemble ce qu'il faut pour décider d'une résolution.
     ///
     /// # POURQUOI TANT DE LECTURES POUR UNE QUESTION SI SIMPLE
@@ -211,6 +325,45 @@ impl Service<'_> {
     }
 }
 
+/// L'instant courant, comme `asl-annuaire` le compte.
+///
+/// **EN MILLISECONDES, ET MONOTONE PAR CONVENTION.** `asl_annuaire::Instant` est
+/// une horloge de DÉCISION — elle sert à dire « ce bail a-t-il expiré ». On la
+/// tire de la même source que le reste de la boucle, en divisant les
+/// microsecondes : un bail se compte en dizaines de secondes, et la
+/// milliseconde y est déjà une précision de trop.
+fn instant() -> asl_annuaire::Instant {
+    asl_annuaire::Instant::depuis_millisecondes(maintenant().saturating_div(1_000))
+}
+
+/// Le bail qu'on accorde.
+///
+/// **QUINZE SECONDES DE KEEPALIVE, QUARANTE-CINQ D'INACTIVITÉ**, soit trois
+/// keepalives manqués. `modele.md` le propose et demande de le MESURER sur de
+/// vrais NAT : ce n'est pas une conclusion, et le jour où la mesure sera faite,
+/// c'est ici qu'elle atterrira.
+const BAIL_PAR_DEFAUT: asl_proto::Bail = match asl_proto::Bail::nouveau(15, 45) {
+    Ok(bail) => bail,
+    // Ces deux constantes sont valides, et le compilateur le vérifie : cette
+    // branche ne compile que parce qu'elle doit exister, jamais parce qu'elle
+    // sert.
+    Err(_) => panic!("quinze et quarante-cinq forment un bail valide"),
+};
+
+/// Le port qu'on note quand un pair prétend parler depuis le zéro.
+const PORT_DE_SECOURS: asl_proto::Port = match asl_proto::Port::depuis_u16(1) {
+    Ok(port) => port,
+    Err(_) => panic!("un est un port"),
+};
+
+/// Un tampon pour une réponse d'annonce.
+///
+/// `asl_proto::cadrage::MESSAGE_MAX` est la borne du protocole : au-delà, le
+/// message ne serait de toute façon pas lisible par un pair.
+fn alloc_reponse() -> Vec<u8> {
+    vec![0_u8; asl_proto::cadrage::MESSAGE_MAX]
+}
+
 /// L'application qui sert l'API de l'annuaire en HTTP/3.
 pub struct Annuaire<'a> {
     /// Un conducteur et une session par connexion vivante.
@@ -223,6 +376,10 @@ pub struct Annuaire<'a> {
     /// Voir `asl_cle::LiaisonDeCanal` pour ce qu'elle ferme et ce qu'elle ne
     /// ferme pas.
     liaison: LiaisonDeCanal,
+    /// Toutes les annonces vivantes.
+    vivier: Vivier,
+    /// De quoi tirer un identifiant de service.
+    tirer_un_identifiant: &'a (dyn Fn() -> Option<[u8; 16]> + Send + Sync),
     /// De quoi tirer un défi.
     ///
     /// `Send + Sync` : l'écoute tourne dans une tâche, et ce qu'elle tient doit
@@ -243,14 +400,23 @@ impl<'a> Annuaire<'a> {
         entrepot: &'a Entrepot,
         liaison: LiaisonDeCanal,
         tirer_un_defi: &'a (dyn Fn() -> Option<Defi> + Send + Sync),
+        tirer_un_identifiant: &'a (dyn Fn() -> Option<[u8; 16]> + Send + Sync),
     ) -> Self {
         Self {
             connexions: HashMap::new(),
             entrepot,
             liaison,
+            vivier: Vivier::nouveau(),
+            tirer_un_identifiant,
             tirer_un_defi,
             servies: 0,
         }
+    }
+
+    /// Combien d'annonces vivent.
+    #[must_use]
+    pub fn annonces_vivantes(&self) -> usize {
+        self.vivier.combien()
     }
 
     /// Combien de connexions ont parlé HTTP/3.
@@ -284,8 +450,15 @@ impl Application for Annuaire<'_> {
         }
     }
 
-    fn a_la_lecture(&mut self, connexion: &mut Connection, flux: StreamId, _pair: SocketAddr) {
+    fn a_la_lecture(&mut self, connexion: &mut Connection, flux: StreamId, pair: SocketAddr) {
         let clef = connexion.local_id().as_bytes().to_vec();
+
+        // **LA CONNEXION VIVANTE EST LE KEEPALIVE.** `protocole.md` §1.2 : il
+        // n'y a pas de verbe pour rafraîchir, et cette ligne est ce qui le
+        // rend vrai. Sans elle, une annonce expirerait sous un daemon qui n'a
+        // rien fait de mal — il tient sa connexion, et c'est ce qu'on lui
+        // demande.
+        self.vivier.keepalive(&clef, instant());
         let Some(etat) = self.connexions.get_mut(&clef) else {
             return;
         };
@@ -299,6 +472,16 @@ impl Application for Annuaire<'_> {
         let mut service = Service {
             session,
             entrepot: self.entrepot,
+            vivier: &mut self.vivier,
+            connexion: clef.clone(),
+            tirer_un_identifiant: self.tirer_un_identifiant,
+            corps: Vec::new(),
+            vu_depuis: asl_proto::VuDepuis {
+                adresse: pair.ip(),
+                // Un pair qui parle depuis le port zéro n'existe pas : une
+                // socket connectée en a toujours un.
+                port: asl_proto::Port::depuis_u16(pair.port()).unwrap_or(PORT_DE_SECOURS),
+            },
             defi: (self.tirer_un_defi)(),
         };
         if let Err(faute) = conducteur.on_readable(&mut Pont(connexion), &mut service, flux) {
@@ -338,11 +521,21 @@ impl Application for Annuaire<'_> {
     }
 
     fn a_la_fermeture(&mut self, connexion: &Connection, _pair: SocketAddr) {
-        // **ET C'EST ICI QUE LE BAIL TOMBERA.** Aujourd'hui on ne libère que le
-        // conducteur et la session ; le jour où une machine se sera annoncée sur
-        // cette connexion, c'est ce rendez-vous qui fera passer ses services de
-        // `joignable` à `parti` — sans quoi l'annuaire annoncerait des services
-        // que plus personne ne sert.
+        // **ET C'EST ICI QUE LE BAIL TOMBE.** Tout ce que cette connexion avait
+        // annoncé cesse d'exister, immédiatement — c'est le gain le plus net du
+        // transport tenu. Avec des annonces périodiques, un daemon arrêté
+        // proprement restait faussement présent jusqu'à l'expiration.
+        //
+        // **`Volontaire`, ET NON `Inactivite`.** La distinction compte pour qui
+        // regarde (`protocole.md` §1.3), et l'écoute ne sait pas encore la
+        // faire : elle ferme sur signal comme sur délai. Le motif juste viendra
+        // avec ce qui distingue les deux — le dire ici plutôt que de laisser
+        // croire que c'est déjà fait.
+        let partis = self.vivier.retirer(
+            connexion.local_id().as_bytes(),
+            asl_annuaire::MotifDeDepart::Volontaire,
+        );
+        let _ = partis;
         self.connexions.remove(connexion.local_id().as_bytes());
     }
 }

@@ -93,6 +93,14 @@ impl Methode {
 /// c'est une propriété de la RESSOURCE et non de la requête.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Exigence {
+    /// Une machine qui porte la capacité `annonce`.
+    ///
+    /// **ELLE NE SE CONFOND PAS AVEC [`Exigence::MachineLecture`]**, et les
+    /// fondre serait la faute : un daemon qui annonce n'a aucune raison de
+    /// pouvoir INTERROGER l'annuaire, et une machine qui interroge n'a aucune
+    /// raison de pouvoir y écrire. `modele.md` §2.3 sépare les deux capacités
+    /// précisément pour qu'on puisse n'en donner qu'une.
+    MachineAnnonce,
     /// Une signature d'un appareil enrôlé du compte.
     ///
     /// C'est le cas de presque toute l'API mobile : il n'y a pas de mot de passe
@@ -109,6 +117,19 @@ pub enum Exigence {
 /// Ce qu'une requête désigne.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ressource<'a> {
+    /// `/v1/annonce` — un daemon dit sur quel port il écoute.
+    ///
+    /// # C'EST LA RAISON D'ÊTRE DU PRODUIT, ET ELLE N'A QU'UN VERBE
+    ///
+    /// `POST` annonce ou réannonce. **Il n'y a pas de verbe pour RETIRER** :
+    /// `protocole.md` §1.3 le dit — fermer la connexion suffit, et c'est
+    /// instantané. Un `DELETE` ferait deux façons de dire la même chose, et
+    /// l'annuaire devrait décider quoi faire d'un retrait qui croise un
+    /// keepalive déjà en vol.
+    ///
+    /// Il n'y a pas non plus de verbe pour RAFRAÎCHIR : la connexion EST le
+    /// bail, et le keepalive de QUIC suffit.
+    Annonce,
     /// `/v1/defi` — le défi d'authentification de CETTE connexion.
     ///
     /// # POURQUOI UNE RESSOURCE, ET NON UNE POIGNÉE DE MAIN À PART
@@ -207,6 +228,7 @@ impl Ressource<'_> {
     #[must_use]
     pub const fn verbes(&self) -> &'static [Methode] {
         match self {
+            Self::Annonce => &[Methode::Post],
             Self::Defi => &[Methode::Get, Methode::Post],
             Self::Comptes | Self::Appareils | Self::Machines => &[Methode::Post],
             Self::Utilisateur { .. }
@@ -250,6 +272,7 @@ impl Ressource<'_> {
             Self::Defi | Self::Comptes | Self::AliasResolu { .. } | Self::Utilisateur { .. } => {
                 Exigence::Aucune
             }
+            Self::Annonce => Exigence::MachineAnnonce,
             Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
             _ => Exigence::Appareil,
         }
@@ -494,6 +517,7 @@ fn service_de_la_requete(requete: &[u8]) -> Result<NomService<'_>, Erreur> {
 /// La table des chemins.
 fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, Erreur> {
     match segments {
+        ["v1", "annonce"] => Ok(Ressource::Annonce),
         ["v1", "defi"] => Ok(Ressource::Defi),
         ["v1", "comptes"] => Ok(Ressource::Comptes),
         ["v1", "utilisateurs", compte] => Ok(Ressource::Utilisateur {

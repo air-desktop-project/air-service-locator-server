@@ -108,7 +108,14 @@ async fn lever(
         // Un défi FIXE dans l'essai : ce qui est éprouvé ici est le transport,
         // pas la qualité du tirage — celle-là l'est dans `asl-server::entropie`.
         let tirer = || Some(asl_cle::Defi::depuis_octets([0x5A; 32]));
-        let mut application = Annuaire::new(&entrepot, liaison, &tirer);
+        // **UN IDENTIFIANT DE SERVICE QUI VARIE**, même dans l'essai : deux
+        // annonces de noms différents doivent donner deux services.
+        let compteur = std::sync::atomic::AtomicU8::new(1);
+        let nommer = || {
+            let rang = compteur.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some([rang; 16])
+        };
+        let mut application = Annuaire::new(&entrepot, liaison, &tirer, &nommer);
         let arret = async {
             let _ = entendre_stop.await;
         };
@@ -667,6 +674,169 @@ async fn avec_l_autorisation_le_meme_service_cesse_d_etre_introuvable() {
         Some(&b"501"[..]),
         "l'autorisation ouvre l'accès ; il n'y a simplement rien à servir tant \
          qu'aucune annonce n'est rangée : {apres:?}"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn un_daemon_annonce_et_son_service_devient_trouvable() {
+    // **LA RAISON D'ÊTRE DU PRODUIT, EN UN ESSAI.** Un daemon obtient du système
+    // le port qu'il veut, l'annonce, et ses clients le retrouvent — sans qu'il
+    // ait jamais eu besoin d'un numéro de port fixe.
+    let (autorite, racine, chaine, cle) = materiel("annonce");
+    let (base, fichier) = entrepot("annonce");
+
+    let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xC1; 16]);
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0xD1; 16]);
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xD1; 32]);
+    base.poser_machine(
+        machine,
+        &asl_registre::Machine {
+            provenance: Provenance::Ici,
+            proprietaire: compte,
+            cle: secrete.publique().octets(),
+            annonce: true,
+            lecture: true,
+        },
+    )
+    .expect("la machine est écrite");
+
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let mut client =
+        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    for _ in 0..64_u32 {
+        client.parler().await;
+        if !client.ecouter().await {
+            break;
+        }
+    }
+    authentifier(&mut client, &chaine, machine, &secrete, 0, 4).await;
+
+    // ── L'ANNONCE ───────────────────────────────────────────────────────────
+    //
+    // Le daemon dit sur quel port il écoute. Le port est celui que le système
+    // lui a donné — ici 49152, un éphémère.
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot-de-messages",\
+"points":[{{"protocole":"tcp","port":49152}}],\
+"adresses_locales":["192.168.1.20"]}}"#,
+        machine.texte()
+    )
+    .replace('\\', "");
+
+    ams_quic_client::envoyer_avec_media(
+        &mut client,
+        8,
+        20,
+        b"/v1/annonce",
+        None,
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut client, 8).await;
+    let apres = champs(client.recu(8));
+    assert_eq!(
+        champ(&apres, b":status"),
+        Some(&b"200"[..]),
+        "l'annonce a été refusée : {apres:?}"
+    );
+
+    let dit = String::from_utf8_lossy(&rendu);
+    assert!(
+        dit.contains("49152"),
+        "la réponse doit porter le port annoncé : {dit}"
+    );
+    // **`en_cours` PLUTÔT QU'UN VERDICT** : l'annuaire n'a pas encore sondé, et
+    // il le DIT au lieu de l'affirmer. C'est C6 dans la réponse.
+    assert!(
+        dit.contains("en_cours"),
+        "l'annuaire ne doit rien affirmer qu'il n'a pas mesuré : {dit}"
+    );
+
+    // **LE VERDICT DE NAT EST CALCULÉ, ET IL EST JUSTE.** Le daemon annonce
+    // `192.168.1.20` ; l'annuaire le voit venir de `127.0.0.1`. Les deux ne
+    // concordent pas, donc il est derrière un NAT — et c'est le seul endroit du
+    // produit où cette comparaison peut se faire, puisque le daemon ne sait pas
+    // comment on le voit.
+    assert!(
+        dit.contains(r#""derriere_nat":"oui""#),
+        "le verdict de NAT n'a pas été tiré de la comparaison : {dit}"
+    );
+
+    // **L'ADRESSE CONSTATÉE, ET NON CELLE QU'ON A ENTENDUE.**
+    assert!(
+        dit.contains("127.0.0.1"),
+        "la réponse doit dire d'où l'annuaire a VU ce daemon : {dit}"
+    );
+
+    // Le service a reçu un identifiant : la première annonce d'un nom le crée.
+    assert!(
+        dit.contains(r#""service":"s-"#),
+        "l'annonce doit avoir créé le service : {dit}"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn une_machine_sans_capacite_d_annonce_est_refusee() {
+    // La capacité est une décision de l'utilisateur sur SA machine. Une machine
+    // de lecture seule ne doit rien pouvoir écrire dans l'annuaire.
+    let (autorite, racine, chaine, cle) = materiel("sans-annonce");
+    let (base, fichier) = entrepot("sans-annonce");
+
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0xE1; 16]);
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xE1; 32]);
+    base.poser_machine(
+        machine,
+        &asl_registre::Machine {
+            provenance: Provenance::Ici,
+            proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [0xE1; 16]),
+            cle: secrete.publique().octets(),
+            annonce: false,
+            lecture: true,
+        },
+    )
+    .expect("écrite");
+
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let mut client =
+        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    for _ in 0..64_u32 {
+        client.parler().await;
+        if !client.ecouter().await {
+            break;
+        }
+    }
+    authentifier(&mut client, &chaine, machine, &secrete, 0, 4).await;
+
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"imap","points":[{{"protocole":"tcp","port":993}}],"adresses_locales":[]}}"#,
+        machine.texte()
+    );
+    ams_quic_client::envoyer_avec_media(
+        &mut client,
+        8,
+        20,
+        b"/v1/annonce",
+        None,
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut client, 8).await;
+    assert_eq!(
+        champ(&champs(client.recu(8)), b":status"),
+        Some(&b"403"[..]),
+        "une machine sans capacité `annonce` a pu annoncer"
     );
 
     let _ = dire_stop.send(());

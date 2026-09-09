@@ -140,6 +140,19 @@ pub enum Besoin<'a> {
     Compte(Identifiant),
     /// Le compte qui porte cet alias.
     CompteParAlias(&'a str),
+    /// Ce daemon annonce un service.
+    ///
+    /// # LE CORPS N'EST PAS DÉCODÉ ICI, ET C'EST DÉLIBÉRÉ
+    ///
+    /// Une annonce n'est pas une lecture : elle OUVRE une session vivante, qui
+    /// n'existe qu'en mémoire et n'appartient qu'à cette connexion. Cet état-là
+    /// est de l'étage 3 — c'est lui qui tient le vivier, c'est lui qui le vide
+    /// quand la connexion tombe.
+    ///
+    /// Cette crate ne fait donc que dire « c'est une annonce, et le demandeur a
+    /// le droit d'en faire » ; `asl_annuaire::Session::ouvrir` décide du reste,
+    /// et `asl_auth::decider_annonce` de la permission.
+    Annoncer,
     /// Où se trouve ce service, sur cette machine.
     ///
     /// **CE BESOIN EN CACHE QUATRE** : le demandeur (pour ses capacités et son
@@ -198,6 +211,12 @@ pub enum Trouvaille {
     Cle(ClePublique),
     /// De quoi décider d'une résolution.
     Resolution(Resolution),
+    /// L'annonce a été prise, et voici ce qu'il faut répondre.
+    ///
+    /// Le corps est déjà encodé par `asl_proto::Reponse` — l'étage 3 l'a
+    /// composé en même temps qu'il ouvrait la session vivante, parce que la
+    /// réponse DÉCRIT cette session.
+    Annoncee(alloc::vec::Vec<u8>),
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -305,7 +324,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &[u8]) -> Be
         // **`MachineLecture` EST TENUE DÈS MAINTENANT** : la connexion sait si
         // une machine a prouvé sa clé. Sans preuve, c'est `401` — et cette
         // fois le mot est juste, puisque `/v1/defi` attend bel et bien derrière.
-        Exigence::MachineLecture => {
+        Exigence::MachineLecture | Exigence::MachineAnnonce => {
             if session.machine.is_none() {
                 return Besoin::Deja(StatusCode::UNAUTHORIZED);
             }
@@ -318,6 +337,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &[u8]) -> Be
     match resolu.ressource {
         Ressource::AliasResolu { alias } => Besoin::CompteParAlias(alias.as_str()),
         Ressource::Utilisateur { compte } => Besoin::Compte(compte),
+        Ressource::Annonce => Besoin::Annoncer,
         Ressource::Ou { machine, service } => Besoin::Ou {
             machine,
             service: service.as_str(),
@@ -412,6 +432,23 @@ pub fn repondre<'o>(
             };
             composer(statut, media, corps, sortie)
         }
+        // **L'ANNONCE EST PRISE À L'ÉTAGE 3**, qui tient le vivier. Ici, on ne
+        // fait qu'habiller ce qu'il rend.
+        Besoin::Annoncer => match trouvaille {
+            Trouvaille::Annoncee(corps) => composer(StatusCode::OK, JSON_MEDIA, corps, sortie),
+            // **`403` ICI, ET NON `404`.** C10 impose de ne rien dire de ce qui
+            // existe sur une LECTURE ; une annonce ne lit rien. Le daemon est
+            // authentifié, il n'a simplement pas la capacité `annonce` — ou son
+            // message est mal formé. Lui rendre « introuvable » l'enverrait
+            // chercher une faute d'URL.
+            _ => composer(
+                StatusCode::FORBIDDEN,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::FORBIDDEN),
+                sortie,
+            ),
+        },
+
         // **C'EST `asl-auth` QUI DÉCIDE, ET RIEN D'AUTRE ICI.** Cette crate
         // rassemble et compose ; la règle « un service ne se rend qu'à qui y a
         // droit » vit à un seul endroit, et c'est là-bas.
@@ -464,7 +501,7 @@ pub fn repondre<'o>(
                 sortie,
             ),
             Trouvaille::Compte { qui, alias } => rendre_un_compte(*qui, alias.as_ref(), sortie),
-            Trouvaille::Cle(_) | Trouvaille::Resolution(_) => composer(
+            Trouvaille::Cle(_) | Trouvaille::Resolution(_) | Trouvaille::Annoncee(_) => composer(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 PROBLEME_MEDIA,
                 probleme(StatusCode::INTERNAL_SERVER_ERROR),
@@ -588,6 +625,7 @@ const fn probleme(statut: StatusCode) -> &'static [u8] {
         StatusCode::UNAUTHORIZED => {
             br#"{"type":"about:blank","title":"Unauthorized","status":401}"#
         }
+        StatusCode::FORBIDDEN => br#"{"type":"about:blank","title":"Forbidden","status":403}"#,
         StatusCode::INTERNAL_SERVER_ERROR => {
             br#"{"type":"about:blank","title":"Internal Server Error","status":500}"#
         }
@@ -1754,5 +1792,159 @@ mod resolution {
             &mut sortie,
         );
         assert_eq!(reponse.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
+#[cfg(test)]
+mod enveloppe_de_l_annonce {
+    extern crate alloc;
+
+    use alloc::vec;
+    use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
+    use asl_cle::{CleSecrete, Defi, LiaisonDeCanal};
+    use asl_id::{Genre, Identifiant};
+
+    use super::{Besoin, JSON_MEDIA, PROBLEME_MEDIA, Session, Trouvaille, besoin, repondre};
+
+    fn liaison() -> LiaisonDeCanal {
+        asl_cle::liaison_depuis_certificat(b"le certificat du banc")
+    }
+
+    fn tete<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
+        let limites = Limits::default();
+        let mut constructeur = HeadBuilder::new(&limites);
+        constructeur.field(b":method", verbe).expect("le verbe");
+        constructeur.field(b":scheme", b"https").expect("le schéma");
+        constructeur
+            .field(b":authority", b"annuaire.example")
+            .expect("l'autorité");
+        constructeur.field(b":path", cible).expect("la cible");
+        constructeur.finish().expect("une tête complète")
+    }
+
+    fn champ<'a>(reponse: &ams_h3::Reponse<'a>, nom: &[u8]) -> Option<&'a [u8]> {
+        reponse
+            .fields()
+            .find(|(cle, _)| *cle == nom)
+            .map(|(_, valeur)| valeur)
+    }
+
+    /// Une session sur laquelle une machine a prouvé sa clé.
+    fn authentifiee() -> Session {
+        let secrete = CleSecrete::depuis_entropie([7; 32]);
+        let machine = Identifiant::depuis_entropie(Genre::Machine, [3; 16]);
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 256];
+
+        let quoi = besoin(&session, &tete(b"GET", b"/v1/defi"), b"");
+        let voulu = Defi::depuis_octets([9; 32]);
+        let _ = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Rien,
+            Some(voulu),
+            &mut sortie,
+        );
+
+        let signature = secrete
+            .signer(machine, &voulu, &liaison())
+            .expect("elle signe");
+        let mut corps = vec![Genre::Machine.prefixe()];
+        corps.extend_from_slice(machine.octets());
+        corps.extend_from_slice(signature.octets());
+
+        let quoi = besoin(&session, &tete(b"POST", b"/v1/defi"), &corps);
+        let _ = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Cle(secrete.publique()),
+            None,
+            &mut sortie,
+        );
+        session
+    }
+
+    #[test]
+    fn sans_preuve_une_annonce_est_refusee_avant_d_etre_lue() {
+        assert_eq!(
+            besoin(
+                &Session::new(liaison()),
+                &tete(b"POST", b"/v1/annonce"),
+                b"{}"
+            ),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn avec_une_preuve_l_annonce_est_confiee_a_l_etage_3() {
+        // **CETTE CRATE NE DÉCODE PAS LE MESSAGE**, et c'est le sujet de cet
+        // essai : elle dit « c'est une annonce », et rien de plus. Le corps est
+        // du charabia, et cela ne change rien ici.
+        assert_eq!(
+            besoin(
+                &authentifiee(),
+                &tete(b"POST", b"/v1/annonce"),
+                b"n'importe quoi"
+            ),
+            Besoin::Annoncer
+        );
+    }
+
+    #[test]
+    fn une_annonce_prise_rend_ce_que_l_etage_3_a_compose() {
+        let mut session = authentifiee();
+        let mut sortie = [0_u8; 512];
+        let compose = br#"{"service":"s-abc"}"#.to_vec();
+        let reponse = repondre(
+            &mut session,
+            &Besoin::Annoncer,
+            &Trouvaille::Annoncee(compose.clone()),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert_eq!(champ(&reponse, b"content-type"), Some(JSON_MEDIA));
+        assert_eq!(reponse.body(), compose.as_slice());
+    }
+
+    #[test]
+    fn une_annonce_refusee_rend_403_et_non_404() {
+        // **C10 NE S'APPLIQUE PAS ICI**, et il faut le dire : il impose de ne
+        // rien laisser deviner sur une LECTURE. Une annonce ne lit rien — le
+        // daemon est authentifié, il n'a simplement pas la capacité. Lui rendre
+        // « introuvable » l'enverrait chercher une faute d'URL.
+        let mut session = authentifiee();
+        let mut sortie = [0_u8; 512];
+        let reponse = repondre(
+            &mut session,
+            &Besoin::Annoncer,
+            &Trouvaille::Rien,
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::FORBIDDEN);
+        assert_eq!(champ(&reponse, b"content-type"), Some(PROBLEME_MEDIA));
+        assert!(
+            reponse.body().windows(3).any(|f| f == b"403"),
+            "le corps porte son propre code"
+        );
+    }
+
+    #[test]
+    fn une_trouvaille_qui_ne_correspond_pas_a_une_annonce_est_aussi_un_403() {
+        // Toute trouvaille qui n'est pas une annonce composée est un refus : il
+        // n'y a rien d'autre à rendre, et inventer un `500` distinguerait pour
+        // le client deux fautes qui ne le regardent pas.
+        let mut session = authentifiee();
+        let mut sortie = [0_u8; 512];
+        let reponse = repondre(
+            &mut session,
+            &Besoin::Annoncer,
+            &Trouvaille::Cle(CleSecrete::depuis_entropie([1; 32]).publique()),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::FORBIDDEN);
     }
 }
