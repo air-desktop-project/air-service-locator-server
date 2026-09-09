@@ -99,16 +99,74 @@ La réponse :
   "service": "s-4k9m2p7r1t6v3x8z5b0d2f4h6j",
   "keepalive_secondes": 15,
   "inactivite_secondes": 45,
-  "vu_depuis": { "adresse": "2001:db8::1c2d", "port": 51840, "famille": "ipv6" },
-  "derriere_nat": false,
+  "vu_depuis": { "adresse": "2001:db8::1c2d", "port": 51840 },
+  "derriere_nat": "non",
   "joignabilite": [
     { "protocole": "tcp", "port": 49152, "verdict": "joignable",
-      "candidat": "[2001:db8::1c2d]:49152", "a": "2026-09-08T13:02:11Z" },
+      "candidat": "[2001:db8::1c2d]:49152", "origine": "reflexif",
+      "a": 1789217731000 },
     { "protocole": "udp", "port": 49152, "verdict": "non_sonde",
-      "raison": "l'UDP ne se sonde pas" }
+      "raison": "protocole_non_sondable" }
   ]
 }
 ```
+
+### Trois écarts avec la première rédaction de ce document
+
+Ils ont été trouvés **en écrivant les types**, et corrigés ici plutôt que laissés
+en contradiction avec le code.
+
+**`derriere_nat` N'EST PLUS UN BOOLÉEN.** L'annuaire tranche en comparant ce
+qu'il observe à ce que le daemon annonce. Si le daemon n'a annoncé **aucune**
+adresse locale, il n'y a rien à comparer — et un booléen forcerait alors à
+répondre `false`, c'est-à-dire à affirmer une chose qu'on n'a pas mesurée. Un
+daemon derrière un NAT qui lirait « non » chercherait la panne partout sauf là où
+elle est. **C'était une violation de C6 dans le schéma**, et les trois valeurs
+sont `oui`, `non`, `indetermine`.
+
+**`famille` A DISPARU.** Elle se déduit de l'adresse. Un champ redondant est un
+champ qui peut CONTREDIRE l'autre — `"famille":"ipv6"` sur une adresse v4
+obligerait un lecteur à choisir un gagnant, et deux lecteurs choisiraient
+différemment. C'est la même faute que les champs en double, écrite dans le schéma
+au lieu du document.
+
+**`a` EST UN ENTIER DE MILLISECONDES D'ÉPOQUE**, et non une date RFC 3339. Un
+analyseur de date est une surface d'analyse entière — années bissextiles,
+longueurs de mois, la soixantième seconde, les décalages — exposée au réseau pour
+transporter un nombre. Et `asl-client` expose ceci à cinq langages qui ont chacun
+leur type de date : leur rendre un entier est plus honnête que leur rendre une
+chaîne qu'ils devront analyser. Le prix est réel : un humain qui lit avec `curl`
+voit `1789217731000`. L'afficher lisiblement est le travail de l'application ou
+de l'utilitaire `asl`, pas celui du protocole.
+
+**Et `raison` est une valeur, non une phrase.** `"protocole_non_sondable"` se
+compare ; « l'UDP ne se sonde pas » se traduit et se reformule.
+
+### Un quatrième verdict : `en_cours`
+
+**L'annuaire ne fait pas attendre le démarrage d'un daemon.**
+
+Répondre en portant déjà les verdicts suppose de SONDER avant de répondre — donc
+de faire attendre le démarrage le temps d'une connexion TCP vers une machine qui
+peut ne jamais répondre. Un daemon dont le démarrage dépend d'un délai d'attente
+réseau est un daemon qui démarre mal.
+
+La connexion est TENUE (§0) : l'annuaire répond donc tout de suite `en_cours`,
+sonde, et **pousse le verdict ensuite**. C'est précisément ce que le transport a
+été choisi pour permettre, et ce qu'un protocole requête-réponse aurait fermé.
+
+### Chaque verdict porte exactement ses champs
+
+| Verdict | Champs |
+|---|---|
+| `joignable` | `candidat`, `origine`, `a` |
+| `injoignable` | `a` |
+| `non_sonde` | `raison` |
+| `en_cours` | aucun |
+
+**Un champ hors de propos est REFUSÉ**, pas ignoré : une date sur un `en_cours`,
+un candidat sur un `non_sonde`, et l'émetteur dit quelque chose que le verdict ne
+peut pas porter. Le lire « au mieux » reviendrait à décider à sa place.
 
 **`vu_depuis`, `derriere_nat` et `joignabilite` sont la moitié utile de cette
 réponse**, et non un ornement de diagnostic.
@@ -125,6 +183,11 @@ réponse**, et non un ornement de diagnostic.
 client : le bon delta de keepalive se mesure et n'est pas encore mesuré
 (`modele.md` §4.1). Le figer côté client exigerait de mettre à jour tous les
 daemons installés chez des tiers — ce qui ne se produira jamais.
+
+**Le type refuse cependant ce qui est absurde** : une inactivité inférieure au
+DOUBLE du keepalive fait tuer un daemon parfaitement sain à la première perte de
+paquet. Il refuse l'absurde, il n'impose pas le prudent — la politique du produit
+est de trois pour un, et elle reste mesurable.
 
 ### 1.2 Tenir — le keepalive
 

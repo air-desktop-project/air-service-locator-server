@@ -18,9 +18,24 @@
 //! service, points d'écoute, candidats d'adresse —, le message d'ANNONCE avec sa
 //! validation, et son CADRAGE JSON dans les deux sens ([`cadrage`]).
 //!
-//! **Pas écrit** : le message de RÉPONSE — bail, `vu_depuis`, `derriere_nat`,
-//! verdicts de joignabilité (`docs/protocole.md` §1.1). Et le retrait, qui n'a
-//! pas de corps.
+//! **Écrit aussi** : le message de RÉPONSE — bail, `vu_depuis`, `derriere_nat`,
+//! verdicts de joignabilité — avec son cadrage.
+//!
+//! **Pas écrit** : le retrait, qui n'a pas de corps, et la poussée d'un verdict
+//! de sonde arrivée après la réponse (`docs/protocole.md` §1.1, `en_cours`).
+//!
+//! # C6 EST ÉCRITE DANS LES TYPES DE LA RÉPONSE
+//!
+//! La contrainte dit que l'annuaire n'affirme jamais ce qu'il n'a pas mesuré.
+//! Trois endroits la rendent impossible à enfreindre plutôt que déconseillée :
+//!
+//! - [`Verdict::Joignable`] porte sa date et son candidat **dans la variante** :
+//!   il n'existe aucune façon d'affirmer « joignable » sans dire depuis quand ni
+//!   par où ;
+//! - [`VerdictNat`] a **trois** états, parce qu'un booléen forcerait à répondre
+//!   « non » quand le daemon n'a annoncé aucune adresse à comparer ;
+//! - un point UDP ne peut être **ni** `joignable` **ni** `injoignable`, et
+//!   [`Reponse::nouvelle`] le refuse.
 //!
 //! # La frontière entre valeurs et cadrage
 //!
@@ -52,7 +67,7 @@
 
 pub mod cadrage;
 
-pub use cadrage::{MESSAGE_MAX, Tampons};
+pub use cadrage::{MESSAGE_MAX, Tampons, TamponsReponse};
 
 use core::fmt;
 use core::net::IpAddr;
@@ -220,6 +235,62 @@ pub enum Erreur {
     },
     /// La tranche de sortie ne suffit pas à écrire le message.
     TamponTropPetit,
+
+    // ── Le message de réponse ───────────────────────────────────────────────
+    /// Le keepalive vaut zéro : une cadence nulle n'est pas une cadence.
+    KeepaliveNul,
+    /// Le keepalive dépasse [`KEEPALIVE_MAX`].
+    KeepaliveTropLong {
+        /// La valeur reçue.
+        obtenu: u16,
+    },
+    /// Le délai d'inactivité ne laisse pas la place à un keepalive manqué.
+    ///
+    /// À un pour un, la première perte de paquet tue un daemon sain.
+    InactiviteTropCourte {
+        /// La valeur reçue.
+        obtenue: u16,
+        /// Le minimum admis.
+        minimum: u16,
+    },
+    /// Le texte ne désigne aucun verdict de NAT.
+    VerdictNatInconnu,
+    /// Le texte ne désigne aucune raison de non-sondage.
+    RaisonInconnue,
+    /// Le texte ne désigne aucun verdict de joignabilité.
+    VerdictInconnu,
+    /// Le texte ne désigne aucune origine de candidat.
+    OrigineInconnue,
+    /// L'identifiant fourni n'est pas celui d'un service.
+    PasUnService {
+        /// Le genre réellement fourni.
+        obtenu: Genre,
+    },
+    /// La réponse ne porte aucun verdict de joignabilité.
+    AucuneJoignabilite,
+    /// La réponse porte plus de [`POINTS_MAX`] verdicts.
+    TropDeJoignabilites {
+        /// Le compte reçu.
+        obtenu: usize,
+    },
+    /// Un verdict de mesure porte sur un point qui ne se sonde pas.
+    ///
+    /// **C'est C6 dans un type** : l'annuaire n'a rien pu mesurer sur un point
+    /// UDP, donc il ne peut ni le dire joignable ni le dire injoignable.
+    VerdictImpossible,
+    /// Un champ qui ne peut pas accompagner ce verdict.
+    ///
+    /// Une date sur un `en_cours`, un candidat sur un `non_sonde` : l'émetteur
+    /// et le lecteur ne parleraient pas du même message.
+    ChampHorsPropos {
+        /// Où commence sa clé.
+        position: usize,
+    },
+    /// Un couple adresse/port ne se lit pas.
+    CandidatInvalide {
+        /// Où.
+        position: usize,
+    },
 }
 
 impl fmt::Display for Erreur {
@@ -293,6 +364,44 @@ impl fmt::Display for Erreur {
                 write!(f, "octets en trop après le message, en position {position}")
             }
             Self::TamponTropPetit => f.write_str("tampon de sortie trop petit"),
+            Self::KeepaliveNul => f.write_str("un keepalive nul n'est pas une cadence"),
+            Self::KeepaliveTropLong { obtenu } => {
+                write!(f, "keepalive de {obtenu} s, maximum {KEEPALIVE_MAX}")
+            }
+            Self::InactiviteTropCourte { obtenue, minimum } => write!(
+                f,
+                "inactivité de {obtenue} s, minimum {minimum} — un keepalive manqué doit être toléré"
+            ),
+            Self::VerdictNatInconnu => {
+                f.write_str("verdict de NAT inconnu (oui, non, indetermine)")
+            }
+            Self::RaisonInconnue => f.write_str("raison de non-sondage inconnue"),
+            Self::VerdictInconnu => f.write_str("verdict de joignabilité inconnu"),
+            Self::OrigineInconnue => {
+                f.write_str("origine de candidat inconnue (reflexif, annonce)")
+            }
+            Self::PasUnService { obtenu } => {
+                write!(
+                    f,
+                    "identifiant de genre {obtenu:?} là où un service est attendu"
+                )
+            }
+            Self::AucuneJoignabilite => f.write_str("aucun verdict de joignabilité"),
+            Self::TropDeJoignabilites { obtenu } => {
+                write!(f, "{obtenu} verdicts, maximum {POINTS_MAX}")
+            }
+            Self::VerdictImpossible => {
+                f.write_str("un verdict de mesure sur un point qui ne se sonde pas")
+            }
+            Self::ChampHorsPropos { position } => {
+                write!(
+                    f,
+                    "champ hors de propos pour ce verdict, en position {position}"
+                )
+            }
+            Self::CandidatInvalide { position } => {
+                write!(f, "couple adresse/port illisible en position {position}")
+            }
         }
     }
 }
@@ -584,6 +693,36 @@ pub enum Origine {
     Annonce,
 }
 
+impl Origine {
+    /// Son écriture sur le fil.
+    #[must_use]
+    pub const fn texte(self) -> &'static str {
+        match self {
+            Self::Reflexif => "reflexif",
+            Self::Annonce => "annonce",
+        }
+    }
+
+    /// Lit une origine.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::OrigineInconnue`] si le texte n'en désigne aucune.
+    pub fn analyser(texte: &str) -> Result<Self, Erreur> {
+        match texte {
+            "reflexif" => Ok(Self::Reflexif),
+            "annonce" => Ok(Self::Annonce),
+            _ => Err(Erreur::OrigineInconnue),
+        }
+    }
+}
+
+impl fmt::Display for Origine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.texte())
+    }
+}
+
 /// Une adresse où tenter de joindre un service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Candidat {
@@ -759,5 +898,431 @@ impl<'a> Annonce<'a> {
     #[must_use]
     pub fn a_un_point_sondable(&self) -> bool {
         self.points.iter().any(|point| point.protocole.se_sonde())
+    }
+}
+
+// ── L'horodatage ────────────────────────────────────────────────────────────
+
+/// Un instant, en **millisecondes depuis l'époque Unix**.
+///
+/// # Pourquoi un entier et non une date RFC 3339
+///
+/// L'exemple de `docs/protocole.md` §1.1 montrait `"2026-09-08T13:02:11Z"`.
+/// Trois raisons l'ont écarté, et elles pèsent dans cet ordre :
+///
+/// 1. **Un analyseur de date est une ferme à bogues** : années bissextiles,
+///    longueurs de mois, la soixantième seconde, les décalages. C'est une
+///    surface d'analyse entière, exposée au réseau, pour transporter un nombre.
+/// 2. **`asl-client` expose ceci à cinq langages**, qui ont chacun leur type de
+///    date. Leur rendre un entier est plus honnête que leur rendre une chaîne
+///    qu'ils devront analyser eux-mêmes — et chacun d'eux sait convertir un
+///    entier d'époque en sa propre date.
+/// 3. **Aucune ambiguïté** : pas de fuseau, pas d'heure locale, pas de forme
+///    équivalente. C'est la règle « une seule écriture par valeur », appliquée
+///    au temps.
+///
+/// **Le prix** : un humain qui lit le JSON avec `curl` voit `1789217731000` au
+/// lieu d'une date. C'est réel, et c'est le travail de l'application ou de
+/// l'utilitaire `asl` de l'afficher lisiblement — pas celui du protocole.
+///
+/// # Ce type ne sait pas quelle heure il est
+///
+/// Il ne PEUT pas le savoir : cette crate est à l'étage 1 et ne lit aucune
+/// horloge (contrainte C1). L'instant vient toujours de l'appelant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Horodatage(u64);
+
+impl Horodatage {
+    /// Depuis des millisecondes d'époque.
+    #[must_use]
+    pub const fn depuis_millisecondes(millisecondes: u64) -> Self {
+        Self(millisecondes)
+    }
+
+    /// Les millisecondes d'époque.
+    #[must_use]
+    pub const fn millisecondes(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for Horodatage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// ── Le bail ─────────────────────────────────────────────────────────────────
+
+/// La cadence maximale d'un keepalive, en secondes.
+///
+/// Une heure. Au-delà, un mapping NAT est mort depuis longtemps et l'annuaire
+/// mettrait une heure à s'apercevoir d'une coupure.
+pub const KEEPALIVE_MAX: u16 = 3_600;
+
+/// Ce que l'annuaire accorde : la cadence attendue et le délai d'inactivité.
+///
+/// **Les deux valeurs viennent du SERVEUR** (`docs/modele.md` §4.1) et ne sont
+/// jamais figées dans le client. Sans cela, changer le delta après la campagne
+/// de mesure exigerait de mettre à jour tous les daemons installés chez des
+/// tiers — ce qui ne se produira jamais.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Bail {
+    keepalive_secondes: u16,
+    inactivite_secondes: u16,
+}
+
+impl Bail {
+    /// Construit un bail **et le valide**.
+    ///
+    /// # L'INVARIANT QUI COMPTE : l'inactivité vaut au moins deux keepalives
+    ///
+    /// À un pour un, **la première perte de paquet tue un daemon parfaitement
+    /// sain**. `docs/modele.md` §4.1 dit exactement pourquoi c'est le mauvais
+    /// compromis : une fausse alerte coûte plus cher qu'une détection tardive.
+    ///
+    /// La politique du produit est de trois pour un ; le type en exige deux.
+    /// **Il refuse ce qui est absurde, il n'impose pas ce qui est prudent** — un
+    /// type qui figerait la politique interdirait de la mesurer, alors qu'elle
+    /// est explicitement en attente d'une campagne.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::KeepaliveNul`], [`Erreur::KeepaliveTropLong`],
+    /// [`Erreur::InactiviteTropCourte`].
+    pub const fn nouveau(
+        keepalive_secondes: u16,
+        inactivite_secondes: u16,
+    ) -> Result<Self, Erreur> {
+        if keepalive_secondes == 0 {
+            return Err(Erreur::KeepaliveNul);
+        }
+        if keepalive_secondes > KEEPALIVE_MAX {
+            return Err(Erreur::KeepaliveTropLong {
+                obtenu: keepalive_secondes,
+            });
+        }
+        // `saturating_mul` : à `keepalive` proche de `u16::MAX`, le double
+        // déborderait — et un débordement rendrait acceptable exactement ce que
+        // cette borne refuse.
+        let minimum = keepalive_secondes.saturating_mul(2);
+        if inactivite_secondes < minimum {
+            return Err(Erreur::InactiviteTropCourte {
+                obtenue: inactivite_secondes,
+                minimum,
+            });
+        }
+        Ok(Self {
+            keepalive_secondes,
+            inactivite_secondes,
+        })
+    }
+
+    /// La cadence attendue.
+    #[must_use]
+    pub const fn keepalive_secondes(self) -> u16 {
+        self.keepalive_secondes
+    }
+
+    /// Le délai au bout duquel l'annuaire conclut à une coupure.
+    #[must_use]
+    pub const fn inactivite_secondes(self) -> u16 {
+        self.inactivite_secondes
+    }
+}
+
+// ── Ce que l'annuaire a observé ─────────────────────────────────────────────
+
+/// L'adresse sous laquelle l'annuaire a vu le daemon.
+///
+/// **Le champ `famille` de l'exemple des specs n'existe pas ici**, et c'est
+/// délibéré : il se déduit de l'adresse. Un champ redondant est un champ qui
+/// peut CONTREDIRE l'autre — `"famille":"ipv6"` sur une adresse v4 obligerait un
+/// lecteur à choisir un gagnant, et deux lecteurs choisiraient différemment.
+/// C'est la même faute que les champs en double du cadrage, écrite dans le
+/// schéma au lieu du document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VuDepuis {
+    /// L'adresse source observée.
+    pub adresse: IpAddr,
+    /// Le port source observé.
+    pub port: Port,
+}
+
+impl VuDepuis {
+    /// L'observation est-elle en IPv6 ?
+    #[must_use]
+    pub const fn est_ipv6(&self) -> bool {
+        matches!(self.adresse, IpAddr::V6(_))
+    }
+}
+
+/// Le daemon est-il derrière un NAT ?
+///
+/// # POURQUOI CE N'EST PAS UN BOOLÉEN (contrainte C6)
+///
+/// L'annuaire tranche en comparant ce qu'il OBSERVE à ce que le daemon ANNONCE.
+/// **Si le daemon n'a annoncé aucune adresse locale, il n'y a rien à comparer**
+/// — et un booléen forcerait alors à répondre « non », c'est-à-dire à affirmer
+/// une chose qu'on n'a pas mesurée.
+///
+/// Un daemon derrière un NAT qui lirait « non » chercherait la panne partout
+/// sauf là où elle est. C'est exactement ce que C6 existe pour empêcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VerdictNat {
+    /// L'adresse observée figure parmi celles que le daemon a annoncées.
+    Non,
+    /// L'adresse observée ne figure dans aucune de celles annoncées.
+    Oui,
+    /// **Le daemon n'a annoncé aucune adresse locale : rien à comparer.**
+    Indetermine,
+}
+
+impl VerdictNat {
+    /// Son écriture sur le fil.
+    #[must_use]
+    pub const fn texte(self) -> &'static str {
+        match self {
+            Self::Non => "non",
+            Self::Oui => "oui",
+            Self::Indetermine => "indetermine",
+        }
+    }
+
+    /// Lit un verdict.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::VerdictNatInconnu`] si le texte n'en désigne aucun.
+    pub fn analyser(texte: &str) -> Result<Self, Erreur> {
+        match texte {
+            "non" => Ok(Self::Non),
+            "oui" => Ok(Self::Oui),
+            "indetermine" => Ok(Self::Indetermine),
+            _ => Err(Erreur::VerdictNatInconnu),
+        }
+    }
+}
+
+impl fmt::Display for VerdictNat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.texte())
+    }
+}
+
+// ── La joignabilité ─────────────────────────────────────────────────────────
+
+/// Pourquoi un point d'écoute n'a pas été sondé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RaisonNonSonde {
+    /// **UDP n'a pas de poignée de main.** Une sonde n'y distingue pas
+    /// « écoute et ignore » de « rien n'écoute » : elle ne mesurerait rien, et
+    /// rendre un verdict à partir de rien est ce que C6 interdit.
+    ProtocoleNonSondable,
+}
+
+impl RaisonNonSonde {
+    /// Son écriture sur le fil.
+    #[must_use]
+    pub const fn texte(self) -> &'static str {
+        match self {
+            Self::ProtocoleNonSondable => "protocole_non_sondable",
+        }
+    }
+
+    /// Lit une raison.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::RaisonInconnue`] si le texte n'en désigne aucune.
+    pub fn analyser(texte: &str) -> Result<Self, Erreur> {
+        match texte {
+            "protocole_non_sondable" => Ok(Self::ProtocoleNonSondable),
+            _ => Err(Erreur::RaisonInconnue),
+        }
+    }
+}
+
+impl fmt::Display for RaisonNonSonde {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.texte())
+    }
+}
+
+/// Ce que l'annuaire sait de la joignabilité d'un point d'écoute.
+///
+/// # C6 EST ÉCRITE ICI, DANS LA FORME DU TYPE
+///
+/// **`Joignable` ne peut pas exister sans sa date et son candidat.** Ce n'est
+/// pas une convention de remplissage : les deux sont DANS la variante, donc il
+/// n'existe aucune façon d'affirmer « joignable » sans dire depuis quand ni par
+/// où.
+///
+/// `docs/modele.md` §4.2 le demande — « un `joignable` sans date est un mensonge
+/// à retardement : il décrit le passé au présent ». Une structure à champs
+/// facultatifs aurait laissé quelqu'un l'omettre un jour de hâte ; le type, non.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// L'annuaire a ouvert une connexion vers ce candidat et l'a vue aboutir.
+    Joignable {
+        /// Par où. **Toujours présent.**
+        candidat: Candidat,
+        /// Quand. **Toujours présent.**
+        a: Horodatage,
+    },
+    /// L'annuaire a essayé et n'a pas abouti.
+    Injoignable {
+        /// Quand l'essai a eu lieu.
+        a: Horodatage,
+    },
+    /// Ce point ne se sonde pas.
+    NonSonde {
+        /// Pourquoi.
+        raison: RaisonNonSonde,
+    },
+    /// **La sonde n'a pas encore rendu son verdict.**
+    ///
+    /// # Pourquoi cet état existe, et ce qu'il évite
+    ///
+    /// L'exemple des specs répond à une annonce en portant déjà les verdicts.
+    /// Cela suppose que l'annuaire SONDE avant de répondre — donc qu'il fasse
+    /// attendre le démarrage d'un daemon le temps d'une connexion TCP vers une
+    /// machine qui peut ne jamais répondre. **Un daemon dont le démarrage dépend
+    /// d'un délai d'attente réseau est un daemon qui démarre mal.**
+    ///
+    /// La connexion est TENUE (`docs/protocole.md` §0) : l'annuaire peut donc
+    /// répondre tout de suite `en_cours`, sonder, et pousser le verdict ensuite.
+    /// C'est précisément ce que le transport a été choisi pour permettre.
+    EnCours,
+}
+
+impl Verdict {
+    /// Son écriture sur le fil.
+    #[must_use]
+    pub const fn texte(&self) -> &'static str {
+        match self {
+            Self::Joignable { .. } => "joignable",
+            Self::Injoignable { .. } => "injoignable",
+            Self::NonSonde { .. } => "non_sonde",
+            Self::EnCours => "en_cours",
+        }
+    }
+
+    /// L'instant de la mesure, s'il y en a eu une.
+    #[must_use]
+    pub const fn mesure_a(&self) -> Option<Horodatage> {
+        match self {
+            Self::Joignable { a, .. } | Self::Injoignable { a } => Some(*a),
+            Self::NonSonde { .. } | Self::EnCours => None,
+        }
+    }
+}
+
+/// Le verdict rendu pour un point d'écoute donné.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Joignabilite {
+    /// Le point dont on parle.
+    pub point: PointEcoute,
+    /// Ce qu'on en sait.
+    pub verdict: Verdict,
+}
+
+// ── Le message de réponse ───────────────────────────────────────────────────
+
+/// Ce que l'annuaire répond à une annonce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reponse<'a> {
+    /// L'identifiant attribué au service.
+    pub service: Identifiant,
+    /// La cadence attendue et le délai d'inactivité.
+    pub bail: Bail,
+    /// Sous quelle adresse l'annuaire a vu le daemon.
+    pub vu_depuis: VuDepuis,
+    /// Le verdict de NAT, qui peut être indéterminé.
+    pub derriere_nat: VerdictNat,
+    /// Un verdict par point d'écoute annoncé.
+    pub joignabilite: &'a [Joignabilite],
+}
+
+impl<'a> Reponse<'a> {
+    /// Construit une réponse **et la valide**.
+    ///
+    /// # Ce qui est vérifié, et pourquoi
+    ///
+    /// - **L'identifiant est celui d'un SERVICE.** Rendre une machine là où le
+    ///   daemon attend son service le ferait s'enregistrer sous un identifiant
+    ///   qui en désigne un autre.
+    /// - **Au moins un verdict**, et pas plus que [`POINTS_MAX`] : il y en a un
+    ///   par point annoncé, et l'annonce était déjà bornée.
+    /// - **Aucun point en double** parmi les verdicts. Deux verdicts pour le
+    ///   même point, ce sont deux réponses à une seule question.
+    /// - **UN POINT UDP N'EST JAMAIS `joignable` NI `injoignable`** (C6) : il ne
+    ///   se sonde pas, donc l'annuaire n'a rien mesuré à son sujet. C'est
+    ///   l'invariant que ce type existe pour tenir.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::PasUnService`], [`Erreur::AucuneJoignabilite`],
+    /// [`Erreur::TropDeJoignabilites`], [`Erreur::PointEnDouble`],
+    /// [`Erreur::VerdictImpossible`].
+    pub fn nouvelle(
+        service: Identifiant,
+        bail: Bail,
+        vu_depuis: VuDepuis,
+        derriere_nat: VerdictNat,
+        joignabilite: &'a [Joignabilite],
+    ) -> Result<Self, Erreur> {
+        if service.genre() != Genre::Service {
+            return Err(Erreur::PasUnService {
+                obtenu: service.genre(),
+            });
+        }
+        if joignabilite.is_empty() {
+            return Err(Erreur::AucuneJoignabilite);
+        }
+        if joignabilite.len() > POINTS_MAX {
+            return Err(Erreur::TropDeJoignabilites {
+                obtenu: joignabilite.len(),
+            });
+        }
+
+        for (rang, entree) in joignabilite.iter().enumerate() {
+            if joignabilite
+                .iter()
+                .skip(rang.saturating_add(1))
+                .any(|autre| autre.point == entree.point)
+            {
+                return Err(Erreur::PointEnDouble);
+            }
+
+            // C6 : un point qui ne se sonde pas n'a pas pu être mesuré.
+            let mesure = matches!(
+                entree.verdict,
+                Verdict::Joignable { .. } | Verdict::Injoignable { .. }
+            );
+            if mesure && !entree.point.protocole.se_sonde() {
+                return Err(Erreur::VerdictImpossible);
+            }
+        }
+
+        Ok(Self {
+            service,
+            bail,
+            vu_depuis,
+            derriere_nat,
+            joignabilite,
+        })
+    }
+
+    /// Au moins un point est-il constaté joignable ?
+    ///
+    /// **Ce n'est pas la même question que « le daemon est-il en ligne »**, et
+    /// c'est tout l'objet de C6 : un daemon peut parler à l'annuaire sans être
+    /// atteignable par qui que ce soit d'autre.
+    #[must_use]
+    pub fn un_point_est_joignable(&self) -> bool {
+        self.joignabilite
+            .iter()
+            .any(|entree| matches!(entree.verdict, Verdict::Joignable { .. }))
     }
 }

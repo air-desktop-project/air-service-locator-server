@@ -436,6 +436,25 @@ fn chaque_erreur_se_dit_a_un_humain() {
         Erreur::AdresseInvalide { position: 60 },
         Erreur::DonneesEnTrop { position: 128 },
         Erreur::TamponTropPetit,
+        // Celles du message de réponse.
+        Erreur::KeepaliveNul,
+        Erreur::KeepaliveTropLong { obtenu: 9_999 },
+        Erreur::InactiviteTropCourte {
+            obtenue: 15,
+            minimum: 30,
+        },
+        Erreur::VerdictNatInconnu,
+        Erreur::RaisonInconnue,
+        Erreur::VerdictInconnu,
+        Erreur::OrigineInconnue,
+        Erreur::PasUnService {
+            obtenu: Genre::Machine,
+        },
+        Erreur::AucuneJoignabilite,
+        Erreur::TropDeJoignabilites { obtenu: 99 },
+        Erreur::VerdictImpossible,
+        Erreur::ChampHorsPropos { position: 42 },
+        Erreur::CandidatInvalide { position: 42 },
     ];
     for erreur in toutes {
         let message = format!("{erreur}");

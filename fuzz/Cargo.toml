@@ -94,3 +94,10 @@ path = "fuzz_targets/fuzz_asl_proto_cadrage.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_asl_proto_reponse"
+path = "fuzz_targets/fuzz_asl_proto_reponse.rs"
+test = false
+doc = false
+bench = false

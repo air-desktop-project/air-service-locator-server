@@ -1,0 +1,1 @@
+{"service":"s-2288AAGG88MMVVZZ2288AAGG88","keepalive_secondes":15,"inactivite_secondes":15,"vu_depuis":{"adresse":"10.0.0.1","port":1},"derriere_nat":"non","joignabilite":[{"protocole":"tcp","port":80,"verdict":"en_cours"}]}

@@ -83,6 +83,7 @@ fuzz_asl_id_aller_retour identifiant
 fuzz_asl_proto_valeurs valeurs
 fuzz_asl_proto_annonce valeurs
 fuzz_asl_proto_cadrage cadrage
+fuzz_asl_proto_reponse reponse
 TABLE
 )
 

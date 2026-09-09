@@ -64,7 +64,11 @@ use core::net::IpAddr;
 
 use asl_id::{Genre, Identifiant};
 
-use crate::{ADRESSES_MAX, Annonce, Erreur, NomService, POINTS_MAX, PointEcoute, Port, Protocole};
+use crate::{
+    ADRESSES_MAX, Annonce, Bail, Candidat, Erreur, Horodatage, Joignabilite, NomService, Origine,
+    POINTS_MAX, PointEcoute, Port, Protocole, RaisonNonSonde, Reponse, Verdict, VerdictNat,
+    VuDepuis,
+};
 
 /// La taille maximale d'un message d'annonce, en octets.
 ///
@@ -217,11 +221,16 @@ impl<'a> Lecteur<'a> {
     /// **Une seule écriture par nombre** : pas de signe, pas de zéro en tête,
     /// pas de fraction, pas d'exposant. C'est la même règle que pour les ports
     /// écrits en texte, et pour la même raison.
-    fn entier(&mut self) -> Result<u32, Erreur> {
+    ///
+    /// **Il rend un `u64`, et ce sont les APPELANTS qui bornent.** Un
+    /// horodatage d'époque en millisecondes dépasse largement un `u32` ; un port
+    /// n'en occupe que seize bits. Un lecteur unique qui rendrait la borne la
+    /// plus étroite obligerait à contourner ailleurs.
+    fn entier(&mut self) -> Result<u64, Erreur> {
         self.sauter_blancs();
         let debut = self.position;
 
-        let mut valeur: u32 = 0;
+        let mut valeur: u64 = 0;
         let mut chiffres = 0_usize;
         while let Some(octet) = self.regarder() {
             if !octet.is_ascii_digit() {
@@ -229,7 +238,7 @@ impl<'a> Lecteur<'a> {
             }
             valeur = valeur
                 .checked_mul(10)
-                .and_then(|v| v.checked_add(u32::from(octet.wrapping_sub(b'0'))))
+                .and_then(|v| v.checked_add(u64::from(octet.wrapping_sub(b'0'))))
                 .ok_or(Erreur::NombreHorsBornes { position: debut })?;
             chiffres = chiffres.saturating_add(1);
             self.avancer();
@@ -611,4 +620,528 @@ fn decoder_adresses(lecteur: &mut Lecteur<'_>, sortie: &mut [IpAddr]) -> Result<
     }
 
     Ok(compte)
+}
+
+// ── Le message de réponse ───────────────────────────────────────────────────
+
+/// Les champs de la réponse, dans l'ordre où l'encodeur les écrit.
+const CHAMPS_REPONSE: [&str; 5] = [
+    "service",
+    "keepalive_secondes",
+    "inactivite_secondes",
+    "vu_depuis",
+    "joignabilite",
+];
+
+/// Les tampons que l'appelant prête au décodeur de réponse.
+#[derive(Debug, Clone, Copy)]
+pub struct TamponsReponse {
+    joignabilite: [Joignabilite; POINTS_MAX],
+}
+
+impl TamponsReponse {
+    /// Des tampons neufs.
+    #[must_use]
+    pub const fn nouveaux() -> Self {
+        Self {
+            joignabilite: [Joignabilite {
+                point: PointEcoute::nouveau(Protocole::Tcp, Port::UN),
+                verdict: Verdict::EnCours,
+            }; POINTS_MAX],
+        }
+    }
+}
+
+impl Default for TamponsReponse {
+    fn default() -> Self {
+        Self::nouveaux()
+    }
+}
+
+impl<'a> Reponse<'a> {
+    /// Décode une réponse.
+    ///
+    /// Les mêmes trois refus que l'annonce : aucun échappement, aucun champ
+    /// inconnu, aucun champ en double.
+    ///
+    /// **Et un quatrième, propre à ce message : aucun champ HORS DE PROPOS.**
+    /// Une date sur un `en_cours`, un candidat sur un `non_sonde` — l'émetteur
+    /// dit alors quelque chose que le verdict ne peut pas porter, et le lire
+    /// « au mieux » reviendrait à décider à sa place.
+    ///
+    /// # Erreurs
+    ///
+    /// Celles du cadrage, plus celles de [`Reponse::nouvelle`].
+    pub fn decoder(octets: &'a [u8], tampons: &'a mut TamponsReponse) -> Result<Self, Erreur> {
+        if octets.len() > MESSAGE_MAX {
+            return Err(Erreur::MessageTropLong {
+                obtenue: octets.len(),
+            });
+        }
+
+        let mut lecteur = Lecteur::nouveau(octets);
+        lecteur.attendre(b'{', "un objet")?;
+
+        let mut vus = 0_u8;
+        let mut service: Option<Identifiant> = None;
+        let mut keepalive: Option<u16> = None;
+        let mut inactivite: Option<u16> = None;
+        let mut vu_depuis: Option<VuDepuis> = None;
+        let mut derriere_nat: Option<VerdictNat> = None;
+        let mut compte = 0_usize;
+
+        lecteur.sauter_blancs();
+        if lecteur.regarder() != Some(b'}') {
+            loop {
+                let position_cle = lecteur.position;
+                let cle = lecteur.chaine()?;
+                let rang = if cle == "derriere_nat" {
+                    // Rang 5 : il n'est pas dans `CHAMPS_REPONSE`, dont l'ordre
+                    // sert l'écriture, mais il compte pour les doublons.
+                    5
+                } else {
+                    CHAMPS_REPONSE
+                        .iter()
+                        .position(|champ| *champ == cle)
+                        .ok_or(Erreur::ChampInconnu {
+                            position: position_cle,
+                        })?
+                };
+
+                let bit = 1_u8 << rang;
+                if vus & bit != 0 {
+                    return Err(Erreur::ChampEnDouble {
+                        position: position_cle,
+                    });
+                }
+                vus |= bit;
+
+                lecteur.attendre(b':', "deux-points")?;
+
+                match rang {
+                    0 => {
+                        let position = lecteur.position;
+                        let texte = lecteur.chaine()?;
+                        service = Some(
+                            Identifiant::analyser_genre(Genre::Service, texte)
+                                .map_err(|_| Erreur::IdentifiantInvalide { position })?,
+                        );
+                    }
+                    1 => keepalive = Some(secondes(&mut lecteur)?),
+                    2 => inactivite = Some(secondes(&mut lecteur)?),
+                    3 => vu_depuis = Some(decoder_vu_depuis(&mut lecteur)?),
+                    4 => {
+                        compte = decoder_joignabilite(&mut lecteur, &mut tampons.joignabilite)?;
+                    }
+                    _ => derriere_nat = Some(VerdictNat::analyser(lecteur.chaine()?)?),
+                }
+
+                lecteur.sauter_blancs();
+                match lecteur.regarder() {
+                    Some(b',') => lecteur.avancer(),
+                    Some(b'}') => {
+                        lecteur.avancer();
+                        break;
+                    }
+                    _ => {
+                        return Err(Erreur::JsonAttendu {
+                            position: lecteur.position,
+                            attendu: "une virgule ou la fin de l'objet",
+                        });
+                    }
+                }
+            }
+        } else {
+            lecteur.avancer();
+        }
+        lecteur.fin()?;
+
+        let service = service.ok_or(Erreur::ChampManquant {
+            nom: CHAMPS_REPONSE[0],
+        })?;
+        let keepalive = keepalive.ok_or(Erreur::ChampManquant {
+            nom: CHAMPS_REPONSE[1],
+        })?;
+        let inactivite = inactivite.ok_or(Erreur::ChampManquant {
+            nom: CHAMPS_REPONSE[2],
+        })?;
+        let vu_depuis = vu_depuis.ok_or(Erreur::ChampManquant {
+            nom: CHAMPS_REPONSE[3],
+        })?;
+        if vus & 0b1_0000 == 0 {
+            return Err(Erreur::ChampManquant {
+                nom: CHAMPS_REPONSE[4],
+            });
+        }
+        let derriere_nat = derriere_nat.ok_or(Erreur::ChampManquant {
+            nom: "derriere_nat",
+        })?;
+
+        let bail = Bail::nouveau(keepalive, inactivite)?;
+        let joignabilite = tampons.joignabilite.get(..compte).unwrap_or(&[]);
+
+        Self::nouvelle(service, bail, vu_depuis, derriere_nat, joignabilite)
+    }
+
+    /// Encode une réponse, et rend le nombre d'octets écrits.
+    ///
+    /// **Chaque verdict n'écrit QUE les champs qu'il porte** : le décodeur
+    /// refusant les champs hors de propos, écrire une date sur un `en_cours`
+    /// produirait un message que nous-mêmes ne saurions pas relire.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`].
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        use fmt::Write as _;
+
+        let mut ecrivain = Ecrivain::nouveau(sortie);
+        let _ = write!(
+            ecrivain,
+            "{{\"service\":\"{}\",\"keepalive_secondes\":{},\"inactivite_secondes\":{},\
+             \"vu_depuis\":{{\"adresse\":\"{}\",\"port\":{}}},\"derriere_nat\":\"{}\",\
+             \"joignabilite\":[",
+            self.service.texte(),
+            self.bail.keepalive_secondes(),
+            self.bail.inactivite_secondes(),
+            self.vu_depuis.adresse,
+            self.vu_depuis.port.valeur(),
+            self.derriere_nat,
+        );
+
+        for (rang, entree) in self.joignabilite.iter().enumerate() {
+            if rang > 0 {
+                ecrivain.pousser(b",");
+            }
+            let _ = write!(
+                ecrivain,
+                "{{\"protocole\":\"{}\",\"port\":{},\"verdict\":\"{}\"",
+                entree.point.protocole,
+                entree.point.port.valeur(),
+                entree.verdict.texte(),
+            );
+            match entree.verdict {
+                Verdict::Joignable { candidat, a } => {
+                    let _ = write!(
+                        ecrivain,
+                        ",\"candidat\":\"{candidat}\",\"origine\":\"{}\",\"a\":{a}",
+                        candidat.origine
+                    );
+                }
+                Verdict::Injoignable { a } => {
+                    let _ = write!(ecrivain, ",\"a\":{a}");
+                }
+                Verdict::NonSonde { raison } => {
+                    let _ = write!(ecrivain, ",\"raison\":\"{raison}\"");
+                }
+                Verdict::EnCours => {}
+            }
+            ecrivain.pousser(b"}");
+        }
+        ecrivain.pousser(b"]}");
+
+        ecrivain.achever()
+    }
+}
+
+/// Lit un nombre de secondes, borné à `u16`.
+fn secondes(lecteur: &mut Lecteur<'_>) -> Result<u16, Erreur> {
+    let position = lecteur.position;
+    let brut = lecteur.entier()?;
+    u16::try_from(brut).map_err(|_| Erreur::NombreHorsBornes { position })
+}
+
+/// Décode l'objet `vu_depuis`.
+fn decoder_vu_depuis(lecteur: &mut Lecteur<'_>) -> Result<VuDepuis, Erreur> {
+    lecteur.attendre(b'{', "un objet")?;
+
+    let mut adresse: Option<IpAddr> = None;
+    let mut port: Option<Port> = None;
+
+    loop {
+        let position_cle = lecteur.position;
+        let cle = lecteur.chaine()?;
+        lecteur.attendre(b':', "deux-points")?;
+        match cle {
+            "adresse" if adresse.is_none() => {
+                let position = lecteur.position;
+                adresse = Some(
+                    lecteur
+                        .chaine()?
+                        .parse()
+                        .map_err(|_| Erreur::AdresseInvalide { position })?,
+                );
+            }
+            "port" if port.is_none() => {
+                let position = lecteur.position;
+                let brut = lecteur.entier()?;
+                let borne =
+                    u16::try_from(brut).map_err(|_| Erreur::NombreHorsBornes { position })?;
+                port = Some(Port::depuis_u16(borne)?);
+            }
+            "adresse" | "port" => {
+                return Err(Erreur::ChampEnDouble {
+                    position: position_cle,
+                });
+            }
+            _ => {
+                return Err(Erreur::ChampInconnu {
+                    position: position_cle,
+                });
+            }
+        }
+
+        lecteur.sauter_blancs();
+        match lecteur.regarder() {
+            Some(b',') => lecteur.avancer(),
+            Some(b'}') => {
+                lecteur.avancer();
+                break;
+            }
+            _ => {
+                return Err(Erreur::JsonAttendu {
+                    position: lecteur.position,
+                    attendu: "une virgule ou la fin de l'objet",
+                });
+            }
+        }
+    }
+
+    Ok(VuDepuis {
+        adresse: adresse.ok_or(Erreur::ChampManquant { nom: "adresse" })?,
+        port: port.ok_or(Erreur::ChampManquant { nom: "port" })?,
+    })
+}
+
+/// Décode le tableau des verdicts.
+fn decoder_joignabilite(
+    lecteur: &mut Lecteur<'_>,
+    sortie: &mut [Joignabilite],
+) -> Result<usize, Erreur> {
+    lecteur.attendre(b'[', "un tableau")?;
+    let mut compte = 0_usize;
+
+    lecteur.sauter_blancs();
+    if lecteur.regarder() == Some(b']') {
+        lecteur.avancer();
+        return Ok(0);
+    }
+
+    loop {
+        let entree = decoder_un_verdict(lecteur)?;
+
+        let place = sortie.get_mut(compte).ok_or(Erreur::TropDeJoignabilites {
+            obtenu: compte.saturating_add(1),
+        })?;
+        *place = entree;
+        compte = compte.saturating_add(1);
+
+        lecteur.sauter_blancs();
+        match lecteur.regarder() {
+            Some(b',') => lecteur.avancer(),
+            Some(b']') => {
+                lecteur.avancer();
+                break;
+            }
+            _ => {
+                return Err(Erreur::JsonAttendu {
+                    position: lecteur.position,
+                    attendu: "une virgule ou la fin du tableau",
+                });
+            }
+        }
+    }
+
+    Ok(compte)
+}
+
+/// Décode un objet de verdict.
+///
+/// **Les champs sont lus d'abord, le verdict assemblé ensuite**, parce que
+/// `verdict` peut arriver après `a` ou `candidat`. C'est l'assemblage qui refuse
+/// les champs hors de propos — au moment où l'on sait de quel verdict il s'agit.
+fn decoder_un_verdict(lecteur: &mut Lecteur<'_>) -> Result<Joignabilite, Erreur> {
+    lecteur.attendre(b'{', "un objet")?;
+
+    let mut protocole: Option<Protocole> = None;
+    let mut port: Option<Port> = None;
+    let mut nom_verdict: Option<&str> = None;
+    let mut candidat: Option<(core::net::SocketAddr, usize)> = None;
+    let mut origine: Option<Origine> = None;
+    let mut instant: Option<Horodatage> = None;
+    let mut raison: Option<RaisonNonSonde> = None;
+    let mut position_candidat = 0_usize;
+    let mut position_origine = 0_usize;
+    let mut position_a = 0_usize;
+    let mut position_raison = 0_usize;
+
+    loop {
+        let position_cle = lecteur.position;
+        let cle = lecteur.chaine()?;
+        lecteur.attendre(b':', "deux-points")?;
+
+        let deja = match cle {
+            "protocole" => protocole.is_some(),
+            "port" => port.is_some(),
+            "verdict" => nom_verdict.is_some(),
+            "candidat" => candidat.is_some(),
+            "origine" => origine.is_some(),
+            "a" => instant.is_some(),
+            "raison" => raison.is_some(),
+            _ => {
+                return Err(Erreur::ChampInconnu {
+                    position: position_cle,
+                });
+            }
+        };
+        if deja {
+            return Err(Erreur::ChampEnDouble {
+                position: position_cle,
+            });
+        }
+
+        match cle {
+            "protocole" => protocole = Some(Protocole::analyser(lecteur.chaine()?)?),
+            "port" => {
+                let position = lecteur.position;
+                let brut = lecteur.entier()?;
+                let borne =
+                    u16::try_from(brut).map_err(|_| Erreur::NombreHorsBornes { position })?;
+                port = Some(Port::depuis_u16(borne)?);
+            }
+            "verdict" => nom_verdict = Some(lecteur.chaine()?),
+            "candidat" => {
+                position_candidat = position_cle;
+                let position = lecteur.position;
+                let adresse: core::net::SocketAddr = lecteur
+                    .chaine()?
+                    .parse()
+                    .map_err(|_| Erreur::CandidatInvalide { position })?;
+                candidat = Some((adresse, position));
+            }
+            "origine" => {
+                position_origine = position_cle;
+                origine = Some(Origine::analyser(lecteur.chaine()?)?);
+            }
+            "a" => {
+                position_a = position_cle;
+                instant = Some(Horodatage::depuis_millisecondes(lecteur.entier()?));
+            }
+            _ => {
+                position_raison = position_cle;
+                raison = Some(RaisonNonSonde::analyser(lecteur.chaine()?)?);
+            }
+        }
+
+        lecteur.sauter_blancs();
+        match lecteur.regarder() {
+            Some(b',') => lecteur.avancer(),
+            Some(b'}') => {
+                lecteur.avancer();
+                break;
+            }
+            _ => {
+                return Err(Erreur::JsonAttendu {
+                    position: lecteur.position,
+                    attendu: "une virgule ou la fin de l'objet",
+                });
+            }
+        }
+    }
+
+    let protocole = protocole.ok_or(Erreur::ChampManquant { nom: "protocole" })?;
+    let port = port.ok_or(Erreur::ChampManquant { nom: "port" })?;
+    let nom_verdict = nom_verdict.ok_or(Erreur::ChampManquant { nom: "verdict" })?;
+
+    // ── L'ASSEMBLAGE, ET C'EST LUI QUI REFUSE LE HORS-PROPOS ────────────────
+    //
+    // Chaque verdict exige exactement ses champs, et n'en tolère aucun autre.
+    let verdict = match nom_verdict {
+        "joignable" => {
+            let (adresse, _) = candidat.ok_or(Erreur::ChampManquant { nom: "candidat" })?;
+            let origine = origine.ok_or(Erreur::ChampManquant { nom: "origine" })?;
+            let a = instant.ok_or(Erreur::ChampManquant { nom: "a" })?;
+            if raison.is_some() {
+                return Err(Erreur::ChampHorsPropos {
+                    position: position_raison,
+                });
+            }
+            Verdict::Joignable {
+                candidat: Candidat {
+                    protocole,
+                    adresse: adresse.ip(),
+                    port: Port::depuis_u16(adresse.port())?,
+                    origine,
+                },
+                a,
+            }
+        }
+        "injoignable" => {
+            let a = instant.ok_or(Erreur::ChampManquant { nom: "a" })?;
+            if candidat.is_some() {
+                return Err(Erreur::ChampHorsPropos {
+                    position: position_candidat,
+                });
+            }
+            if origine.is_some() {
+                return Err(Erreur::ChampHorsPropos {
+                    position: position_origine,
+                });
+            }
+            if raison.is_some() {
+                return Err(Erreur::ChampHorsPropos {
+                    position: position_raison,
+                });
+            }
+            Verdict::Injoignable { a }
+        }
+        "non_sonde" => {
+            let raison = raison.ok_or(Erreur::ChampManquant { nom: "raison" })?;
+            if candidat.is_some() {
+                return Err(Erreur::ChampHorsPropos {
+                    position: position_candidat,
+                });
+            }
+            if origine.is_some() {
+                return Err(Erreur::ChampHorsPropos {
+                    position: position_origine,
+                });
+            }
+            if instant.is_some() {
+                return Err(Erreur::ChampHorsPropos {
+                    position: position_a,
+                });
+            }
+            Verdict::NonSonde { raison }
+        }
+        "en_cours" => {
+            if candidat.is_some() {
+                return Err(Erreur::ChampHorsPropos {
+                    position: position_candidat,
+                });
+            }
+            if origine.is_some() {
+                return Err(Erreur::ChampHorsPropos {
+                    position: position_origine,
+                });
+            }
+            if instant.is_some() {
+                return Err(Erreur::ChampHorsPropos {
+                    position: position_a,
+                });
+            }
+            if raison.is_some() {
+                return Err(Erreur::ChampHorsPropos {
+                    position: position_raison,
+                });
+            }
+            Verdict::EnCours
+        }
+        _ => return Err(Erreur::VerdictInconnu),
+    };
+
+    Ok(Joignabilite {
+        point: PointEcoute::nouveau(protocole, port),
+        verdict,
+    })
 }

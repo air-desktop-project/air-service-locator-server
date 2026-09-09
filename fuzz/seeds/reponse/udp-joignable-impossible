@@ -1,0 +1,1 @@
+{"service":"s-2288AAGG88MMVVZZ2288AAGG88","keepalive_secondes":1,"inactivite_secondes":2,"vu_depuis":{"adresse":"10.0.0.1","port":1},"derriere_nat":"non","joignabilite":[{"protocole":"udp","port":80,"verdict":"joignable","candidat":"10.0.0.1:80","origine":"annonce","a":1}]}
