@@ -5,6 +5,10 @@ version = 4
 [[package]]
 name = "asl-annuaire"
 version = "0.1.0"
+dependencies = [
+ "asl-id",
+ "asl-proto",
+]
 
 [[package]]
 name = "asl-api"

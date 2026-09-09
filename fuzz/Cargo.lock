@@ -7,6 +7,7 @@ name = "air-service-locator-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "asl-annuaire",
  "asl-id",
  "asl-proto",
  "libfuzzer-sys",
@@ -19,6 +20,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 dependencies = [
  "derive_arbitrary",
+]
+
+[[package]]
+name = "asl-annuaire"
+version = "0.1.0"
+dependencies = [
+ "asl-id",
+ "asl-proto",
 ]
 
 [[package]]

@@ -11,6 +11,7 @@ cran sur une entrée que personne n'a imaginée. C'est la contrainte C3.
 |---|---|---|
 | `fuzz_asl_id_analyser` | `identifiant` | La LECTURE : des octets quelconques vers un identifiant, ou vers un refus. Aller-retour, canonicité, casse, rattrapage de Crockford, accord de `analyser_genre`. |
 | `fuzz_asl_id_aller_retour` | `identifiant` | L'ÉCRITURE : seize octets quelconques vers un texte, et retour. C'est le sens qui compte en production — un identifiant naît d'un tirage. |
+| `fuzz_asl_annuaire_session` | `session` | **La seule qui n'éprouve pas un codec** : une MACHINE À ÉTATS, donc des invariants qui doivent tenir après n'importe quelle suite d'événements. Une session close reste close, l'expiration est monotone, et C6 tient quoi qu'il arrive. |
 | `fuzz_asl_proto_valeurs` | `valeurs` | Les trois décodeurs du protocole : protocole, port, nom de service. Le port est celui où une faute coûte le plus cher — un `65536` tronqué vaudrait `0`. |
 | `fuzz_asl_proto_cadrage` | `cadrage` | **La cible qui vaut le plus cher** : des octets ENTIÈREMENT contrôlés par un inconnu vers une annonce, et retour. Aller-retour, idempotence de l'écriture, bornes du tampon de sortie, et le refus des échappements vérifié sur l'entrée. |
 | `fuzz_asl_proto_reponse` | `reponse` | Le message de réponse, et **C6 dans un type** : un point UDP n'est jamais dit joignable, un `joignable` porte toujours sa date, un bail tolère toujours un keepalive manqué. |
@@ -55,13 +56,17 @@ plus. S'en réclamer davantage serait affirmer une garantie qu'il n'a pas.
 
 ## Les graines
 
-Elles sont **écrites à la main**, et `check-fuzz.sh` le vérifie : un fichier dont
-le nom est quarante caractères hexadécimaux est une trouvaille de libFuzzer, dont
-la place est `corpus/` et non ici.
+Chacune est **nommée pour ce qu'elle éprouve** — `debordement`,
+`crockford-rattrape`, `symbole-u-refuse`. Une graine qu'on ne sait pas nommer est
+une graine dont personne ne sait ce qu'elle apporte, et `check-fuzz.sh` refuse
+les noms de quarante caractères hexadécimaux : ce sont des trouvailles brutes de
+libFuzzer, dont la place est `corpus/`.
 
-Chacune est nommée pour ce qu'elle éprouve — `debordement`, `crockford-rattrape`,
-`symbole-u-refuse`. Une graine qu'on ne sait pas nommer est une graine dont
-personne ne sait ce qu'elle apporte.
+**Une trouvaille peut devenir une graine, à condition d'être renommée.**
+`session/regression-keepalive-tardif` est l'entrée qui a fait tomber
+`fuzz_asl_annuaire_session` à sa première campagne : une session expirée y
+ressuscitait au premier keepalive. Elle est gardée pour que cela ne repasse
+jamais — sous un nom qui dit ce qu'elle prouve, et non sous son SHA-1.
 
 ## Le corpus n'est pas versionné
 

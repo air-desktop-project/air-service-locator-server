@@ -21,9 +21,15 @@
 #      gate resterait vert en ne l'ayant pas examinée.
 #   2. Le TABLEAU de `fuzz/README.md` décrit exactement ces cibles-là. Une cible
 #      qu'aucune ligne ne décrit est une cible que personne ne sait lire.
-#   3. Les GRAINES sont écrites à la main. Un fichier dont le nom est quarante
-#      caractères hexadécimaux est une trouvaille de libFuzzer — son nom est le
-#      SHA-1 de son contenu — et sa place est `corpus/`, pas `seeds/`.
+#   3. Les GRAINES sont NOMMÉES POUR CE QU'ELLES ÉPROUVENT. Un fichier dont le
+#      nom est quarante caractères hexadécimaux est une trouvaille brute de
+#      libFuzzer — son nom est le SHA-1 de son contenu — et sa place est
+#      `corpus/`, pas `seeds/`.
+#
+#      **Cela n'interdit PAS de garder une trouvaille** : une entrée qui a fait
+#      tomber une cible mérite d'être conservée pour qu'elle ne repasse jamais.
+#      Ce qui est exigé est de la RENOMMER pour ce qu'elle prouve — un SHA-1
+#      n'apprend rien à qui lira ce répertoire dans six mois.
 #   4. Avec `--smoke`, chacune tourne quelques secondes sur ses graines.
 #
 # **IL NE VÉRIFIE NI LE FORMATAGE NI LA COMPILATION**, et ce n'est pas un oubli :
@@ -85,6 +91,7 @@ fuzz_asl_proto_annonce valeurs
 fuzz_asl_proto_cadrage cadrage
 fuzz_asl_proto_reponse reponse
 fuzz_asl_proto_poussee poussee
+fuzz_asl_annuaire_session session
 TABLE
 )
 
@@ -136,8 +143,13 @@ fi
 
 if [ "$smoke" -eq 0 ]; then
     echo
-    echo "OK : les cibles existent, sont décrites, et leurs graines sont écrites"
-    echo "     à la main. (\`--smoke\` pour les faire tourner)"
+    echo "OK : les cibles existent, sont décrites, et leurs graines sont nommées"
+    # UNE APOSTROPHE FRANÇAISE DANS UNE CHAÎNE SHELL EST UN PIÈGE, et c'est la
+    # deuxième fois qu'il se referme sur ce dépôt : `check-couverture.sh` avait
+    # déjà été coupé en deux au milieu d'une ligne par « rien n'a été mesuré ».
+    # La règle qui l'évite : PAS D'APOSTROPHE dans un `echo`, ou une chaîne
+    # entre guillemets doubles où l'apostrophe ne signifie rien.
+    echo "     pour ce que chacune éprouve. (\`--smoke\` pour les faire tourner)"
     exit 0
 fi
 
