@@ -317,10 +317,21 @@ impl Service<'_> {
             })
             .collect();
 
+        // **CE QUI EST ANNONCÉ, LU MAINTENANT ET RÉVÉLÉ PLUS TARD.** C'est
+        // notre propre mémoire : la lire ne dit rien à personne. La RENDRE est
+        // une décision, et elle se prend à l'étage 2, après l'autorisation.
+        let annonce = self.vivier.annonce(service).and_then(|vivante| {
+            let mut sortie = alloc_reponse();
+            let combien = vivante.reponse().ok()?.encoder(&mut sortie).ok()?;
+            sortie.truncate(combien);
+            Some(sortie)
+        });
+
         Some(Resolution {
             demandeur,
             cible,
             autorisations,
+            annonce,
         })
     }
 }

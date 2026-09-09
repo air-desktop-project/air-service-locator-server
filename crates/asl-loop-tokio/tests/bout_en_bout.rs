@@ -671,9 +671,9 @@ async fn avec_l_autorisation_le_meme_service_cesse_d_etre_introuvable() {
     let apres = champs(client.recu(8));
     assert_eq!(
         champ(&apres, b":status"),
-        Some(&b"501"[..]),
-        "l'autorisation ouvre l'accès ; il n'y a simplement rien à servir tant \
-         qu'aucune annonce n'est rangée : {apres:?}"
+        Some(&b"404"[..]),
+        "l'autorisation ouvre l'accès, et il n'y a pourtant rien à joindre : \
+         aucun daemon ne tient de connexion pour ce service : {apres:?}"
     );
 
     let _ = dire_stop.send(());
@@ -837,6 +837,120 @@ async fn une_machine_sans_capacite_d_annonce_est_refusee() {
         champ(&champs(client.recu(8)), b":status"),
         Some(&b"403"[..]),
         "une machine sans capacité `annonce` a pu annoncer"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn un_service_annonce_par_a_se_retrouve_chez_b_qui_y_a_droit() {
+    // **LE PRODUIT ENTIER, D'UN BOUT À L'AUTRE.** Le daemon d'A annonce le port
+    // que son système lui a donné. B, qu'A a autorisé, demande où est ce
+    // service — et reçoit le port, sans qu'aucun numéro n'ait été fixé
+    // d'avance ni convenu entre eux.
+    let (autorite, racine, chaine, cle) = materiel("trouve");
+    let (base, fichier) = entrepot("trouve");
+
+    let compte_a = Identifiant::depuis_entropie(Genre::Utilisateur, [0xA1; 16]);
+    let compte_b = Identifiant::depuis_entropie(Genre::Utilisateur, [0xB2; 16]);
+    let machine_a = Identifiant::depuis_entropie(Genre::Machine, [0xA1; 16]);
+    let machine_b = Identifiant::depuis_entropie(Genre::Machine, [0xB2; 16]);
+    let secrete_a = asl_cle::CleSecrete::depuis_entropie([0xA1; 32]);
+    let secrete_b = asl_cle::CleSecrete::depuis_entropie([0xB2; 32]);
+
+    for (quelle, proprietaire, secrete) in [
+        (machine_a, compte_a, &secrete_a),
+        (machine_b, compte_b, &secrete_b),
+    ] {
+        base.poser_machine(
+            quelle,
+            &asl_registre::Machine {
+                provenance: Provenance::Ici,
+                proprietaire,
+                cle: secrete.publique().octets(),
+                annonce: true,
+                lecture: true,
+            },
+        )
+        .expect("écrite");
+    }
+    base.poser_autorisation(
+        Identifiant::depuis_entropie(Genre::Autorisation, [0x01; 16]),
+        &asl_registre::Autorisation {
+            provenance: Provenance::Ici,
+            par: compte_a,
+            a: compte_b,
+            portee: asl_registre::Portee::ToutLeCompte,
+            revoquee: false,
+        },
+    )
+    .expect("écrite");
+
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    // ── A ANNONCE, SUR SA CONNEXION ─────────────────────────────────────────
+    let mut daemon =
+        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    for _ in 0..64_u32 {
+        daemon.parler().await;
+        if !daemon.ecouter().await {
+            break;
+        }
+    }
+    authentifier(&mut daemon, &chaine, machine_a, &secrete_a, 0, 4).await;
+
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}],"adresses_locales":[]}}"#,
+        machine_a.texte()
+    );
+    ams_quic_client::envoyer_avec_media(
+        &mut daemon,
+        8,
+        20,
+        b"/v1/annonce",
+        None,
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut daemon, 8).await;
+    assert_eq!(
+        champ(&champs(daemon.recu(8)), b":status"),
+        Some(&b"200"[..]),
+        "l'annonce a échoué"
+    );
+
+    // ── B CHERCHE, SUR LA SIENNE ────────────────────────────────────────────
+    //
+    // **UNE AUTRE CONNEXION** : c'est bien l'annuaire qui fait le lien, pas un
+    // état de session partagé par hasard.
+    let mut chercheur =
+        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    for _ in 0..64_u32 {
+        chercheur.parler().await;
+        if !chercheur.ecouter().await {
+            break;
+        }
+    }
+    authentifier(&mut chercheur, &chaine, machine_b, &secrete_b, 0, 4).await;
+
+    let cible = format!("/v1/ou/{}/depot", machine_a.texte());
+    ams_quic_client::envoyer_une_requete(&mut chercheur, 8, 17, cible.as_bytes(), None, b"").await;
+    let corps = ams_quic_client::attendre_la_reponse(&mut chercheur, 8).await;
+    let apres = champs(chercheur.recu(8));
+
+    assert_eq!(
+        champ(&apres, b":status"),
+        Some(&b"200"[..]),
+        "B n'a pas trouvé le service qu'A lui a ouvert : {apres:?}"
+    );
+    let dit = String::from_utf8_lossy(&corps);
+    assert!(
+        dit.contains("49152"),
+        "B doit recevoir le PORT, c'est tout l'objet du produit : {dit}"
     );
 
     let _ = dire_stop.send(());

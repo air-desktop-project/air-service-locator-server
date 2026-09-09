@@ -185,6 +185,18 @@ pub struct Resolution {
     /// **RÉVOQUÉES COMPRISES** : c'est `asl_auth::Autorisation::couvre` qui les
     /// écarte, et les filtrer ici mettrait cette règle à deux endroits.
     pub autorisations: alloc::vec::Vec<asl_auth::Autorisation>,
+    /// Ce qui est annoncé pour ce service, en ce moment, déjà encodé.
+    ///
+    /// # ELLE EST LUE AVANT LA DÉCISION, ET RÉVÉLÉE APRÈS
+    ///
+    /// L'étage 3 la rassemble en même temps que le reste — c'est sa propre
+    /// mémoire, la lire ne coûte rien et ne dit rien à personne. **Ce qui reste
+    /// une décision, c'est de la RENDRE**, et cette décision-là est prise ici,
+    /// après `asl_auth::decider_resolution`.
+    ///
+    /// `None` quand rien n'est annoncé : le service est déclaré, mais aucun
+    /// daemon ne tient de connexion pour lui en ce moment.
+    pub annonce: Option<alloc::vec::Vec<u8>>,
 }
 
 /// Ce que l'étage 3 a trouvé.
@@ -469,15 +481,28 @@ pub fn repondre<'o>(
                         probleme(StatusCode::NOT_FOUND),
                         sortie,
                     ),
-                    // Servi — mais il n'y a rien à servir tant que les
-                    // annonces ne sont pas rangées : l'état vivant d'un service
-                    // n'existe pas encore.
-                    asl_auth::Decision::Servir => composer(
-                        StatusCode::NOT_IMPLEMENTED,
-                        PROBLEME_MEDIA,
-                        probleme(StatusCode::NOT_IMPLEMENTED),
-                        sortie,
-                    ),
+                    // **SERVI** : voici où le service se trouve.
+                    asl_auth::Decision::Servir => match &quoi.annonce {
+                        Some(corps) => composer(StatusCode::OK, JSON_MEDIA, corps, sortie),
+                        // **DÉCLARÉ MAIS PAS ANNONCÉ : `404`.** Le demandeur y a
+                        // droit, et il n'y a pourtant rien à joindre — aucun
+                        // daemon ne tient de connexion pour ce service en ce
+                        // moment.
+                        //
+                        // On pourrait vouloir dire « parti » plutôt
+                        // qu'« introuvable ». **On ne le peut pas, et c'est une
+                        // conséquence assumée** : l'état vivant n'est jamais
+                        // écrit sur disque, donc un annuaire qui vient de
+                        // redémarrer ne sait pas si ce service est parti ou n'a
+                        // jamais parlé. Prétendre le savoir serait affirmer ce
+                        // qu'on n'a pas mesuré, ce que C6 interdit.
+                        None => composer(
+                            StatusCode::NOT_FOUND,
+                            PROBLEME_MEDIA,
+                            probleme(StatusCode::NOT_FOUND),
+                            sortie,
+                        ),
+                    },
                 }
             }
             // Le service, la machine ou le demandeur manquent : `404`, du même
@@ -1598,7 +1623,23 @@ mod resolution {
             )
             .expect("une cible"),
             autorisations,
+            annonce: None,
         }
+    }
+
+    /// Le même, mais avec un service effectivement annoncé.
+    fn de_quoi_decider_avec_annonce(
+        proprietaire_du_demandeur: Identifiant,
+        proprietaire_de_la_cible: Identifiant,
+        autorisations: alloc::vec::Vec<asl_auth::Autorisation>,
+    ) -> Resolution {
+        let mut quoi = de_quoi_decider(
+            proprietaire_du_demandeur,
+            proprietaire_de_la_cible,
+            autorisations,
+        );
+        quoi.annonce = Some(br#"{"service":"s-abc","joignabilite":[]}"#.to_vec());
+        quoi
     }
 
     /// Le statut que rend une résolution.
@@ -1684,10 +1725,60 @@ mod resolution {
         // propres machines.
         let moi = un(Genre::Utilisateur, 1);
         assert_eq!(
-            statut(de_quoi_decider(moi, moi, vec![])),
-            StatusCode::NOT_IMPLEMENTED,
-            "servi — il n'y a simplement rien à servir encore"
+            statut(de_quoi_decider_avec_annonce(moi, moi, vec![])),
+            StatusCode::OK,
+            "servi"
         );
+    }
+
+    #[test]
+    fn un_service_declare_mais_pas_annonce_est_introuvable() {
+        // **LE DEMANDEUR Y A DROIT, ET IL N'Y A RIEN À JOINDRE.** On pourrait
+        // vouloir dire « parti » plutôt qu'« introuvable » ; on ne le peut pas,
+        // et c'est une conséquence assumée de ne jamais écrire l'état vivant :
+        // un annuaire qui vient de redémarrer ne sait pas si ce service est
+        // parti ou n'a jamais parlé.
+        let moi = un(Genre::Utilisateur, 1);
+        assert_eq!(
+            statut(de_quoi_decider(moi, moi, vec![])),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn la_reponse_servie_est_celle_de_l_annonce() {
+        let moi = un(Genre::Utilisateur, 1);
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 512];
+        let reponse = repondre(
+            &mut session,
+            &Besoin::Ou {
+                machine: un(Genre::Machine, 2),
+                service: "imap",
+            },
+            &Trouvaille::Resolution(de_quoi_decider_avec_annonce(moi, moi, vec![])),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert_eq!(
+            reponse.body(),
+            br#"{"service":"s-abc","joignabilite":[]}"#,
+            "la réponse servie doit être celle que l'annonce a composée"
+        );
+    }
+
+    #[test]
+    fn un_refus_ne_rend_jamais_l_annonce_meme_quand_elle_existe() {
+        // **C'EST LA PROPRIÉTÉ QUI COMPTE.** L'étage 3 a lu ce qui est annoncé
+        // AVANT de savoir si le demandeur y a droit — c'est sa propre mémoire.
+        // Ce qui reste une décision est de la RENDRE, et elle se prend ici.
+        let refuse = statut(de_quoi_decider_avec_annonce(
+            un(Genre::Utilisateur, 1),
+            un(Genre::Utilisateur, 2),
+            vec![],
+        ));
+        assert_eq!(refuse, StatusCode::NOT_FOUND);
     }
 
     #[test]
@@ -1713,8 +1804,8 @@ mod resolution {
             asl_auth::Autorisation::nouvelle(lui, moi, asl_auth::Portee::ToutLeCompte, false)
                 .expect("une autorisation");
         assert_eq!(
-            statut(de_quoi_decider(moi, lui, vec![accord])),
-            StatusCode::NOT_IMPLEMENTED,
+            statut(de_quoi_decider_avec_annonce(moi, lui, vec![accord])),
+            StatusCode::OK,
             "servi"
         );
     }

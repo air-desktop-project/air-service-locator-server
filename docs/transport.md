@@ -179,8 +179,12 @@ Nommé ici pour ne pas être redécouvert :
   `asl-loop-tokio::quic`, et §9 ci-dessous.
 - ~~L'horloge des délais de renvoi.~~ **Faite**, dans la même boucle.
 - ~~D'où viennent les certificats.~~ **Tranché le 2026-09-09 — voir §8.**
-- **L'entrepôt.** `asl-session` route et refuse correctement ; tout ce qui se
-  route rend `501`, parce qu'aucune ressource de cette API ne se sert sans état.
+- ~~L'entrepôt.~~ **Fait**, et le produit est bouclé : un daemon annonce le port
+  que son système lui a donné, et un pair autorisé le retrouve, sur une AUTRE
+  connexion. Ce qui reste : la sonde de joignabilité (`Verdict::EnCours` la
+  remplace en disant qu'elle n'a pas eu lieu), le motif de départ réel, et ce
+  qui CRÉE les objets — comptes, machines, autorisations passent encore par
+  l'entrepôt à la main.
 
 ---
 
