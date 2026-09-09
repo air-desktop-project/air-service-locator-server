@@ -36,7 +36,7 @@ use ams_h3::{Http3, Reponse};
 use ams_proto_http::RequestHead;
 use ams_proto_quic::StreamId;
 use ams_quic_tls::Connection;
-use asl_cle::{ClePublique, Defi, LiaisonDeCanal};
+use asl_cle::{ClePublique, Defi};
 use asl_id::Identifiant;
 use asl_session::{Besoin, Resolution, Session, Trouvaille};
 use asl_store::Entrepot;
@@ -932,12 +932,6 @@ pub struct Annuaire<'a> {
     connexions: HashMap<Vec<u8>, ParConnexion>,
     /// Ce qui se souvient, partagé par toutes les connexions.
     entrepot: &'a Entrepot,
-    /// À quoi les signatures de ce serveur sont liées.
-    ///
-    /// **L'EMPREINTE DE NOTRE CERTIFICAT**, calculée une fois au démarrage.
-    /// Voir `asl_cle::LiaisonDeCanal` pour ce qu'elle ferme et ce qu'elle ne
-    /// ferme pas.
-    liaison: LiaisonDeCanal,
     /// Toutes les annonces vivantes.
     vivier: Vivier,
     /// Par où les sondes rapportent.
@@ -969,13 +963,15 @@ pub struct Annuaire<'a> {
 impl<'a> Annuaire<'a> {
     /// Une application neuve, servant depuis cet entrepôt.
     ///
-    /// `liaison` est l'empreinte du certificat que ce serveur présente ;
+    /// **ELLE NE PREND PLUS DE LIAISON DE CANAL** : celle-ci est propre à chaque
+    /// connexion, et s'exporte de sa poignée de main plutôt que de se calculer
+    /// une fois pour toutes depuis notre certificat.
+    ///
     /// `tirer_un_defi` rend trente-deux octets imprévisibles, ou `None` si le noyau
     /// a refusé — auquel cas la réponse sera `500`, jamais un défi de repli.
     #[must_use]
     pub fn new(
         entrepot: &'a Entrepot,
-        liaison: LiaisonDeCanal,
         tirer_un_defi: &'a (dyn Fn() -> Option<Defi> + Send + Sync),
         tirer_un_identifiant: &'a (dyn Fn() -> Option<[u8; 16]> + Send + Sync),
         politique: asl_auth::Politique,
@@ -984,7 +980,6 @@ impl<'a> Annuaire<'a> {
         Self {
             connexions: HashMap::new(),
             entrepot,
-            liaison,
             vivier: Vivier::nouveau(),
             rapports,
             verdicts,
@@ -1089,8 +1084,22 @@ impl Application for Annuaire<'_> {
     }
 
     fn a_l_etablissement(&mut self, connexion: &mut Connection, _pair: SocketAddr) {
+        // ── LA LIAISON EST CELLE DE CETTE CONNEXION, ET DE NULLE AUTRE ──────
+        //
+        // Elle était calculée une fois au démarrage, depuis notre certificat.
+        // Elle est désormais EXPORTÉE de la poignée de main qui vient de se
+        // terminer (RFC 8446 §7.5) : deux connexions au même serveur en tirent
+        // deux valeurs, et c'est ce qui ferme le relais.
+        //
+        // **`None` NE SE RATTRAPE PAS.** Il faudrait que la poignée de main ne
+        // soit pas terminée, alors que ce rendez-vous ne passe qu'après. Une
+        // session sans liaison juste ne doit pas exister : on ferme, et le pair
+        // recommence.
+        let Some(liaison) = crate::liaison_de_la_connexion(connexion) else {
+            connexion.close_with(ams_quic_tls::generic_close_code(), maintenant());
+            return;
+        };
         let clef = connexion.local_id().as_bytes().to_vec();
-        let liaison = self.liaison;
         let etat = self.connexions.entry(clef).or_insert_with(|| ParConnexion {
             conducteur: Http3::default(),
             session: Session::new(liaison),

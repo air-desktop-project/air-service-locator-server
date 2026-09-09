@@ -243,56 +243,48 @@ fn les_valeurs_rendent_ce_qu_on_leur_a_donne() {
     assert_eq!(LiaisonDeCanal::depuis_octets(*l.octets()), l);
 }
 
-// ── La liaison de canal tirée du certificat ─────────────────────────────────
+// ── La liaison de canal, exportée de la connexion ───────────────────────────
 
 #[test]
-fn deux_certificats_differents_donnent_deux_liaisons() {
-    // **C'EST TOUTE LA PROPRIÉTÉ.** Si deux certificats donnaient la même
-    // liaison, un intermédiaire au certificat distinct passerait.
-    assert_ne!(
-        asl_cle::liaison_depuis_certificat(b"un certificat"),
-        asl_cle::liaison_depuis_certificat(b"un autre certificat")
-    );
-}
-
-#[test]
-fn le_meme_certificat_donne_la_meme_liaison() {
-    // Sans cela, aucune signature ne vérifierait jamais — et la panne serait
-    // indiscernable d'une clé fausse.
+fn l_etiquette_de_liaison_porte_la_version_du_protocole() {
+    // **LES DEUX CAMPS DONNENT LA MÊME ÉTIQUETTE À LEUR EXPORTATEUR**, sans quoi
+    // rien ne vérifie et la panne est indiscernable d'une clé fausse. Elle est
+    // donc écrite ICI, une fois, et cet essai la fige.
     assert_eq!(
-        asl_cle::liaison_depuis_certificat(b"le certificat"),
-        asl_cle::liaison_depuis_certificat(b"le certificat")
+        asl_cle::ETIQUETTE_LIAISON,
+        b"air-service-locator/v1/liaison-de-canal"
+    );
+    // Une liaison dérivée pour `v1` ne doit jamais valoir pour `v2`.
+    assert!(
+        asl_cle::ETIQUETTE_LIAISON.windows(4).any(|f| f == b"/v1/"),
+        "l'étiquette doit porter la version"
     );
 }
 
 #[test]
-fn un_certificat_vide_donne_quand_meme_une_liaison() {
-    // Un condensat de rien est un condensat valide. C'est au chargement du
-    // certificat de refuser le vide, pas ici : ce module condense ce qu'on lui
-    // donne, et n'a pas d'opinion sur ce qu'est un certificat.
-    let vide = asl_cle::liaison_depuis_certificat(b"");
-    assert_ne!(vide.octets(), &[0_u8; asl_cle::LIAISON_OCTETS]);
-}
-
-#[test]
-fn une_signature_faite_pour_un_autre_certificat_ne_vaut_pas_ici() {
+fn une_signature_faite_pour_une_autre_connexion_ne_vaut_pas_ici() {
     // **L'ESSAI QUI JUSTIFIE LA LIAISON.** La même machine, le même défi, deux
-    // certificats : c'est exactement la manœuvre de l'intermédiaire qui
+    // connexions : c'est exactement la manœuvre de l'intermédiaire qui
     // transmettrait un défi et rapporterait la signature.
+    //
+    // Ce que l'exportateur change par rapport à une empreinte de certificat :
+    // les deux valeurs ci-dessous seraient les MÊMES si l'intermédiaire servait
+    // le certificat du vrai annuaire. Elles diffèrent parce qu'elles sont
+    // dérivées de deux poignées de main, et non de deux identités.
     let secrete = asl_cle::CleSecrete::depuis_entropie([9; 32]);
     let publique = secrete.publique();
     let machine = asl_id::Identifiant::depuis_entropie(asl_id::Genre::Machine, [1; 16]);
     let defi = asl_cle::Defi::depuis_octets([2; 32]);
 
-    let chez_nous = asl_cle::liaison_depuis_certificat(b"le certificat de l'annuaire");
-    let chez_l_intrus = asl_cle::liaison_depuis_certificat(b"le certificat de l'intrus");
+    let chez_nous = asl_cle::LiaisonDeCanal::depuis_octets([0xA1; asl_cle::LIAISON_OCTETS]);
+    let chez_l_intrus = asl_cle::LiaisonDeCanal::depuis_octets([0xB2; asl_cle::LIAISON_OCTETS]);
 
     let signee = secrete
         .signer(machine, &defi, &chez_l_intrus)
         .expect("une machine signe");
     assert!(
         !publique.verifie(machine, &defi, &chez_nous, &signee),
-        "une signature faite pour un autre certificat a été acceptée"
+        "une signature faite pour une autre connexion a été acceptée"
     );
     assert!(
         publique.verifie(machine, &defi, &chez_l_intrus, &signee),

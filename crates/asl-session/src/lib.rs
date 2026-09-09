@@ -1415,7 +1415,7 @@ mod tests {
 
     /// La liaison de l'essai : celle d'un certificat quelconque.
     fn liaison() -> LiaisonDeCanal {
-        asl_cle::liaison_depuis_certificat(b"le certificat du banc")
+        LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
     }
 
     /// Une session neuve pour l'essai.
@@ -1900,7 +1900,7 @@ mod authentification {
     use super::{Besoin, OCTETS_MEDIA, PREUVE_OCTETS, Session, Trouvaille, besoin, repondre};
 
     fn liaison() -> LiaisonDeCanal {
-        asl_cle::liaison_depuis_certificat(b"le certificat du banc")
+        LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
     }
 
     fn tete<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
@@ -2032,13 +2032,14 @@ mod authentification {
 
     #[test]
     fn une_signature_faite_pour_un_autre_canal_est_refusee() {
-        // **C'EST LE RELAIS.** Une machine qui a signé pour le certificat d'un
-        // intermédiaire ne s'authentifie pas ici.
+        // **C'EST LE RELAIS.** Une machine qui a signé pour la liaison d'une
+        // AUTRE connexion — celle qu'un intermédiaire a montée avec elle — ne
+        // s'authentifie pas ici.
         let (machine, secrete) = une_machine();
         let mut session = Session::new(liaison());
         let defi = tirer(&mut session, Defi::depuis_octets([1; 32]));
 
-        let ailleurs = asl_cle::liaison_depuis_certificat(b"le certificat de l'intrus");
+        let ailleurs = LiaisonDeCanal::depuis_octets([0x22; asl_cle::LIAISON_OCTETS]);
         let signature = secrete
             .signer(machine, &defi, &ailleurs)
             .expect("elle signe");
@@ -2217,7 +2218,7 @@ mod resolution {
     use super::{Besoin, Resolution, Session, Trouvaille, besoin, repondre};
 
     fn liaison() -> LiaisonDeCanal {
-        asl_cle::liaison_depuis_certificat(b"le certificat du banc")
+        LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
     }
 
     fn tete<'a>(cible: &'a [u8]) -> RequestHead<'a> {
@@ -2535,7 +2536,7 @@ mod enveloppe_de_l_annonce {
     use super::{Besoin, JSON_MEDIA, PROBLEME_MEDIA, Session, Trouvaille, besoin, repondre};
 
     fn liaison() -> LiaisonDeCanal {
-        asl_cle::liaison_depuis_certificat(b"le certificat du banc")
+        LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
     }
 
     fn tete<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
@@ -2702,7 +2703,7 @@ mod creations {
     };
 
     fn liaison() -> LiaisonDeCanal {
-        asl_cle::liaison_depuis_certificat(b"le certificat du banc")
+        LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
     }
 
     fn defi() -> Defi {
@@ -3345,7 +3346,7 @@ mod retraits {
     use super::{Besoin, Session, Trouvaille, besoin, repondre};
 
     fn liaison() -> LiaisonDeCanal {
-        asl_cle::liaison_depuis_certificat(b"le certificat du banc")
+        LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
     }
 
     fn un(genre: Genre, graine: u8) -> Identifiant {

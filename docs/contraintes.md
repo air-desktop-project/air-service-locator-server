@@ -437,16 +437,50 @@ ainsi qu'on fait valoir une signature pour un message qu'on n'a pas écrit.
 **Comment le rejeu est empêché.** Par le défi, tiré par l'annuaire, accepté une
 seule fois.
 
-### ET CE QUE L'ASSEMBLAGE NE GARANTIT PAS ENCORE
+### LE RELAIS EST FERMÉ, ET IL FAUT DIRE COMMENT
 
-Un défi seul n'arrête pas un **RELAIS** : un intermédiaire qui transmet le défi du
-vrai annuaire à la machine, puis la signature en retour, s'authentifie comme elle.
-Seule une valeur propre à la connexion TLS — un *exporter* (RFC 8446 §7.5) —
-ferme ce chemin.
+Ce paragraphe disait : « Un défi seul n'arrête pas un RELAIS — un intermédiaire
+qui transmet le défi du vrai annuaire à la machine, puis la signature en retour,
+s'authentifie comme elle. Seule une valeur propre à la connexion TLS, un
+*exporter* (RFC 8446 §7.5), ferme ce chemin. `asl-cle` l'EXIGE en paramètre,
+précisément pour qu'on ne puisse pas l'oublier en silence. Mais elle ne peut pas
+vérifier que ce qu'on lui donne en est un. Si le transport n'en fournit pas, le
+relais reste ouvert — et il faut le savoir. »
 
-`asl-cle` l'EXIGE en paramètre, précisément pour qu'on ne puisse pas l'oublier en
-silence. **Mais elle ne peut pas vérifier que ce qu'on lui donne en est un.** Si
-le transport n'en fournit pas, le relais reste ouvert — et il faut le savoir.
+**Le transport en fournit un.** `ams_quic_tls::Connection::export` a été écrit
+dans `air-mail-server`, sous son propre régime de couverture, et l'annuaire
+dérive désormais sa liaison de canal de la poignée de main plutôt que de son
+certificat.
+
+Ce que le changement achète :
+
+| | Empreinte du certificat | *Exporter* |
+|---|---|---|
+| Lie à | une IDENTITÉ | une SESSION |
+| Deux connexions au même serveur | même valeur | **deux valeurs** |
+| Deux serveurs, même certificat | même valeur | **deux valeurs** |
+| Un relais qui monte sa propre poignée de main | passe s'il sert notre certificat | **ne passe pas** |
+
+**Le défi reste, et son « à usage unique » aussi.** Il ne porte plus la
+séparation des connexions — l'exporteur s'en charge —, mais il porte toujours la
+FRAÎCHEUR : sans lui, une signature valide pour cette connexion vaudrait
+indéfiniment sur elle.
+
+Il n'y a plus d'intermédiaire que celui qui détient la clé privée du serveur —
+mais celui-là **est** le serveur, et aucune liaison de canal n'y peut rien.
+
+### CE QUE CELA A COÛTÉ, ET QU'IL FAUT SAVOIR
+
+**`asl-client` doit dériver la même valeur, et il ne le fait pas encore.** Il vit
+dans un autre dépôt, épinglé sur une révision antérieure de celui-ci : il compile
+toujours, et un daemon bâti dessus ne s'authentifierait plus. Rien n'est déployé,
+donc rien n'est cassé — mais la mise à jour de ce dépôt-là est une tranche, et
+elle est nommée ici pour qu'on ne la découvre pas sur une machine.
+
+**L'étiquette de l'exportateur est écrite dans `asl-cle`**
+(`ETIQUETTE_LIAISON`), et une seule fois, pour la raison qui met déjà le message
+signé là : une convention écrite deux fois finit par différer, et la panne serait
+indiscernable d'une clé fausse.
 
 ### Ce que cette contrainte ne couvre pas encore
 

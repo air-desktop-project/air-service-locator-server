@@ -92,28 +92,33 @@ pub fn configuration_tls(
     Ok(configuration)
 }
 
-/// L'empreinte du certificat de tête, comme liaison de canal.
+/// La liaison de canal de CETTE connexion — RFC 8446 §7.5.
 ///
-/// # POURQUOI CELUI DE TÊTE, ET POURQUOI CETTE FONCTION EXISTE
+/// # ELLE A REMPLACÉ UNE EMPREINTE DE CERTIFICAT, ET C'EST UN GAIN
 ///
-/// Une chaîne PEM porte le certificat du serveur **en premier**, puis ses
-/// intermédiaires (§4.4.2 de RFC 8446). C'est le premier qui identifie ce
-/// serveur-ci ; lier à un intermédiaire lierait à tous ceux qu'il a signés,
-/// c'est-à-dire à rien de particulier.
+/// Cette fonction lisait le certificat de tête de la chaîne PEM et en rendait le
+/// condensat, une fois pour toutes au démarrage. Elle liait donc à une IDENTITÉ,
+/// et non à une SESSION : **deux connexions au même serveur partageaient une
+/// liaison**, et c'était le défi seul qui les séparait.
 ///
-/// La convention vit ici plutôt que chez l'appelant parce que **le client doit
-/// appliquer la même**, et qu'une convention écrite deux fois finit par
-/// différer. Voir `asl_cle::LiaisonDeCanal` pour ce que cette liaison ferme et
-/// ce qu'elle ne ferme pas.
+/// `ams_quic_tls::Connection::export` dérive du secret maître de la poignée de
+/// main. Deux connexions au même serveur en tirent deux valeurs, et un
+/// intermédiaire qui monterait sa propre poignée de main avec le pair n'obtient
+/// pas celle du vrai annuaire — c'est le relais, et il est fermé.
 ///
-/// Rend `None` si la chaîne ne porte aucun certificat lisible — ce qui n'arrive
-/// pas après [`configuration_tls`], qui l'aurait déjà refusée.
+/// **L'ÉTIQUETTE VIENT D'`asl-cle`**, parce que le daemon doit donner la même :
+/// une convention écrite deux fois finit par différer, et la panne serait
+/// indiscernable d'une clé fausse.
+///
+/// Rend `None` tant que la poignée de main n'est pas terminée. Ce n'est pas un
+/// cas à rattraper : une session sans liaison juste ne doit pas exister, et
+/// l'appelant ferme la connexion plutôt que de s'en inventer une.
 #[must_use]
-pub fn liaison_du_certificat(chaine_pem: &[u8]) -> Option<asl_cle::LiaisonDeCanal> {
-    use rustls::pki_types::pem::PemObject as _;
-
-    let premier = rustls::pki_types::CertificateDer::pem_slice_iter(chaine_pem)
-        .next()?
-        .ok()?;
-    Some(asl_cle::liaison_depuis_certificat(&premier))
+pub fn liaison_de_la_connexion(
+    connexion: &ams_quic_tls::Connection,
+) -> Option<asl_cle::LiaisonDeCanal> {
+    connexion
+        .export(asl_cle::ETIQUETTE_LIAISON, None)
+        .ok()
+        .map(asl_cle::LiaisonDeCanal::depuis_octets)
 }

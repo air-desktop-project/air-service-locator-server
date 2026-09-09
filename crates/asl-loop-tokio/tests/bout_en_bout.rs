@@ -103,7 +103,6 @@ async fn lever(
     let adresse = socket.local_addr().expect("une adresse");
 
     let (dire_stop, entendre_stop) = tokio::sync::oneshot::channel();
-    let liaison = asl_loop_tokio::liaison_du_certificat(chaine).expect("un certificat de tête");
     let tache = tokio::spawn(async move {
         // Un défi FIXE dans l'essai : ce qui est éprouvé ici est le transport,
         // pas la qualité du tirage — celle-là l'est dans `asl-server::entropie`.
@@ -117,7 +116,6 @@ async fn lever(
         };
         let mut application = Annuaire::new(
             &entrepot,
-            liaison,
             &tirer,
             &nommer,
             asl_auth::Politique::AttestationFacultative,
@@ -462,9 +460,10 @@ async fn une_machine_s_authentifie_de_bout_en_bout() {
 
     // ── LA PREUVE ───────────────────────────────────────────────────────────
     //
-    // Le client lie sa signature au certificat qu'il a VÉRIFIÉ — ici, la
-    // racine n'en porte qu'un, celui du serveur de banc.
-    let liaison = asl_loop_tokio::liaison_du_certificat(&chaine).expect("un certificat de tête");
+    // **LE CLIENT EXPORTE DE SA PROPRE POIGNÉE DE MAIN** (RFC 8446 §7.5), et le
+    // serveur de la sienne. Les deux valeurs ne s'accordent que si c'est LA MÊME
+    // poignée de main — ce qui est exactement ce que la liaison doit prouver.
+    let liaison = liaison_du_client(&client);
     let signature = secrete
         .signer(machine, &defi, &liaison)
         .expect("la machine signe");
@@ -510,7 +509,6 @@ async fn une_machine_s_authentifie_de_bout_en_bout() {
 /// Authentifie ce client comme cette machine, sur cette connexion.
 async fn authentifier(
     client: &mut ams_quic_client::Client,
-    chaine: &[u8],
     machine: Identifiant,
     secrete: &asl_cle::CleSecrete,
     flux_defi: u64,
@@ -522,7 +520,7 @@ async fn authentifier(
     brut.copy_from_slice(&octets);
     let defi = asl_cle::Defi::depuis_octets(brut);
 
-    let liaison = asl_loop_tokio::liaison_du_certificat(chaine).expect("un certificat de tête");
+    let liaison = liaison_du_client(client);
     let signature = secrete
         .signer(machine, &defi, &liaison)
         .expect("elle signe");
@@ -601,7 +599,7 @@ async fn une_autorisation_ouvre_le_service_d_un_autre_compte() {
             break;
         }
     }
-    authentifier(&mut client, &chaine, machine_b, &secrete_b, 0, 4).await;
+    authentifier(&mut client, machine_b, &secrete_b, 0, 4).await;
 
     // ── SANS AUTORISATION : INTROUVABLE, ET NON « INTERDIT » ─────────────────
     ams_quic_client::envoyer_une_requete(&mut client, 8, 17, cible.as_bytes(), None, b"").await;
@@ -679,7 +677,7 @@ async fn avec_l_autorisation_le_meme_service_cesse_d_etre_introuvable() {
             break;
         }
     }
-    authentifier(&mut client, &chaine, machine_b, &secrete_b, 0, 4).await;
+    authentifier(&mut client, machine_b, &secrete_b, 0, 4).await;
 
     ams_quic_client::envoyer_une_requete(&mut client, 8, 17, cible.as_bytes(), None, b"").await;
     let _ = ams_quic_client::attendre_la_reponse(&mut client, 8).await;
@@ -730,7 +728,7 @@ async fn un_daemon_annonce_et_son_service_devient_trouvable() {
             break;
         }
     }
-    authentifier(&mut client, &chaine, machine, &secrete, 0, 4).await;
+    authentifier(&mut client, machine, &secrete, 0, 4).await;
 
     // ── L'ANNONCE ───────────────────────────────────────────────────────────
     //
@@ -833,7 +831,7 @@ async fn une_machine_sans_capacite_d_annonce_est_refusee() {
             break;
         }
     }
-    authentifier(&mut client, &chaine, machine, &secrete, 0, 4).await;
+    authentifier(&mut client, machine, &secrete, 0, 4).await;
 
     let annonce = format!(
         r#"{{"machine":"{}","service":"imap","points":[{{"protocole":"tcp","port":993}}],"adresses_locales":[]}}"#,
@@ -918,7 +916,7 @@ async fn un_service_annonce_par_a_se_retrouve_chez_b_qui_y_a_droit() {
             break;
         }
     }
-    authentifier(&mut daemon, &chaine, machine_a, &secrete_a, 0, 4).await;
+    authentifier(&mut daemon, machine_a, &secrete_a, 0, 4).await;
 
     let annonce = format!(
         r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}],"adresses_locales":[]}}"#,
@@ -953,7 +951,7 @@ async fn un_service_annonce_par_a_se_retrouve_chez_b_qui_y_a_droit() {
             break;
         }
     }
-    authentifier(&mut chercheur, &chaine, machine_b, &secrete_b, 0, 4).await;
+    authentifier(&mut chercheur, machine_b, &secrete_b, 0, 4).await;
 
     let cible = format!("/v1/ou/{}/depot", machine_a.texte());
     ams_quic_client::envoyer_une_requete(&mut chercheur, 8, 17, cible.as_bytes(), None, b"").await;
@@ -1025,7 +1023,7 @@ async fn la_sonde_mesure_la_joignabilite_et_le_verdict_bascule() {
             break;
         }
     }
-    authentifier(&mut client, &chaine, machine, &secrete, 0, 4).await;
+    authentifier(&mut client, machine, &secrete, 0, 4).await;
 
     let annonce = format!(
         r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":{port}}}],"adresses_locales":[]}}"#,
@@ -1125,7 +1123,7 @@ async fn un_port_ou_rien_n_ecoute_reste_injoignable() {
             break;
         }
     }
-    authentifier(&mut client, &chaine, machine, &secrete, 0, 4).await;
+    authentifier(&mut client, machine, &secrete, 0, 4).await;
 
     let annonce = format!(
         r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":{port}}}],"adresses_locales":[]}}"#,
@@ -1255,13 +1253,12 @@ fn nombre_json(corps: &[u8], nom: &str) -> u64 {
 /// Rend le compte, l'appareil, et la clé secrète de l'appareil.
 async fn creer_un_compte(
     client: &mut ams_quic_client::Client,
-    chaine: &[u8],
     flux: u64,
     graine: u8,
 ) -> (Identifiant, Identifiant, asl_cle::CleSecrete) {
     let secrete = asl_cle::CleSecrete::depuis_entropie([graine; 32]);
     let defi = tirer_le_defi(client, flux).await;
-    let liaison = asl_loop_tokio::liaison_du_certificat(chaine).expect("un certificat de tête");
+    let liaison = liaison_du_client(client);
     let preuve = secrete.prouver_la_possession(&defi, &liaison);
 
     let mut corps = Vec::with_capacity(96);
@@ -1308,7 +1305,7 @@ async fn le_produit_entier_se_monte_par_l_api_et_rien_d_autre() {
 
     // ── A : COMPTE, MACHINE, ENRÔLEMENT ─────────────────────────────────────
     let mut alice = connecter(&racine, adresse).await;
-    let (compte_a, _appareil_a, _cle_a) = creer_un_compte(&mut alice, &chaine, 0, 0xA1).await;
+    let (compte_a, _appareil_a, _cle_a) = creer_un_compte(&mut alice, 0, 0xA1).await;
 
     // La connexion est désormais celle de cet appareil : `POST /v1/comptes`
     // portait déjà sa preuve, et la refaire par `/v1/defi` serait la même
@@ -1331,12 +1328,12 @@ async fn le_produit_entier_se_monte_par_l_api_et_rien_d_autre() {
     // code — pas le compte, pas l'appareil, rien d'autre.
     let mut daemon = connecter(&racine, adresse).await;
     let secrete_a = asl_cle::CleSecrete::depuis_entropie([0xD1; 32]);
-    let enrolee = enroler(&mut daemon, &chaine, 0, &code_a, &secrete_a).await;
+    let enrolee = enroler(&mut daemon, 0, &code_a, &secrete_a).await;
     assert_eq!(enrolee, machine_a, "le code désigne la machine d'A");
 
     // ── B : COMPTE ET MACHINE DE LECTURE ────────────────────────────────────
     let mut bob = connecter(&racine, adresse).await;
-    let (compte_b, _appareil_b, _cle_b) = creer_un_compte(&mut bob, &chaine, 0, 0xB1).await;
+    let (compte_b, _appareil_b, _cle_b) = creer_un_compte(&mut bob, 0, 0xB1).await;
     let (statut, rendu) = poster(
         &mut bob,
         8,
@@ -1352,15 +1349,15 @@ async fn le_produit_entier_se_monte_par_l_api_et_rien_d_autre() {
     let mut chercheur = connecter(&racine, adresse).await;
     let secrete_b = asl_cle::CleSecrete::depuis_entropie([0xD2; 32]);
     assert_eq!(
-        enroler(&mut chercheur, &chaine, 0, &code_b, &secrete_b).await,
+        enroler(&mut chercheur, 0, &code_b, &secrete_b).await,
         machine_b
     );
 
     // ── B CHERCHE AVANT D'ÊTRE AUTORISÉ, ET NE TROUVE RIEN ──────────────────
-    authentifier(&mut chercheur, &chaine, machine_b, &secrete_b, 12, 16).await;
+    authentifier(&mut chercheur, machine_b, &secrete_b, 12, 16).await;
 
     // ── LE DAEMON D'A ANNONCE ───────────────────────────────────────────────
-    authentifier(&mut daemon, &chaine, machine_a, &secrete_a, 12, 16).await;
+    authentifier(&mut daemon, machine_a, &secrete_a, 12, 16).await;
     let annonce = format!(
         r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}]}}"#,
         machine_a.texte()
@@ -1423,13 +1420,12 @@ async fn le_produit_entier_se_monte_par_l_api_et_rien_d_autre() {
 /// Présente un code et une clé neuve, et rend la machine que le code désignait.
 async fn enroler(
     client: &mut ams_quic_client::Client,
-    chaine: &[u8],
     flux: u64,
     code: &str,
     secrete: &asl_cle::CleSecrete,
 ) -> Identifiant {
     let defi = tirer_le_defi(client, flux).await;
-    let liaison = asl_loop_tokio::liaison_du_certificat(chaine).expect("un certificat de tête");
+    let liaison = liaison_du_client(client);
     let preuve = secrete.prouver_la_possession(&defi, &liaison);
 
     // **DIX SYMBOLES, ET NON ONZE** : le corps porte la forme canonique, sans le
@@ -1470,7 +1466,7 @@ async fn revoquer_la_cle_d_une_machine_ferme_sa_connexion_et_fait_tomber_son_bai
 
     // A crée son compte, déclare une machine, et l'enrôle.
     let mut alice = connecter(&racine, adresse).await;
-    let (_compte, _appareil, _secrete) = creer_un_compte(&mut alice, &chaine, 0, 0xA1).await;
+    let (_compte, _appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA1).await;
     let (statut, rendu) = poster(
         &mut alice,
         8,
@@ -1485,11 +1481,8 @@ async fn revoquer_la_cle_d_une_machine_ferme_sa_connexion_et_fait_tomber_son_bai
 
     let mut daemon = connecter(&racine, adresse).await;
     let secrete = asl_cle::CleSecrete::depuis_entropie([0xD1; 32]);
-    assert_eq!(
-        enroler(&mut daemon, &chaine, 0, &code, &secrete).await,
-        machine
-    );
-    authentifier(&mut daemon, &chaine, machine, &secrete, 12, 16).await;
+    assert_eq!(enroler(&mut daemon, 0, &code, &secrete).await, machine);
+    authentifier(&mut daemon, machine, &secrete, 12, 16).await;
 
     let annonce = format!(
         r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}]}}"#,
@@ -1548,7 +1541,7 @@ async fn l_alias_se_pose_se_cherche_et_se_retire() {
     let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
 
     let mut alice = connecter(&racine, adresse).await;
-    let (compte, _appareil, _secrete) = creer_un_compte(&mut alice, &chaine, 0, 0xA1).await;
+    let (compte, _appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA1).await;
 
     // Avant : personne ne répond à cet alias.
     ams_quic_client::envoyer_une_requete(&mut alice, 8, 17, b"/v1/alias/thierry", None, b"").await;
@@ -1590,7 +1583,7 @@ async fn l_alias_se_pose_se_cherche_et_se_retire() {
 
     // Un autre compte ne peut pas le prendre.
     let mut bob = connecter(&racine, adresse).await;
-    let (_, _, _) = creer_un_compte(&mut bob, &chaine, 0, 0xB1).await;
+    let (_, _, _) = creer_un_compte(&mut bob, 0, 0xB1).await;
     ams_quic_client::envoyer_avec_media(
         &mut bob,
         12,
@@ -1628,4 +1621,23 @@ async fn l_alias_se_pose_se_cherche_et_se_retire() {
     let _ = tache.await;
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
+}
+
+/// La liaison de canal, vue du client.
+///
+/// # ELLE S'EXPORTE, ELLE NE SE CALCULE PLUS
+///
+/// Elle était l'empreinte du certificat que le client avait vérifié — la même
+/// pour toutes ses connexions à ce serveur. Elle est désormais dérivée du secret
+/// maître de CETTE poignée de main, et le serveur dérive la sienne pareillement.
+///
+/// **C'est ce que l'essai éprouve sans le dire** : chaque authentification qui
+/// réussit dans ce fichier prouve que les deux camps sont tombés sur les mêmes
+/// octets, sans jamais se les être transmis.
+fn liaison_du_client(client: &ams_quic_client::Client) -> asl_cle::LiaisonDeCanal {
+    asl_cle::LiaisonDeCanal::depuis_octets(
+        client
+            .export(asl_cle::ETIQUETTE_LIAISON, None)
+            .expect("la poignée de main est terminée"),
+    )
 }

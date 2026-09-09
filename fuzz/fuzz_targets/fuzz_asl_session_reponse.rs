@@ -106,7 +106,9 @@ fuzz_target!(|entree: Entree| {
     // `asl-server::entropie`. Une session neuve n'a authentifié personne, donc
     // cette cible explore les chemins d'un pair NON authentifié : ce sont ceux
     // qu'un inconnu atteint.
-    let mut session = Session::new(asl_cle::liaison_depuis_certificat(b"le certificat"));
+    let mut session = Session::new(asl_cle::LiaisonDeCanal::depuis_octets(
+        [0x11; asl_cle::LIAISON_OCTETS],
+    ));
     let defi = Some(asl_cle::Defi::depuis_octets([0x5A; 32]));
     let besoin = asl_session::besoin(&session, &tete_reelle, entree.corps);
     let reponse =
@@ -179,8 +181,9 @@ fuzz_target!(|entree: Entree| {
 
         if let Some(tete_get) = tete(b"GET", entree.cible) {
             let mut autre = vec![0_u8; taille];
-            let mut session_get =
-                Session::new(asl_cle::liaison_depuis_certificat(b"le certificat"));
+            let mut session_get = Session::new(asl_cle::LiaisonDeCanal::depuis_octets(
+                [0x11; asl_cle::LIAISON_OCTETS],
+            ));
             let besoin_get = asl_session::besoin(&session_get, &tete_get, entree.corps);
             let par_get = asl_session::repondre(
                 &mut session_get,

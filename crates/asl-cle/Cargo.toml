@@ -10,7 +10,6 @@ repository.workspace = true
 [dependencies]
 asl-id.workspace = true
 ed25519-dalek.workspace = true
-sha2.workspace = true
 
 [lints]
 workspace = true

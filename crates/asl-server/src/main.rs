@@ -32,9 +32,7 @@ mod socket;
 
 use std::sync::Arc;
 
-use asl_loop_tokio::{
-    Annuaire, configuration_tls, liaison_du_certificat, refuser_root, servir_quic,
-};
+use asl_loop_tokio::{Annuaire, configuration_tls, refuser_root, servir_quic};
 use asl_store::Entrepot;
 
 use crate::reglages::{Reglages, USAGE};
@@ -75,12 +73,6 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
     let chaine = std::fs::read(&reglages.certificat)?;
     let cle = std::fs::read(&reglages.cle)?;
     let tls = Arc::new(configuration_tls(&chaine, &cle)?);
-    // **APRÈS `configuration_tls`, ET PAS AVANT** : elle a déjà refusé une
-    // chaîne illisible, donc l'absence de certificat de tête est ici
-    // impossible — et le message le dit plutôt que de la taire.
-    let liaison =
-        liaison_du_certificat(&chaine).ok_or("la chaîne ne porte aucun certificat lisible")?;
-
     let socket = socket::ecouter(reglages.port)?;
     let ou = socket.local_addr()?;
 
@@ -123,8 +115,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                  n'est pas écrite : AUCUN appareil ne pourra s'enrôler."
             );
         }
-        let mut application =
-            Annuaire::new(&entrepot, liaison, &tirer, &nommer, reglages.politique);
+        let mut application = Annuaire::new(&entrepot, &tirer, &nommer, reglages.politique);
         let comptes = servir_quic(
             socket,
             tls,

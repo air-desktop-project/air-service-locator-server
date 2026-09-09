@@ -167,9 +167,14 @@ asl-store = { path = "crates/asl-store", version = "0.1.0" }
 
 ed25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }
 
-# `sha2` POUR DEUX USAGES : l'empreinte du certificat qui sert de liaison de
-# canal (`asl-cle`), et celle d'un code d'enrôlement (`asl-auth`). Elle est DÉJÀ
-# dans le graphe — `ams-quic-crypto` la tire — et elle est en Rust pur.
+# `sha2` POUR UN SEUL USAGE : l'empreinte d'un code d'enrôlement (`asl-auth`).
+#
+# Elle en avait deux ; le second était l'empreinte du certificat qui servait de
+# liaison de canal. **Celle-là a disparu** : la liaison s'exporte désormais de la
+# poignée de main (RFC 8446 §7.5), et `asl-cle` n'a plus rien à condenser.
+#
+# Elle est DÉJÀ dans le graphe — `ams-quic-crypto` la tire — et elle est en Rust
+# pur.
 sha2 = { version = "0.11", default-features = false }
 
 # ── LA PILE QUIC ET HTTP/3, GREFFÉE DEPUIS `air-mail-server` (C15) ─────────
@@ -179,9 +184,19 @@ sha2 = { version = "0.11", default-features = false }
 # ligne de ce dépôt ait bougé, et un échec de CI ne dirait plus lequel des deux
 # a changé.
 #
-# **Épinglage posé le 2026-09-09 sur `3f18333`.** Le relever est une décision, et
-# elle se prend en relisant ce qui a bougé en amont — pas en laissant cargo le
+# **Épinglage relevé le 2026-09-09 sur `1efd3bf`.** Le relever est une décision,
+# et elle se prend en relisant ce qui a bougé en amont — pas en laissant cargo le
 # faire.
+#
+# CE QUE CE RELÈVEMENT-CI APPORTE, ET POURQUOI IL A ÉTÉ DEMANDÉ
+#
+# `ams_quic_tls::Connection::export` — l'exportateur de RFC 8446 §7.5. C'est
+# NOUS qui l'avons écrit là-bas, parce que C14 portait une réserve qu'aucune
+# tranche d'ici ne pouvait lever : la liaison de canal était l'empreinte de notre
+# certificat, faute d'exporteur, et un relais restait donc ouvert.
+#
+# L'amont a bougé d'un seul commit, et c'est celui-là. Rien d'autre n'a changé
+# entre `3f18333` et `1efd3bf`.
 #
 # CE QUI EST REPRIS, ET CE QUI NE L'EST PAS
 #
@@ -224,25 +239,25 @@ sha2 = { version = "0.11", default-features = false }
 # passage n'a coûté aucune ligne de code : `asl-cle` n'emploie que
 # `VerifyingKey`, `SigningKey`, `Signature`, `Signer` et `Verifier`.
 
-ams-h3 = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
-ams-proto-h3 = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
-ams-proto-http = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
-ams-proto-quic = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
-ams-quic = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
-ams-quic-tls = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
+ams-h3 = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "1efd3bfca36ebc7d317410077677db29206c7dfb" }
+ams-proto-h3 = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "1efd3bfca36ebc7d317410077677db29206c7dfb" }
+ams-proto-http = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "1efd3bfca36ebc7d317410077677db29206c7dfb" }
+ams-proto-quic = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "1efd3bfca36ebc7d317410077677db29206c7dfb" }
+ams-quic = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "1efd3bfca36ebc7d317410077677db29206c7dfb" }
+ams-quic-tls = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "1efd3bfca36ebc7d317410077677db29206c7dfb" }
 
 # `ams-tls` N'ENTRE QUE COMME DÉPENDANCE DE DÉVELOPPEMENT, et la nuance compte.
 # Elle est DÉJÀ dans le graphe construit, tirée par `ams-quic-tls` ; ce qu'on
 # déclare ici, c'est le droit de l'appeler NOUS-MÊMES depuis un essai — pour
 # faire charger par notre propre pile le certificat que `scripts/ca.sh` frappe.
 # Un certificat qu'openssl valide n'est qu'un certificat qu'openssl valide.
-ams-tls = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
+ams-tls = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "1efd3bfca36ebc7d317410077677db29206c7dfb" }
 
 # `ams-quic-client` EST UN HARNAIS D'ESSAI, PAS UNE BIBLIOTHÈQUE CLIENTE — voir
 # `docs/transport.md` §3. Elle n'entre donc qu'en dépendance de DÉVELOPPEMENT,
 # et c'est là qu'elle est irremplaçable : c'est un vrai client QUIC sur une
 # vraie socket, et rien d'autre ne peut éprouver notre boucle de bout en bout.
-ams-quic-client = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
+ams-quic-client = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "1efd3bfca36ebc7d317410077677db29206c7dfb" }
 
 # `default-features = false` et la liste exacte d'`air-mail-server` : deux
 # fournisseurs cryptographiques activés en même temps, c'est `rustls` qui refuse
