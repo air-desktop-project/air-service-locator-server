@@ -8,7 +8,7 @@ encore ».
 | | Contrainte | Contrôle |
 |---|---|---|
 | C1 | Étages 1 et 2 sans entrée-sortie | `check-etages.sh` |
-| C2 | 100 % de couverture aux étages 1 et 2 | `check-couverture.sh` — **à écrire** |
+| C2 | 100 % de couverture aux étages 1 et 2 | `check-couverture.sh` |
 | C3 | Tout décodeur est fuzzé | `check-fuzz.sh` — **à écrire** |
 | C4 | `asl-client` reste mince | `check-client.sh` — **à écrire** |
 | C5 | Aucune abstraction d'exécution | Revue |
@@ -77,8 +77,20 @@ ne se pilote pas, on l'attend. L'étage 3 est donc hors mesure — non par
 indulgence, mais parce qu'y atteindre 100 % exigerait de simuler des pannes du
 noyau, ce qui mesure la simulation.
 
-**Le gate ne s'arme QUE lorsqu'il y a du code à mesurer.** Posé aujourd'hui sur
-des crates vides, il rendrait 100 % et n'attesterait de rien.
+**`check-couverture.sh` existe**, et il est entré avec `asl-id` — la première
+crate à porter du code. Il aurait été trop tard de l'attendre davantage : c'est
+en écrivant une crate qu'on écrit les essais qui la couvrent, pas six mois après.
+
+**Il ne se laisse pas berner par le vide.** Une crate sans code a zéro région
+couverte sur zéro : arithmétiquement parfaite, et vide de sens. Le script COMPTE
+ces crates à part et les nomme, au lieu de les laisser gonfler un pourcentage.
+Aujourd'hui, quatre des cinq crates sous mesure sont dans ce cas, et la sortie le
+dit.
+
+**Ce qu'il ne mesure pas** : la couverture dit qu'une ligne a été exécutée,
+jamais qu'elle a été éprouvée. Un essai qui appelle sans rien vérifier rend
+100 % et ne prouve rien. C'est la limite de tout gate de couverture, et elle vaut
+d'être écrite pour qu'on ne prenne pas ce vert pour une garantie de correction.
 
 ## C3 — Tout décodeur est fuzzé
 

@@ -150,3 +150,34 @@ jobs:
       # tout ce qui juge le CODE a déjà parlé quand il le fait.
       - name: check-format
         run: ./scripts/check-format.sh
+
+  # ── Le 100 % de couverture sur ce qui ne fait pas d'entrée-sortie (C2) ─────
+  #
+  # JOB SÉPARÉ, et pour une raison de temps : il installe un outil, recompile
+  # tout sous instrumentation, et dure bien plus longtemps que la vérification
+  # ordinaire. Le noyer dedans rendrait cette dernière lente pour rien — et
+  # c'est elle qu'on lit en premier quand une poussée casse quelque chose.
+  couverture:
+    name: couverture 100 % (C2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain épinglée
+        run: rustup show active-toolchain
+
+      # Binaire pré-construit plutôt que `cargo install` : ce dernier compile
+      # plusieurs centaines de crates à chaque exécution, pour un outil dont la
+      # version n'a aucune raison de varier d'un job à l'autre.
+      #
+      # Forme EXPLICITE (`@v2` + `tool:`), et non le tag court. Les deux
+      # existent, mais les tags courts ne couvrent qu'un jeu d'outils choisi par
+      # l'amont : un tag qui ne correspond à rien se résout, n'installe RIEN, et
+      # l'échec apparaît trois étapes plus loin sur un « no such command » qui ne
+      # désigne pas sa cause.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: check-couverture
+        run: ./scripts/check-couverture.sh

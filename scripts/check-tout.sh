@@ -25,15 +25,22 @@
 #   4. `check-pile`      — le graphe résolu, donc les dépendances transitives.
 #   5. `check-clippy`    — les lints du produit.
 #   6. `cargo test`
-#   7. `check-format`    — EN DERNIER (voir ci-dessus).
+#   7. `check-couverture` — LENTE : elle recompile tout sous instrumentation.
+#      Elle passe donc APRÈS les essais ordinaires, qui disent la même chose en
+#      quelques secondes quand quelque chose est cassé. Il n'y a aucune raison
+#      d'attendre une recompilation complète pour apprendre qu'un essai échoue.
+#   8. `check-format`    — EN DERNIER (voir ci-dessus).
 #
 # # CE QUI MANQUE ENCORE, ET QUI EST DIT PLUTÔT QUE TU
 #
-# `air-mail-server` en porte dix. Ce dépôt en porte SIX, parce que les autres
-# mesureraient du vide : la couverture d'un workspace sans code vaut 100 % et
-# n'atteste de rien ; le paquet `.deb` et l'installateur n'existent pas ; le fuzz
-# n'a aucune grammaire à éprouver. Elles s'ajoutent AVEC le code qu'elles jugent,
-# jamais avant — une barrière verte qui n'a rien examiné est un mensonge poli.
+# `air-mail-server` en porte dix. Ce dépôt en porte SEPT. Celles qui manquent
+# encore attendent le code qu'elles jugent : le fuzz n'a qu'une grammaire et pas
+# encore de cible, le paquet `.deb` et l'installateur n'existent pas.
+#
+# `check-couverture` est ENTRÉE avec `asl-id`, la première crate à porter du
+# code. Elle serait arrivée trop tard si on l'avait attendue davantage : c'est
+# en écrivant la crate qu'on écrit les essais qui la couvrent, pas six mois
+# après.
 #
 # **Et deux de celles qui EXISTENT le disent d'elles-mêmes aujourd'hui** :
 # `check-pile` annonce qu'aucune crate tierce n'est dans le graphe, donc qu'il
@@ -51,6 +58,9 @@ barrieres=(
     scripts/check-clippy.sh
     scripts/check-format.sh
 )
+
+# `check-couverture` n'est PAS dans la liste ci-dessus : elle tourne après les
+# essais, plus bas, parce qu'elle les relance elle-même sous instrumentation.
 
 echecs=()
 
@@ -74,13 +84,22 @@ else
 fi
 echo
 
+echo "═══ scripts/check-couverture.sh"
+if ./scripts/check-couverture.sh; then
+    echo "─── scripts/check-couverture.sh : OK"
+else
+    echo "─── scripts/check-couverture.sh : ÉCHEC"
+    echecs+=("scripts/check-couverture.sh")
+fi
+echo
+
 if [ "${#echecs[@]}" -gt 0 ]; then
     echo "ÉCHEC : ${#echecs[@]} barrière(s) refusent :"
     printf '  %s\n' "${echecs[@]}"
     exit 1
 fi
 
-echo "OK : les ${#barrieres[@]} barrières et les essais passent."
+echo "OK : les ${#barrieres[@]} barrières, la couverture et les essais passent."
 echo
 echo "Le DCO ne fait PAS partie de ce lot : il juge des messages de commit, donc"
 echo "il se lance APRÈS avoir committé — scripts/check-dco.sh."
