@@ -222,6 +222,32 @@ façon de partir vaut mieux que deux.
 démarrage d'un daemon le temps d'une sonde. Le verdict arrive ensuite, dans la
 connexion déjà tenue.
 
+```
+GET /v1/poussees
+        (dans la même connexion QUIC, après l'annonce)
+```
+
+**LA RÉPONSE À CE VERBE NE SE TERMINE JAMAIS.** L'annuaire répond `200`, garde le
+flux ouvert, et y écrit un objet à chaque verdict. Un client le lit à mesure, sans
+attendre de fin.
+
+Elle ne porte **ni corps d'ouverture, ni `content-length`** : le premier octet est
+la première poussée, et une longueur déclarée sur un corps qui s'allonge est un
+message qui se contredit — un intermédiaire aurait raison de la couper.
+
+**Les objets se suivent sans enveloppe**, et non dans un tableau : un tableau
+attend un crochet fermant qui ne viendra jamais, et un lecteur qui l'attendrait
+n'afficherait rien.
+
+**Le flux n'est pas ouvert d'office.** Un daemon qui ne le demande pas ne reçoit
+rien : il a lu `en_cours` et s'en contente. Le verbe exige la capacité `annonce` —
+une machine de lecture seule n'a aucun service, donc aucun verdict, et lui ouvrir
+ce flux tiendrait une ressource des deux côtés pour rien.
+
+**On ne pousse que ce qui a CHANGÉ.** Un verdict tardif — le service est parti,
+réannoncé, ou déjà mesuré autrement — ne produit rien : une connexion qu'un daemon
+tient pour des mois n'a pas à porter du bruit.
+
 ```jsonc
 {
   "vu_depuis": { "adresse": "203.0.113.4", "port": 61003 },

@@ -129,6 +129,21 @@ pub struct Consignes {
     /// **Vide au tour ordinaire**, et un `Vec` vide n'alloue pas : ce
     /// rendez-vous passe des milliers de fois par seconde.
     pub a_fermer: Vec<Vec<u8>>,
+    /// Ce qu'il faut écrire sur une connexion, par identifiant local.
+    ///
+    /// # POURQUOI CE N'EST PAS L'APPLICATION QUI ÉCRIT DIRECTEMENT
+    ///
+    /// [`Application::au_tour`] est le seul rendez-vous qui n'appartienne à
+    /// aucune connexion — c'est tout son objet : recueillir le résultat d'un
+    /// travail lancé ailleurs. **Il n'a donc AUCUNE connexion sous la main**,
+    /// et un verdict de sonde arrive précisément là.
+    ///
+    /// Une consigne dit ce qu'il faut écrire et où ; l'écoute, qui tient les
+    /// connexions, redonne la main à l'application avec la bonne. C'est le même
+    /// mécanisme que [`Consignes::a_fermer`], et pour la même raison.
+    ///
+    /// **Vide au tour ordinaire**, comme l'autre.
+    pub a_pousser: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 /// Ce qu'une application fait des flux d'une connexion.
@@ -175,6 +190,14 @@ pub trait Application {
     /// trois unidirectionnels — contrôle et QPACK —, que le client attend sans
     /// les avoir demandés.
     fn a_l_etablissement(&mut self, _connexion: &mut Connection, _pair: SocketAddr) {}
+
+    /// Voici la connexion qu'une consigne désignait, et ce qu'il fallait y
+    /// écrire.
+    ///
+    /// **C'EST LE RETOUR DE [`Consignes::a_pousser`]** : l'application a dit
+    /// « écris ceci là » depuis un rendez-vous qui n'avait pas de connexion, et
+    /// l'écoute la lui rend.
+    fn a_pousser(&mut self, _connexion: &mut Connection, _octets: &[u8]) {}
 
     /// Ce flux a de quoi être lu, ou son pair vient d'en changer l'état.
     ///
@@ -508,9 +531,25 @@ impl Ecoute {
     fn executer<App: Application>(
         &mut self,
         consignes: &Consignes,
-        application: &App,
+        application: &mut App,
         maintenant: u64,
     ) {
+        // **LES POUSSÉES D'ABORD, LES FERMETURES ENSUITE.** Une connexion qu'on
+        // ferme n'émet plus un octet de flux : pousser après fermer jetterait ce
+        // qu'on vient d'écrire, sans le dire.
+        for (clef, octets) in &consignes.a_pousser {
+            let Some(rang) = self.carte.get(clef.as_slice()).copied() else {
+                continue;
+            };
+            let Some(vivante) = self.connexions.get_mut(rang) else {
+                continue;
+            };
+            if vivante.conduite.is_closed() {
+                continue;
+            }
+            application.a_pousser(&mut vivante.conduite, octets);
+        }
+
         if consignes.a_fermer.is_empty() {
             return;
         }

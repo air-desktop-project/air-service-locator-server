@@ -233,6 +233,15 @@ pub enum Besoin<'a> {
     ///
     /// `protocole.md` §2.2 : « ce que j'ai accordé, ce qu'on m'a accordé ».
     MesAutorisations,
+    /// Ouvrir le flux par lequel les verdicts arriveront.
+    ///
+    /// # IL NE DEMANDE RIEN À L'ÉTAGE 3, ET C'EST POURQUOI IL EST ICI
+    ///
+    /// La réponse ne dépend d'aucun état : elle est vide, et c'est le FLUX qui
+    /// compte. Ce qui s'y écrira ensuite ne passe pas par `repondre` — un
+    /// verdict n'est pas une réponse à une requête, il arrive quand la sonde a
+    /// fini.
+    EcouterLesPoussees,
     /// Une preuve de possession a été présentée, et elle ne vaut pas.
     ///
     /// # POURQUOI CE N'EST PAS UN `Deja(401)`
@@ -670,6 +679,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
             machine,
             service: service.as_str(),
         },
+        Ressource::Poussees => Besoin::EcouterLesPoussees,
         Ressource::OuParNom { service } => Besoin::OuParNom {
             service: service.as_str(),
         },
@@ -1000,6 +1010,19 @@ pub fn repondre<'o>(
             // Refusé, ou rien trouvé : un tableau vide, pour la raison ci-dessus.
             _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
         },
+
+        // **UNE RÉPONSE VIDE, ET UN FLUX QUI RESTE OUVERT.**
+        //
+        // Pas de `content-length` : une réponse dont la longueur est déclarée et
+        // dont le corps s'allonge est un message qui se contredit, et un
+        // intermédiaire aurait raison de la couper.
+        //
+        // Pas de corps non plus — la première poussée sera le premier octet. Un
+        // tableau vide d'ouverture ferait croire à une liste, alors que ce qui
+        // suit est une suite d'objets sans enveloppe.
+        Besoin::EcouterLesPoussees => Reponse::new(StatusCode::OK, &[])
+            .avec_champ(b"content-type", JSON_MEDIA)
+            .tenue(),
 
         Besoin::MesAutorisations => match trouvaille {
             Trouvaille::Autorisations(quoi) => composer_les_autorisations(quoi, sortie),
@@ -3043,6 +3066,41 @@ mod resolution {
                 "cette cible devrait exiger un appareil"
             );
         }
+    }
+    // ── Le flux des poussées ────────────────────────────────────────────────
+
+    #[test]
+    fn le_flux_des_poussees_s_ouvre_et_ne_se_ferme_pas() {
+        // **C'EST TOUTE LA MÉCANIQUE, VUE DE L'ÉTAGE 2.** L'annuaire répond
+        // `en_cours` parce qu'il ne fait pas attendre le démarrage d'un daemon le
+        // temps d'une sonde ; le verdict arrive ensuite, sur ce flux-là. Une
+        // réponse qui conclurait son flux le rendrait impossible.
+        let mut session = session_authentifiee();
+        let quoi = besoin(&session, &tete(b"/v1/poussees"), b"");
+        assert_eq!(quoi, Besoin::EcouterLesPoussees);
+
+        let mut sortie = [0_u8; 512];
+        let reponse = repondre(&mut session, &quoi, &Trouvaille::Rien, None, &mut sortie);
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert!(reponse.est_tenue(), "le flux doit rester ouvert");
+
+        // **NI CORPS, NI `content-length`.** Le premier octet sera la première
+        // poussée ; une longueur déclarée sur un corps qui s'allonge est un
+        // message qui se contredit.
+        assert!(reponse.body().is_empty());
+        let noms: alloc::vec::Vec<&[u8]> = reponse.fields().map(|(nom, _)| nom).collect();
+        assert!(!noms.contains(&b"content-length".as_slice()), "{noms:?}");
+    }
+
+    #[test]
+    fn le_flux_des_poussees_exige_une_machine() {
+        // Sans clé prouvée sur cette connexion, `401` — et le mot est juste,
+        // puisque `/v1/defi` attend bel et bien derrière.
+        let sans = Session::new(liaison());
+        assert_eq!(
+            besoin(&sans, &tete(b"/v1/poussees"), b""),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
     }
 }
 

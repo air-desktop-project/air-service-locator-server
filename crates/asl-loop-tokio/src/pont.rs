@@ -20,6 +20,13 @@ use ams_quic_tls::Connection;
 pub struct Pont<'a>(pub &'a mut Connection);
 
 impl Transport for Pont<'_> {
+    /// **UN SERVEUR N'OUVRE PAS DE FLUX BIDIRECTIONNEL**, et §6.1 de RFC 9114 ne
+    /// lui en donne pas l'occasion : une requête vient du client, toujours. La
+    /// moitié CLIENTE du conducteur en a besoin ; celle-ci refuse.
+    fn open_bi(&mut self) -> Result<StreamId, ams_h3::Error> {
+        Err(ams_h3::Error::new(ams_h3::Reason::Interne))
+    }
+
     fn open_uni(&mut self) -> Result<StreamId, ams_h3::Error> {
         self.0
             .open_stream(Directional::Unidirectional)

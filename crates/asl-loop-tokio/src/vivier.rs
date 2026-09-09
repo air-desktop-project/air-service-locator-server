@@ -66,6 +66,17 @@ impl Vivier {
         self.annonces.get(&clef(service)).map(|quoi| &quoi.session)
     }
 
+    /// La connexion au nom de laquelle ce service est annoncé.
+    ///
+    /// **C'EST ELLE QUI RECEVRA LE VERDICT.** Une sonde rapporte un service ;
+    /// pour pousser, il faut savoir par où.
+    #[must_use]
+    pub fn connexion_de(&self, service: Identifiant) -> Option<&[u8]> {
+        self.annonces
+            .get(&clef(service))
+            .map(|quoi| quoi.connexion.as_slice())
+    }
+
     /// Dit à toutes les annonces de cette connexion que le temps passe.
     ///
     /// # POURQUOI L'ÉCOUTE APPELLE LE KEEPALIVE, ET NON LE CLIENT

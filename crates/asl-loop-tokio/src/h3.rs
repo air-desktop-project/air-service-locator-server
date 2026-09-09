@@ -200,6 +200,9 @@ impl Service<'_> {
             }
             Besoin::ServicesDeMachine { machine } => self.rassembler_les_services(*machine),
             Besoin::MesAutorisations => self.rassembler_les_autorisations(),
+            // **RIEN À CHERCHER** : ouvrir le flux ne dépend d'aucun état, et
+            // ce qui s'y écrira ensuite n'est pas une réponse à une requête.
+            Besoin::EcouterLesPoussees => Trouvaille::Rien,
 
             // ── CE QUI CRÉE ─────────────────────────────────────────────
             //
@@ -1174,7 +1177,23 @@ impl<'a> Annuaire<'a> {
             })
             .map(|(clef, _)| clef.clone())
             .collect();
-        crate::quic::Consignes { a_fermer }
+        crate::quic::Consignes {
+            a_fermer,
+            a_pousser: Vec::new(),
+        }
+    }
+
+    /// La poussée d'un service, telle qu'elle part sur le fil.
+    ///
+    /// **ELLE NE PORTE AUCUN IDENTIFIANT DE SERVICE** (`protocole.md` §1.4) : la
+    /// connexion le détermine déjà, et l'y remettre serait un champ qui peut
+    /// CONTREDIRE la connexion sur laquelle il arrive.
+    fn composer_une_poussee(&self, service: Identifiant) -> Option<Vec<u8>> {
+        let vivante = self.vivier.annonce(service)?;
+        let mut sortie = alloc_reponse();
+        let combien = vivante.poussee().ok()?.encoder(&mut sortie).ok()?;
+        sortie.truncate(combien);
+        Some(sortie)
     }
 
     /// Efface les codes d'enrôlement périmés, de loin en loin.
@@ -1212,15 +1231,50 @@ impl Application for Annuaire<'_> {
         // une tâche à part : elle ne touche pas au vivier, elle rapporte. C'est
         // ce qui permet d'attendre trois secondes un trois-temps sans arrêter
         // la boucle, qui n'a qu'une tâche pour toutes les connexions.
+        let mut a_pousser = Vec::new();
         while let Ok(verdict) = self.verdicts.try_recv() {
             self.en_vol = self.en_vol.saturating_sub(1);
-            self.vivier.appliquer(&verdict);
+            // **ON NE POUSSE QUE CE QUI A CHANGÉ.** `appliquer` refuse un
+            // verdict tardif — le service peut être parti, réannoncé, ou déjà
+            // mesuré autrement —, et pousser un état inchangé ferait du bruit
+            // sur une connexion qu'un daemon tient pour des mois.
+            if !self.vivier.appliquer(&verdict) {
+                continue;
+            }
+            let Some(clef) = self.vivier.connexion_de(verdict.service) else {
+                continue;
+            };
+            let clef = clef.to_vec();
+            let Some(octets) = self.composer_une_poussee(verdict.service) else {
+                continue;
+            };
+            a_pousser.push((clef, octets));
         }
         // Et l'on oublie ce qui a expiré — une annonce dont la connexion est
         // tombée sans qu'on l'apprenne n'a personne pour la retirer.
         self.vivier.oublier_les_expirees(instant());
         self.balayer_les_codes();
-        self.consignes_de_fermeture()
+        let mut consignes = self.consignes_de_fermeture();
+        consignes.a_pousser = a_pousser;
+        consignes
+    }
+
+    fn a_pousser(&mut self, connexion: &mut Connection, octets: &[u8]) {
+        // **SUR LES FLUX QUE LE CONDUCTEUR TIENT, ET NULLE PART AILLEURS.** Un
+        // daemon en ouvre au plus un — `GET /v1/poussees` —, et celui qui n'en a
+        // ouvert aucun ne reçoit rien : il a répondu `en_cours` et n'a pas
+        // demandé la suite.
+        let clef = connexion.local_id().as_bytes().to_vec();
+        let Some(etat) = self.connexions.get_mut(&clef) else {
+            return;
+        };
+        let tenus: Vec<StreamId> = etat.conducteur.tenus().to_vec();
+        for flux in tenus {
+            // **UNE ÉCRITURE QUI ÉCHOUE NE FERME RIEN.** Le pair a peut-être
+            // fermé son flux entre-temps ; le verdict est perdu, et le prochain
+            // le remplacera — la poussée porte la liste ENTIÈRE, pas un delta.
+            let _ = etat.conducteur.pousser(&mut Pont(connexion), flux, octets);
+        }
     }
 
     fn a_l_etablissement(&mut self, connexion: &mut Connection, _pair: SocketAddr) {

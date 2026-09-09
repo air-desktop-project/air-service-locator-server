@@ -132,6 +132,25 @@ pub enum Ressource<'a> {
     /// Il n'y a pas non plus de verbe pour RAFRAÎCHIR : la connexion EST le
     /// bail, et le keepalive de QUIC suffit.
     Annonce,
+    /// `/v1/poussees` — **le flux par lequel les verdicts arrivent.**
+    ///
+    /// # POURQUOI UNE RESSOURCE, ALORS QUE LA RÉPONSE NE VIENT JAMAIS
+    ///
+    /// `protocole.md` §1.4 : l'annuaire répond souvent `en_cours`, parce qu'il
+    /// ne fait pas attendre le démarrage d'un daemon le temps d'une sonde. Le
+    /// verdict arrive ensuite, « dans la connexion déjà tenue » — et il fallait
+    /// bien un flux pour le porter.
+    ///
+    /// `GET` ouvre ce flux. **Sa réponse ne se termine pas** : le conducteur la
+    /// tient ouverte, et y écrit une poussée à chaque verdict. Un client la lit
+    /// à mesure, sans jamais attendre de fin.
+    ///
+    /// # ELLE EXIGE LA CAPACITÉ D'ANNONCE, ET NON CELLE DE LECTURE
+    ///
+    /// Un verdict porte sur des services QU'ON ANNONCE. Une machine de lecture
+    /// seule n'en a aucun, et lui ouvrir ce flux lui donnerait un flux qui ne
+    /// dira jamais rien — en tenant une ressource des deux côtés.
+    Poussees,
     /// `/v1/defi` — le défi d'authentification de CETTE connexion.
     ///
     /// # POURQUOI UNE RESSOURCE, ET NON UNE POIGNÉE DE MAIN À PART
@@ -251,6 +270,7 @@ impl Ressource<'_> {
             Self::Defi => &[Methode::Get, Methode::Post],
             Self::Comptes | Self::Appareils | Self::Machines | Self::Enrolement => &[Methode::Post],
             Self::Utilisateur { .. }
+            | Self::Poussees
             | Self::ServicesMachine { .. }
             | Self::Expositions
             | Self::AliasResolu { .. }
@@ -297,7 +317,7 @@ impl Ressource<'_> {
             | Self::Enrolement
             | Self::AliasResolu { .. }
             | Self::Utilisateur { .. } => Exigence::Aucune,
-            Self::Annonce => Exigence::MachineAnnonce,
+            Self::Annonce | Self::Poussees => Exigence::MachineAnnonce,
             Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
             _ => Exigence::Appareil,
         }
@@ -569,6 +589,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "machines", machine, "services"] => Ok(Ressource::ServicesMachine {
             machine: identifiant(machine, Genre::Machine)?,
         }),
+        ["v1", "poussees"] => Ok(Ressource::Poussees),
         ["v1", "autorisations"] => Ok(Ressource::Autorisations),
         ["v1", "autorisations", autorisation] => Ok(Ressource::Autorisation {
             autorisation: identifiant(autorisation, Genre::Autorisation)?,
