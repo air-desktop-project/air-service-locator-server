@@ -122,6 +122,34 @@ scripts/check-dco.sh      # après avoir committé : DCO et paternité
 L'ordre n'est pas arbitraire, et le formatage est en dernier : une faute de forme
 ne doit pas cacher une faute de fond.
 
+## Lancer un annuaire
+
+```sh
+scripts/ca.sh racine
+scripts/ca.sh serveur banc localhost ::1 127.0.0.1
+
+cargo run -p asl-server -- \
+    --entrepot   local/annuaire.redb \
+    --certificat local/ca/banc/chaine.pem \
+    --cle        local/ca/banc/serveur.key
+```
+
+`asl-server --aide` dit le reste. Trois choses qui surprendraient sinon :
+
+- **Il refuse de démarrer en root** (C8). Il écoute au-dessus de 1024 et n'a
+  besoin d'aucun privilège ; il refuse plutôt que d'en abandonner, parce qu'un
+  abandon est un endroit où l'on se trompe.
+- **Le port par défaut est 6630/udp**, libre au registre de l'IANA en TCP comme
+  en UDP — le raisonnement complet est au-dessus de `asl_proto::PORT_PAR_DEFAUT`.
+- **L'écoute est en double pile**, explicitement : `IPV6_V6ONLY` est mis à zéro
+  plutôt que laissé au sysctl du noyau. « IPv6 d'abord, IPv4 en repli » est une
+  décision de produit, et la faire dépendre de `net.ipv6.bindv6only` reviendrait
+  à ne pas l'avoir prise.
+
+Il s'éteint sur `SIGTERM` ou `SIGINT`, en deux temps (§5.2 de RFC 9114) : il dit
+d'abord « n'ouvre plus rien » sans rien condamner de ce qui est en vol, puis
+ferme.
+
 ## L'autorité de certification
 
 Ce n'est **pas** une barrière : on la lance à la main, et le fichier ne s'appelle

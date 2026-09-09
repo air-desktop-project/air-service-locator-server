@@ -219,6 +219,16 @@ dependencies = [
 [[package]]
 name = "asl-server"
 version = "0.1.0"
+dependencies = [
+ "ams-quic-client",
+ "asl-id",
+ "asl-loop-tokio",
+ "asl-proto",
+ "asl-registre",
+ "asl-store",
+ "libc",
+ "tokio",
+]
 
 [[package]]
 name = "asl-session"

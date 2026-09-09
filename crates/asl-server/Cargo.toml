@@ -1,13 +1,31 @@
 [package]
 name = "asl-server"
-description = "Le binaire du service : assemble la boucle, le magasin et l'annuaire."
+description = "Le binaire de l'annuaire : il assemble, il ne décide de rien."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "asl-server"
+path = "src/main.rs"
+
 [dependencies]
+asl-loop-tokio.workspace = true
+asl-proto.workspace = true
+asl-store.workspace = true
+
+libc.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+# Le harnais d'essai d'`air-mail-server` : un vrai client QUIC sur une vraie
+# socket. Voir `docs/transport.md` §3 pour ce qu'il est et ce qu'il n'est pas.
+ams-quic-client.workspace = true
+asl-id.workspace = true
+asl-registre.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true
