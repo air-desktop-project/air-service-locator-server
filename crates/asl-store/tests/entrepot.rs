@@ -10,7 +10,10 @@
 use std::path::PathBuf;
 
 use asl_id::{Genre, Identifiant};
-use asl_registre::{AliasRange, Compte, EntreeJournal, Machine, NomRange, Provenance, Verdict};
+use asl_registre::{
+    AliasRange, Compte, EntreeJournal, JetonPoussee, JetonRange, Machine, NomRange, Plateforme,
+    Provenance, Verdict,
+};
 use asl_store::{Entrepot, Faute};
 
 /// Un entrepôt neuf, dans un fichier à nous.
@@ -784,6 +787,115 @@ fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
         base.entrees_du_journal().expect("lisible"),
         1,
         "LE JOURNAL SURVIT — c'est l'exception de C17, et la seule"
+    );
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+// ── Une base neuve ──────────────────────────────────────────────────────────
+
+#[test]
+fn une_base_neuve_rend_des_listes_vides_et_non_des_fautes() {
+    // **UNE TABLE QUE REDB N'A JAMAIS VUE N'EXISTE PAS**, et l'ouvrir en lecture
+    // rend `TableDoesNotExist` — pas un intervalle vide. Trois index créés après
+    // coup manquaient à `ouvrir`, et lister les machines d'un compte neuf
+    // échouait donc, ce que l'étage 3 traduisait en `404` là où le protocole
+    // promet `200` et un tableau vide.
+    let (base, fichier) = entrepot("neuve");
+    let compte = un(Genre::Utilisateur, 1);
+    let appareil = un(Genre::Appareil, 2);
+
+    assert!(base.machines_de_compte(compte).expect("lisible").is_empty());
+    assert!(
+        base.autorisations_accordees(compte)
+            .expect("lisible")
+            .is_empty()
+    );
+    assert!(base.jeton(appareil).expect("lisible").is_none());
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+// ── Les jetons de poussée ───────────────────────────────────────────────────
+
+/// Un jeton d'essai.
+fn jeton(plateforme: Plateforme, texte: &str) -> JetonPoussee {
+    JetonPoussee {
+        provenance: Provenance::Ici,
+        plateforme,
+        jeton: JetonRange::nouveau(texte).expect("il tient"),
+    }
+}
+
+#[test]
+fn un_jeton_se_depose_se_relit_et_se_remplace() {
+    // **LE NEUF REMPLACE L'ANCIEN**, il ne s'ajoute pas : Apple et Google font
+    // tourner leurs jetons, et en garder deux enverrait chaque notification en
+    // double, dont une à un jeton mort.
+    let (base, fichier) = entrepot("jeton");
+    let quel = un(Genre::Appareil, 3);
+    assert!(base.jeton(quel).expect("lisible").is_none());
+
+    base.poser_jeton(quel, &jeton(Plateforme::Apns, "c0ffee"))
+        .expect("écrit");
+    let lu = base.jeton(quel).expect("lisible").expect("il est là");
+    assert_eq!(lu.plateforme, Plateforme::Apns);
+    assert_eq!(lu.jeton.octets(), b"c0ffee");
+
+    base.poser_jeton(quel, &jeton(Plateforme::Fcm, "d0d0"))
+        .expect("écrit");
+    let lu = base.jeton(quel).expect("lisible").expect("il est là");
+    assert_eq!(
+        lu.plateforme,
+        Plateforme::Fcm,
+        "la plate-forme change aussi"
+    );
+    assert_eq!(lu.jeton.octets(), b"d0d0");
+
+    assert!(
+        base.retirer_jeton(quel).expect("lisible"),
+        "il y en avait un"
+    );
+    assert!(base.jeton(quel).expect("lisible").is_none());
+    assert!(
+        !base.retirer_jeton(quel).expect("lisible"),
+        "retirer ce qui n'est plus là ne ment pas"
+    );
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+#[test]
+fn revoquer_un_appareil_emporte_son_jeton() {
+    // **L'APPAREIL RESTE MARQUÉ, LE JETON PART.** L'écran d'après une perte doit
+    // montrer ce qu'on a retiré ; le jeton, lui, n'a rien à montrer, et le
+    // laisser derrière ferait continuer les notifications du compte vers le
+    // téléphone de qui l'a.
+    let (base, fichier) = entrepot("revoque-jeton");
+    let quel = un(Genre::Appareil, 3);
+    base.poser_appareil(
+        quel,
+        &asl_registre::Appareil {
+            provenance: Provenance::Ici,
+            proprietaire: un(Genre::Utilisateur, 1),
+            cle: [0x77; 32],
+            revoque: false,
+        },
+    )
+    .expect("écrit");
+    base.poser_jeton(quel, &jeton(Plateforme::Apns, "c0ffee"))
+        .expect("écrit");
+
+    base.revoquer_appareil(quel).expect("révoqué");
+    assert!(
+        base.appareil(quel)
+            .expect("lisible")
+            .expect("il reste")
+            .revoque
+    );
+    assert!(
+        base.jeton(quel).expect("lisible").is_none(),
+        "le jeton part avec l'appareil"
     );
 
     let _ = std::fs::remove_file(fichier);

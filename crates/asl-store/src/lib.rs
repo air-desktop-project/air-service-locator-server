@@ -33,7 +33,8 @@ use asl_id::Identifiant;
 use asl_registre::{
     APPAREIL_OCTETS, AUTORISATION_OCTETS, Appareil, Autorisation, CLEF_JOURNAL_OCTETS,
     COMPTE_OCTETS, Compte, ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement, EntreeJournal,
-    IDENTIFIANT_OCTETS, MACHINE_OCTETS, Machine, SERVICE_OCTETS, Service,
+    IDENTIFIANT_OCTETS, JetonPoussee, MACHINE_OCTETS, Machine, POUSSEE_OCTETS, SERVICE_OCTETS,
+    Service,
 };
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
@@ -62,6 +63,17 @@ const ALIAS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("alias");
 /// Les appareils, par identifiant.
 const APPAREILS: TableDefinition<'_, &[u8], &[u8; APPAREIL_OCTETS]> =
     TableDefinition::new("appareils");
+
+/// Les jetons de poussée, **par identifiant d'appareil**.
+///
+/// # UNE TABLE À PART, ET NON UNE COLONNE
+///
+/// `asl_registre::JetonPoussee` dit les trois raisons. Celle qui se voit ici est
+/// la troisième : la table des appareils est lue à CHAQUE requête authentifiée,
+/// et y loger 255 octets le plus souvent vides ferait payer à toutes les
+/// requêtes un champ que presque aucune ne regarde.
+const POUSSEES: TableDefinition<'_, &[u8], &[u8; POUSSEE_OCTETS]> =
+    TableDefinition::new("poussees");
 
 /// Les codes d'enrôlement en attente, **par empreinte du code**.
 ///
@@ -312,6 +324,18 @@ impl Entrepot {
             ecriture.open_table(SERVICES_PAR_NOM)?;
             ecriture.open_table(AUTORISATIONS)?;
             ecriture.open_table(AUTORISATIONS_RECUES)?;
+            // **CES TROIS-LÀ MANQUAIENT, ET C'ÉTAIT UN DÉFAUT.** Une table que
+            // redb n'a jamais vue n'existe pas, et l'ouvrir en LECTURE rend
+            // `TableDoesNotExist` — pas un intervalle vide. Sur une base neuve,
+            // lister les machines d'un compte qui n'en a aucune échouait donc,
+            // et l'étage 3 traduisait cet échec en `404` là où le protocole
+            // promet `200` et un tableau vide.
+            //
+            // Les créer ici les rend vides plutôt qu'absentes, ce qui est la
+            // même chose pour un lecteur et pas du tout la même pour redb.
+            ecriture.open_table(AUTORISATIONS_ACCORDEES)?;
+            ecriture.open_table(MACHINES_PAR_COMPTE)?;
+            ecriture.open_table(POUSSEES)?;
             ecriture.open_table(JOURNAL)?;
             ecriture.open_table(RANG)?;
             ecriture.commit()?;
@@ -847,8 +871,76 @@ impl Entrepot {
                 table.insert(clef_appareil.as_slice(), &octets)?;
             }
         }
+        // **LE JETON PART AVEC L'APPAREIL, ET DANS LA MÊME ÉCRITURE.**
+        // `docs/modele.md` §2.6 : il est lié à l'appareil et se révoque avec
+        // lui. Le laisser derrière ferait continuer les notifications d'un
+        // compte vers un téléphone qu'on vient de déclarer perdu — c'est-à-dire
+        // vers celui qui l'a.
+        //
+        // L'appareil, lui, reste marqué : l'écran d'après une perte doit
+        // MONTRER ce qu'on a retiré. Le jeton n'a rien à montrer.
+        {
+            let mut table = ecriture.open_table(POUSSEES)?;
+            table.remove(clef_appareil.as_slice())?;
+        }
         ecriture.commit()?;
         Ok(trouve)
+    }
+
+    // ── Les jetons de poussée ───────────────────────────────────────────────
+
+    /// Dépose ou renouvelle le jeton de cet appareil.
+    ///
+    /// **UN SEUL JETON PAR APPAREIL, ET LE NEUF REMPLACE L'ANCIEN.** Apple et
+    /// Google font tourner les leurs : en garder deux ferait envoyer chaque
+    /// notification en double, dont une à un jeton mort — et un jeton mort
+    /// répété finit par faire retirer le droit d'en envoyer.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] si la base refuse.
+    pub fn poser_jeton(&self, appareil: Identifiant, jeton: &JetonPoussee) -> Result<(), Faute> {
+        let mut octets = [0_u8; POUSSEE_OCTETS];
+        jeton.ecrire(&mut octets);
+        let ecriture = self.base.begin_write()?;
+        {
+            let mut table = ecriture.open_table(POUSSEES)?;
+            table.insert(clef(appareil).as_slice(), &octets)?;
+        }
+        ecriture.commit()?;
+        Ok(())
+    }
+
+    /// Le jeton de cet appareil, s'il en a déposé un.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn jeton(&self, appareil: Identifiant) -> Result<Option<JetonPoussee>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let table = lecture.open_table(POUSSEES)?;
+        match table.get(clef(appareil).as_slice())? {
+            Some(brut) => Ok(Some(
+                JetonPoussee::lire(brut.value()).map_err(Faute::Enregistrement)?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Retire le jeton de cet appareil. Rend `true` s'il y en avait un.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] si la base refuse.
+    pub fn retirer_jeton(&self, appareil: Identifiant) -> Result<bool, Faute> {
+        let ecriture = self.base.begin_write()?;
+        let avait;
+        {
+            let mut table = ecriture.open_table(POUSSEES)?;
+            avait = table.remove(clef(appareil).as_slice())?.is_some();
+        }
+        ecriture.commit()?;
+        Ok(avait)
     }
 
     // ── Les codes d'enrôlement ──────────────────────────────────────────────

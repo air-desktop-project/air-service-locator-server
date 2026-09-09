@@ -55,6 +55,20 @@ pub const NOM_OCTETS_MAX: usize = 64;
 /// Ce qu'une clé publique Ed25519 occupe.
 pub const CLE_OCTETS: usize = 32;
 
+/// Ce qu'un jeton de poussée peut faire.
+///
+/// # POURQUOI 255, ET NON UNE BORNE CHOISIE POUR CE QU'ON VOIT AUJOURD'HUI
+///
+/// Un jeton APNs fait 64 caractères hexadécimaux ; un jeton FCM en fait environ
+/// 160, et **Google ne promet aucune longueur** — sa documentation dit de ne pas
+/// en supposer une. Une borne serrée sur ce qu'on observe aujourd'hui refuserait
+/// un jour un jeton parfaitement valide, et le téléphone concerné cesserait
+/// silencieusement de recevoir ses notifications.
+///
+/// 255 est le plus grand que [`Court`] sache écrire — sa longueur tient sur un
+/// octet — et c'est la raison de ce nombre-là plutôt qu'un autre.
+pub const JETON_OCTETS_MAX: usize = 255;
+
 // ── Les fautes ──────────────────────────────────────────────────────────────
 
 /// Ce qui empêche de relire un enregistrement.
@@ -86,6 +100,22 @@ pub enum Faute {
         annoncee: usize,
         /// Ce que le tableau peut faire.
         maximum: usize,
+    },
+    /// Un texte porte un octet qui ne s'imprime pas.
+    ///
+    /// # ELLE N'EXISTE QUE POUR LE JETON DE POUSSÉE, ET IL FAUT DIRE POURQUOI
+    ///
+    /// Partout ailleurs, une longueur corrompue se voit : elle dépasse le
+    /// tableau. **Le jeton de poussée est le seul texte dont la borne vaut 255**,
+    /// et une longueur tenant sur un octet ne peut donc jamais la dépasser — le
+    /// contrôle de [`Court::lire`] y est structurellement inatteignable.
+    ///
+    /// Ce qui reste pour voir la corruption est le contenu : un jeton est du
+    /// texte imprimable, et un octet nul au milieu trahit une longueur qu'on a
+    /// allongée.
+    NonImprimable {
+        /// Où, dans le texte.
+        position: usize,
     },
 }
 
@@ -190,11 +220,11 @@ impl<const N: usize> Court<N> {
 
     /// Écrit la longueur puis les octets. Occupe `1 + N`.
     fn ecrire(&self, sortie: &mut [u8]) {
-        // La longueur tient sur un octet : `N` vaut au plus 64 dans ce module,
+        // La longueur tient sur un octet : `N` vaut au plus 255 dans ce module,
         // et `nouveau` a déjà refusé au-delà.
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "la longueur est bornée par N, au plus 64"
+            reason = "la longueur est bornée par N, au plus 255"
         )]
         poser_un(sortie, self.longueur as u8);
         poser(sortie.get_mut(1..).unwrap_or_default(), &self.octets);
@@ -228,6 +258,9 @@ pub type AliasRange = Court<ALIAS_OCTETS_MAX>;
 
 /// Un nom de service rangé.
 pub type NomRange = Court<NOM_OCTETS_MAX>;
+
+/// Un jeton de poussée rangé.
+pub type JetonRange = Court<JETON_OCTETS_MAX>;
 
 // ── L'identifiant, en octets ────────────────────────────────────────────────
 
@@ -562,10 +595,14 @@ pub const APPAREIL_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_
 /// l'appareil ou son porteur (C13). Un appareil, pour l'annuaire, est **une clé
 /// publique rattachée à un compte**, et rien d'autre.
 ///
-/// `docs/modele.md` §2.2 lui donne aussi un jeton de poussée et deux dates.
-/// **Elles ne sont pas ici, et c'est un manque nommé** : rien ne les écrit ni ne
-/// les lit encore, et un champ qu'on range toujours vide ment sur ce que
-/// l'annuaire sait.
+/// `docs/modele.md` §2.2 lui donne aussi deux dates. **Elles ne sont pas ici, et
+/// c'est un manque nommé** : rien ne les écrit ni ne les lit encore, et un champ
+/// qu'on range toujours vide ment sur ce que l'annuaire sait.
+///
+/// **Le jeton de poussée, lui, est ailleurs** — voir [`JetonPoussee`]. Il n'est
+/// pas ici parce qu'il ne tient pas dans une rangée de taille fixe, et parce
+/// qu'il se retire seul : un appareil qui refuse les notifications reste un
+/// appareil.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Appareil {
     /// D'où vient cet enregistrement.
@@ -647,6 +684,129 @@ impl Appareil {
             proprietaire,
             cle,
             revoque,
+        })
+    }
+}
+
+// ── Le jeton de poussée ─────────────────────────────────────────────────────
+
+/// La plate-forme qui délivrera la notification.
+///
+/// # DEUX, ET L'ANNUAIRE NE SAIT RIEN FAIRE DE PLUS
+///
+/// Ce n'est pas un champ libre. Un jeton ne veut rien dire hors du service qui
+/// l'a émis, et l'annuaire doit savoir à qui le présenter — le ranger sans le
+/// savoir en ferait une chaîne opaque que personne ne pourrait employer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Plateforme {
+    /// Apple Push Notification service.
+    Apns,
+    /// Firebase Cloud Messaging.
+    Fcm,
+}
+
+impl Plateforme {
+    /// L'étiquette d'APNs.
+    const APNS: u8 = 1;
+    /// L'étiquette de FCM.
+    const FCM: u8 = 2;
+
+    /// Son étiquette rangée.
+    ///
+    /// **AUCUNE NE VAUT ZÉRO** : un octet oublié dans un tampon réemployé vaut
+    /// zéro, et le laisser désigner APNs ferait présenter à Apple des jetons
+    /// qu'on n'a jamais reçus.
+    const fn etiquette(self) -> u8 {
+        match self {
+            Self::Apns => Self::APNS,
+            Self::Fcm => Self::FCM,
+        }
+    }
+
+    /// Relit une étiquette.
+    const fn depuis(octet: u8) -> Result<Self, Faute> {
+        match octet {
+            Self::APNS => Ok(Self::Apns),
+            Self::FCM => Ok(Self::Fcm),
+            lue => Err(Faute::Etiquette { lue }),
+        }
+    }
+}
+
+/// Ce qu'un jeton de poussée occupe.
+pub const POUSSEE_OCTETS: usize = PROVENANCE_OCTETS + 1 + 1 + JETON_OCTETS_MAX;
+
+/// Le jeton par lequel un appareil reçoit ses notifications.
+///
+/// # IL EST RANGÉ À PART DE L'APPAREIL, ET CE N'EST PAS UN DÉTAIL
+///
+/// Trois raisons, dont deux tiennent au produit :
+///
+/// - **Il se retire seul.** Un utilisateur qui coupe les notifications garde son
+///   appareil ; un champ dans la rangée d'appareil aurait fait d'un retrait une
+///   réécriture de ce qui prouve son identité.
+/// - **Il ne vient pas de nous.** Apple et Google le font tourner, l'invalident,
+///   le remplacent. Ce qui change au rythme d'un tiers ne se range pas à côté de
+///   ce qui ne change jamais.
+/// - Il ne tiendrait pas dans une rangée de taille fixe raisonnable : 255 octets
+///   pour un champ le plus souvent vide, dans une table qu'on lit à chaque
+///   requête authentifiée.
+///
+/// **Il est rangé sous l'identifiant de l'appareil**, et se révoque avec lui
+/// (`docs/modele.md` §2.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JetonPoussee {
+    /// D'où vient cet enregistrement.
+    pub provenance: Provenance,
+    /// À qui le présenter.
+    pub plateforme: Plateforme,
+    /// Le jeton lui-même, tel que la plate-forme l'a donné.
+    ///
+    /// **L'ANNUAIRE NE LE LIT PAS.** Il ne sait pas ce qu'il porte, et n'a aucune
+    /// raison de le savoir : c'est une chaîne opaque qu'il rend à Apple ou à
+    /// Google. La seule chose qu'on en exige est qu'elle soit du texte imprimable
+    /// — pas pour la comprendre, mais pour qu'une base corrompue se voie.
+    pub jeton: JetonRange,
+}
+
+impl JetonPoussee {
+    /// Écrit ce jeton.
+    pub fn ecrire(&self, sortie: &mut [u8; POUSSEE_OCTETS]) {
+        self.provenance
+            .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
+        poser_un(
+            sortie.get_mut(PROVENANCE_OCTETS..).unwrap_or_default(),
+            self.plateforme.etiquette(),
+        );
+        let apres = PROVENANCE_OCTETS.saturating_add(1);
+        self.jeton
+            .ecrire(sortie.get_mut(apres..).unwrap_or_default());
+    }
+
+    /// Relit un jeton.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un jeton.
+    pub fn lire(octets: &[u8; POUSSEE_OCTETS]) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        let plateforme = Plateforme::depuis(octets.get(PROVENANCE_OCTETS).copied().unwrap_or(0))?;
+        let apres = PROVENANCE_OCTETS.saturating_add(1);
+        let jeton = JetonRange::lire(octets.get(apres..).unwrap_or_default())?;
+        // **LE SEUL CONTRÔLE DE CONTENU DE TOUT CE MODULE.** Voir
+        // [`Faute::NonImprimable`] : à 255 octets de borne, la longueur ne peut
+        // pas se dénoncer elle-même, et il n'y a que le texte pour le faire.
+        if let Some(position) = jeton
+            .octets()
+            .iter()
+            .position(|octet| !octet.is_ascii_graphic())
+        {
+            return Err(Faute::NonImprimable { position });
+        }
+        Ok(Self {
+            provenance,
+            plateforme,
+            jeton,
         })
     }
 }
@@ -1146,9 +1306,10 @@ mod tests {
     use super::{
         ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Autorisation,
         CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte, Court, ENROLEMENT_OCTETS,
-        ENTREE_OCTETS, Enrolement, EntreeJournal, Faute, IDENTIFIANT_OCTETS, MACHINE_OCTETS,
-        Machine, NOM_OCTETS_MAX, NomRange, PROVENANCE_OCTETS, Portee, Provenance, SERVICE_OCTETS,
-        Service, Verdict,
+        ENTREE_OCTETS, Enrolement, EntreeJournal, Faute, IDENTIFIANT_OCTETS, JETON_OCTETS_MAX,
+        JetonPoussee, JetonRange, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange,
+        POUSSEE_OCTETS, PROVENANCE_OCTETS, Plateforme, Portee, Provenance, SERVICE_OCTETS, Service,
+        Verdict,
     };
 
     /// Un identifiant de ce genre, reproductible.
@@ -1851,6 +2012,120 @@ mod tests {
     /// Un nom de machine, pour les essais.
     fn nom_de_machine(texte: &str) -> NomRange {
         NomRange::nouveau(texte).expect("un nom court se range")
+    }
+
+    // ── Le jeton de poussée ─────────────────────────────────────────────────
+
+    /// Un jeton de poussée, reproductible.
+    fn un_jeton(plateforme: Plateforme, texte: &str) -> JetonPoussee {
+        JetonPoussee {
+            provenance: Provenance::Ici,
+            plateforme,
+            jeton: JetonRange::nouveau(texte).expect("il tient"),
+        }
+    }
+
+    #[test]
+    fn un_jeton_de_poussee_fait_l_aller_retour() {
+        for plateforme in [Plateforme::Apns, Plateforme::Fcm] {
+            let jeton = un_jeton(plateforme, "c0ffee");
+            let mut octets = [0_u8; POUSSEE_OCTETS];
+            jeton.ecrire(&mut octets);
+            assert_eq!(JetonPoussee::lire(&octets), Ok(jeton), "{plateforme:?}");
+        }
+    }
+
+    #[test]
+    fn un_jeton_venu_d_un_pair_fait_l_aller_retour() {
+        // C17 : il porte son origine comme tout le reste.
+        let jeton = JetonPoussee {
+            provenance: Provenance::Annuaire(un(Genre::Annuaire, 2)),
+            ..un_jeton(Plateforme::Fcm, "d0d0")
+        };
+        let mut octets = [0_u8; POUSSEE_OCTETS];
+        jeton.ecrire(&mut octets);
+        assert_eq!(JetonPoussee::lire(&octets), Ok(jeton));
+    }
+
+    #[test]
+    fn un_jeton_de_la_longueur_maximale_tient() {
+        // **255 EST LA BORNE, ET ELLE DOIT PASSER**, pas seulement les longueurs
+        // qu'on observe : un jeton FCM n'a pas de longueur promise.
+        let long = "a".repeat(JETON_OCTETS_MAX);
+        let jeton = un_jeton(Plateforme::Fcm, &long);
+        let mut octets = [0_u8; POUSSEE_OCTETS];
+        jeton.ecrire(&mut octets);
+        assert_eq!(JetonPoussee::lire(&octets), Ok(jeton));
+        assert_eq!(jeton.jeton.longueur(), JETON_OCTETS_MAX);
+
+        // Et un octet de plus est refusé, plutôt que tronqué : un jeton tronqué
+        // serait présenté tel quel à Apple, qui le refuserait sans dire pourquoi.
+        let trop = "a".repeat(JETON_OCTETS_MAX + 1);
+        assert_eq!(
+            JetonRange::nouveau(&trop),
+            Err(Faute::Longueur {
+                annoncee: JETON_OCTETS_MAX + 1,
+                maximum: JETON_OCTETS_MAX,
+            })
+        );
+    }
+
+    #[test]
+    fn une_plateforme_inconnue_refuse_le_jeton() {
+        let jeton = un_jeton(Plateforme::Apns, "c0ffee");
+        let mut octets = [0_u8; POUSSEE_OCTETS];
+        jeton.ecrire(&mut octets);
+        // **ZÉRO EN FAIT PARTIE**, et c'est le cas qui compte : un tampon
+        // réemployé vaut zéro, et le laisser désigner APNs ferait présenter à
+        // Apple des jetons qu'on n'a jamais reçus.
+        for lue in [0_u8, 3, 200] {
+            octets[PROVENANCE_OCTETS] = lue;
+            assert_eq!(
+                JetonPoussee::lire(&octets),
+                Err(Faute::Etiquette { lue }),
+                "{lue}"
+            );
+        }
+    }
+
+    #[test]
+    fn une_provenance_ou_une_longueur_corrompue_refuse_le_jeton() {
+        let jeton = un_jeton(Plateforme::Apns, "c0ffee");
+        let mut octets = [0_u8; POUSSEE_OCTETS];
+
+        jeton.ecrire(&mut octets);
+        octets[0] = 9;
+        assert_eq!(
+            JetonPoussee::lire(&octets),
+            Err(Faute::Etiquette { lue: 9 })
+        );
+
+        // **UNE LONGUEUR ALLONGÉE NE DÉPASSE JAMAIS 255**, donc `Court` ne peut
+        // pas la refuser ; ce sont les zéros qu'elle fait entrer dans le texte
+        // qui la dénoncent.
+        jeton.ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 1] = 255;
+        assert_eq!(
+            JetonPoussee::lire(&octets),
+            Err(Faute::NonImprimable { position: 6 })
+        );
+
+        // **UNE LONGUEUR RACCOURCIE, ELLE, SE VOIT** : le texte qu'elle exclut
+        // reste dans le tampon, et n'y est plus du bourrage nul. C'est le seul
+        // sens dans lequel `Court` sache encore se défendre à 255 octets de
+        // borne — l'autre, la longueur allongée, ne peut pas dépasser le tableau.
+        jeton.ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 1] = 3;
+        assert_eq!(JetonPoussee::lire(&octets), Err(Faute::Bourrage));
+
+        // Et l'espace n'est pas imprimable au sens qui nous intéresse : un jeton
+        // n'en porte pas, et en accepter un ferait passer un tampon mal rempli.
+        jeton.ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 2] = b' ';
+        assert_eq!(
+            JetonPoussee::lire(&octets),
+            Err(Faute::NonImprimable { position: 0 })
+        );
     }
 
     // ── L'appareil et l'enrôlement ──────────────────────────────────────────

@@ -1564,6 +1564,92 @@ async fn revoquer_la_cle_d_une_machine_ferme_sa_connexion_et_fait_tomber_son_bai
 }
 
 #[tokio::test]
+async fn un_jeton_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // Le jeton vient du système du téléphone qui le porte, et personne d'autre
+    // ne l'a. Déposer pour l'appareil d'un AUTRE détournerait ses notifications
+    // — c'est-à-dire celles d'un compte vers le téléphone de qui l'a volé.
+    //
+    // Le refus est un `404`, et non un `403` : dire « ce n'est pas vous » à qui
+    // vise l'identifiant d'un autre confirmerait que cet identifiant existe.
+    let (autorite, racine, chaine, cle) = materiel("jeton-poussee");
+    let (base, fichier) = entrepot("jeton-poussee");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let (_compte, appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA1).await;
+
+    let mut bob = connecter(&racine, adresse).await;
+    let (_autre_compte, autre, _autre_secrete) = creer_un_compte(&mut bob, 0, 0xB1).await;
+
+    // `21` est l'index QPACK de `:method: PUT`.
+    let cible = format!("/v1/appareils/{}/poussee", appareil.texte());
+    ams_quic_client::envoyer_avec_media(
+        &mut alice,
+        12,
+        21,
+        cible.as_bytes(),
+        None,
+        br#"{"plateforme":"apns","jeton":"c0ffee"}"#,
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 12).await;
+    assert_eq!(
+        champ(&champs(alice.recu(12)), b":status"),
+        Some(&b"204"[..]),
+        "un appareil dépose pour lui-même"
+    );
+
+    // ── ET POUR CELUI D'UN AUTRE, RIEN ──────────────────────────────────────
+    let cible = format!("/v1/appareils/{}/poussee", autre.texte());
+    ams_quic_client::envoyer_avec_media(
+        &mut alice,
+        16,
+        21,
+        cible.as_bytes(),
+        None,
+        br#"{"plateforme":"fcm","jeton":"vole"}"#,
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 16).await;
+    assert_eq!(
+        champ(&champs(alice.recu(16)), b":status"),
+        Some(&b"404"[..]),
+        "déposer pour l'appareil d'un autre ne dit pas qu'il existe"
+    );
+
+    // ── UN CORPS MAL FORMÉ EST UN `400`, ET NON UN `404` ────────────────────
+    //
+    // Là, la faute est bien celle de l'appelant, et la lui cacher ne protège
+    // rien : il vise son propre appareil.
+    let cible = format!("/v1/appareils/{}/poussee", appareil.texte());
+    ams_quic_client::envoyer_avec_media(
+        &mut alice,
+        20,
+        21,
+        cible.as_bytes(),
+        None,
+        br#"{"plateforme":"windows","jeton":"x"}"#,
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 20).await;
+    assert_eq!(
+        champ(&champs(alice.recu(20)), b":status"),
+        Some(&b"400"[..]),
+        "une plate-forme inconnue est une requête mal formée"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
 async fn retirer_la_capacite_d_annonce_ferme_la_connexion_du_daemon() {
     // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
     //

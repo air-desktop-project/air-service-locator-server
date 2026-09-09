@@ -487,7 +487,7 @@ l'empêcherait de comprendre.
 |---|---|
 | `POST /v1/comptes` | Crée le compte et enrôle le premier appareil. Rend `u-…`. |
 | `POST /v1/appareils` | Enrôle un appareil de plus. **Signé par un appareil déjà enrôlé.** |
-| `PUT /v1/appareils/{a}/poussee` | Dépose ou renouvelle le jeton APNs / FCM. |
+| `PUT /v1/appareils/{a}/poussee` | Dépose ou renouvelle le jeton APNs / FCM. **Pour soi seulement** ; voir ci-dessous. |
 | `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. **Il est marqué, non effacé** : l'écran qu'on regarde après avoir perdu un téléphone doit montrer ce qu'on a retiré. |
 | `POST /v1/machines` | Déclare une machine, avec son **nom** et ses **capacités** (`annonce`, `lecture`). **Rend un code d'enrôlement** — dix symboles, à usage unique, valable dix minutes. La machine n'a **pas encore de clé**. |
 | `PATCH /v1/machines/{m}` | Change le nom ou les capacités. **Ce qui est absent ne change pas** ; voir ci-dessous. |
@@ -503,6 +503,37 @@ l'empêcherait de comprendre.
 | `DELETE /v1/autorisations/{g}` | Révoque. Effet immédiat. |
 | `GET /v1/expositions` | **Ce qui est exposé de MOI**, relation par relation. Tout utilisateur, pas seulement l'administrateur. |
 | `DELETE /v1/expositions/{relation}` | **Retire mes enregistrements** de cette exposition. Portée : tout mon compte, ou telle machine. |
+
+### Ce qu'un jeton de poussée exige, et ce qu'il ne promet pas
+
+**Un appareil ne dépose que pour LUI-MÊME.** Le jeton vient du système du
+téléphone qui le porte, et personne d'autre ne l'a ; déposer pour un autre
+détournerait ses notifications, c'est-à-dire celles d'un compte vers le téléphone
+de qui l'a volé. Viser l'appareil d'un autre rend **`404`**, comme un appareil qui
+n'existe pas — le distinguer confirmerait l'existence de l'identifiant visé.
+
+**Un corps mal formé rend `400`**, et non `404` : là, la faute est bien celle de
+l'appelant, et il vise son propre appareil.
+
+**Un seul jeton par appareil, et le neuf remplace l'ancien.** Apple et Google font
+tourner les leurs ; en garder deux enverrait chaque notification en double, dont
+une à un jeton mort — et un jeton mort répété finit par faire retirer le droit
+d'en envoyer.
+
+**Le jeton part avec l'appareil qu'on révoque**, dans la même écriture. L'appareil,
+lui, reste marqué : l'écran d'après une perte doit montrer ce qu'on a retiré. Le
+jeton n'a rien à montrer.
+
+**L'annuaire ne lit pas le jeton.** Ni sa forme, ni sa longueur attendue : c'est
+une chaîne opaque, et le seul juge de sa validité est le service qui l'a émis. Ce
+qui est exigé ne porte pas sur le sens — de l'ASCII imprimable, non vide, et au
+plus 255 octets, qui est ce qu'une longueur sur un octet permet. Un jeton vide
+n'est pas un retrait déguisé ; **il n'y a pas de verbe de retrait**, et un
+appareil qui n'en veut plus est un appareil qu'on révoque.
+
+**Et l'ENVOI n'est pas écrit.** Ce verbe range le jeton ; rien ne s'en sert
+encore. Le dire ici est plus honnête que de laisser croire qu'une notification
+part parce que l'application a réussi son dépôt.
 
 ### Ce qu'un `PATCH` change, et ce qu'il ferme
 

@@ -80,7 +80,7 @@ use ams_h3::Reponse;
 use ams_proto_http::{Method, RequestHead, StatusCode};
 use asl_api::corps::{
     AutorisationRendue, Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation,
-    ModificationMachine, Portee,
+    DepotJeton, ModificationMachine, Plateforme, Portee,
 };
 use asl_api::{Exigence, Ressource};
 use asl_cle::{ClePublique, Defi, LiaisonDeCanal, Signature};
@@ -325,6 +325,26 @@ pub enum Besoin<'a> {
         a: Identifiant,
         /// Jusqu'où elle porte.
         portee: Portee,
+    },
+    /// Déposer ou renouveler le jeton de poussée d'un appareil.
+    ///
+    /// # UN APPAREIL NE DÉPOSE QUE POUR LUI-MÊME
+    ///
+    /// Le jeton vient du système d'exploitation du téléphone qui le porte :
+    /// personne d'autre ne l'a. Un appareil qui en déposerait un pour un autre
+    /// détournerait donc les notifications d'un frère vers lui — c'est-à-dire
+    /// vers celui qui tient un téléphone volé.
+    ///
+    /// **Le refus se cache derrière le `404` des autres** : dire « ce n'est pas
+    /// vous » à qui vise l'identifiant d'un autre confirmerait que cet
+    /// identifiant existe.
+    PoserJetonDePoussee {
+        /// L'appareil visé, qui doit être celui de cette connexion.
+        appareil: Identifiant,
+        /// À qui présenter ce jeton.
+        plateforme: Plateforme,
+        /// Le jeton, tel que la plate-forme l'a donné.
+        jeton: &'a str,
     },
     /// Révoquer un appareil du compte de cette connexion.
     ///
@@ -742,6 +762,14 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
                 Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
         },
+        Ressource::PousseeAppareil { appareil } => match DepotJeton::decoder(corps) {
+            Ok(depot) => Besoin::PoserJetonDePoussee {
+                appareil,
+                plateforme: depot.plateforme,
+                jeton: depot.jeton,
+            },
+            Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+        },
         Ressource::Appareil { appareil } => Besoin::RevoquerAppareil { appareil },
         Ressource::CleMachine { machine } => Besoin::RevoquerCleMachine { machine },
         Ressource::Autorisation { autorisation } => Besoin::RevoquerAutorisation { autorisation },
@@ -754,7 +782,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
                 Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
         },
-        // Ce qui reste — le jeton de poussée d'un appareil et les expositions —
+        // Ce qui reste — les expositions —
         // n'est pas écrit. Le dire par `501` est exact : la ressource existe, le
         // verbe est servi, et l'annuaire ne sait pas encore le faire.
         _ => Besoin::Deja(StatusCode::NOT_IMPLEMENTED),
@@ -1179,6 +1207,7 @@ pub fn repondre<'o>(
         // il doit savoir pourquoi on lui dit non.
         Besoin::RevoquerAppareil { .. }
         | Besoin::ModifierMachine { .. }
+        | Besoin::PoserJetonDePoussee { .. }
         | Besoin::RevoquerCleMachine { .. }
         | Besoin::RevoquerAutorisation { .. }
         | Besoin::PoserAlias { .. }
@@ -3635,6 +3664,70 @@ mod creations {
             besoin(&session_d_appareil(), &tete(b"POST", b"/v1/machines"), b"{"),
             Besoin::Deja(StatusCode::BAD_REQUEST)
         );
+    }
+
+    // ── Le jeton de poussée ─────────────────────────────────────────────────
+
+    #[test]
+    fn les_deux_bornes_du_jeton_sont_le_meme_nombre() {
+        // **`asl-api` RECOPIE LA BORNE DU MAGASIN**, parce qu'une grammaire ne
+        // dépend pas d'un rangement. Cet essai est la seule chose qui relie les
+        // deux copies : sans lui, un jeton accepté par le décodeur serait refusé
+        // à l'écriture, et le téléphone cesserait silencieusement d'être joint.
+        assert_eq!(asl_api::corps::JETON_MAX, asl_registre::JETON_OCTETS_MAX);
+    }
+
+    #[test]
+    fn un_depot_de_jeton_se_lit_et_rend_204() {
+        let appareil = un(Genre::Appareil, 5);
+        let cible = alloc::format!("/v1/appareils/{}/poussee", appareil.texte());
+        let quoi = besoin(
+            &session_d_appareil(),
+            &tete(b"PUT", cible.as_bytes()),
+            br#"{"plateforme":"apns","jeton":"c0ffee"}"#,
+        );
+        assert_eq!(
+            quoi,
+            Besoin::PoserJetonDePoussee {
+                appareil,
+                plateforme: asl_api::corps::Plateforme::Apns,
+                jeton: "c0ffee",
+            }
+        );
+
+        let mut session = session_d_appareil();
+        assert_eq!(
+            rendre(&mut session, &quoi, &Trouvaille::Fait).0,
+            StatusCode::NO_CONTENT
+        );
+        // **VISER L'APPAREIL D'UN AUTRE REND LE MÊME `404`** qu'un appareil qui
+        // n'existe pas : dire « ce n'est pas vous » confirmerait son existence.
+        assert_eq!(
+            rendre(&mut session, &quoi, &Trouvaille::Rien).0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn un_depot_mal_forme_est_refuse() {
+        let appareil = un(Genre::Appareil, 5);
+        let cible = alloc::format!("/v1/appareils/{}/poussee", appareil.texte());
+        for corps in [
+            &b"{}"[..],
+            &br#"{"plateforme":"apns"}"#[..],
+            &br#"{"plateforme":"windows","jeton":"x"}"#[..],
+            &br#"{"plateforme":"apns","jeton":""}"#[..],
+        ] {
+            assert_eq!(
+                besoin(
+                    &session_d_appareil(),
+                    &tete(b"PUT", cible.as_bytes()),
+                    corps
+                ),
+                Besoin::Deja(StatusCode::BAD_REQUEST),
+                "{corps:?}"
+            );
+        }
     }
 
     // ── Modifier une machine ────────────────────────────────────────────────

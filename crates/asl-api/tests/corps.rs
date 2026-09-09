@@ -1,8 +1,8 @@
 //! Les corps de l'API mobile : ce qu'ils acceptent, et ce qu'ils refusent.
 
 use asl_api::corps::{
-    CORPS_MAX, Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation,
-    ModificationMachine, NOM_MACHINE_MAX, Portee,
+    CORPS_MAX, Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation, DepotJeton,
+    JETON_MAX, ModificationMachine, NOM_MACHINE_MAX, Plateforme, Portee,
 };
 use asl_id::{Genre, Identifiant};
 use asl_proto::Erreur;
@@ -930,4 +930,137 @@ fn une_portee_illisible_est_refusee() {
         ),
         "{faux}"
     );
+}
+
+// ── Déposer un jeton de poussée ─────────────────────────────────────────────
+
+#[test]
+fn un_depot_se_lit_et_se_reecrit_a_l_identique() {
+    for octets in [
+        &br#"{"plateforme":"apns","jeton":"c0ffee"}"#[..],
+        &br#"{"plateforme":"fcm","jeton":"e:Z-_9"}"#[..],
+    ] {
+        let lu = DepotJeton::decoder(octets).expect("il se lit");
+        let mut tampon = [0_u8; 128];
+        let ecrit = lu.encoder(&mut tampon).expect("il se réécrit");
+        assert_eq!(
+            &tampon[..ecrit],
+            octets,
+            "{}",
+            String::from_utf8_lossy(octets)
+        );
+    }
+}
+
+#[test]
+fn l_ordre_des_champs_ne_compte_pas() {
+    let lu = DepotJeton::decoder(br#"{"jeton":"c0ffee","plateforme":"fcm"}"#).expect("il se lit");
+    assert_eq!(lu.plateforme, Plateforme::Fcm);
+    assert_eq!(lu.jeton, "c0ffee");
+}
+
+#[test]
+fn les_deux_plateformes_et_elles_seules() {
+    // **LA LISTE EST FERMÉE.** Un jeton ne veut rien dire hors du service qui
+    // l'a émis, et l'annuaire doit savoir à qui le présenter.
+    assert_eq!(Plateforme::depuis_le_mot("apns"), Some(Plateforme::Apns));
+    assert_eq!(Plateforme::depuis_le_mot("fcm"), Some(Plateforme::Fcm));
+    for mot in ["APNS", "windows", "", "apns "] {
+        assert_eq!(Plateforme::depuis_le_mot(mot), None, "{mot}");
+    }
+    for plateforme in [Plateforme::Apns, Plateforme::Fcm] {
+        assert_eq!(
+            Plateforme::depuis_le_mot(plateforme.mot()),
+            Some(plateforme)
+        );
+    }
+    assert!(matches!(
+        DepotJeton::decoder(br#"{"plateforme":"windows","jeton":"x"}"#),
+        Err(Erreur::ChampInconnu { .. })
+    ));
+}
+
+#[test]
+fn un_jeton_vide_ou_trop_long_est_refuse() {
+    // **UN JETON VIDE N'EST PAS UN RETRAIT DÉGUISÉ.** C'est un champ qu'on a
+    // oublié de remplir, et le prendre pour un dépôt ferait présenter la chaîne
+    // vide à Apple.
+    assert_eq!(
+        DepotJeton::decoder(br#"{"plateforme":"apns","jeton":""}"#).map(|_| ()),
+        Err(Erreur::NomVide)
+    );
+
+    let juste = "a".repeat(JETON_MAX);
+    let corps = format!(r#"{{"plateforme":"apns","jeton":"{juste}"}}"#);
+    assert!(
+        DepotJeton::decoder(corps.as_bytes()).is_ok(),
+        "la borne passe"
+    );
+
+    let trop = "a".repeat(JETON_MAX + 1);
+    let corps = format!(r#"{{"plateforme":"apns","jeton":"{trop}"}}"#);
+    assert_eq!(
+        DepotJeton::decoder(corps.as_bytes()).map(|_| ()),
+        Err(Erreur::NomTropLong {
+            obtenue: JETON_MAX + 1
+        })
+    );
+}
+
+#[test]
+fn un_depot_incomplet_inconnu_ou_double_est_refuse() {
+    assert_eq!(
+        DepotJeton::decoder(br#"{"jeton":"c0ffee"}"#).map(|_| ()),
+        Err(Erreur::ChampManquant { nom: "plateforme" })
+    );
+    assert_eq!(
+        DepotJeton::decoder(br#"{"plateforme":"apns"}"#).map(|_| ()),
+        Err(Erreur::ChampManquant { nom: "jeton" })
+    );
+    assert!(matches!(
+        DepotJeton::decoder(br#"{"plateforme":"apns","couleur":"bleu","jeton":"x"}"#),
+        Err(Erreur::ChampInconnu { .. })
+    ));
+    assert!(matches!(
+        DepotJeton::decoder(br#"{"plateforme":"apns","plateforme":"fcm","jeton":"x"}"#),
+        Err(Erreur::ChampEnDouble { .. })
+    ));
+}
+
+#[test]
+fn un_depot_mal_cadre_est_refuse() {
+    for octets in [
+        &b""[..],
+        &b"["[..],
+        &br#"{}"#[..],
+        &br#"{"plateforme" "apns","jeton":"x"}"#[..],
+        &br#"{"plateforme":"apns" "jeton":"x"}"#[..],
+        &br#"{"plateforme":"apns","jeton":"x""#[..],
+        &br#"{"plateforme":"apns","jeton":"x"}y"#[..],
+        // **UN JETON N'EST PAS UN NOMBRE**, et le lecteur de chaînes le dit.
+        &br#"{"plateforme":"apns","jeton":42}"#[..],
+        // Un échappement est refusé : aucune valeur de ce protocole n'en emploie.
+        &br#"{"plateforme":"apns","jeton":"a\nb"}"#[..],
+    ] {
+        assert!(
+            DepotJeton::decoder(octets).is_err(),
+            "{:?} devrait être refusé",
+            String::from_utf8_lossy(octets)
+        );
+    }
+
+    let trop = vec![b'{'; CORPS_MAX + 1];
+    assert_eq!(
+        DepotJeton::decoder(&trop).map(|_| ()),
+        Err(Erreur::MessageTropLong {
+            obtenue: CORPS_MAX + 1
+        })
+    );
+}
+
+#[test]
+fn un_depot_ne_tient_pas_dans_un_tampon_trop_court() {
+    let lu = DepotJeton::decoder(br#"{"plateforme":"apns","jeton":"c0ffee"}"#).expect("il se lit");
+    let mut tampon = [0_u8; 8];
+    assert!(lu.encoder(&mut tampon).is_err());
 }

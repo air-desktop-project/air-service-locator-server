@@ -42,6 +42,13 @@ pub const CORPS_MAX: usize = 512;
 /// stockage qui décide, parce que c'est elle qui peut refuser.
 pub const NOM_MACHINE_MAX: usize = 64;
 
+/// Ce qu'un jeton de poussée peut faire. Égal à `asl_registre::JETON_OCTETS_MAX`.
+///
+/// **RECOPIÉ PLUTÔT QU'IMPORTÉ** : `asl-api` est une grammaire, et dépendre du
+/// magasin pour connaître une borne ferait remonter une décision de rangement
+/// dans un décodeur. Les deux nombres sont comparés par un essai.
+pub const JETON_MAX: usize = 255;
+
 // ── Déclarer une machine ────────────────────────────────────────────────────
 
 /// Les champs de `POST /v1/machines`, dans l'ordre où l'encodeur les écrit.
@@ -741,6 +748,166 @@ impl<'a> DemandeAlias<'a> {
         let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
         ecrivain.pousser(b"{\"alias\":\"");
         ecrivain.pousser(self.alias.as_str().as_bytes());
+        ecrivain.pousser(b"\"}");
+        ecrivain.achever()
+    }
+}
+
+// ── Déposer un jeton de poussée ─────────────────────────────────────────────
+
+/// Les champs de `PUT /v1/appareils/{a}/poussee`.
+const CHAMPS_JETON: [&str; 2] = ["plateforme", "jeton"];
+
+/// La plate-forme qui délivrera la notification.
+///
+/// **DEUX, ET C'EST UNE LISTE FERMÉE.** Un jeton ne veut rien dire hors du
+/// service qui l'a émis, et l'annuaire doit savoir à qui le présenter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Plateforme {
+    /// Apple Push Notification service.
+    Apns,
+    /// Firebase Cloud Messaging.
+    Fcm,
+}
+
+impl Plateforme {
+    /// Le mot qui la désigne sur le fil.
+    #[must_use]
+    pub const fn mot(self) -> &'static str {
+        match self {
+            Self::Apns => "apns",
+            Self::Fcm => "fcm",
+        }
+    }
+
+    /// Ce que ce mot désigne, s'il désigne quelque chose.
+    #[must_use]
+    pub fn depuis_le_mot(mot: &str) -> Option<Self> {
+        match mot {
+            "apns" => Some(Self::Apns),
+            "fcm" => Some(Self::Fcm),
+            _ => None,
+        }
+    }
+}
+
+/// Ce que `PUT /v1/appareils/{a}/poussee` dépose.
+///
+/// # L'ANNUAIRE NE LIT PAS LE JETON, ET N'A PAS À LE FAIRE
+///
+/// Il ne vérifie ni sa forme, ni sa longueur attendue, ni qu'il ressemble à ce
+/// qu'Apple ou Google émettent aujourd'hui. **Un jeton est une chaîne opaque**,
+/// et le seul juge de sa validité est le service qui l'a émis.
+///
+/// Ce qui EST exigé tient en deux points, et aucun ne porte sur le sens : il
+/// s'écrit en ASCII imprimable — ce que [`Lecteur::chaine`] impose déjà —, et il
+/// n'est pas vide. Un jeton vide n'est pas un dépôt, c'est un champ qu'on a
+/// oublié de remplir ; **le retrait, lui, n'a pas de verbe** et n'est pas un
+/// jeton vide déguisé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepotJeton<'a> {
+    /// À qui présenter ce jeton.
+    pub plateforme: Plateforme,
+    /// Le jeton, tel que la plate-forme l'a donné.
+    pub jeton: &'a str,
+}
+
+impl<'a> DepotJeton<'a> {
+    /// Décode un dépôt de jeton.
+    ///
+    /// ```jsonc
+    /// {"plateforme": "apns", "jeton": "c0ffee…"}
+    /// ```
+    ///
+    /// # Erreurs
+    ///
+    /// Celles du cadrage, plus [`Erreur::ChampManquant`], [`Erreur::NomVide`]
+    /// pour un jeton vide et [`Erreur::NomTropLong`] au-delà de [`JETON_MAX`].
+    pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
+        if octets.len() > CORPS_MAX {
+            return Err(Erreur::MessageTropLong {
+                obtenue: octets.len(),
+            });
+        }
+        let mut lecteur = Lecteur::nouveau(octets);
+        lecteur.attendre(b'{', "un objet")?;
+
+        let mut vus = 0_u8;
+        let mut plateforme: Option<Plateforme> = None;
+        let mut jeton: Option<&'a str> = None;
+
+        loop {
+            let position_cle = lecteur.position();
+            let cle = lecteur.chaine()?;
+            let rang = CHAMPS_JETON.iter().position(|champ| *champ == cle).ok_or(
+                Erreur::ChampInconnu {
+                    position: position_cle,
+                },
+            )?;
+            let bit = 1_u8 << rang;
+            if vus & bit != 0 {
+                return Err(Erreur::ChampEnDouble {
+                    position: position_cle,
+                });
+            }
+            vus |= bit;
+
+            lecteur.attendre(b':', "deux-points")?;
+            let position = lecteur.position();
+            let texte = lecteur.chaine()?;
+            if rang == 0 {
+                plateforme = Some(
+                    Plateforme::depuis_le_mot(texte).ok_or(Erreur::ChampInconnu { position })?,
+                );
+            } else {
+                if texte.is_empty() {
+                    return Err(Erreur::NomVide);
+                }
+                if texte.len() > JETON_MAX {
+                    return Err(Erreur::NomTropLong {
+                        obtenue: texte.len(),
+                    });
+                }
+                jeton = Some(texte);
+            }
+
+            lecteur.sauter_blancs();
+            match lecteur.regarder() {
+                Some(b',') => lecteur.avancer(),
+                Some(b'}') => {
+                    lecteur.avancer();
+                    break;
+                }
+                _ => {
+                    return Err(Erreur::JsonAttendu {
+                        position: lecteur.position(),
+                        attendu: "une virgule ou la fin de l'objet",
+                    });
+                }
+            }
+        }
+        lecteur.fin()?;
+
+        let plateforme = plateforme.ok_or(Erreur::ChampManquant {
+            nom: CHAMPS_JETON[0],
+        })?;
+        let jeton = jeton.ok_or(Erreur::ChampManquant {
+            nom: CHAMPS_JETON[1],
+        })?;
+        Ok(Self { plateforme, jeton })
+    }
+
+    /// Encode ce dépôt, et rend le nombre d'octets écrits.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`].
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{\"plateforme\":\"");
+        ecrivain.pousser(self.plateforme.mot().as_bytes());
+        ecrivain.pousser(b"\",\"jeton\":\"");
+        ecrivain.pousser(self.jeton.as_bytes());
         ecrivain.pousser(b"\"}");
         ecrivain.achever()
     }

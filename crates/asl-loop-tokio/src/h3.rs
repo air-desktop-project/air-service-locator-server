@@ -224,6 +224,11 @@ impl Service<'_> {
             Besoin::Autoriser { a, portee } => self.autoriser(*a, *portee),
 
             // ── CE QUI RETIRE ───────────────────────────────────────────
+            Besoin::PoserJetonDePoussee {
+                appareil,
+                plateforme,
+                jeton,
+            } => self.poser_un_jeton(*appareil, *plateforme, jeton),
             Besoin::RevoquerAppareil { appareil } => self.revoquer_un_appareil(*appareil),
             Besoin::RevoquerCleMachine { machine } => self.revoquer_une_cle(*machine),
             Besoin::RevoquerAutorisation { autorisation } => {
@@ -681,6 +686,54 @@ impl Service<'_> {
                 self.a_fermer.push(machine);
                 Trouvaille::Fait
             }
+            Err(_) => Trouvaille::Rien,
+        }
+    }
+
+    /// Dépose ou renouvelle le jeton de poussée d'un appareil.
+    ///
+    /// # C'EST LA CONNEXION QUI DÉSIGNE L'APPAREIL, ET LE CHEMIN DOIT SUIVRE
+    ///
+    /// Le jeton vient du système du téléphone qui le porte, et personne d'autre
+    /// ne l'a. Déposer pour un autre appareil détournerait ses notifications —
+    /// c'est-à-dire celles d'un compte vers le téléphone de qui l'a volé.
+    ///
+    /// **Le refus rend `Rien`, donc `404`.** Dire « ce n'est pas vous » à qui
+    /// vise l'identifiant d'un autre confirmerait que cet identifiant existe.
+    fn poser_un_jeton(
+        &self,
+        vise: Identifiant,
+        plateforme: asl_api::corps::Plateforme,
+        jeton: &str,
+    ) -> Trouvaille {
+        let Some(moi) = self.session.appareil() else {
+            return Trouvaille::Rien;
+        };
+        if moi != vise {
+            return Trouvaille::Rien;
+        }
+        // **UN APPAREIL RÉVOQUÉ NE DÉPOSE PLUS.** `compte_de_la_connexion`
+        // écarte déjà les révoqués, et c'est ce qui compte ici : sans elle, un
+        // téléphone déclaré perdu pourrait redéposer son jeton et continuer de
+        // recevoir les notifications du compte.
+        let Some(_compte) = self.compte_de_la_connexion() else {
+            return Trouvaille::Rien;
+        };
+        let Ok(jeton) = asl_registre::JetonRange::nouveau(jeton) else {
+            return Trouvaille::Rien;
+        };
+        match self.entrepot.poser_jeton(
+            vise,
+            &asl_registre::JetonPoussee {
+                provenance: asl_registre::Provenance::Ici,
+                plateforme: match plateforme {
+                    asl_api::corps::Plateforme::Apns => asl_registre::Plateforme::Apns,
+                    asl_api::corps::Plateforme::Fcm => asl_registre::Plateforme::Fcm,
+                },
+                jeton,
+            },
+        ) {
+            Ok(()) => Trouvaille::Fait,
             Err(_) => Trouvaille::Rien,
         }
     }
