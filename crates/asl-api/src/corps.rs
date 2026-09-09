@@ -84,76 +84,13 @@ impl<'a> DeclarationMachine<'a> {
     ///
     /// Celles du cadrage, plus [`Erreur::NomVide`] et [`Erreur::NomTropLong`].
     pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
-        if octets.len() > CORPS_MAX {
-            return Err(Erreur::MessageTropLong {
-                obtenue: octets.len(),
-            });
-        }
-        let mut lecteur = Lecteur::nouveau(octets);
-        lecteur.attendre(b'{', "un objet")?;
-
-        let mut vus = 0_u8;
-        let mut nom: Option<&'a str> = None;
-        let mut capacites = Capacites::default();
-
-        loop {
-            let position_cle = lecteur.position();
-            let cle = lecteur.chaine()?;
-            let rang = CHAMPS_MACHINE
-                .iter()
-                .position(|champ| *champ == cle)
-                .ok_or(Erreur::ChampInconnu {
-                    position: position_cle,
-                })?;
-            let bit = 1_u8 << rang;
-            if vus & bit != 0 {
-                return Err(Erreur::ChampEnDouble {
-                    position: position_cle,
-                });
-            }
-            vus |= bit;
-
-            lecteur.attendre(b':', "deux-points")?;
-            if rang == 0 {
-                let texte = lecteur.texte_libre()?;
-                if texte.is_empty() {
-                    return Err(Erreur::NomVide);
-                }
-                if texte.len() > NOM_MACHINE_MAX {
-                    return Err(Erreur::NomTropLong {
-                        obtenue: texte.len(),
-                    });
-                }
-                nom = Some(texte);
-            } else {
-                capacites = decoder_capacites(&mut lecteur)?;
-            }
-
-            lecteur.sauter_blancs();
-            match lecteur.regarder() {
-                Some(b',') => lecteur.avancer(),
-                Some(b'}') => {
-                    lecteur.avancer();
-                    break;
-                }
-                _ => {
-                    return Err(Erreur::JsonAttendu {
-                        position: lecteur.position(),
-                        attendu: "une virgule ou la fin de l'objet",
-                    });
-                }
-            }
-        }
-        lecteur.fin()?;
-
+        let (nom, capacites) = lire_les_champs_de_machine(octets)?;
         let nom = nom.ok_or(Erreur::ChampManquant {
             nom: CHAMPS_MACHINE[0],
         })?;
-        if vus & 0b10 == 0 {
-            return Err(Erreur::ChampManquant {
-                nom: CHAMPS_MACHINE[1],
-            });
-        }
+        let capacites = capacites.ok_or(Erreur::ChampManquant {
+            nom: CHAMPS_MACHINE[1],
+        })?;
         Ok(Self { nom, capacites })
     }
 
@@ -179,6 +116,170 @@ impl<'a> DeclarationMachine<'a> {
             ecrivain.pousser(b"\"lecture\"");
         }
         ecrivain.pousser(b"]}");
+        ecrivain.achever()
+    }
+}
+
+/// Lit les champs d'un objet machine, **sans exiger qu'ils soient tous là**.
+///
+/// # POURQUOI LA DÉCLARATION ET LA MODIFICATION PARTAGENT CETTE BOUCLE
+///
+/// `POST /v1/machines` et `PATCH /v1/machines/{m}` lisent les MÊMES champs, avec
+/// les mêmes bornes et les mêmes refus ; seule l'exigence diffère — l'un veut les
+/// deux, l'autre en veut au moins un. Deux boucles auraient divergé au premier
+/// champ ajouté, et c'est le `PATCH`, moins souvent relu, qui aurait gardé la
+/// vieille borne.
+///
+/// **Un objet VIDE se lit ici sans faute**, et rend deux `None` : c'est à
+/// l'appelant de dire si l'absence est une faute, et laquelle.
+fn lire_les_champs_de_machine(octets: &[u8]) -> Result<(Option<&str>, Option<Capacites>), Erreur> {
+    if octets.len() > CORPS_MAX {
+        return Err(Erreur::MessageTropLong {
+            obtenue: octets.len(),
+        });
+    }
+    let mut lecteur = Lecteur::nouveau(octets);
+    lecteur.attendre(b'{', "un objet")?;
+
+    let mut vus = 0_u8;
+    let mut nom: Option<&str> = None;
+    let mut capacites: Option<Capacites> = None;
+
+    lecteur.sauter_blancs();
+    if lecteur.regarder() == Some(b'}') {
+        lecteur.avancer();
+        lecteur.fin()?;
+        return Ok((None, None));
+    }
+
+    loop {
+        let position_cle = lecteur.position();
+        let cle = lecteur.chaine()?;
+        let rang = CHAMPS_MACHINE
+            .iter()
+            .position(|champ| *champ == cle)
+            .ok_or(Erreur::ChampInconnu {
+                position: position_cle,
+            })?;
+        let bit = 1_u8 << rang;
+        if vus & bit != 0 {
+            return Err(Erreur::ChampEnDouble {
+                position: position_cle,
+            });
+        }
+        vus |= bit;
+
+        lecteur.attendre(b':', "deux-points")?;
+        if rang == 0 {
+            let texte = lecteur.texte_libre()?;
+            if texte.is_empty() {
+                return Err(Erreur::NomVide);
+            }
+            if texte.len() > NOM_MACHINE_MAX {
+                return Err(Erreur::NomTropLong {
+                    obtenue: texte.len(),
+                });
+            }
+            nom = Some(texte);
+        } else {
+            capacites = Some(decoder_capacites(&mut lecteur)?);
+        }
+
+        lecteur.sauter_blancs();
+        match lecteur.regarder() {
+            Some(b',') => lecteur.avancer(),
+            Some(b'}') => {
+                lecteur.avancer();
+                break;
+            }
+            _ => {
+                return Err(Erreur::JsonAttendu {
+                    position: lecteur.position(),
+                    attendu: "une virgule ou la fin de l'objet",
+                });
+            }
+        }
+    }
+    lecteur.fin()?;
+    Ok((nom, capacites))
+}
+
+// ── Modifier une machine ────────────────────────────────────────────────────
+
+/// Ce que `PATCH /v1/machines/{m}` demande.
+///
+/// # CE QUI EST ABSENT NE CHANGE PAS
+///
+/// C'est la sémantique de `PATCH`, et elle a une conséquence qu'il faut nommer :
+/// **`{"capacites": []}` RETIRE les deux capacités**, alors que l'absence du
+/// champ les laisse telles quelles. Le tableau vide n'est pas « je ne dis rien »,
+/// il est « aucune » — et c'est un état légitime, celui d'une machine déclarée
+/// qui ne peut plus rien.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModificationMachine<'a> {
+    /// Le nouveau nom, ou `None` pour le laisser.
+    pub nom: Option<&'a str>,
+    /// Les nouvelles capacités, ou `None` pour les laisser.
+    pub capacites: Option<Capacites>,
+}
+
+impl<'a> ModificationMachine<'a> {
+    /// Décode la modification d'une machine.
+    ///
+    /// ```jsonc
+    /// {"nom": "grenier"}                       // le nom seul
+    /// {"capacites": ["lecture"]}               // les capacités seules
+    /// {"nom": "grenier", "capacites": []}      // les deux
+    /// ```
+    ///
+    /// # Erreurs
+    ///
+    /// Celles de [`DeclarationMachine::decoder`], plus [`Erreur::RienAChanger`]
+    /// si l'objet ne porte aucun des deux champs.
+    pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
+        let (nom, capacites) = lire_les_champs_de_machine(octets)?;
+        if nom.is_none() && capacites.is_none() {
+            return Err(Erreur::RienAChanger);
+        }
+        Ok(Self { nom, capacites })
+    }
+
+    /// Encode cette modification, et rend le nombre d'octets écrits.
+    ///
+    /// **Ce qui est `None` n'est pas écrit** — et non écrit à `null` : un `null`
+    /// serait un troisième sens, à mi-chemin entre « laisse » et « vide », qu'il
+    /// faudrait ensuite trancher partout.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`].
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{");
+        if let Some(nom) = self.nom {
+            ecrivain.pousser(b"\"nom\":\"");
+            ecrivain.pousser(nom.as_bytes());
+            ecrivain.pousser(b"\"");
+        }
+        if let Some(capacites) = self.capacites {
+            if self.nom.is_some() {
+                ecrivain.pousser(b",");
+            }
+            ecrivain.pousser(b"\"capacites\":[");
+            let mut deja = false;
+            if capacites.annonce {
+                ecrivain.pousser(b"\"annonce\"");
+                deja = true;
+            }
+            if capacites.lecture {
+                if deja {
+                    ecrivain.pousser(b",");
+                }
+                ecrivain.pousser(b"\"lecture\"");
+            }
+            ecrivain.pousser(b"]");
+        }
+        ecrivain.pousser(b"}");
         ecrivain.achever()
     }
 }

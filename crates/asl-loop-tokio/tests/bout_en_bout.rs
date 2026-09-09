@@ -1211,6 +1211,38 @@ async fn poster(
     (statut, rendu)
 }
 
+/// Envoie un `PATCH`, **dont la méthode ne tient dans aucun index**.
+///
+/// # POURQUOI CELUI-CI SE BÂTIT À LA MAIN
+///
+/// L'annexe A de RFC 9204 donne un index à `GET`, `POST`, `PUT` et `DELETE` —
+/// et **aucun à `PATCH`**. `une_section` ne sait donc pas l'écrire, et il faut
+/// une ligne de champ littérale (§4.5.6). Les pseudo-champs restent en tête,
+/// comme §4.3 de RFC 9114 l'exige : un serveur qui recevrait `content-type`
+/// avant `:method` doit clore le flux.
+async fn patcher(
+    client: &mut ams_quic_client::Client,
+    flux: u64,
+    cible: &[u8],
+    corps: &[u8],
+) -> Vec<u8> {
+    let mut section = vec![0x00_u8, 0x00];
+    for (nom, valeur) in [
+        (&b":method"[..], &b"PATCH"[..]),
+        (b":scheme", b"https"),
+        (b":authority", b"exemple.test"),
+        (b":path", cible),
+        (b"content-type", b"application/json"),
+    ] {
+        ams_quic_client::poser_champ(nom, valeur, &mut section);
+    }
+    ams_quic_client::envoyer_la_section(client, flux, &section, corps).await;
+    let _ = ams_quic_client::attendre_la_reponse(client, flux).await;
+    champ(&champs(client.recu(flux)), b":status")
+        .expect("un statut")
+        .to_vec()
+}
+
 /// La valeur d'un champ JSON plat, sans analyseur.
 ///
 /// Ces corps sont écrits par `asl-session`, à champs fixes et sans échappement :
@@ -1523,6 +1555,96 @@ async fn revoquer_la_cle_d_une_machine_ferme_sa_connexion_et_fait_tomber_son_bai
     assert!(
         daemon.ferme().is_some(),
         "la connexion du daemon aurait dû être fermée par la révocation"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn retirer_la_capacite_d_annonce_ferme_la_connexion_du_daemon() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // Décocher « annonce » dans l'application doit RETIRER quelque chose. Écrire
+    // la nouvelle capacité dans l'entrepôt ne suffirait pas : la connexion déjà
+    // authentifiée porte son pair avec elle, son bail vit tant qu'elle vit, et
+    // l'annuaire continuerait de publier les adresses d'une machine à qui l'on
+    // vient d'interdire d'annoncer.
+    //
+    // **Un changement de NOM, lui, ne ferme rien**, et l'essai le montre dans le
+    // même souffle : le daemon survit au premier `PATCH` et tombe au second.
+    let (autorite, racine, chaine, cle) = materiel("patch-machine");
+    let (base, fichier) = entrepot("patch-machine");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let (_compte, _appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA1).await;
+    let (statut, rendu) = poster(
+        &mut alice,
+        8,
+        b"/v1/machines",
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let machine = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let code = valeur_json(&rendu, "code");
+
+    let mut daemon = connecter(&racine, adresse).await;
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xD2; 32]);
+    assert_eq!(enroler(&mut daemon, 0, &code, &secrete).await, machine);
+    authentifier(&mut daemon, machine, &secrete, 12, 16).await;
+
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}]}}"#,
+        machine.texte()
+    );
+    let (statut, _) = poster(
+        &mut daemon,
+        20,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"200", "l'annonce est prise");
+
+    // ── LE NOM CHANGE, ET RIEN NE TOMBE ─────────────────────────────────────
+    let cible = format!("/v1/machines/{}", machine.texte());
+    assert_eq!(
+        patcher(&mut alice, 16, cible.as_bytes(), br#"{"nom":"cave"}"#).await,
+        b"204",
+        "le nom se change"
+    );
+    for _ in 0..16_u32 {
+        daemon.parler().await;
+        if !daemon.ecouter().await {
+            break;
+        }
+    }
+    assert!(
+        daemon.ferme().is_none(),
+        "renommer ne retire aucun droit, et ne doit rien fermer"
+    );
+
+    // ── LA CAPACITÉ PART, ET LA CONNEXION AVEC ──────────────────────────────
+    assert_eq!(
+        patcher(&mut alice, 20, cible.as_bytes(), br#"{"capacites":[]}"#).await,
+        b"204",
+        "les capacités se retirent"
+    );
+    for _ in 0..32_u32 {
+        daemon.parler().await;
+        if !daemon.ecouter().await {
+            break;
+        }
+    }
+    assert!(
+        daemon.ferme().is_some(),
+        "la connexion du daemon aurait dû être fermée par le retrait de l'annonce"
     );
 
     let _ = dire_stop.send(());

@@ -250,6 +250,19 @@ pub enum Erreur {
         /// Son nom.
         nom: &'static str,
     },
+    /// Une modification ne demande AUCUN changement.
+    ///
+    /// # POURQUOI `{}` EST REFUSÉ, ALORS QU'IL EST DU JSON VALIDE
+    ///
+    /// Un `PATCH` dont tous les champs sont facultatifs accepterait `{}` sans
+    /// rien faire, et rendrait un succès. Or personne n'envoie `{}` exprès : ce
+    /// qui l'a produit est un champ mal orthographié qu'un décodeur indulgent
+    /// aurait ignoré, ou une variable vide côté appelant.
+    ///
+    /// **Rendre un succès à une requête qui n'a rien changé, c'est mentir.** Le
+    /// nom mal écrit resterait affiché tel quel dans l'application, et l'humain
+    /// chercherait la faute partout sauf là où elle est.
+    RienAChanger,
     /// Une chaîne porte un échappement.
     ///
     /// Aucune valeur de ce protocole n'emploie de caractère qui en demande un.
@@ -433,6 +446,7 @@ impl fmt::Display for Erreur {
                 write!(f, "champ répété en position {position}")
             }
             Self::ChampManquant { nom } => write!(f, "champ `{nom}` manquant"),
+            Self::RienAChanger => f.write_str("aucun champ à changer"),
             Self::EchappementRefuse { position } => {
                 write!(f, "échappement refusé en position {position}")
             }

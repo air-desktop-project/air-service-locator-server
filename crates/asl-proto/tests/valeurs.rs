@@ -428,6 +428,7 @@ fn chaque_erreur_se_dit_a_un_humain() {
         Erreur::ChampInconnu { position: 12 },
         Erreur::ChampEnDouble { position: 12 },
         Erreur::ChampManquant { nom: "machine" },
+        Erreur::RienAChanger,
         Erreur::EchappementRefuse { position: 7 },
         Erreur::CaractereBrutRefuse { position: 7 },
         Erreur::NombreNonCanonique { position: 40 },

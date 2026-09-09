@@ -79,7 +79,8 @@ extern crate alloc;
 use ams_h3::Reponse;
 use ams_proto_http::{Method, RequestHead, StatusCode};
 use asl_api::corps::{
-    AutorisationRendue, Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation, Portee,
+    AutorisationRendue, Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation,
+    ModificationMachine, Portee,
 };
 use asl_api::{Exigence, Ressource};
 use asl_cle::{ClePublique, Defi, LiaisonDeCanal, Signature};
@@ -283,6 +284,25 @@ pub enum Besoin<'a> {
         nom: &'a str,
         /// Ce qu'elle aura le droit de faire.
         capacites: Capacites,
+    },
+    /// Changer le nom ou les capacités d'une machine qu'on possède.
+    ///
+    /// # RETIRER LA CAPACITÉ D'ANNONCE FERME LES CONNEXIONS
+    ///
+    /// C'est l'étage 3 qui ferme — il tient les connexions —, mais la raison est
+    /// ici : une capacité retirée qui laisserait courir les baux déjà posés
+    /// serait un retrait qui ne retire rien. L'annuaire continuerait de publier
+    /// les adresses d'une machine à qui l'on vient d'interdire d'annoncer, et
+    /// l'humain qui a décoché la case verrait ses services toujours là.
+    ///
+    /// **Un changement de nom, lui, ne ferme rien** : il ne retire aucun droit.
+    ModifierMachine {
+        /// La machine visée.
+        machine: Identifiant,
+        /// Le nouveau nom, ou `None` pour le laisser.
+        nom: Option<&'a str>,
+        /// Les nouvelles capacités, ou `None` pour les laisser.
+        capacites: Option<Capacites>,
     },
     /// Émettre un nouveau code pour une machine qu'on possède déjà.
     NouveauCode {
@@ -693,6 +713,14 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
             },
             Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
         },
+        Ressource::Machine { machine } => match ModificationMachine::decoder(corps) {
+            Ok(demande) => Besoin::ModifierMachine {
+                machine,
+                nom: demande.nom,
+                capacites: demande.capacites,
+            },
+            Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+        },
         Ressource::EnrolementMachine { machine } => Besoin::NouveauCode { machine },
         Ressource::Enrolement => lire_un_enrolement(session, corps),
         // **DEUX VERBES, DEUX BESOINS.** Le routage sert `GET` et `POST` sur
@@ -726,7 +754,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
                 Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
         },
-        // Ce qui reste — révoquer, modifier, lister, l'alias, les expositions —
+        // Ce qui reste — le jeton de poussée d'un appareil et les expositions —
         // n'est pas écrit. Le dire par `501` est exact : la ressource existe, le
         // verbe est servi, et l'annuaire ne sait pas encore le faire.
         _ => Besoin::Deja(StatusCode::NOT_IMPLEMENTED),
@@ -1150,6 +1178,7 @@ pub fn repondre<'o>(
         // se révoque lui-même. Celui-là connaît déjà son propre identifiant, et
         // il doit savoir pourquoi on lui dit non.
         Besoin::RevoquerAppareil { .. }
+        | Besoin::ModifierMachine { .. }
         | Besoin::RevoquerCleMachine { .. }
         | Besoin::RevoquerAutorisation { .. }
         | Besoin::PoserAlias { .. }
@@ -3606,6 +3635,80 @@ mod creations {
             besoin(&session_d_appareil(), &tete(b"POST", b"/v1/machines"), b"{"),
             Besoin::Deja(StatusCode::BAD_REQUEST)
         );
+    }
+
+    // ── Modifier une machine ────────────────────────────────────────────────
+
+    #[test]
+    fn une_modification_se_lit_et_rend_204() {
+        let machine = un(Genre::Machine, 6);
+        let cible = alloc::format!("/v1/machines/{}", machine.texte());
+        let quoi = besoin(
+            &session_d_appareil(),
+            &tete(b"PATCH", cible.as_bytes()),
+            br#"{"nom":"grenier"}"#,
+        );
+        assert_eq!(
+            quoi,
+            Besoin::ModifierMachine {
+                machine,
+                nom: Some("grenier"),
+                capacites: None,
+            }
+        );
+
+        let mut session = session_d_appareil();
+        assert_eq!(
+            rendre(&mut session, &quoi, &Trouvaille::Fait).0,
+            StatusCode::NO_CONTENT
+        );
+        // **UNE MACHINE QUI N'EST PAS À NOUS REND LE MÊME `404`** que celle qui
+        // n'existe pas : les distinguer dirait à qui essaie des identifiants au
+        // hasard lesquels existent.
+        assert_eq!(
+            rendre(&mut session, &quoi, &Trouvaille::Rien).0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn une_modification_ne_porte_que_ce_qu_elle_nomme() {
+        let machine = un(Genre::Machine, 6);
+        let cible = alloc::format!("/v1/machines/{}", machine.texte());
+        // **LE TABLEAU VIDE RETIRE**, là où l'absence du champ laisse : c'est ce
+        // qui permet à une machine de tout perdre par ce verbe.
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"PATCH", cible.as_bytes()),
+                br#"{"capacites":[]}"#,
+            ),
+            Besoin::ModifierMachine {
+                machine,
+                nom: None,
+                capacites: Some(asl_api::corps::Capacites {
+                    annonce: false,
+                    lecture: false,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn une_modification_vide_ou_mal_formee_est_refusee() {
+        let machine = un(Genre::Machine, 6);
+        let cible = alloc::format!("/v1/machines/{}", machine.texte());
+        for corps in [&b"{}"[..], &b"{"[..], &br#"{"couleur":"bleu"}"#[..]] {
+            assert_eq!(
+                besoin(
+                    &session_d_appareil(),
+                    &tete(b"PATCH", cible.as_bytes()),
+                    corps,
+                ),
+                Besoin::Deja(StatusCode::BAD_REQUEST),
+                "{corps:?}"
+            );
+        }
     }
 
     #[test]

@@ -490,7 +490,7 @@ l'empêcherait de comprendre.
 | `PUT /v1/appareils/{a}/poussee` | Dépose ou renouvelle le jeton APNs / FCM. |
 | `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. **Il est marqué, non effacé** : l'écran qu'on regarde après avoir perdu un téléphone doit montrer ce qu'on a retiré. |
 | `POST /v1/machines` | Déclare une machine, avec son **nom** et ses **capacités** (`annonce`, `lecture`). **Rend un code d'enrôlement** — dix symboles, à usage unique, valable dix minutes. La machine n'a **pas encore de clé**. |
-| `PATCH /v1/machines/{m}` | Change le nom ou les capacités. |
+| `PATCH /v1/machines/{m}` | Change le nom ou les capacités. **Ce qui est absent ne change pas** ; voir ci-dessous. |
 | `POST /v1/machines/{m}/enrolement` | Émet un nouveau code, pour ré-enrôler une machine dont la clé a été révoquée ou perdue. **Le code précédent meurt à l'émission du suivant.** |
 | `DELETE /v1/machines/{m}/cle` | Révoque la clé. **Effet immédiat : connexions fermées, baux tombés** (voir ci-dessous). La machine reste — son nom, ses capacités, ses services ; elle perd le moyen de prouver qu'elle est elle. |
 | `PUT /v1/alias` | Enregistre ou change l'alias public. **La seule donnée que l'utilisateur nous confie.** Un alias déjà pris rend `409`, et non `403` : la demande est légitime, c'est l'état du monde qui s'y oppose. |
@@ -503,6 +503,31 @@ l'empêcherait de comprendre.
 | `DELETE /v1/autorisations/{g}` | Révoque. Effet immédiat. |
 | `GET /v1/expositions` | **Ce qui est exposé de MOI**, relation par relation. Tout utilisateur, pas seulement l'administrateur. |
 | `DELETE /v1/expositions/{relation}` | **Retire mes enregistrements** de cette exposition. Portée : tout mon compte, ou telle machine. |
+
+### Ce qu'un `PATCH` change, et ce qu'il ferme
+
+**Ce qui est absent ne change pas, et le tableau vide RETIRE.** `{"capacites":
+[]}` laisse une machine déclarée qui ne peut plus rien — un état légitime —,
+tandis que l'absence du champ laisse les capacités telles quelles. Il n'y a pas de
+troisième forme : un `null` serait un sens de plus, à mi-chemin entre « laisse »
+et « aucune », qu'il faudrait ensuite trancher partout.
+
+**`{}` rend `400`, alors que c'est du JSON valide.** Personne ne l'envoie
+exprès : ce qui le produit est un champ mal orthographié ou une variable vide
+côté appelant. Rendre `204` à une requête qui n'a rien changé laisserait l'humain
+regarder un nom inchangé en cherchant sa faute partout sauf là où elle est.
+
+**Retirer la capacité d'annonce ferme les connexions de cette machine**, et fait
+donc tomber ses baux — le même effet immédiat que `DELETE
+/v1/machines/{m}/cle`, et pour la même raison : une capacité retirée qui
+laisserait courir les baux déjà posés ne retirerait rien, et l'annuaire
+continuerait de publier les adresses d'une machine à qui l'on vient d'interdire
+d'annoncer.
+
+**Retirer la LECTURE ne ferme rien.** Une machine qui ne peut plus interroger
+l'annuaire n'a rien laissé derrière elle : sa prochaine requête sera refusée, et
+il n'y a pas d'état à défaire. Renommer ne ferme rien non plus — un nom ne
+retire aucun droit.
 
 ### Ce qu'une liste rend, et ce qu'elle ne dit pas
 

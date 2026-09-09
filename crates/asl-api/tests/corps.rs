@@ -1,8 +1,8 @@
 //! Les corps de l'API mobile : ce qu'ils acceptent, et ce qu'ils refusent.
 
 use asl_api::corps::{
-    CORPS_MAX, Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation, NOM_MACHINE_MAX,
-    Portee,
+    CORPS_MAX, Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation,
+    ModificationMachine, NOM_MACHINE_MAX, Portee,
 };
 use asl_id::{Genre, Identifiant};
 use asl_proto::Erreur;
@@ -221,6 +221,120 @@ fn un_tampon_trop_petit_se_dit() {
     )
     .expect("elle se lit");
     assert_eq!(demande.encoder(&mut sortie), Err(Erreur::TamponTropPetit));
+}
+
+// ── Modifier une machine ────────────────────────────────────────────────────
+
+#[test]
+fn une_modification_se_lit_et_se_reecrit_a_l_identique() {
+    for octets in [
+        &br#"{"nom":"grenier"}"#[..],
+        &br#"{"capacites":["annonce"]}"#[..],
+        // **LA LECTURE SEULE**, et non l'annonce : c'est le seul cas où le
+        // tableau commence par son second membre, et où la virgule ne doit pas
+        // s'écrire.
+        &br#"{"capacites":["lecture"]}"#[..],
+        &br#"{"capacites":[]}"#[..],
+        &br#"{"nom":"grenier","capacites":["annonce","lecture"]}"#[..],
+    ] {
+        let lue = ModificationMachine::decoder(octets).expect("elle se lit");
+        let mut tampon = [0_u8; 128];
+        let ecrit = lue.encoder(&mut tampon).expect("elle se réécrit");
+        assert_eq!(
+            &tampon[..ecrit],
+            octets,
+            "{}",
+            String::from_utf8_lossy(octets)
+        );
+    }
+}
+
+#[test]
+fn ce_qui_est_absent_ne_change_pas() {
+    // **ET LE TABLEAU VIDE, LUI, RETIRE.** `None` dit « laisse », `Some(rien)`
+    // dit « aucune » : sans cette distinction, une machine ne pourrait jamais
+    // perdre toutes ses capacités par ce verbe.
+    let nom_seul = ModificationMachine::decoder(br#"{"nom":"grenier"}"#).expect("elle se lit");
+    assert_eq!(nom_seul.nom, Some("grenier"));
+    assert_eq!(nom_seul.capacites, None);
+
+    let vides = ModificationMachine::decoder(br#"{"capacites":[]}"#).expect("elle se lit");
+    assert_eq!(vides.nom, None);
+    assert_eq!(vides.capacites, Some(Capacites::default()));
+}
+
+#[test]
+fn une_modification_qui_ne_change_rien_est_refusee() {
+    // **`{}` EST DU JSON VALIDE, ET IL EST REFUSÉ QUAND MÊME.** Personne ne
+    // l'envoie exprès : ce qui le produit est un champ mal orthographié, ou une
+    // variable vide. Rendre `200` laisserait l'humain chercher sa faute partout
+    // sauf là où elle est.
+    assert_eq!(
+        ModificationMachine::decoder(b"{}").map(|_| ()),
+        Err(Erreur::RienAChanger)
+    );
+    assert_eq!(
+        ModificationMachine::decoder(b"{ }").map(|_| ()),
+        Err(Erreur::RienAChanger)
+    );
+    // Une déclaration, elle, NOMME celui des deux champs qui manque : elle les
+    // veut tous les deux, et le dire aide plus que « rien à changer ».
+    assert_eq!(
+        DeclarationMachine::decoder(b"{}").map(|_| ()),
+        Err(Erreur::ChampManquant { nom: "nom" })
+    );
+}
+
+#[test]
+fn une_modification_refuse_tout_ce_qu_une_declaration_refuse() {
+    // La boucle est PARTAGÉE, et cet essai est là pour que ça reste vrai : si
+    // quelqu'un réécrivait l'une des deux, ces refus-là seraient les premiers à
+    // se perdre.
+    for octets in [
+        &br#"{"nom":""}"#[..],
+        &br#"{"nom":"n","nom":"m"}"#[..],
+        &br#"{"couleur":"bleu"}"#[..],
+        &br#"{"capacites":["administrer"]}"#[..],
+        &br#"{"capacites":["annonce","annonce"]}"#[..],
+        &br#"{"nom":"gre
+ier"}"#[..],
+        &br#"{"nom":"n" "capacites":[]}"#[..],
+        &br#"{"nom":"n"}x"#[..],
+        // Un objet vide SUIVI de quelque chose : la faute est ce qui suit, et
+        // non l'absence de champ — le décodeur doit le dire dans cet ordre.
+        &br#"{}x"#[..],
+        &b""[..],
+    ] {
+        assert!(
+            ModificationMachine::decoder(octets).is_err(),
+            "{:?} devrait être refusé",
+            String::from_utf8_lossy(octets)
+        );
+    }
+
+    let trop = "a".repeat(NOM_MACHINE_MAX + 1);
+    let corps = format!(r#"{{"nom":"{trop}"}}"#);
+    assert_eq!(
+        ModificationMachine::decoder(corps.as_bytes()).map(|_| ()),
+        Err(Erreur::NomTropLong {
+            obtenue: NOM_MACHINE_MAX + 1
+        })
+    );
+
+    let long = vec![b'{'; CORPS_MAX + 1];
+    assert_eq!(
+        ModificationMachine::decoder(&long).map(|_| ()),
+        Err(Erreur::MessageTropLong {
+            obtenue: CORPS_MAX + 1
+        })
+    );
+}
+
+#[test]
+fn une_modification_ne_tient_pas_dans_un_tampon_trop_court() {
+    let lue = ModificationMachine::decoder(br#"{"nom":"grenier"}"#).expect("elle se lit");
+    let mut tampon = [0_u8; 4];
+    assert!(lue.encoder(&mut tampon).is_err());
 }
 
 // ── Accorder une autorisation ───────────────────────────────────────────────

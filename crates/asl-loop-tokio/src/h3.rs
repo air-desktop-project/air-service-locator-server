@@ -214,6 +214,11 @@ impl Service<'_> {
             Besoin::CreerCompte { cle } => self.creer_un_compte(cle),
             Besoin::CreerAppareil { cle } => self.creer_un_appareil(cle),
             Besoin::CreerMachine { nom, capacites } => self.creer_une_machine(nom, *capacites),
+            Besoin::ModifierMachine {
+                machine,
+                nom,
+                capacites,
+            } => self.modifier_une_machine(*machine, *nom, *capacites),
             Besoin::NouveauCode { machine } => self.emettre_un_code(*machine),
             Besoin::Enroler { empreinte, cle } => self.enroler(empreinte, cle),
             Besoin::Autoriser { a, portee } => self.autoriser(*a, *portee),
@@ -381,6 +386,71 @@ impl Service<'_> {
                 expire_a,
             },
             None => Trouvaille::Rien,
+        }
+    }
+
+    /// Change le nom ou les capacités d'une machine qu'on possède.
+    ///
+    /// # RETIRER LA CAPACITÉ D'ANNONCE FERME LES CONNEXIONS DE CETTE MACHINE
+    ///
+    /// Sans cette fermeture, le retrait ne retirerait rien : les baux posés
+    /// avant vivraient tant que les connexions vivent, et l'annuaire
+    /// continuerait de publier les adresses d'une machine à qui l'on vient
+    /// d'interdire d'annoncer. **C'est le même geste que la révocation d'une
+    /// clé**, pour la même raison, et il partage la même file.
+    ///
+    /// **Retirer la LECTURE ne ferme rien.** Une machine qui ne peut plus
+    /// interroger l'annuaire n'a rien laissé derrière elle : la prochaine
+    /// requête sera refusée, et il n'y a pas d'état à défaire.
+    fn modifier_une_machine(
+        &mut self,
+        machine: Identifiant,
+        nom: Option<&str>,
+        capacites: Option<asl_api::corps::Capacites>,
+    ) -> Trouvaille {
+        let (Some(compte), Ok(Some(rangee))) = (
+            self.compte_de_la_connexion(),
+            self.entrepot.machine(machine),
+        ) else {
+            return Trouvaille::Rien;
+        };
+        // **UNE MACHINE QUI N'EST PAS À NOUS NE SE MODIFIE PAS**, et le refus se
+        // cache derrière le `404` des autres : distinguer « elle n'existe pas »
+        // de « elle n'est pas à vous » dirait à qui essaie des identifiants au
+        // hasard lesquels existent.
+        if asl_auth::decider_gestion(compte, rangee.proprietaire) == asl_auth::Decision::Refuser {
+            return Trouvaille::Rien;
+        }
+
+        let nom = match nom {
+            Some(texte) => match asl_registre::NomRange::nouveau(texte) {
+                Ok(range) => range,
+                Err(_) => return Trouvaille::Rien,
+            },
+            None => rangee.nom,
+        };
+        let (annonce, lecture) = match capacites {
+            Some(demandees) => (demandees.annonce, demandees.lecture),
+            None => (rangee.annonce, rangee.lecture),
+        };
+        let perd_l_annonce = rangee.annonce && !annonce;
+
+        match self.entrepot.poser_machine(
+            machine,
+            &asl_registre::Machine {
+                nom,
+                annonce,
+                lecture,
+                ..rangee
+            },
+        ) {
+            Ok(()) => {
+                if perd_l_annonce {
+                    self.a_fermer.push(machine);
+                }
+                Trouvaille::Fait
+            }
+            Err(_) => Trouvaille::Rien,
         }
     }
 
