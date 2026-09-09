@@ -19,8 +19,8 @@
 # parfaite, et vide de sens. Ce script COMPTE ces crates à part et les nomme,
 # au lieu de les laisser gonfler un pourcentage.
 #
-# **C'est le cas de la plupart d'entre elles aujourd'hui**, et c'est écrit dans
-# la sortie plutôt que caché derrière un OK.
+# **AUCUNE NE L'EST PLUS DEPUIS QUE LES CINQ CRATES DES ÉTAGES 1 ET 2 SONT
+# ÉCRITES**, et ce compteur reste : il redeviendra utile à la sixième.
 #
 # # CE QU'IL NE MESURE PAS
 #

@@ -84,8 +84,9 @@ en écrivant une crate qu'on écrit les essais qui la couvrent, pas six mois apr
 **Il ne se laisse pas berner par le vide.** Une crate sans code a zéro région
 couverte sur zéro : arithmétiquement parfaite, et vide de sens. Le script COMPTE
 ces crates à part et les nomme, au lieu de les laisser gonfler un pourcentage.
-Aujourd'hui, quatre des cinq crates sous mesure sont dans ce cas, et la sortie le
-dit.
+
+**Les cinq crates des étages 1 et 2 portent désormais du code**, et aucune n'est
+donc dans ce cas. Le compteur reste : il redeviendra utile à la sixième.
 
 **Ce qu'il ne mesure pas** : la couverture dit qu'une ligne a été exécutée,
 jamais qu'elle a été éprouvée. Un essai qui appelle sans rien vérifier rend

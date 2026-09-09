@@ -64,6 +64,9 @@ path = "../crates/asl-annuaire"
 [dependencies.asl-auth]
 path = "../crates/asl-auth"
 
+[dependencies.asl-api]
+path = "../crates/asl-api"
+
 # `[[bin]]` par cible, et `test = false` : ces binaires ne sont pas des essais,
 # et `cargo test` ne doit pas essayer de les lancer sans harnais libFuzzer.
 [[bin]]
@@ -125,6 +128,13 @@ bench = false
 [[bin]]
 name = "fuzz_asl_auth_decisions"
 path = "fuzz_targets/fuzz_asl_auth_decisions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_asl_api_routage"
+path = "fuzz_targets/fuzz_asl_api_routage.rs"
 test = false
 doc = false
 bench = false

@@ -8,6 +8,7 @@ version = "0.0.0"
 dependencies = [
  "arbitrary",
  "asl-annuaire",
+ "asl-api",
  "asl-auth",
  "asl-id",
  "asl-proto",
@@ -25,6 +26,14 @@ dependencies = [
 
 [[package]]
 name = "asl-annuaire"
+version = "0.1.0"
+dependencies = [
+ "asl-id",
+ "asl-proto",
+]
+
+[[package]]
+name = "asl-api"
 version = "0.1.0"
 dependencies = [
  "asl-id",
