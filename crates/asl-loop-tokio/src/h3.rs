@@ -391,7 +391,7 @@ impl Service<'_> {
     }
 
     /// Tire un code pour cette machine, et le range sous son empreinte.
-    fn tirer_un_code(&self, machine: Identifiant) -> Option<(asl_auth::TexteCode, u64)> {
+    fn tirer_un_code(&self, machine: Identifiant) -> Option<(asl_cle::TexteCode, u64)> {
         // Huit octets suffisent : dix symboles n'en portent que cinquante bits.
         // On puise à la même source que les identifiants — c'est le même noyau,
         // et la même exigence.
@@ -400,7 +400,7 @@ impl Service<'_> {
         for (place, octet) in huit.iter_mut().zip(graine.iter()) {
             *place = *octet;
         }
-        let code = asl_auth::CodeEnrolement::depuis_entropie(huit);
+        let code = asl_cle::CodeEnrolement::depuis_entropie(huit);
         let expire_a = maintenant()
             .saturating_div(1_000)
             .saturating_add(asl_auth::VALIDITE_CODE_SECONDES.saturating_mul(1_000));

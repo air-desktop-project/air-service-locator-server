@@ -144,7 +144,6 @@ name = "asl-auth"
 version = "0.1.0"
 dependencies = [
  "asl-id",
- "sha2",
 ]
 
 [[package]]
@@ -153,6 +152,7 @@ version = "0.1.0"
 dependencies = [
  "asl-id",
  "ed25519-dalek",
+ "sha2",
 ]
 
 [[package]]

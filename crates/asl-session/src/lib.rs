@@ -80,8 +80,8 @@ use ams_h3::Reponse;
 use ams_proto_http::{Method, RequestHead, StatusCode};
 use asl_api::corps::{Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation, Portee};
 use asl_api::{Exigence, Ressource};
-use asl_auth::{CodeEnrolement, TexteCode};
 use asl_cle::{ClePublique, Defi, LiaisonDeCanal, Signature};
+use asl_cle::{CodeEnrolement, TexteCode};
 use asl_id::{Genre, Identifiant};
 use asl_registre::AliasRange;
 
@@ -150,7 +150,7 @@ pub const POSSESSION_OCTETS: usize = asl_cle::CLE_PUBLIQUE_OCTETS + asl_cle::SIG
 pub const CLE_SEULE_OCTETS: usize = asl_cle::CLE_PUBLIQUE_OCTETS;
 
 /// Ce qu'occupe le corps de `POST /v1/enrolement` : le code, la clé, la preuve.
-pub const ENROLEMENT_CORPS_OCTETS: usize = asl_auth::CODE_SYMBOLES + POSSESSION_OCTETS;
+pub const ENROLEMENT_CORPS_OCTETS: usize = asl_cle::CODE_SYMBOLES + POSSESSION_OCTETS;
 
 /// Le type de média d'un défi et d'une preuve.
 pub const OCTETS_MEDIA: &[u8] = b"application/octet-stream";
@@ -251,10 +251,10 @@ pub enum Besoin<'a> {
     /// Lier une clé à une machine, sur présentation d'un code.
     ///
     /// **L'EMPREINTE, ET NON LE CODE.** L'étage 3 cherche par elle et ne détient
-    /// jamais le code — voir `asl_auth::CodeEnrolement::empreinte`.
+    /// jamais le code — voir `asl_cle::CodeEnrolement::empreinte`.
     Enroler {
         /// Sous quoi le code est rangé.
-        empreinte: [u8; asl_auth::EMPREINTE_OCTETS],
+        empreinte: [u8; asl_cle::EMPREINTE_OCTETS],
         /// La clé que la machine présente, dont la possession est prouvée.
         cle: ClePublique,
     },
@@ -667,7 +667,7 @@ fn lire_un_enrolement<'a>(session: &Session, corps: &[u8]) -> Besoin<'a> {
     if corps.len() != ENROLEMENT_CORPS_OCTETS {
         return Besoin::Deja(StatusCode::BAD_REQUEST);
     }
-    let symboles = corps.get(..asl_auth::CODE_SYMBOLES).unwrap_or_default();
+    let symboles = corps.get(..asl_cle::CODE_SYMBOLES).unwrap_or_default();
     let Ok(texte) = core::str::from_utf8(symboles) else {
         return Besoin::Deja(StatusCode::BAD_REQUEST);
     };
@@ -675,7 +675,7 @@ fn lire_un_enrolement<'a>(session: &Session, corps: &[u8]) -> Besoin<'a> {
         return Besoin::Deja(StatusCode::BAD_REQUEST);
     };
     let Some((cle, preuve)) =
-        lire_cle_et_preuve(corps.get(asl_auth::CODE_SYMBOLES..).unwrap_or(&[]))
+        lire_cle_et_preuve(corps.get(asl_cle::CODE_SYMBOLES..).unwrap_or(&[]))
     else {
         return Besoin::Deja(StatusCode::BAD_REQUEST);
     };
@@ -2993,7 +2993,7 @@ mod creations {
         ));
 
         let machine = un(Genre::Machine, 6);
-        let code = asl_auth::CodeEnrolement::analyser("4K9M2P7R1T").expect("un code");
+        let code = asl_cle::CodeEnrolement::analyser("4K9M2P7R1T").expect("un code");
         let mut session = session_d_appareil();
         let (statut, rendu) = rendre(
             &mut session,
@@ -3035,7 +3035,7 @@ mod creations {
         let quoi = besoin(&session_d_appareil(), &tete(b"POST", cible.as_bytes()), b"");
         assert_eq!(quoi, Besoin::NouveauCode { machine });
 
-        let code = asl_auth::CodeEnrolement::analyser("0123456789").expect("un code");
+        let code = asl_cle::CodeEnrolement::analyser("0123456789").expect("un code");
         let mut session = session_d_appareil();
         let (statut, rendu) = rendre(
             &mut session,
@@ -3081,7 +3081,7 @@ mod creations {
             &tete(b"POST", b"/v1/enrolement"),
             &corps,
         );
-        let attendue = asl_auth::CodeEnrolement::analyser("0123456789")
+        let attendue = asl_cle::CodeEnrolement::analyser("0123456789")
             .expect("un code")
             .empreinte();
         assert!(matches!(quoi, Besoin::Enroler { empreinte, .. } if empreinte == attendue));
@@ -3134,7 +3134,7 @@ mod creations {
         // Le code est juste, la longueur aussi : c'est la CLÉ qui n'en est pas
         // une. La faute se voit à la lecture, et non trois requêtes plus tard.
         let mut corps = corps_d_enrolement("0123456789", 0x44);
-        corps[asl_auth::CODE_SYMBOLES..asl_auth::CODE_SYMBOLES + asl_cle::CLE_PUBLIQUE_OCTETS]
+        corps[asl_cle::CODE_SYMBOLES..asl_cle::CODE_SYMBOLES + asl_cle::CLE_PUBLIQUE_OCTETS]
             .copy_from_slice(&CLE_IMPOSSIBLE);
         assert_eq!(
             besoin(

@@ -8,9 +8,9 @@
 //! renseignent pas par leur durée.
 
 use asl_auth::{
-    Autorisation, Capacites, Cible, CodeEnrolement, Decision, EtatCode, Faute, Machine, Politique,
-    Portee, decider_annonce, decider_attestation, decider_enrolement, decider_gestion,
-    decider_resolution, decider_revocation_d_appareil,
+    Autorisation, Capacites, Cible, Decision, EtatCode, Faute, Machine, Politique, Portee,
+    decider_annonce, decider_attestation, decider_enrolement, decider_gestion, decider_resolution,
+    decider_revocation_d_appareil,
 };
 use asl_id::{Genre, Identifiant};
 
@@ -317,102 +317,7 @@ fn tous_les_refus_sont_le_meme_refus() {
     assert!(Decision::Servir.permet());
 }
 
-// ── Le code d'enrôlement ────────────────────────────────────────────────────
-
-#[test]
-fn un_code_se_fabrique_se_lit_et_se_relit() {
-    let code = CodeEnrolement::depuis_entropie([0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]);
-    let texte = code.texte();
-    assert_eq!(texte.len(), 10);
-    assert!(texte.bytes().all(|o| asl_id::base32::valeur(o).is_some()));
-
-    let relu = CodeEnrolement::analyser(texte).expect("un code canonique se relit");
-    assert_eq!(relu.texte(), texte);
-    // **C'EST L'EMPREINTE QUI IDENTIFIE**, puisque c'est elle qu'on range.
-    assert_eq!(relu.empreinte(), code.empreinte());
-}
-
-#[test]
-fn la_forme_groupee_s_affiche_et_se_retape() {
-    let code = CodeEnrolement::analyser("4K9M2P7R1T").unwrap();
-    let groupe = code.texte_groupe();
-    assert_eq!(groupe.as_str(), "4K9M2-P7R1T");
-
-    // Ce qu'on AFFICHE se retape tel quel, et vaut ce qu'on a affiché.
-    let retape = CodeEnrolement::analyser(groupe.as_str()).expect("la forme groupée se relit");
-    assert_eq!(retape.empreinte(), code.empreinte());
-    assert_eq!(retape.texte(), "4K9M2P7R1T");
-}
-
-#[test]
-fn un_tiret_egare_ne_passe_pas() {
-    // La bonne longueur, mais le tiret ailleurs qu'à sa place.
-    assert_eq!(
-        CodeEnrolement::analyser("4K9M2P-7R1T").map(|_| ()),
-        Err(Faute::CodeLongueur {
-            attendue: 10,
-            obtenue: 11
-        })
-    );
-}
-
-#[test]
-fn deux_codes_differents_ont_deux_empreintes() {
-    let un = CodeEnrolement::analyser("0123456789").unwrap();
-    let autre = CodeEnrolement::analyser("9876543210").unwrap();
-    assert_ne!(un.empreinte(), autre.empreinte());
-    assert_eq!(un.empreinte().len(), 32);
-}
-
-#[test]
-fn le_rattrapage_de_crockford_vaut_aussi_pour_un_code() {
-    // C'est un humain qui le tape sur un terminal.
-    let reference = CodeEnrolement::analyser("0123456789").unwrap();
-    for variante in ["O123456789", "o123456789", "0I23456789", "0L23456789"] {
-        let lu = CodeEnrolement::analyser(variante).unwrap();
-        assert_eq!(
-            lu.empreinte(),
-            reference.empreinte(),
-            "{variante} devrait valoir la référence"
-        );
-        // Et ce qu'on range est la forme CANONIQUE.
-        assert_eq!(lu.texte(), "0123456789");
-    }
-}
-
-#[test]
-fn un_code_mal_forme_est_refuse() {
-    for texte in ["", "012345678", "01234567890"] {
-        assert_eq!(
-            CodeEnrolement::analyser(texte).map(|_| ()),
-            Err(Faute::CodeLongueur {
-                attendue: 10,
-                obtenue: texte.len()
-            }),
-            "{texte:?}"
-        );
-    }
-    assert_eq!(
-        CodeEnrolement::analyser("01234U6789").map(|_| ()),
-        Err(Faute::CodeSymboleInvalide { position: 5 })
-    );
-    assert_eq!(
-        CodeEnrolement::analyser("!123456789").map(|_| ()),
-        Err(Faute::CodeSymboleInvalide { position: 0 })
-    );
-}
-
-#[test]
-fn les_cinquante_bits_de_poids_fort_sont_employes() {
-    // Changer un bit de POIDS FORT change le code ; changer les quatorze bits
-    // de poids faible ne le change pas.
-    let base = CodeEnrolement::depuis_entropie([0x00; 8]);
-    let poids_fort = CodeEnrolement::depuis_entropie([0x80, 0, 0, 0, 0, 0, 0, 0]);
-    let poids_faible = CodeEnrolement::depuis_entropie([0, 0, 0, 0, 0, 0, 0x3F, 0xFF]);
-
-    assert_ne!(base.empreinte(), poids_fort.empreinte());
-    assert_eq!(base.empreinte(), poids_faible.empreinte());
-}
+// ── L'état d'un code d'enrôlement ───────────────────────────────────────────
 
 #[test]
 fn seul_un_code_utilisable_lie_une_cle() {
@@ -484,13 +389,6 @@ fn les_enregistrements_rendent_ce_qu_on_leur_a_donne() {
     assert_eq!(cible.service(), ident(Genre::Service, 0x51));
     assert_eq!(cible.machine(), ident(Genre::Machine, 0x11));
     assert_eq!(cible.proprietaire(), alice());
-}
-
-#[test]
-fn le_texte_groupe_s_affiche() {
-    // Il se recopie d'un écran vers un terminal : il doit s'écrire.
-    let code = CodeEnrolement::analyser("4K9M2P7R1T").unwrap();
-    assert_eq!(code.texte_groupe().to_string(), "4K9M2-P7R1T");
 }
 
 // ── Révoquer un appareil ────────────────────────────────────────────────────

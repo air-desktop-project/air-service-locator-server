@@ -12,12 +12,12 @@ asl-id.workspace = true
 asl-registre.workspace = true
 redb.workspace = true
 
-# `asl-auth` POUR LES ESSAIS SEULEMENT, et c'est la bonne place : l'entrepôt
+# `asl-cle` POUR LES ESSAIS SEULEMENT, et c'est la bonne place : l'entrepôt
 # range l'EMPREINTE d'un code d'enrôlement, qu'il reçoit toute faite ; il ne sait
 # pas la calculer et n'a aucune raison de savoir. Les essais, eux, doivent bien
 # en fabriquer une.
 [dev-dependencies]
-asl-auth.workspace = true
+asl-cle.workspace = true
 
 [lints]
 workspace = true

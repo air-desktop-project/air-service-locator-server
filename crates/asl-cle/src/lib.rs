@@ -329,6 +329,18 @@ pub fn message_de_possession(
 pub enum Faute {
     /// Les octets ne forment pas un point valide de la courbe.
     ClePubliqueInvalide,
+    /// Le code d'enrôlement n'a pas la bonne longueur.
+    CodeLongueur {
+        /// Ce qui était attendu.
+        attendue: usize,
+        /// Ce qui a été reçu.
+        obtenue: usize,
+    },
+    /// Le code d'enrôlement porte un symbole hors de l'alphabet.
+    CodeSymboleInvalide {
+        /// La position du symbole fautif.
+        position: usize,
+    },
     /// Un identifiant de machine ou d'appareil était attendu.
     ///
     /// **Ce sont les deux seuls genres qui SIGNENT.** Un compte ne signe pas —
@@ -486,5 +498,231 @@ impl CleSecrete {
     pub fn prouver_la_possession(&self, defi: &Defi, liaison: &LiaisonDeCanal) -> Signature {
         let message = message_de_possession(&self.publique(), defi, liaison);
         Signature(self.0.sign(&message).to_bytes())
+    }
+}
+
+// ── Le code d'enrôlement ────────────────────────────────────────────────────
+//
+// # POURQUOI IL VIT ICI, ET NON DANS `asl-auth`
+//
+// Il y a vécu, tant qu'il n'y avait qu'un camp pour le lire. **Le daemon doit
+// désormais le composer** : c'est lui qui tape `asl enrole <code>`, et c'est lui
+// qui envoie `code ‖ clé ‖ preuve` sur `/v1/enrolement`.
+//
+// Il faut donc que les DEUX camps le canonisent identiquement — un `O` tapé pour
+// un `0` doit donner la même empreinte des deux côtés —, et `asl-client` ne peut
+// pas embarquer `asl-auth` : ce serait embarquer les décisions de l'annuaire
+// dans une bibliothèque chargée par des interpréteurs tiers.
+//
+// La GRAMMAIRE et l'EMPREINTE viennent donc ici, avec les autres justificatifs.
+// **Ce qui reste à `asl-auth` est ce qui décide** : l'état d'un code, sa durée
+// de validité, et `decider_enrolement`.
+
+/// Le nombre de symboles d'un code d'enrôlement.
+///
+/// Dix symboles de base32 font **cinquante bits**. C'est confortable pour un
+/// secret qui vit quelques minutes et ne sert qu'une fois : deviner demanderait
+/// des milliards d'essais, et l'annuaire en compte.
+pub const CODE_SYMBOLES: usize = 10;
+
+/// La longueur du texte groupé d'un code, tiret compris : `XXXXX-XXXXX`.
+pub const CODE_TEXTE_OCTETS: usize = CODE_SYMBOLES + 1;
+
+/// Où le tiret se place dans le texte groupé.
+const COUPURE: usize = 5;
+
+/// La taille de l'empreinte d'un code.
+pub const EMPREINTE_OCTETS: usize = 32;
+
+/// Le séparateur de domaine de l'empreinte d'un code.
+const DOMAINE_CODE: &[u8] = b"air-service-locator/v1/code-d-enrolement\x00";
+
+/// Combien de temps un code vaut, en secondes.
+///
+/// Dix minutes : le temps d'aller du téléphone au terminal, et pas davantage.
+/// **Un code qui traîne est un secret qui traîne** — c'est la seule chose qui
+/// borne les essais d'un inconnu, avec ses cinquante bits.
+pub const VALIDITE_CODE_SECONDES: u64 = 600;
+
+/// Ce que le magasin sait d'un code.
+///
+/// **C'est un FAIT, pas une décision.** L'expiration se constate avec une
+/// horloge, que cette crate n'a pas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EtatCode {
+    /// Le code n'a pas encore servi et n'a pas expiré.
+    Utilisable,
+    /// Aucun code ne répond à cette empreinte.
+    ///
+    /// **Il a peut-être servi, il n'a peut-être jamais existé**, et l'annuaire
+    /// ne fait pas la différence : un code consommé est SUPPRIMÉ, pas marqué.
+    /// Garder les codes morts pour distinguer les deux cas aurait fait pousser
+    /// une table de secrets périmés, et n'aurait rien appris à personne
+    /// d'utile — sinon à qui essaie des codes au hasard.
+    Inconnu,
+    /// Il existe, mais sa date est passée.
+    Expire,
+}
+
+/// Le code court qu'on tape sur une machine pour y lier une clé.
+///
+/// # C'EST LE SEUL SECRET PARTAGÉ DE CE PRODUIT, ET IL EST NOMMÉ COMME TEL
+///
+/// La contrainte C14 interdit l'authentification par secret partagé. Ce code en
+/// est un — et ce qui le rend acceptable est qu'il n'authentifie RIEN sur la
+/// durée : une seule fois, quelques minutes, et il n'ouvre qu'une opération,
+/// lier une clé. Le justificatif durable est la clé, que personne n'a jamais
+/// transmise.
+///
+/// Le déguiser en « jeton d'appairage » aurait été pire que de l'écrire.
+#[derive(Debug, Clone, Copy)]
+pub struct CodeEnrolement {
+    symboles: [u8; CODE_SYMBOLES],
+}
+
+impl CodeEnrolement {
+    /// Fabrique un code à partir de huit octets d'entropie.
+    ///
+    /// **Les cinquante bits de POIDS FORT sont employés**, et les quatorze
+    /// autres ignorés. Prendre les bits de poids faible aurait donné le même
+    /// résultat avec un bon générateur et un moins bon avec un mauvais : autant
+    /// prendre ceux qui varient toujours.
+    ///
+    /// L'aléa vient de l'appelant : cette crate est à l'étage 2 et ne lit rien.
+    #[must_use]
+    pub fn depuis_entropie(entropie: [u8; 8]) -> Self {
+        let mut valeur = u64::from_be_bytes(entropie) >> 14;
+        let mut symboles = [b'0'; CODE_SYMBOLES];
+        for place in symboles.iter_mut().rev() {
+            // `& 31` borne à 0..=31 : l'indice est toujours dans l'alphabet.
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "le masque `& 31` borne la valeur à 0..=31"
+            )]
+            let indice = (valeur & 31) as usize;
+            *place = asl_id::base32::ALPHABET[indice];
+            valeur >>= 5;
+        }
+        Self { symboles }
+    }
+
+    /// Lit un code tapé par un humain.
+    ///
+    /// La casse est indifférente, les confusions de Crockford sont rattrapées,
+    /// et **le tiret d'affichage est accepté autant qu'omis** : c'est la raison
+    /// d'être de cet alphabet, et elle vaut ici autant que pour un identifiant.
+    /// Refuser `4K9M2-P7R1T` parce qu'on a affiché `4K9M2-P7R1T` serait une
+    /// cruauté gratuite.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Faute::CodeLongueur`], [`Faute::CodeSymboleInvalide`].
+    pub fn analyser(texte: &str) -> Result<Self, Faute> {
+        let octets = texte.as_bytes();
+        let (gauche, droite): (&[u8], &[u8]) = match octets.len() {
+            CODE_SYMBOLES => (octets, &[]),
+            CODE_TEXTE_OCTETS if octets.get(COUPURE) == Some(&b'-') => (
+                octets.get(..COUPURE).unwrap_or_default(),
+                octets.get(COUPURE.saturating_add(1)..).unwrap_or_default(),
+            ),
+            obtenue => {
+                return Err(Faute::CodeLongueur {
+                    attendue: CODE_SYMBOLES,
+                    obtenue,
+                });
+            }
+        };
+
+        let mut symboles = [b'0'; CODE_SYMBOLES];
+        for (position, (place, octet)) in symboles
+            .iter_mut()
+            .zip(gauche.iter().chain(droite.iter()))
+            .enumerate()
+        {
+            let valeur =
+                asl_id::base32::valeur(*octet).ok_or(Faute::CodeSymboleInvalide { position })?;
+            // On range la forme CANONIQUE, pas ce qui a été tapé : sans cela,
+            // `0` et `O` donneraient deux EMPREINTES différentes, et le
+            // rattrapage de Crockford ne servirait à rien.
+            *place = asl_id::base32::ALPHABET[usize::from(valeur)];
+        }
+        Ok(Self { symboles })
+    }
+
+    /// Le texte canonique, en majuscules.
+    #[must_use]
+    pub fn texte(&self) -> &str {
+        // Tous les octets viennent de l'alphabet, donc ASCII.
+        core::str::from_utf8(&self.symboles).unwrap_or("")
+    }
+
+    /// Le texte groupé pour l'œil : `XXXXX-XXXXX`.
+    ///
+    /// **C'est la forme qu'on AFFICHE**, et la seule différence avec
+    /// [`CodeEnrolement::texte`] est un tiret au milieu. Dix symboles d'affilée
+    /// se perdent des yeux entre l'écran et le clavier ; deux groupes de cinq,
+    /// non. [`CodeEnrolement::analyser`] accepte les deux formes, donc ce tiret
+    /// n'ajoute rien à taper.
+    #[must_use]
+    pub fn texte_groupe(&self) -> TexteCode {
+        let mut sortie = [b'-'; CODE_TEXTE_OCTETS];
+        for (position, &symbole) in self.symboles.iter().enumerate() {
+            let place = if position < COUPURE {
+                position
+            } else {
+                position.saturating_add(1)
+            };
+            sortie[place] = symbole;
+        }
+        TexteCode(sortie)
+    }
+
+    /// L'empreinte sous laquelle l'annuaire range ce code.
+    ///
+    /// # L'ANNUAIRE NE GARDE PAS LES CODES, IL GARDE LEURS EMPREINTES
+    ///
+    /// Deux choses en découlent, et la seconde a supprimé du code.
+    ///
+    /// **Une base qui fuit ne livre aucune machine en cours d'enrôlement.** Un
+    /// code en clair au repos serait un secret vivant de plus, pour rien : on ne
+    /// le relit jamais, on ne fait que le reconnaître.
+    ///
+    /// **Et il n'y a plus rien à comparer.** `POST /v1/enrolement` ne nomme pas
+    /// la machine — il ne peut pas, sinon l'annuaire croirait sur parole celui
+    /// qui la nomme —, donc l'empreinte est ce par quoi on CHERCHE. Une
+    /// recherche par clé n'est pas une comparaison : la fonction de comparaison
+    /// en temps constant qui vivait ici n'avait plus d'appelant, et elle est
+    /// partie.
+    ///
+    /// SHA-256 du domaine, puis des symboles canoniques. Le domaine est là pour
+    /// la raison habituelle : cette empreinte ne doit jamais valoir le condensat
+    /// de quelque chose d'autre.
+    #[must_use]
+    pub fn empreinte(&self) -> [u8; EMPREINTE_OCTETS] {
+        use sha2::Digest as _;
+        let mut condensat = sha2::Sha256::new();
+        condensat.update(DOMAINE_CODE);
+        condensat.update(self.symboles);
+        let mut octets = [0_u8; EMPREINTE_OCTETS];
+        octets.copy_from_slice(&condensat.finalize());
+        octets
+    }
+}
+
+/// Le texte groupé d'un code, sans allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TexteCode([u8; CODE_TEXTE_OCTETS]);
+
+impl TexteCode {
+    /// Le texte, ASCII par construction.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.0).unwrap_or("")
+    }
+}
+
+impl core::fmt::Display for TexteCode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
     }
 }

@@ -10,6 +10,9 @@ repository.workspace = true
 [dependencies]
 asl-id.workspace = true
 ed25519-dalek.workspace = true
+# `sha2` POUR L'EMPREINTE D'UN CODE D'ENRÔLEMENT, et rien d'autre. Elle est déjà
+# dans le graphe : `ed25519-dalek` la tire.
+sha2.workspace = true
 
 [lints]
 workspace = true

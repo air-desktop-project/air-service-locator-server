@@ -563,7 +563,7 @@ fn un_appareil_se_pose_et_se_relit() {
 
 /// L'empreinte de ce code.
 fn empreinte(texte: &str) -> [u8; 32] {
-    asl_auth::CodeEnrolement::analyser(texte)
+    asl_cle::CodeEnrolement::analyser(texte)
         .expect("un code")
         .empreinte()
 }

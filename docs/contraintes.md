@@ -264,28 +264,22 @@ construction, ne publient pas leur port : **c'est une cible de reconnaissance**,
 et le seul endroit de ce produit où une fuite d'information est aussi utile à un
 attaquant que le contenu lui-même.
 
-Cela vaut aussi pour la comparaison des codes d'enrôlement : une comparaison qui
-s'arrête au premier octet différent est une fuite.
+**LE MORCEAU QUI COMPTE EST DANS LE TYPE** : `Decision::Refuser` **ne porte
+aucune raison**. Ce n'est pas un oubli — une raison finirait, un jour de hâte,
+dans une réponse, et « vous n'avez pas le droit » distingué de « ce service
+n'existe pas » est exactement la fuite qu'on ferme.
 
-**DEUX MORCEAUX EXISTENT DANS `asl-auth`, ET UN TROISIÈME MANQUE.**
+**IL Y EN AVAIT UN SECOND, ET IL A DISPARU AVEC CE QU'IL PROTÉGEAIT.** Ce
+document décrivait une comparaison de codes d'enrôlement en temps constant, puis
+la levée d'une réserve sur `black_box` et l'arrivée de `subtle`. **L'annuaire ne
+compare plus aucun code** : il ne range que leur EMPREINTE et cherche par elle
+(voir C14). Il n'y a plus de comparaison à écourter, donc plus de canal à fermer,
+donc plus de `subtle` — la meilleure façon de tenir une comparaison en temps
+constant reste de ne pas en avoir à faire.
 
-Le premier est dans le TYPE : `Decision::Refuser` **ne porte aucune raison**. Ce
-n'est pas un oubli — une raison finirait, un jour de hâte, dans une réponse, et
-« vous n'avez pas le droit » distingué de « ce service n'existe pas » est
-exactement la fuite qu'on ferme.
-
-Le second est dans `decider_enrolement` : **la comparaison a lieu même quand
-l'état la rend inutile**. Un `return` anticipé sur un code déjà consommé rendrait
-la réponse plus rapide dans ce cas, et un inconnu qui mesure les temps
-apprendrait si le code qu'il présente existe.
-
-**CETTE RÉSERVE EST LEVÉE.** Ce document disait : « Rust ne garantit pas le temps
-constant ; `black_box` le rend difficile au compilateur, pas impossible. La
-garantie réelle demande `subtle`, et c'est une décision de la tranche de crypto. »
-
-La tranche de crypto est arrivée, et `subtle` entre dans le graphe par
-`ed25519-dalek`, qui en dépend déjà. `asl-auth` emploie donc désormais
-`ConstantTimeEq`, écrite pour cela.
+Ce que la contrainte exigeait tient toujours : un code inconnu et un code périmé
+donnent le même refus, et rien ne les distingue — un code consommé est supprimé,
+pas marqué.
 
 ## C10 — Rien ne se lit sans autorisation nominative
 
