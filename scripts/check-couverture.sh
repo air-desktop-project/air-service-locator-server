@@ -36,7 +36,7 @@ cd "$(dirname "$0")/.."
 # Les mêmes listes que `check-etages.sh`. Elles sont dupliquées, et c'est un
 # défaut connu : le jour où elles divergeront, `check-etages` classera une crate
 # que celui-ci ignorera. À fusionner dès qu'un troisième script en aura besoin.
-sous_mesure=(asl-id asl-proto asl-api asl-annuaire asl-auth)
+sous_mesure=(asl-id asl-proto asl-api asl-annuaire asl-auth asl-cle)
 
 echo 'check-couverture — 100 % aux étages 1 et 2 (C2)'
 echo

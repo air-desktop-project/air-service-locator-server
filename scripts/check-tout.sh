@@ -23,6 +23,7 @@
 #      dira jamais : qu'un codec a commencé à lire un fichier.
 #   3. `check-compile`   — une erreur de type se lit en une seconde.
 #   4. `check-pile`      — le graphe résolu, donc les dépendances transitives.
+#   4 bis. `check-sans-c` — le même graphe, et ce que la compilation a produit.
 #   5. `check-clippy`    — les lints du produit.
 #   6. `cargo test`
 #   7. `check-fuzz --smoke` — quelques secondes par cible, plus la construction
@@ -58,6 +59,7 @@ barrieres=(
     scripts/check-etages.sh
     scripts/check-compile.sh
     scripts/check-pile.sh
+    scripts/check-sans-c.sh
     scripts/check-clippy.sh
     scripts/check-format.sh
 )

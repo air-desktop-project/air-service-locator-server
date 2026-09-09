@@ -49,6 +49,7 @@ members = [
     # Étage 2 — décisions, sans entrée-sortie
     "crates/asl-annuaire",
     "crates/asl-auth",
+    "crates/asl-cle",
     # Étage 3 — exécution
     "crates/asl-store",
     "crates/asl-loop-tokio",
@@ -109,6 +110,7 @@ repository = "https://github.com/air-desktop-project/air-service-locator-server"
 asl-annuaire = { path = "crates/asl-annuaire", version = "0.1.0" }
 asl-api = { path = "crates/asl-api", version = "0.1.0" }
 asl-auth = { path = "crates/asl-auth", version = "0.1.0" }
+asl-cle = { path = "crates/asl-cle", version = "0.1.0" }
 asl-id = { path = "crates/asl-id", version = "0.1.0" }
 asl-loop-tokio = { path = "crates/asl-loop-tokio", version = "0.1.0" }
 asl-proto = { path = "crates/asl-proto", version = "0.1.0" }
@@ -136,6 +138,29 @@ asl-store = { path = "crates/asl-store", version = "0.1.0" }
 # **Aucune crate tierce de QUIC ou de HTTP/3 n'entrera jamais** — ni un module
 # local qui en réimplémenterait une partie. Réimplémenter QUIC est le genre de
 # décision qui paraît raisonnable un après-midi et coûte deux ans.
+#
+# ── LA PREMIÈRE DÉPENDANCE EXTERNE, ET POURQUOI CELLE-LÀ ───────────────────
+#
+# `ed25519-dalek` — les signatures des clés de machine (C14). Elle entre au
+# moment où `asl-cle` la consomme, et pas avant.
+#
+# **PURE RUST, AUCUNE LIGNE DE C.** C'est la condition qui l'a fait retenir :
+# `asl-client` l'embarquera, et il est chargé dans des interpréteurs Python et
+# Ruby où une bibliothèque qui lierait sa propre libcrypto entrerait en conflit
+# avec celle du processus hôte.
+#
+# `default-features = false` N'EST PAS UNE PRÉFÉRENCE DE STYLE : la feature
+# `std` est dans les défauts, et ces crates sont `no_std`. La laisser active
+# ferait entrer `std` par la porte de derrière, sans qu'aucune ligne de notre
+# code ne le demande.
+#
+# `subtle` arrive avec elle, et c'est ce qui permet ENFIN à C9 d'être tenue
+# plutôt qu'approchée : `asl-auth` comparait ses codes avec une boucle et un
+# `black_box`, en disant honnêtement que Rust ne garantit rien. `subtle` est
+# écrite pour cela.
+
+ed25519-dalek = { version = "2", default-features = false, features = ["zeroize"] }
+subtle = { version = "2", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "forbid"

@@ -501,26 +501,23 @@ impl CodeEnrolement {
 
 /// Deux codes sont-ils égaux ?
 ///
-/// **La comparaison ne s'arrête pas au premier écart** (contrainte C9) : elle
-/// parcourt les dix symboles quoi qu'il arrive, et n'accumule qu'une différence.
+/// **La comparaison ne s'arrête pas au premier écart** (contrainte C9).
 ///
-/// # CE QUE CETTE FONCTION NE PEUT PAS PROMETTRE, ET QUI EST DIT ICI
+/// # LA DETTE QUI ÉTAIT ÉCRITE ICI EST PAYÉE
 ///
-/// **Rust ne garantit pas le temps constant.** Un compilateur a le droit de
-/// remplacer cette boucle par une comparaison qui s'arrête tôt ; `black_box` le
-/// lui rend difficile, pas impossible.
+/// Une première version employait une boucle et `core::hint::black_box`, avec
+/// cette réserve : « Rust ne garantit pas le temps constant ; un compilateur a
+/// le droit de remplacer cette boucle par une comparaison qui s'arrête tôt, et
+/// `black_box` le lui rend difficile, pas impossible. La garantie réelle demande
+/// `subtle`, et c'est une décision de la tranche de crypto. »
 ///
-/// La garantie réelle demande une bibliothèque écrite pour cela — `subtle` — et
-/// **c'est une décision de la tranche de crypto**, pas de celle-ci. Écrire ici
-/// « comparaison en temps constant » sans cette réserve aurait affirmé une
-/// propriété que ce code n'a pas.
+/// **La tranche de crypto est arrivée**, et `subtle` avec elle — elle entre dans
+/// le graphe par `ed25519-dalek`, qui en dépend déjà. La réserve n'a donc plus
+/// lieu d'être, et la comparaison est celle d'une bibliothèque écrite pour cela.
 #[must_use]
 pub fn egal_en_temps_constant(a: &CodeEnrolement, b: &CodeEnrolement) -> bool {
-    let mut ecart = 0_u8;
-    for (gauche, droite) in a.symboles.iter().zip(b.symboles.iter()) {
-        ecart |= gauche ^ droite;
-    }
-    core::hint::black_box(ecart) == 0
+    use subtle::ConstantTimeEq as _;
+    a.symboles.ct_eq(&b.symboles).into()
 }
 
 /// Ce code permet-il de lier une clé ?

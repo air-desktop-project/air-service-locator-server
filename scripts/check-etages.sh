@@ -35,7 +35,7 @@ cd "$(dirname "$0")/.."
 
 # ── La classification ────────────────────────────────────────────────────────
 etage1=(asl-id asl-proto asl-api)
-etage2=(asl-annuaire asl-auth)
+etage2=(asl-annuaire asl-auth asl-cle)
 hors=(asl-store asl-loop-tokio asl-server)
 
 # ── Ce qui est interdit aux étages 1 et 2 ────────────────────────────────────

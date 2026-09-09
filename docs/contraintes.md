@@ -10,7 +10,7 @@ encore ».
 | C1 | Étages 1 et 2 sans entrée-sortie | `check-etages.sh` |
 | C2 | 100 % de couverture aux étages 1 et 2 | `check-couverture.sh` |
 | C3 | Tout décodeur est fuzzé | `check-fuzz.sh` |
-| C4 | `asl-client` reste mince | `check-client.sh` — **à écrire** |
+| C4 | `asl-client` n'embarque pas une ligne de C | `check-sans-c.sh` ; la borne chiffrée reste **à écrire** |
 | C5 | Aucune abstraction d'exécution | Revue |
 | C6 | L'annuaire n'affirme jamais ce qu'il n'a pas mesuré | Revue, et les noms de l'API |
 | C7 | Aucune donnée biométrique ne traverse le réseau | Revue |
@@ -20,7 +20,7 @@ encore ».
 | C11 | Un annuaire n'accepte d'un pair que ce dont ce pair est l'autorité | Essai — **à écrire** |
 | C12 | La surface publique d'`asl-client` traverse une ABI C, et elle est stable | `check-abi.sh` (dépôt client) |
 | C13 | Aucune donnée personnelle hébergée, hors l'alias public choisi | Revue, et le schéma du magasin |
-| C14 | Aucune authentification par secret partagé — des clés, et rien d'autre | Revue |
+| C14 | Aucune authentification par secret partagé — des clés, et rien d'autre | `asl-cle`, une cible de fuzz, et la revue |
 | C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` |
 | C16 | Une seule toolchain, celle d'Air, datée | `check-toolchain.sh` |
 | C17 | Tout enregistrement porte son origine, et rompre une relation efface ce qui en vient — **sauf le journal** | Essai — **à écrire** |
@@ -143,9 +143,19 @@ nous ne savons rien.
   Ruby qui lierait sa propre libcrypto entrerait en conflit avec celle du
   processus hôte, et ce genre de panne se diagnostique en jours. La pile QUIC
   d'`air-mail-server` est pure Rust, et c'est ce qui rend ce choix tenable.
-- **Une borne chiffrée reste à fixer** sur le nombre de crates transitives, et
-  `check-client.sh` devra la faire respecter. Elle sera plus haute qu'espéré —
-  QUIC et TLS coûtent — mais **une borne haute et tenue vaut mieux qu'une règle
+- **`check-sans-c.sh` existe**, et il a commencé à examiner quelque chose le jour
+  où `ed25519-dalek` est entré. Trois contrôles : aucune crate `*-sys`, ni `cc`,
+  `bindgen` ou `pkg-config`, et **aucun objet compilé dans la sortie d'un script
+  de construction** — le seul des trois qui regarde ce que la compilation a
+  réellement fait.
+
+  `libc` y est admise, et la raison est écrite : elle ne contient pas une ligne
+  de C, ce sont des DÉCLARATIONS de l'ABI de la libc du système. Elle n'embarque
+  aucune implémentation, donc elle n'entre en conflit avec rien.
+
+- **Une borne chiffrée reste à fixer** sur le nombre de crates transitives.
+  Le graphe en compte **vingt-quatre** depuis l'entrée de la crypto, et il
+  grossira encore avec QUIC. **Une borne haute et tenue vaut mieux qu'une règle
   qualitative** : sans nombre, elle se relâche d'une dépendance à la fois, et
   chaque pas paraît raisonnable.
 
@@ -232,13 +242,13 @@ l'état la rend inutile**. Un `return` anticipé sur un code déjà consommé re
 la réponse plus rapide dans ce cas, et un inconnu qui mesure les temps
 apprendrait si le code qu'il présente existe.
 
-**CE QUI MANQUE, ET QUI EST DIT PLUTÔT QUE TU : Rust ne garantit pas le temps
-constant.** Un compilateur a le droit de remplacer la boucle de comparaison par
-une version qui s'arrête tôt ; `black_box` le lui rend difficile, pas impossible.
-La garantie réelle demande une bibliothèque écrite pour cela — `subtle` — et
-c'est une décision de la tranche de crypto. Écrire « comparaison en temps
-constant » sans cette réserve aurait affirmé une propriété que ce code n'a
-pas.
+**CETTE RÉSERVE EST LEVÉE.** Ce document disait : « Rust ne garantit pas le temps
+constant ; `black_box` le rend difficile au compilateur, pas impossible. La
+garantie réelle demande `subtle`, et c'est une décision de la tranche de crypto. »
+
+La tranche de crypto est arrivée, et `subtle` entre dans le graphe par
+`ed25519-dalek`, qui en dépend déjà. `asl-auth` emploie donc désormais
+`ConstantTimeEq`, écrite pour cela.
 
 ## C10 — Rien ne se lit sans autorisation nominative
 
@@ -356,11 +366,42 @@ d'une machine, et il est nommé comme tel plutôt que déguisé : à usage uniqu
 valable quelques minutes, et il n'ouvre qu'une opération — lier une clé. Le
 justificatif durable est la clé.
 
-**Ed25519**, pur Rust, aucune dépendance C. Ce que cette contrainte ne couvre pas
-encore : les signatures ne sont **pas** post-quantiques. L'échange de clés de
-QUIC l'est — `air-mail-server` porte un KEX hybride X25519 + ML-KEM-768 — mais
-signer avec ML-DSA est une décision à prendre, pas une case à cocher, et elle
-n'est pas prise.
+**Ed25519**, pur Rust, aucune dépendance C — c'est `asl-cle`, et
+`check-sans-c.sh` le vérifie.
+
+### CE QUE `asl-cle` A DÛ TRANCHER, ET QUI N'ÉTAIT PAS SPÉCIFIÉ
+
+**Où la vérification a lieu.** Dans le protocole applicatif, par un défi–réponse,
+et **pas dans TLS**. S'appuyer sur l'authentification cliente de TLS aurait lié
+une décision de sécurité à ce que la pile QUIC empruntée sait faire aujourd'hui,
+et l'aurait placée dans une crate qu'on n'écrit pas.
+
+**Ce qui est signé.** Un message à champs de longueur FIXE : séparateur de
+domaine, genre, identifiant de machine, défi, liaison de canal. **Tous fixes,
+donc aucun préfixe de longueur et aucune ambiguïté** — un encodage sans préfixe à
+champs variables permettrait de déplacer la frontière entre deux champs, et c'est
+ainsi qu'on fait valoir une signature pour un message qu'on n'a pas écrit.
+
+**Comment le rejeu est empêché.** Par le défi, tiré par l'annuaire, accepté une
+seule fois.
+
+### ET CE QUE L'ASSEMBLAGE NE GARANTIT PAS ENCORE
+
+Un défi seul n'arrête pas un **RELAIS** : un intermédiaire qui transmet le défi du
+vrai annuaire à la machine, puis la signature en retour, s'authentifie comme elle.
+Seule une valeur propre à la connexion TLS — un *exporter* (RFC 8446 §7.5) —
+ferme ce chemin.
+
+`asl-cle` l'EXIGE en paramètre, précisément pour qu'on ne puisse pas l'oublier en
+silence. **Mais elle ne peut pas vérifier que ce qu'on lui donne en est un.** Si
+le transport n'en fournit pas, le relais reste ouvert — et il faut le savoir.
+
+### Ce que cette contrainte ne couvre pas encore
+
+Les signatures ne sont **pas** post-quantiques. L'échange de clés de QUIC l'est —
+`air-mail-server` porte un KEX hybride X25519 + ML-KEM-768 — mais signer avec
+ML-DSA est une décision à prendre, pas une case à cocher, et elle n'est pas
+prise.
 
 ## C15 — La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite
 

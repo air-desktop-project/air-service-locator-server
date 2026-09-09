@@ -129,6 +129,14 @@ jobs:
       - name: check-pile
         run: ./scripts/check-pile.sh
 
+      # ── AUCUNE LIGNE DE C (C4) ───────────────────────────────────────────
+      #
+      # Elle n'avait rien à examiner tant que le graphe ne contenait que nos
+      # crates. `ed25519-dalek` y est entré avec vingt-trois dépendances : c'est
+      # le moment où la règle cesse d'être une intention.
+      - name: check-sans-c
+        run: ./scripts/check-sans-c.sh
+
       - name: check-clippy
         run: ./scripts/check-clippy.sh
 
