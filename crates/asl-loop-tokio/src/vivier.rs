@@ -103,6 +103,32 @@ impl Vivier {
         partis
     }
 
+    /// Applique le verdict d'une sonde.
+    ///
+    /// # UN VERDICT QUI ARRIVE TROP TARD NE RESSUSCITE RIEN
+    ///
+    /// Une sonde prend jusqu'à trois secondes ; le service qu'elle mesurait peut
+    /// être parti entre-temps — sa connexion fermée, son annonce retirée. Le
+    /// verdict tombe alors dans le vide, et `asl-annuaire` le refuse de
+    /// lui-même : c'est la même règle que pour un keepalive tardif, et pour la
+    /// même raison — un service qui clignote est pire qu'un service absent.
+    ///
+    /// Rend `true` si le verdict a changé quelque chose.
+    pub fn appliquer(&mut self, verdict: &crate::sonde::Verdict) -> bool {
+        let Some(vivante) = self.annonces.get_mut(&clef(verdict.service)) else {
+            return false;
+        };
+        vivante
+            .session
+            .verdict_de_sonde(
+                verdict.point,
+                verdict.aboutie,
+                verdict.quand,
+                verdict.maintenant,
+            )
+            .unwrap_or(false)
+    }
+
     /// Oublie ce qui a expiré.
     ///
     /// **UNE ANNONCE EXPIRÉE N'EST PAS UNE ANNONCE ABSENTE**, et c'est pour cela

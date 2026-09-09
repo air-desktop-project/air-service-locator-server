@@ -529,9 +529,45 @@ candidat** — pas à chaque keepalive. La connexion tenue rend cela naturel : i
 n'y a plus de « renouvellement de bail » périodique auquel accrocher une sonde,
 et il n'en faut pas.
 
-Une connexion TCP ouverte puis refermée aussitôt, vers chaque candidat TCP,
-**IPv6 d'abord**. Elle ne transmet rien et ne parle aucun protocole applicatif :
-elle répond à une seule question, « le trois-temps aboutit-il ? ».
+Une connexion TCP ouverte puis refermée aussitôt, **vers le seul candidat
+RÉFLEXIF**. Elle ne transmet rien et ne parle aucun protocole applicatif : elle
+répond à une seule question, « le trois-temps aboutit-il ? ».
+
+#### On ne sonde JAMAIS une adresse annoncée, et c'est une correction
+
+Une version antérieure de ce document disait « vers chaque candidat TCP ». C'était
+faux, et dangereux.
+
+**C'était inutile.** Les adresses annoncées sont les adresses LOCALES du daemon.
+Se connecter à `192.168.1.20` depuis l'annuaire ne joint pas sa machine : cela
+joint ce qui se trouve à cette adresse **sur le réseau de l'annuaire**, qui est
+une machine sans aucun rapport. La mesure n'aurait rien mesuré.
+
+**Et c'était une faille.** Ces adresses sont choisies par le client. Les sonder
+ferait de l'annuaire un intermédiaire qui ouvre des connexions vers des cibles
+qu'un inconnu désigne :
+
+- **un balayage de notre propre réseau** — `10.0.0.5:22`, `169.254.169.254:80`
+  et le reste. Le trois-temps aboutit ou non, et cette seule différence est un
+  oracle : le client apprend ce qui écoute chez nous, avec notre adresse ;
+- **un relais vers des tiers**, qui verraient notre IP dans leurs journaux et
+  nous l'imputeraient — huit adresses par annonce, autant d'annonces qu'on veut.
+
+**Le candidat réflexif n'a aucun de ces défauts**, et c'est ce qui le distingue :
+c'est l'adresse d'où ce pair vient de nous parler, et la poignée de main QUIC a
+déjà prouvé qu'il tient ce chemin. Lui répondre n'ouvre aucune cible nouvelle —
+nous ne parlons qu'à qui nous a parlé.
+
+Les adresses annoncées gardent leurs deux emplois, qui ne demandent aucune
+connexion de notre part : **le verdict de NAT** les compare à ce qu'on constate,
+et **un client sur le même réseau** peut les essayer lui-même, ce qui est
+exactement l'endroit d'où elles ont un sens.
+
+Il reste une réserve, et il faut la dire : derrière un NAT, le candidat réflexif
+est l'adresse publique d'une box que plusieurs abonnés peuvent partager. Sonder
+le port qu'un daemon y déclare peut donc atteindre le voisin. C'est une gêne, non
+une faille : n'importe quel pair peut faire la même chose directement, et sans
+nous.
 
 **Pourquoi ce coût est justifié.** Sans sonde, l'annuaire ne peut rendre que
 `annoncé`, et un administrateur derrière un NAT découvre que son service est

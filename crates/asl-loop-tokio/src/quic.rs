@@ -130,6 +130,21 @@ struct Vivante {
 /// qu'on ait CONSTATÉE plutôt qu'entendue. La garder pour la boucle serait la
 /// perdre.
 pub trait Application {
+    /// Un tour de boucle vient de passer.
+    ///
+    /// # POURQUOI CE RENDEZ-VOUS EXISTE
+    ///
+    /// Tous les autres sont liés à une connexion : un datagramme est arrivé,
+    /// un flux est lisible, une connexion s'éteint. **Il manquait un endroit où
+    /// faire ce qui n'appartient à personne** — recueillir le résultat d'un
+    /// travail qu'on a lancé ailleurs, oublier ce qui a expiré.
+    ///
+    /// Il est appelé À CHAQUE TOUR, y compris ceux qu'un simple délai a
+    /// réveillés : une application qui n'aurait de nouvelles que lorsqu'un pair
+    /// parle ne saurait rien pendant qu'il se tait, ce qui est exactement le
+    /// moment où les délais échoient.
+    fn au_tour(&mut self, _maintenant: u64) {}
+
     /// Une connexion vient de s'établir.
     ///
     /// **C'EST LE PREMIER INSTANT OÙ L'ON PEUT OUVRIR UN FLUX** : avant, les
@@ -261,6 +276,7 @@ where
         };
 
         let maintenant = maintenant();
+        application.au_tour(maintenant);
         ecoute.un_tour(arrivee, &mut recu, application, maintenant);
         ecoute.emettre(&mut place, maintenant).await;
         ecoute.oublier_les_eteintes(application);
@@ -288,6 +304,7 @@ where
             lu = ecoute.socket.recv_from(&mut recu) => Some(lu),
         };
         let maintenant = maintenant();
+        application.au_tour(maintenant);
         ecoute.un_tour(arrivee, &mut recu, application, maintenant);
         ecoute.emettre(&mut place, maintenant).await;
         ecoute.oublier_les_eteintes(application);

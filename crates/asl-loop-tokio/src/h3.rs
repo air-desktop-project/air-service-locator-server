@@ -41,6 +41,7 @@ use asl_id::Identifiant;
 use asl_session::{Besoin, Resolution, Session, Trouvaille};
 use asl_store::Entrepot;
 
+use crate::sonde::{self, Verdict};
 use crate::vivier::Vivier;
 
 use crate::pont::Pont;
@@ -75,6 +76,10 @@ struct Service<'a> {
     tirer_un_identifiant: &'a (dyn Fn() -> Option<[u8; 16]> + Send + Sync),
     /// Le corps de la requête, pour l'annonce qui doit le décoder.
     corps: Vec<u8>,
+    /// Par où les sondes rapportent.
+    rapports: tokio::sync::mpsc::UnboundedSender<Verdict>,
+    /// Combien de sondes sont en vol, pour ne pas en lancer sans fin.
+    en_vol: &'a mut usize,
     /// D'où l'on VOIT ce pair.
     ///
     /// **C'est le seul fait qu'on ait constaté plutôt qu'entendu**, et c'est ce
@@ -253,17 +258,79 @@ impl Service<'_> {
         )
         .ok()?;
 
-        // **LES ORDRES DE SONDE NE SONT PAS ENCORE EXÉCUTÉS**, et c'est écrit
-        // plutôt que tu. `asl_proto::Verdict::EnCours` existe exactement pour
-        // cela : l'annuaire répond sans avoir sondé, et dit qu'il n'a pas
-        // sondé. Sonder est une tranche à part — elle ouvre des connexions TCP
-        // vers des tiers, avec ses délais et ses refus.
+        // ── LES SONDES PARTENT, ET LA RÉPONSE N'ATTEND PAS ──────────────────
+        //
+        // **ON RÉPOND AVANT D'AVOIR MESURÉ**, et c'est ce que
+        // `asl_proto::Verdict::EnCours` existe pour dire. Attendre le
+        // trois-temps ferait patienter le daemon jusqu'à trois secondes par
+        // point, et bloquerait la boucle entière — qui n'a qu'une tâche.
+        //
+        // Les verdicts reviennent par le canal, et `au_tour` les applique.
+        self.lancer_les_sondes(service, &vivante, &_ordres);
+
         let mut sortie = alloc_reponse();
         let combien = vivante.reponse().ok()?.encoder(&mut sortie).ok()?;
         sortie.truncate(combien);
 
         self.vivier.poser(service, &self.connexion, vivante);
         Some(sortie)
+    }
+
+    /// Lance une sonde par point sondable, et rend la main aussitôt.
+    ///
+    /// # SEUL LE CANDIDAT RÉFLEXIF EST SONDÉ
+    ///
+    /// `sonde::sondable` en est le juge, et son en-tête dit pourquoi : sonder
+    /// une adresse ANNONCÉE serait inutile — c'est une adresse du réseau du
+    /// daemon, pas du nôtre — et ferait de l'annuaire un balayeur de notre
+    /// propre réseau, avec notre IP.
+    fn lancer_les_sondes(
+        &mut self,
+        service: Identifiant,
+        vivante: &asl_annuaire::Session,
+        ordres: &asl_annuaire::Ordres,
+    ) {
+        for point in ordres.a_sonder() {
+            if *self.en_vol >= sonde::EN_VOL_MAX {
+                // **ON NE SONDE PAS, ET C'EST HONNÊTE** : le verdict reste
+                // `en_cours`, ce qui est exactement la vérité.
+                break;
+            }
+            let mut candidats = [asl_proto::Candidat {
+                protocole: point.protocole,
+                adresse: core::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED),
+                port: point.port,
+                origine: asl_proto::Origine::Reflexif,
+            }; asl_proto::ADRESSES_MAX + 1];
+            let combien = vivante.candidats(point, &mut candidats);
+
+            let Some(ou) = candidats
+                .get(..combien)
+                .unwrap_or_default()
+                .iter()
+                .find_map(|candidat| sonde::sondable(*candidat).map(|ou| (ou, *candidat)))
+            else {
+                continue;
+            };
+
+            let (adresse, candidat) = ou;
+            let rapports = self.rapports.clone();
+            *self.en_vol = self.en_vol.saturating_add(1);
+            tokio::spawn(async move {
+                let aboutie = sonde::aboutit(adresse).await.then_some(candidat);
+                // Le canal est fermé quand l'annuaire s'éteint : il n'y a alors
+                // plus personne pour le verdict, et ce n'est pas une faute.
+                let _ = rapports.send(Verdict {
+                    service,
+                    point,
+                    aboutie,
+                    quand: asl_proto::Horodatage::depuis_millisecondes(
+                        maintenant().saturating_div(1_000),
+                    ),
+                    maintenant: instant(),
+                });
+            });
+        }
     }
 
     /// Rassemble ce qu'il faut pour décider d'une résolution.
@@ -389,6 +456,12 @@ pub struct Annuaire<'a> {
     liaison: LiaisonDeCanal,
     /// Toutes les annonces vivantes.
     vivier: Vivier,
+    /// Par où les sondes rapportent.
+    rapports: tokio::sync::mpsc::UnboundedSender<Verdict>,
+    /// Ce qu'elles rapportent, recueilli à chaque tour.
+    verdicts: tokio::sync::mpsc::UnboundedReceiver<Verdict>,
+    /// Combien de sondes sont en vol.
+    en_vol: usize,
     /// De quoi tirer un identifiant de service.
     tirer_un_identifiant: &'a (dyn Fn() -> Option<[u8; 16]> + Send + Sync),
     /// De quoi tirer un défi.
@@ -413,11 +486,15 @@ impl<'a> Annuaire<'a> {
         tirer_un_defi: &'a (dyn Fn() -> Option<Defi> + Send + Sync),
         tirer_un_identifiant: &'a (dyn Fn() -> Option<[u8; 16]> + Send + Sync),
     ) -> Self {
+        let (rapports, verdicts) = tokio::sync::mpsc::unbounded_channel();
         Self {
             connexions: HashMap::new(),
             entrepot,
             liaison,
             vivier: Vivier::nouveau(),
+            rapports,
+            verdicts,
+            en_vol: 0,
             tirer_un_identifiant,
             tirer_un_defi,
             servies: 0,
@@ -446,6 +523,20 @@ impl<'a> Annuaire<'a> {
 }
 
 impl Application for Annuaire<'_> {
+    fn au_tour(&mut self, _maintenant: u64) {
+        // **LES VERDICTS ARRIVENT ICI, ET NULLE PART AILLEURS.** Une sonde est
+        // une tâche à part : elle ne touche pas au vivier, elle rapporte. C'est
+        // ce qui permet d'attendre trois secondes un trois-temps sans arrêter
+        // la boucle, qui n'a qu'une tâche pour toutes les connexions.
+        while let Ok(verdict) = self.verdicts.try_recv() {
+            self.en_vol = self.en_vol.saturating_sub(1);
+            self.vivier.appliquer(&verdict);
+        }
+        // Et l'on oublie ce qui a expiré — une annonce dont la connexion est
+        // tombée sans qu'on l'apprenne n'a personne pour la retirer.
+        self.vivier.oublier_les_expirees(instant());
+    }
+
     fn a_l_etablissement(&mut self, connexion: &mut Connection, _pair: SocketAddr) {
         let clef = connexion.local_id().as_bytes().to_vec();
         let liaison = self.liaison;
@@ -484,6 +575,8 @@ impl Application for Annuaire<'_> {
             session,
             entrepot: self.entrepot,
             vivier: &mut self.vivier,
+            rapports: self.rapports.clone(),
+            en_vol: &mut self.en_vol,
             connexion: clef.clone(),
             tirer_un_identifiant: self.tirer_un_identifiant,
             corps: Vec::new(),

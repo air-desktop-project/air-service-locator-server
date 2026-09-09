@@ -958,3 +958,193 @@ async fn un_service_annonce_par_a_se_retrouve_chez_b_qui_y_a_droit() {
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
+
+#[tokio::test]
+async fn la_sonde_mesure_la_joignabilite_et_le_verdict_bascule() {
+    // **C'EST LA FONCTION LA PLUS UTILE DU PRODUIT** (`modele.md` §4.3) :
+    // l'annuaire dit au propriétaire si son service est joignable, à la seconde
+    // où il démarre — plutôt qu'il ne le découvre quand quelqu'un essaie.
+    let (autorite, racine, chaine, cle) = materiel("sonde");
+    let (base, fichier) = entrepot("sonde");
+
+    let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xF1; 16]);
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0xF1; 16]);
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xF1; 32]);
+    base.poser_machine(
+        machine,
+        &asl_registre::Machine {
+            provenance: Provenance::Ici,
+            proprietaire: compte,
+            cle: secrete.publique().octets(),
+            annonce: true,
+            lecture: true,
+        },
+    )
+    .expect("écrite");
+
+    // **UN VRAI SERVICE QUI ÉCOUTE**, sur la boucle locale — c'est-à-dire
+    // exactement l'adresse d'où l'annuaire verra le daemon venir, donc le
+    // candidat RÉFLEXIF qu'il a le droit de sonder.
+    let service = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("un service d'essai");
+    let port = service.local_addr().expect("une adresse").port();
+    tokio::spawn(async move {
+        // On accepte et l'on referme : la sonde ne dit rien, on ne lui répond
+        // rien.
+        while let Ok((flux, _)) = service.accept().await {
+            drop(flux);
+        }
+    });
+
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let mut client =
+        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    for _ in 0..64_u32 {
+        client.parler().await;
+        if !client.ecouter().await {
+            break;
+        }
+    }
+    authentifier(&mut client, &chaine, machine, &secrete, 0, 4).await;
+
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":{port}}}],"adresses_locales":[]}}"#,
+        machine.texte()
+    );
+    ams_quic_client::envoyer_avec_media(
+        &mut client,
+        8,
+        20,
+        b"/v1/annonce",
+        None,
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut client, 8).await;
+
+    // **LA RÉPONSE N'ATTEND PAS LA MESURE.** Attendre le trois-temps ferait
+    // patienter le daemon, et bloquerait une boucle qui n'a qu'une tâche.
+    assert!(
+        String::from_utf8_lossy(&rendu).contains("en_cours"),
+        "l'annonce doit répondre avant d'avoir sondé : {}",
+        String::from_utf8_lossy(&rendu)
+    );
+
+    // ── ET LE VERDICT BASCULE ───────────────────────────────────────────────
+    //
+    // On redemande jusqu'à ce que la sonde ait rapporté. Chaque requête fait un
+    // tour de boucle, et c'est au tour que les verdicts sont recueillis.
+    let cible = format!("/v1/ou/{}/depot", machine.texte());
+    let mut vu = String::new();
+    let mut flux = 12_u64;
+    for _ in 0..40_u32 {
+        ams_quic_client::envoyer_une_requete(&mut client, flux, 17, cible.as_bytes(), None, b"")
+            .await;
+        let corps = ams_quic_client::attendre_la_reponse(&mut client, flux).await;
+        vu = String::from_utf8_lossy(&corps).into_owned();
+        if vu.contains("joignable") {
+            break;
+        }
+        flux = flux.saturating_add(4);
+        tokio::time::sleep(core::time::Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        vu.contains("joignable"),
+        "la sonde n'a jamais rapporté que le service était joignable : {vu}"
+    );
+    assert!(
+        vu.contains(&port.to_string()),
+        "et le port sondé doit être celui qu'on a annoncé : {vu}"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn un_port_ou_rien_n_ecoute_reste_injoignable() {
+    // **C6 EN ACTION** : l'annuaire ne dit `joignable` que de ce qu'il a mesuré,
+    // et dit `injoignable` de ce qu'il a mesuré aussi. C'est ce qui prévient un
+    // administrateur derrière un NAT AVANT que quelqu'un n'essaie.
+    let (autorite, racine, chaine, cle) = materiel("injoignable");
+    let (base, fichier) = entrepot("injoignable");
+
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0xF2; 16]);
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xF2; 32]);
+    base.poser_machine(
+        machine,
+        &asl_registre::Machine {
+            provenance: Provenance::Ici,
+            proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [0xF2; 16]),
+            cle: secrete.publique().octets(),
+            annonce: true,
+            lecture: true,
+        },
+    )
+    .expect("écrite");
+
+    // Un port qu'on prend puis qu'on rend : plus personne n'écoute.
+    let port = {
+        let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("une écoute");
+        ecoute.local_addr().expect("une adresse").port()
+    };
+
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let mut client =
+        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    for _ in 0..64_u32 {
+        client.parler().await;
+        if !client.ecouter().await {
+            break;
+        }
+    }
+    authentifier(&mut client, &chaine, machine, &secrete, 0, 4).await;
+
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":{port}}}],"adresses_locales":[]}}"#,
+        machine.texte()
+    );
+    ams_quic_client::envoyer_avec_media(
+        &mut client,
+        8,
+        20,
+        b"/v1/annonce",
+        None,
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut client, 8).await;
+
+    let cible = format!("/v1/ou/{}/depot", machine.texte());
+    let mut vu = String::new();
+    let mut flux = 12_u64;
+    for _ in 0..40_u32 {
+        ams_quic_client::envoyer_une_requete(&mut client, flux, 17, cible.as_bytes(), None, b"")
+            .await;
+        let corps = ams_quic_client::attendre_la_reponse(&mut client, flux).await;
+        vu = String::from_utf8_lossy(&corps).into_owned();
+        if vu.contains("injoignable") {
+            break;
+        }
+        flux = flux.saturating_add(4);
+        tokio::time::sleep(core::time::Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        vu.contains("injoignable"),
+        "la sonde devait rapporter que rien n'écoute : {vu}"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}

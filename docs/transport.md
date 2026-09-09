@@ -181,10 +181,11 @@ Nommé ici pour ne pas être redécouvert :
 - ~~D'où viennent les certificats.~~ **Tranché le 2026-09-09 — voir §8.**
 - ~~L'entrepôt.~~ **Fait**, et le produit est bouclé : un daemon annonce le port
   que son système lui a donné, et un pair autorisé le retrouve, sur une AUTRE
-  connexion. Ce qui reste : la sonde de joignabilité (`Verdict::EnCours` la
-  remplace en disant qu'elle n'a pas eu lieu), le motif de départ réel, et ce
-  qui CRÉE les objets — comptes, machines, autorisations passent encore par
-  l'entrepôt à la main.
+  connexion. Ce qui reste : le motif de départ réel, et ce qui CRÉE
+  les objets — comptes, machines, autorisations passent encore par l'entrepôt à
+  la main. **La sonde mesure** (`asl-loop-tokio::sonde`), et seulement le
+  candidat réflexif — voir `modele.md` §4.3 pour ce que sonder une adresse
+  annoncée aurait coûté.
 
 ---
 

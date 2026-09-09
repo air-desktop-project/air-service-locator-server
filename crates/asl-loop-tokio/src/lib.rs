@@ -39,6 +39,7 @@
 //! | [`pont`] | Marie `ams_h3::Transport` et `ams_quic_tls::Connection`. |
 //! | [`h3`] | Présente `asl-session` à `ams-h3`, connexion par connexion. |
 //! | [`privileges`] | Le refus de tourner en root (C8). |
+//! | [`sonde`] | La joignabilité, mesurée — et seulement là où c'est SÛR. |
 //! | [`vivier`] | L'état VIVANT des annonces — en mémoire, jamais sur disque. |
 //!
 //! # CE QUI MANQUE ENCORE
@@ -50,6 +51,7 @@ pub mod h3;
 pub mod pont;
 pub mod privileges;
 pub mod quic;
+pub mod sonde;
 pub mod vivier;
 
 pub use h3::Annuaire;
