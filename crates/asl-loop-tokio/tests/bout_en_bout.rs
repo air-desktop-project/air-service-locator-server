@@ -35,7 +35,10 @@ use std::process::Command;
 use std::sync::Arc;
 
 use ams_proto_h3::{FrameHeader, FrameKind, qpack};
+use asl_id::{Genre, Identifiant};
 use asl_loop_tokio::{Annuaire, Comptes, configuration_tls, servir_quic};
+use asl_registre::{AliasRange, Compte, Provenance};
+use asl_store::Entrepot;
 
 /// La racine du dépôt, depuis ce paquet.
 fn depot() -> PathBuf {
@@ -75,11 +78,19 @@ fn materiel(quoi: &str) -> (PathBuf, Vec<u8>, Vec<u8>, Vec<u8>) {
     (autorite, racine, chaine, cle)
 }
 
+/// Un entrepôt neuf, dans un fichier à nous.
+fn entrepot(quoi: &str) -> (Entrepot, PathBuf) {
+    let chemin = std::env::temp_dir().join(format!("asl-bout-{}-{quoi}.redb", std::process::id()));
+    let _ = std::fs::remove_file(&chemin);
+    (Entrepot::ouvrir(&chemin).expect("un entrepôt neuf"), chemin)
+}
+
 /// Lance l'écoute sur une socket éphémère, et rend son adresse et de quoi
 /// l'arrêter.
 async fn lever(
     chaine: &[u8],
     cle: &[u8],
+    entrepot: Entrepot,
 ) -> (
     SocketAddr,
     tokio::sync::oneshot::Sender<()>,
@@ -93,7 +104,7 @@ async fn lever(
 
     let (dire_stop, entendre_stop) = tokio::sync::oneshot::channel();
     let tache = tokio::spawn(async move {
-        let mut application = Annuaire::new();
+        let mut application = Annuaire::new(&entrepot);
         let arret = async {
             let _ = entendre_stop.await;
         };
@@ -172,7 +183,8 @@ fn champ<'a>(champs: &'a [(Vec<u8>, Vec<u8>)], nom: &[u8]) -> Option<&'a [u8]> {
 #[tokio::test]
 async fn une_requete_traverse_toute_la_pile_et_revient() {
     let (autorite, racine, chaine, cle) = materiel("servie");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle).await;
+    let (base, fichier) = entrepot("servie");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
 
     let mut client =
         ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
@@ -241,6 +253,7 @@ async fn une_requete_traverse_toute_la_pile_et_revient() {
     assert_eq!(comptes.refusees, 0, "{comptes:?}");
 
     let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
 }
 
 #[tokio::test]
@@ -250,7 +263,8 @@ async fn une_cible_inconnue_revient_en_404_et_non_en_501() {
     // « elle désigne quelque chose que je ne sais pas encore servir ». Les
     // confondre ferait chercher une faute d'URL là où il n'y en a pas.
     let (autorite, racine, chaine, cle) = materiel("inconnue");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle).await;
+    let (base, fichier) = entrepot("inconnue");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
 
     let mut client =
         ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
@@ -275,4 +289,93 @@ async fn une_cible_inconnue_revient_en_404_et_non_en_501() {
     let _ = dire_stop.send(());
     let _ = tache.await;
     let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn un_compte_ecrit_dans_l_entrepot_revient_par_son_alias() {
+    // **C'EST LA CHAÎNE ENTIÈRE**, et c'est le premier essai où l'annuaire rend
+    // une donnée qu'il a vraiment rangée : la cérémonie frappe un certificat,
+    // l'entrepôt garde un compte, la boucle sert QUIC, la session dit ce qu'il
+    // lui faut, l'étage 3 va le chercher, et le client reçoit l'identifiant.
+    let (autorite, racine, chaine, cle) = materiel("alias");
+    let (base, fichier) = entrepot("alias");
+
+    let qui = Identifiant::depuis_entropie(Genre::Utilisateur, [0x2A; 16]);
+    base.poser_compte(
+        qui,
+        &Compte {
+            provenance: Provenance::Ici,
+            alias: Some(AliasRange::nouveau("thierry").expect("il tient")),
+        },
+    )
+    .expect("le compte est écrit");
+
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let mut client =
+        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    for _ in 0..64_u32 {
+        client.parler().await;
+        if !client.ecouter().await {
+            break;
+        }
+    }
+
+    ams_quic_client::envoyer_une_requete(&mut client, 0, 17, b"/v1/alias/thierry", None, b"").await;
+    let corps = ams_quic_client::attendre_la_reponse(&mut client, 0).await;
+    let brut = client.recu(0).to_vec();
+
+    let champs = champs(&brut);
+    assert_eq!(
+        champ(&champs, b":status"),
+        Some(&b"200"[..]),
+        "l'alias n'a pas été résolu : {champs:?}"
+    );
+    assert_eq!(
+        champ(&champs, b"content-type"),
+        Some(&b"application/json"[..])
+    );
+
+    let rendu = String::from_utf8_lossy(&corps);
+    assert!(
+        rendu.contains(qui.texte().as_str()),
+        "l'identifiant n'est pas dans la réponse : {rendu}"
+    );
+    assert!(
+        rendu.contains("thierry"),
+        "l'alias n'est pas dans la réponse : {rendu}"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn un_alias_que_personne_ne_porte_revient_en_404() {
+    let (autorite, racine, chaine, cle) = materiel("sans-alias");
+    let (base, fichier) = entrepot("sans-alias");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    let mut client =
+        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    for _ in 0..64_u32 {
+        client.parler().await;
+        if !client.ecouter().await {
+            break;
+        }
+    }
+
+    ams_quic_client::envoyer_une_requete(&mut client, 0, 17, b"/v1/alias/personne", None, b"")
+        .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut client, 0).await;
+    let brut = client.recu(0).to_vec();
+
+    assert_eq!(champ(&champs(&brut), b":status"), Some(&b"404"[..]));
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
 }

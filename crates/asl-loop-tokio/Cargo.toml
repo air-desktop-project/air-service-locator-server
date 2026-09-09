@@ -9,6 +9,8 @@ repository.workspace = true
 
 [dependencies]
 asl-session.workspace = true
+asl-store.workspace = true
+ams-proto-http.workspace = true
 
 # La pile QUIC et HTTP/3 d'`air-mail-server` (C15). Voir le manifeste du
 # workspace pour ce qui est repris et ce qui ne l'est pas.
@@ -21,6 +23,11 @@ ams-quic-tls.workspace = true
 # monte la configuration TLS, et surtout elle porte l'ALPN `h3` : voir
 # `configuration_tls`, qui existe pour qu'on ne puisse pas l'oublier.
 ams-tls.workspace = true
+
+# `libc` POUR UN SEUL APPEL : `geteuid`, qui n'a pas d'équivalent dans `std`.
+# Elle est DÉJÀ dans le graphe — `redb` la tire — et `check-sans-c.sh` l'admet
+# avec sa raison écrite : ce sont des déclarations d'ABI, pas une ligne de C.
+libc.workspace = true
 rustls.workspace = true
 tokio.workspace = true
 
@@ -37,6 +44,8 @@ ams-quic-client.workspace = true
 # no-store` est une entrée de la table statique de QPACK, et ne voyage donc pas
 # en clair sur le fil.
 ams-proto-h3.workspace = true
+asl-id.workspace = true
+asl-registre.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 [lints]

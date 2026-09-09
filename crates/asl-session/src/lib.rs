@@ -24,17 +24,45 @@
 //!      son URL quand c'est sa syntaxe qui est fautive.
 //!   3. **Le corps tient-il dans la borne ?** Voir [`CORPS_OCTETS_MAX`].
 //!
+//! # ELLE NE LIT PAS L'ENTREPÔT : ELLE DIT CE QU'IL LUI FAUT
+//!
+//! C'est le point d'architecture de cette crate, et il mérite d'être défendu
+//! contre la solution qu'on aurait prise naturellement.
+//!
+//! **La solution naturelle** serait un trait `Vue` — « donne-moi un compte » —
+//! que l'étage 3 implémenterait et qu'on passerait ici. Le code de cette crate
+//! resterait sans entrée-sortie, et `check-etages.sh` ne verrait rien à redire.
+//!
+//! **Elle serait fausse quand même.** La règle de l'étage 2 n'est pas « ne pas
+//! écrire d'entrée-sortie », c'est **« ne jamais attendre »**. Une décision qui
+//! appelle un trait dont l'implémentation ouvre un fichier attend, et personne
+//! ne le voit — ni le compilateur, ni la barrière, ni le lecteur.
+//!
+//! Donc [`besoin`] dit ce qu'il faut chercher, l'étage 3 va le chercher, et
+//! [`repondre`] répond. **C'est le même partage qu'`asl_annuaire::Ordres`**, à
+//! ceci près qu'un ordre part sans retour quand un besoin en attend un.
+//!
+//! # POURQUOI DEUX FONCTIONS PLUTÔT QU'UNE MACHINE À ÉTATS
+//!
+//! Une `Session` qui retiendrait le besoin en cours entre les deux appels
+//! **mélangerait deux requêtes concurrentes** : HTTP/3 sert plusieurs flux sur
+//! une même connexion, et la session est par connexion. Le besoin est donc
+//! rendu à l'appelant, qui le lui rend — il vit sur la pile de la requête, et
+//! nulle part ailleurs.
+//!
 //! # ET CE QU'ELLE NE DÉCIDE PAS ENCORE
 //!
-//! Tout le reste rend `501`. Ce n'est pas un trou : **aucune ressource de cette
-//! API ne se sert sans état**, et l'entrepôt n'existe pas. Répondre `401` serait
-//! pire — cela dirait à un client de s'authentifier et de réessayer, alors que
-//! rien ne l'attend derrière.
+//! Tout ce qui exige une preuve rend `501` : l'authentification n'existe pas.
+//! Répondre `401` serait pire — cela dirait à un client de s'authentifier et de
+//! réessayer, alors que rien ne l'attend derrière.
 
 #![no_std]
 
 use ams_h3::Reponse;
 use ams_proto_http::{Method, RequestHead, StatusCode};
+use asl_api::{Exigence, Ressource};
+use asl_id::Identifiant;
+use asl_registre::AliasRange;
 
 /// Ce qu'un corps de requête peut faire, en octets.
 ///
@@ -55,14 +83,47 @@ pub const PROBLEME_MEDIA: &[u8] = b"application/problem+json";
 /// Le type de média des réponses ordinaires.
 pub const JSON_MEDIA: &[u8] = b"application/json";
 
+/// Ce qu'il faut aller chercher pour répondre.
+///
+/// **Ce n'est pas un effet, c'est un besoin.** L'étage 3 le satisfait ; cette
+/// crate ne sait pas ouvrir un fichier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Besoin<'a> {
+    /// Rien à chercher : la réponse est déjà décidée, et la voici.
+    Deja(StatusCode),
+    /// Le compte de cet identifiant.
+    Compte(Identifiant),
+    /// Le compte qui porte cet alias.
+    CompteParAlias(&'a str),
+}
+
+/// Ce que l'étage 3 a trouvé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Trouvaille {
+    /// Rien ne correspond.
+    #[default]
+    Rien,
+    /// Ce compte.
+    ///
+    /// **Il ne porte que son identifiant et son alias**, et c'est tout ce qu'un
+    /// compte EST (C13) : ni courriel, ni numéro, ni nom.
+    Compte {
+        /// Son identifiant public.
+        qui: Identifiant,
+        /// Son alias, s'il en a choisi un.
+        alias: Option<AliasRange>,
+    },
+}
+
 /// Ce qu'une session sait d'une connexion.
 ///
 /// # ELLE EST VIDE, ET ELLE NE LE RESTERA PAS
 ///
 /// Elle portera la machine authentifiée : **la connexion QUIC EST le bail**, et
 /// ce qu'une requête a le droit de faire dépend de qui a signé le défi au début
-/// de cette connexion-là. Une session par connexion est donc la bonne portée, et
-/// c'est pour cela que ce type existe déjà plutôt qu'une fonction libre.
+/// de cette connexion-là. Une session par connexion est donc la bonne portée.
+///
+/// **Elle ne retient PAS le besoin en cours** : voir l'en-tête du module.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Session {
     /// Réservé : rien à retenir tant que rien ne s'authentifie.
@@ -75,58 +136,125 @@ impl Session {
     pub const fn new() -> Self {
         Self { _rien: () }
     }
+}
 
-    /// Décide de la réponse à cette requête.
-    ///
-    /// Tout ce que la réponse désigne vit dans `sortie` — voir [`composer`].
-    pub fn servir<'o>(
-        &mut self,
-        tete: &RequestHead<'_>,
-        corps: &[u8],
-        sortie: &'o mut [u8],
-    ) -> Reponse<'o> {
-        let Some((methode, sans_corps)) = traduire(tete.method()) else {
-            return composer(StatusCode::METHOD_NOT_ALLOWED, false, sortie);
-        };
+/// **PREMIER TEMPS** : que faut-il pour répondre à cette requête ?
+///
+/// Rend [`Besoin::Deja`] quand la réponse ne dépend d'aucun état — un verbe
+/// qu'on ne sert pas, une cible qui ne se route pas, un corps trop gros.
+#[must_use]
+pub fn besoin<'a>(tete: &RequestHead<'a>, corps: &[u8]) -> Besoin<'a> {
+    let Some((methode, _)) = traduire(tete.method()) else {
+        return Besoin::Deja(StatusCode::METHOD_NOT_ALLOWED);
+    };
 
-        if corps.len() > CORPS_OCTETS_MAX {
-            return composer(StatusCode::CONTENT_TOO_LARGE, sans_corps, sortie);
-        }
+    if corps.len() > CORPS_OCTETS_MAX {
+        return Besoin::Deja(StatusCode::CONTENT_TOO_LARGE);
+    }
 
-        let resolu = match asl_api::resoudre(methode, tete.path()) {
-            Ok(resolu) => resolu,
-            Err(faute) => return composer(statut_de(faute), sans_corps, sortie),
-        };
+    let resolu = match asl_api::resoudre(methode, tete.path()) {
+        Ok(resolu) => resolu,
+        Err(faute) => return Besoin::Deja(statut_de(faute)),
+    };
 
-        if !resolu.sert {
-            return composer(StatusCode::METHOD_NOT_ALLOWED, sans_corps, sortie);
-        }
+    if !resolu.sert {
+        return Besoin::Deja(StatusCode::METHOD_NOT_ALLOWED);
+    }
 
-        // La cible se route, le verbe est servi — et rien ne peut encore être
-        // rendu, faute d'entrepôt.
-        composer(StatusCode::NOT_IMPLEMENTED, sans_corps, sortie)
+    // **CE QUI EXIGE UNE PREUVE REND `501`, ET NON `401`.** L'authentification
+    // n'existe pas : dire `401` inviterait un client à s'authentifier et à
+    // réessayer, alors que rien ne l'attend derrière.
+    if resolu.exigence != Exigence::Aucune {
+        return Besoin::Deja(StatusCode::NOT_IMPLEMENTED);
+    }
+
+    match resolu.ressource {
+        Ressource::AliasResolu { alias } => Besoin::CompteParAlias(alias.as_str()),
+        Ressource::Utilisateur { compte } => Besoin::Compte(compte),
+        // `Comptes` est un `POST` qui CRÉE : il ne se sert pas d'une lecture, et
+        // il demande de l'entropie que cette crate n'a pas.
+        _ => Besoin::Deja(StatusCode::NOT_IMPLEMENTED),
     }
 }
 
-/// C'est par là qu'`ams-h3` entre.
+/// **SECOND TEMPS** : voici ce qui a été trouvé, réponds.
 ///
-/// # POURQUOI L'IMPLÉMENTATION EST ICI ET NON DANS LA BOUCLE
-///
-/// [`ams_h3::Service`] est un trait étranger, [`Session`] est notre type : la
-/// règle de l'orphelin autorise le mariage ici, et l'interdit ailleurs. Ce n'est
-/// pas une contrainte subie — **c'est le bon endroit**, puisque rien dans ce
-/// trait ne demande une socket.
-///
-/// La boucle n'a donc qu'à tenir une `Session` par connexion et la lui passer.
-impl ams_h3::Service for Session {
-    fn serve<'o>(
-        &mut self,
-        tete: &RequestHead<'_>,
-        corps: &[u8],
-        sortie: &'o mut [u8],
-    ) -> Reponse<'o> {
-        self.servir(tete, corps, sortie)
+/// Tout ce que la réponse désigne vit dans `sortie` — voir [`composer`].
+#[must_use]
+pub fn repondre<'o>(
+    besoin: &Besoin<'_>,
+    trouvaille: &Trouvaille,
+    sortie: &'o mut [u8],
+) -> Reponse<'o> {
+    match besoin {
+        Besoin::Deja(statut) => composer(*statut, PROBLEME_MEDIA, probleme(*statut), sortie),
+        Besoin::Compte(_) | Besoin::CompteParAlias(_) => match trouvaille {
+            // **UN COMPTE QU'ON NE TROUVE PAS EST UN `404`**, et jamais un
+            // corps vide avec un `200` : le client doit pouvoir distinguer
+            // « ce compte n'existe pas » de « ce compte n'a pas d'alias ».
+            Trouvaille::Rien => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+            Trouvaille::Compte { qui, alias } => rendre_un_compte(*qui, alias.as_ref(), sortie),
+        },
     }
+}
+
+/// Ce qu'un corps de compte peut faire, en octets.
+///
+/// L'identifiant tient sur vingt-huit caractères, l'alias sur trente-deux, et le
+/// reste est de la ponctuation. Cent vingt octets couvrent largement, et la
+/// borne est ici pour que le tampon soit une CONSTANTE plutôt qu'un calcul.
+pub const COMPTE_CORPS_MAX: usize = 120;
+
+/// Écrit le corps JSON d'un compte, et rend la réponse.
+///
+/// # POURQUOI CE CORPS-LÀ, ET RIEN DE PLUS
+///
+/// Un compte n'est qu'un identifiant public et, facultativement, un alias.
+/// **C13 n'est pas une intention ici, c'est ce que le type permet d'écrire** :
+/// il n'y a pas d'autre champ à rendre, parce qu'il n'y en a pas d'autre à
+/// stocker.
+fn rendre_un_compte<'o>(
+    qui: Identifiant,
+    alias: Option<&AliasRange>,
+    sortie: &'o mut [u8],
+) -> Reponse<'o> {
+    let mut corps = [0_u8; COMPTE_CORPS_MAX];
+    let mut ecrits = 0_usize;
+    let mut ajouter = |quoi: &[u8]| {
+        let debut = ecrits.min(COMPTE_CORPS_MAX);
+        let fin = debut.saturating_add(quoi.len()).min(COMPTE_CORPS_MAX);
+        for (place, octet) in corps
+            .get_mut(debut..fin)
+            .unwrap_or_default()
+            .iter_mut()
+            .zip(quoi.iter())
+        {
+            *place = *octet;
+        }
+        ecrits = fin;
+    };
+
+    // **AUCUN ÉCHAPPEMENT N'EST NÉCESSAIRE, ET C'EST VÉRIFIÉ PAR CONSTRUCTION.**
+    // L'alphabet d'un identifiant est celui de Crockford, celui d'un alias est
+    // minuscules, chiffres, `-`, `_` et `.` : aucun `"` ni `\` ne peut y entrer.
+    // Un échappeur serait donc du code que rien n'appellerait jamais — et qui
+    // deviendrait faux le jour où l'alphabet changerait sans qu'on y pense.
+    ajouter(br#"{"identifiant":""#);
+    ajouter(qui.texte().as_str().as_bytes());
+    if let Some(alias) = alias {
+        ajouter(br#"","alias":""#);
+        ajouter(alias.octets());
+    }
+    ajouter(br#""}"#);
+
+    let ecrit = ecrits.min(COMPTE_CORPS_MAX);
+    let rendu = corps.get(..ecrit).unwrap_or_default();
+    composer(StatusCode::OK, JSON_MEDIA, rendu, sortie)
 }
 
 /// Traduit un verbe HTTP en verbe de l'API, et dit s'il faut taire le corps.
@@ -202,8 +330,20 @@ const fn probleme(statut: StatusCode) -> &'static [u8] {
 /// C'est le seul endroit du produit qui a cette forme, et elle vient de
 /// l'absence d'allocation, pas d'un goût pour l'astuce.
 #[must_use]
-pub fn composer(statut: StatusCode, sans_corps: bool, sortie: &mut [u8]) -> Reponse<'_> {
-    let corps = probleme(statut);
+pub fn composer<'o>(
+    statut: StatusCode,
+    media: &'static [u8],
+    corps: &[u8],
+    sortie: &'o mut [u8],
+) -> Reponse<'o> {
+    // **`HEAD` N'EST PLUS TRAITÉ ICI**, et il faut dire où il est passé : il
+    // l'était par un drapeau `sans_corps` que tout appelant devait penser à
+    // passer. Un paramètre qu'on peut oublier est un paramètre qu'on oubliera —
+    // et `ams-h3` sait déjà taire le corps d'une réponse à `HEAD`, puisque c'est
+    // lui qui écrit les trames.
+    //
+    // Le `content-length` reste celui du corps ENTIER (§8.6 de RFC 9110), ce
+    // qui est exactement ce que §9.3.2 demande.
 
     // §8.6 de RFC 9110 : `content-length` annonce ce que le corps AURAIT, même
     // quand la réponse à un `HEAD` n'en porte pas.
@@ -229,11 +369,7 @@ pub fn composer(statut: StatusCode, sans_corps: bool, sortie: &mut [u8]) -> Repo
     // endroit, là où un champ absent ne trompe personne.
     let reserve = if combien <= sortie.len() { combien } else { 0 };
     let pour_le_corps = sortie.len().saturating_sub(reserve);
-    let ecrit = if sans_corps {
-        0
-    } else {
-        corps.len().min(pour_le_corps)
-    };
+    let ecrit = corps.len().min(pour_le_corps);
 
     // ON DÉCOUPE D'ABORD, ON RECOPIE ENSUITE. L'ordre inverse demandait un
     // `get_mut` dont l'échec était impossible, et la mesure de couverture
@@ -249,12 +385,6 @@ pub fn composer(statut: StatusCode, sans_corps: bool, sortie: &mut [u8]) -> Repo
     for (place, octet) in longueur.iter_mut().zip(chiffres.iter()) {
         *place = *octet;
     }
-
-    let media = if statut == StatusCode::OK {
-        JSON_MEDIA
-    } else {
-        PROBLEME_MEDIA
-    };
 
     Reponse::new(statut, corps_rendu)
         .avec_champ(b"content-type", media)
@@ -312,10 +442,12 @@ mod tests {
     use alloc::string::ToString as _;
     use alloc::vec;
     use ams_proto_http::{HeadBuilder, Limits, Method, RequestHead, StatusCode};
+    use asl_id::{Genre, Identifiant};
+    use asl_registre::AliasRange;
 
     use super::{
-        CORPS_OCTETS_MAX, JSON_MEDIA, NOMBRE_OCTETS_MAX, PROBLEME_MEDIA, Session, composer,
-        ecrire_un_nombre, probleme, statut_de, traduire,
+        Besoin, CORPS_OCTETS_MAX, JSON_MEDIA, NOMBRE_OCTETS_MAX, PROBLEME_MEDIA, Session,
+        Trouvaille, besoin, composer, ecrire_un_nombre, probleme, repondre, statut_de, traduire,
     };
 
     /// Fabrique une tête de requête, comme le décodeur HTTP/3 en rendrait une.
@@ -331,7 +463,7 @@ mod tests {
         constructeur.finish().expect("une tête complète")
     }
 
-    /// Rend le statut, et la valeur du champ nommé.
+    /// Rend la valeur du champ nommé.
     fn champ<'a>(reponse: &ams_h3::Reponse<'a>, nom: &[u8]) -> Option<&'a [u8]> {
         reponse
             .fields()
@@ -339,10 +471,15 @@ mod tests {
             .map(|(_, valeur)| valeur)
     }
 
+    /// Un identifiant d'utilisateur, reproductible.
+    fn un_compte(graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(Genre::Utilisateur, [graine; 16])
+    }
+
     // ── traduire ────────────────────────────────────────────────────────────
 
     #[test]
-    fn head_est_un_get_sans_corps() {
+    fn head_est_un_get() {
         assert_eq!(traduire(Method::Head), Some((asl_api::Methode::Get, true)));
         assert_eq!(traduire(Method::Get), Some((asl_api::Methode::Get, false)));
     }
@@ -399,17 +536,12 @@ mod tests {
             (StatusCode::NOT_IMPLEMENTED, b"501"),
         ] {
             let corps = probleme(statut);
-            assert!(
-                corps.windows(3).any(|fenetre| fenetre == attendu),
-                "le corps doit porter son propre code"
-            );
+            assert!(corps.windows(3).any(|fenetre| fenetre == attendu));
         }
     }
 
     #[test]
     fn un_statut_hors_table_retombe_sur_501() {
-        // La branche `_` existe parce qu'un statut peut arriver ici sans avoir
-        // de corps à lui ; elle ne doit jamais rendre un corps vide.
         assert_eq!(
             probleme(StatusCode::OK),
             probleme(StatusCode::NOT_IMPLEMENTED)
@@ -429,7 +561,6 @@ mod tests {
     fn un_nombre_s_ecrit_dans_le_bon_ordre() {
         let mut sortie = [0_u8; NOMBRE_OCTETS_MAX];
         let combien = ecrire_un_nombre(1_024, &mut sortie);
-        assert_eq!(combien, 4);
         assert_eq!(sortie.get(..combien), Some(&b"1024"[..]));
     }
 
@@ -449,52 +580,37 @@ mod tests {
     #[test]
     fn une_reponse_porte_son_corps_sa_longueur_et_ses_gardes() {
         let mut sortie = [0_u8; 256];
-        let reponse = composer(StatusCode::NOT_FOUND, false, &mut sortie);
+        let attendu = probleme(StatusCode::NOT_FOUND);
+        let reponse = composer(StatusCode::NOT_FOUND, PROBLEME_MEDIA, attendu, &mut sortie);
 
         assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
-        assert_eq!(reponse.body(), probleme(StatusCode::NOT_FOUND));
+        assert_eq!(reponse.body(), attendu);
         assert_eq!(champ(&reponse, b"content-type"), Some(PROBLEME_MEDIA));
         assert_eq!(champ(&reponse, b"cache-control"), Some(&b"no-store"[..]));
         assert_eq!(
             champ(&reponse, b"x-content-type-options"),
             Some(&b"nosniff"[..])
         );
-    }
-
-    #[test]
-    fn la_longueur_annoncee_est_celle_du_corps_meme_sans_corps() {
-        let attendu = probleme(StatusCode::NOT_FOUND).len().to_string();
-
-        let mut avec = [0_u8; 256];
-        let pleine = composer(StatusCode::NOT_FOUND, false, &mut avec);
-        assert_eq!(champ(&pleine, b"content-length"), Some(attendu.as_bytes()));
-
-        let mut sans = [0_u8; 256];
-        let vide = composer(StatusCode::NOT_FOUND, true, &mut sans);
-        assert!(vide.body().is_empty(), "un HEAD ne porte pas de corps");
         assert_eq!(
-            champ(&vide, b"content-length"),
-            Some(attendu.as_bytes()),
-            "et il annonce quand même ce que le corps AURAIT (§8.6)"
+            champ(&reponse, b"content-length"),
+            Some(attendu.len().to_string().as_bytes())
         );
     }
 
     #[test]
-    fn une_reponse_ordinaire_est_du_json_pas_un_probleme() {
+    fn le_type_de_media_est_celui_qu_on_passe() {
         let mut sortie = [0_u8; 256];
-        let reponse = composer(StatusCode::OK, false, &mut sortie);
+        let reponse = composer(StatusCode::OK, JSON_MEDIA, b"{}", &mut sortie);
         assert_eq!(champ(&reponse, b"content-type"), Some(JSON_MEDIA));
+        assert_eq!(reponse.body(), b"{}");
     }
 
     #[test]
     fn un_tampon_trop_court_sacrifie_le_corps_et_garde_la_longueur() {
-        // Le corps de ce statut fait cinquante-sept octets, sa longueur deux
-        // chiffres. Dans quatre octets, la longueur passe d'abord, et il reste
-        // deux octets pour le corps.
-        let attendu = probleme(StatusCode::NOT_FOUND).len().to_string();
+        let corps = probleme(StatusCode::NOT_FOUND);
+        let attendu = corps.len().to_string();
         let mut sortie = [0_u8; 4];
-        let reponse = composer(StatusCode::NOT_FOUND, false, &mut sortie);
-        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+        let reponse = composer(StatusCode::NOT_FOUND, PROBLEME_MEDIA, corps, &mut sortie);
         assert_eq!(
             champ(&reponse, b"content-length"),
             Some(attendu.as_bytes()),
@@ -506,41 +622,32 @@ mod tests {
     #[test]
     fn une_longueur_qui_ne_tient_pas_entiere_n_est_pas_ecrite() {
         let mut sortie = [0_u8; 1];
-        let reponse = composer(StatusCode::NOT_FOUND, false, &mut sortie);
-        assert_eq!(
-            champ(&reponse, b"content-length"),
-            Some(&b""[..]),
-            "un seul chiffre sur deux ne s'écrit pas"
+        let reponse = composer(
+            StatusCode::NOT_FOUND,
+            PROBLEME_MEDIA,
+            probleme(StatusCode::NOT_FOUND),
+            &mut sortie,
         );
+        assert_eq!(champ(&reponse, b"content-length"), Some(&b""[..]));
         assert_eq!(reponse.body().len(), 1, "l'octet libre revient au corps");
     }
 
     #[test]
-    fn un_head_et_un_get_annoncent_la_meme_longueur_meme_a_l_etroit() {
-        // C'EST LE FUZZ QUI A TROUVÉ CE CAS. Sur deux octets, le corps du `GET`
-        // mangeait la place des chiffres, et le `HEAD` — qui n'écrit pas de
-        // corps — gardait un champ que le `GET` perdait.
-        for taille in 0..8_usize {
-            let mut avec = vec![0_u8; taille];
-            let mut sans = vec![0_u8; taille];
-            let par_get = composer(StatusCode::NOT_FOUND, false, &mut avec);
-            let par_head = composer(StatusCode::NOT_FOUND, true, &mut sans);
-            assert_eq!(
-                champ(&par_get, b"content-length"),
-                champ(&par_head, b"content-length"),
-                "à {taille} octets, `GET` et `HEAD` divergent (§9.3.2)"
-            );
-        }
-    }
-
-    #[test]
-    fn un_tampon_vide_ne_panique_pas_non_plus() {
+    fn un_tampon_vide_ne_panique_pas() {
         let mut sortie = [0_u8; 0];
-        let reponse = composer(StatusCode::NOT_FOUND, false, &mut sortie);
+        let reponse = composer(StatusCode::NOT_FOUND, PROBLEME_MEDIA, b"quoi", &mut sortie);
         assert!(reponse.body().is_empty());
     }
 
-    // ── servir ──────────────────────────────────────────────────────────────
+    #[test]
+    fn un_corps_vide_annonce_une_longueur_nulle() {
+        let mut sortie = [0_u8; 64];
+        let reponse = composer(StatusCode::NO_CONTENT, JSON_MEDIA, b"", &mut sortie);
+        assert_eq!(champ(&reponse, b"content-length"), Some(&b"0"[..]));
+        assert!(reponse.body().is_empty());
+    }
+
+    // ── besoin ──────────────────────────────────────────────────────────────
 
     #[test]
     fn une_session_neuve_vaut_la_session_par_defaut() {
@@ -548,99 +655,189 @@ mod tests {
     }
 
     #[test]
-    fn le_trait_d_ams_h3_rend_exactement_ce_que_servir_rend() {
-        use ams_h3::Service as _;
-
-        let mut par_le_trait = Session::new();
-        let mut a = [0_u8; 256];
-        let une = par_le_trait.serve(&tete(b"GET", b"/v1/rien-de-tel"), b"", &mut a);
-        let statut_une = une.status();
-        let corps_une = une.body().len();
-
-        let mut en_direct = Session::new();
-        let mut b = [0_u8; 256];
-        let autre = en_direct.servir(&tete(b"GET", b"/v1/rien-de-tel"), b"", &mut b);
-
-        assert_eq!(statut_une, autre.status());
-        assert_eq!(corps_une, autre.body().len());
-    }
-
-    #[test]
     fn options_est_refuse_par_le_verbe() {
-        let mut session = Session::new();
-        let mut sortie = [0_u8; 256];
-        let reponse = session.servir(&tete(b"OPTIONS", b"/v1/machines"), b"", &mut sortie);
-        assert_eq!(reponse.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            besoin(&tete(b"OPTIONS", b"/v1/machines"), b""),
+            Besoin::Deja(StatusCode::METHOD_NOT_ALLOWED)
+        );
     }
 
     #[test]
     fn un_corps_trop_gros_est_refuse_avant_toute_analyse() {
-        let mut session = Session::new();
-        let mut sortie = [0_u8; 256];
         let enorme = vec![b'x'; CORPS_OCTETS_MAX + 1];
-        // La cible est ABERRANTE, et c'est exprès : le refus doit porter sur le
-        // corps, donc tomber AVANT que le routage ne la regarde.
-        let reponse = session.servir(
-            &tete(b"POST", b"/v1/ceci-n-existe-pas"),
-            &enorme,
-            &mut sortie,
+        assert_eq!(
+            besoin(&tete(b"POST", b"/v1/ceci-n-existe-pas"), &enorme),
+            Besoin::Deja(StatusCode::CONTENT_TOO_LARGE),
+            "le refus doit tomber AVANT que le routage ne regarde la cible"
         );
-        assert_eq!(reponse.status(), StatusCode::CONTENT_TOO_LARGE);
     }
 
     #[test]
     fn un_corps_juste_a_la_borne_passe() {
-        let mut session = Session::new();
-        let mut sortie = [0_u8; 256];
         let pile = vec![b'x'; CORPS_OCTETS_MAX];
-        let reponse = session.servir(&tete(b"POST", b"/v1/ceci-n-existe-pas"), &pile, &mut sortie);
-        assert_ne!(reponse.status(), StatusCode::CONTENT_TOO_LARGE);
+        assert_ne!(
+            besoin(&tete(b"POST", b"/v1/ceci-n-existe-pas"), &pile),
+            Besoin::Deja(StatusCode::CONTENT_TOO_LARGE)
+        );
     }
 
     #[test]
     fn une_cible_mal_formee_est_un_400() {
-        // LA CIBLE EST BIEN FORMÉE POUR HTTP, ET MAL FORMÉE POUR NOUS, et il
-        // fallait la choisir ainsi : `ams-proto-http` refuse LUI-MÊME une cible
-        // sans racine, avec `MalformedPath`, et le routage ne la voit jamais.
-        // La faute que `statut_de` traduit en `400` est donc SÉMANTIQUE — ici,
-        // un identifiant de machine qui n'en est pas un.
-        let mut session = Session::new();
-        let mut sortie = [0_u8; 256];
-        let reponse = session.servir(
-            &tete(b"PATCH", b"/v1/machines/pas-un-identifiant"),
-            b"",
-            &mut sortie,
+        assert_eq!(
+            besoin(&tete(b"PATCH", b"/v1/machines/pas-un-identifiant"), b""),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
         );
-        assert_eq!(reponse.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
     fn une_ressource_qui_ne_sert_pas_ce_verbe_est_un_405() {
-        // `/v1/machines` ne sert que `POST` : on y déclare une machine, on n'y
-        // liste rien.
-        let mut session = Session::new();
-        let mut sortie = [0_u8; 256];
-        let reponse = session.servir(&tete(b"GET", b"/v1/machines"), b"", &mut sortie);
-        assert_eq!(reponse.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            besoin(&tete(b"GET", b"/v1/machines"), b""),
+            Besoin::Deja(StatusCode::METHOD_NOT_ALLOWED)
+        );
     }
 
     #[test]
     fn une_cible_inconnue_est_un_404() {
-        let mut session = Session::new();
-        let mut sortie = [0_u8; 256];
-        let reponse = session.servir(&tete(b"GET", b"/v1/rien-de-tel"), b"", &mut sortie);
-        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            besoin(&tete(b"GET", b"/v1/rien-de-tel"), b""),
+            Besoin::Deja(StatusCode::NOT_FOUND)
+        );
     }
 
     #[test]
-    fn une_ressource_qui_se_route_repond_501_faute_d_entrepot() {
-        let mut session = Session::new();
-        let mut sortie = [0_u8; 256];
-        let reponse = session.servir(&tete(b"GET", b"/v1/expositions"), b"", &mut sortie);
+    fn ce_qui_exige_une_preuve_rend_501_et_non_401() {
+        // `401` dirait à un client de s'authentifier et de réessayer, alors que
+        // rien ne l'attend derrière.
         assert_eq!(
-            reponse.status(),
-            StatusCode::NOT_IMPLEMENTED,
-            "la cible se route ; c'est l'entrepôt qui manque"
+            besoin(&tete(b"GET", b"/v1/expositions"), b""),
+            Besoin::Deja(StatusCode::NOT_IMPLEMENTED)
         );
+    }
+
+    #[test]
+    fn un_alias_demande_le_compte_qui_le_porte() {
+        assert_eq!(
+            besoin(&tete(b"GET", b"/v1/alias/thierry"), b""),
+            Besoin::CompteParAlias("thierry")
+        );
+    }
+
+    #[test]
+    fn un_utilisateur_demande_son_compte() {
+        let qui = un_compte(1);
+        let texte = alloc::format!("/v1/utilisateurs/{}", qui.texte());
+        assert_eq!(
+            besoin(&tete(b"GET", texte.as_bytes()), b""),
+            Besoin::Compte(qui)
+        );
+    }
+
+    #[test]
+    fn une_ressource_sans_exigence_qu_on_ne_sert_pas_encore_rend_501() {
+        // `/v1/comptes` est un `POST` qui CRÉE : il ne se sert d'aucune lecture,
+        // et il demande de l'entropie que cette crate n'a pas.
+        assert_eq!(
+            besoin(&tete(b"POST", b"/v1/comptes"), b""),
+            Besoin::Deja(StatusCode::NOT_IMPLEMENTED)
+        );
+    }
+
+    // ── repondre ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn un_besoin_deja_decide_rend_son_statut() {
+        let mut sortie = [0_u8; 256];
+        let reponse = repondre(
+            &Besoin::Deja(StatusCode::NOT_FOUND),
+            &Trouvaille::Rien,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+        assert_eq!(champ(&reponse, b"content-type"), Some(PROBLEME_MEDIA));
+    }
+
+    #[test]
+    fn un_besoin_deja_decide_ignore_ce_qu_on_a_trouve() {
+        // Le besoin dit déjà tout ; une trouvaille ne doit pas pouvoir le
+        // contredire.
+        let mut sortie = [0_u8; 256];
+        let reponse = repondre(
+            &Besoin::Deja(StatusCode::METHOD_NOT_ALLOWED),
+            &Trouvaille::Compte {
+                qui: un_compte(1),
+                alias: None,
+            },
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[test]
+    fn un_compte_introuvable_est_un_404() {
+        let mut sortie = [0_u8; 256];
+        for besoin in [
+            Besoin::Compte(un_compte(1)),
+            Besoin::CompteParAlias("personne"),
+        ] {
+            let reponse = repondre(&besoin, &Trouvaille::Rien, &mut sortie);
+            assert_eq!(reponse.status(), StatusCode::NOT_FOUND, "{besoin:?}");
+        }
+    }
+
+    #[test]
+    fn un_compte_trouve_rend_son_identifiant() {
+        let qui = un_compte(7);
+        let mut sortie = [0_u8; 512];
+        let reponse = repondre(
+            &Besoin::Compte(qui),
+            &Trouvaille::Compte { qui, alias: None },
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert_eq!(champ(&reponse, b"content-type"), Some(JSON_MEDIA));
+
+        let attendu = alloc::format!(r#"{{"identifiant":"{}"}}"#, qui.texte());
+        assert_eq!(reponse.body(), attendu.as_bytes());
+        assert!(
+            !attendu.contains("alias"),
+            "un compte sans alias n'annonce pas de champ vide"
+        );
+    }
+
+    #[test]
+    fn un_compte_avec_alias_le_rend_aussi() {
+        let qui = un_compte(3);
+        let mut sortie = [0_u8; 512];
+        let reponse = repondre(
+            &Besoin::CompteParAlias("thierry"),
+            &Trouvaille::Compte {
+                qui,
+                alias: Some(AliasRange::nouveau("thierry").expect("il tient")),
+            },
+            &mut sortie,
+        );
+        let attendu = alloc::format!(r#"{{"identifiant":"{}","alias":"thierry"}}"#, qui.texte());
+        assert_eq!(reponse.body(), attendu.as_bytes());
+    }
+
+    #[test]
+    fn le_corps_d_un_compte_ne_deborde_jamais_sa_borne() {
+        // L'alias le plus long possible, avec l'identifiant le plus long : le
+        // corps doit rester dans `COMPTE_CORPS_MAX`, et rester du JSON clos.
+        let qui = un_compte(0xFF);
+        let long = "z".repeat(32);
+        let mut sortie = [0_u8; 512];
+        let reponse = repondre(
+            &Besoin::Compte(qui),
+            &Trouvaille::Compte {
+                qui,
+                alias: Some(AliasRange::nouveau(&long).expect("il tient")),
+            },
+            &mut sortie,
+        );
+        let rendu = core::str::from_utf8(reponse.body()).expect("du JSON en ASCII");
+        assert!(rendu.len() <= super::COMPTE_CORPS_MAX, "{rendu}");
+        assert!(rendu.ends_with('}'), "le JSON a été tronqué : {rendu}");
     }
 }

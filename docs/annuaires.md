@@ -62,6 +62,37 @@ code, ce sont donc **les CLÉS PUBLIQUES des deux racines**, et l'adresse n'est
 qu'un moyen de les joindre. Un annuaire qui répond sur la bonne adresse sans
 pouvoir signer n'est pas une racine.
 
+### Les deux machines existent — et elles ne satisfont PAS la contrainte ci-dessous
+
+Provisionnées le **2026-09-09**, sur le domaine `air-desktop.org` :
+
+| Racine | IPv6 | IPv4 | Système |
+|---|---|---|---|
+| `nitrogen.air-desktop.org` | `2001:41d0:20a:900::1dd4` | `178.32.16.250` | Ubuntu 26.04 LTS |
+| `argon.air-desktop.org` | `2001:41d0:20a:900::1d32` | `178.32.16.249` | Ubuntu 26.04 LTS |
+
+**`2001:41d0::/32` EST L'ALLOCATION D'OVH, PAS LA NÔTRE.** Ces adresses sont
+donc perdues le jour où l'on change d'hébergeur — exactement ce que le point
+suivant interdit. Le problème est réel et il est ouvert ; trois issues, et
+aucune n'est gratuite :
+
+1. **Une allocation à nous** (PI, via un RIR ou un courtier), annoncée par
+   l'hébergeur du moment. C'est la seule qui tienne la promesse littéralement,
+   et c'est un engagement administratif et financier durable.
+2. **Ancrer sur les NOMS plutôt que sur les adresses.** `nitrogen.air-desktop.org`
+   nous suit d'un hébergeur à l'autre. Mais un annuaire neuf devrait alors
+   résoudre un nom avant de parler — donc embarquer un client DNS, dépendre
+   d'un résolveur, et hériter de ce qu'un résolveur peut faire de travers.
+3. **Accepter la renumérotation**, et prévoir que les deux ancres soient
+   REMPLAÇABLES : un annuaire qui ne joint plus ses racines apprend les
+   nouvelles adresses par un canal signé. Cela déplace le problème vers « qui
+   signe la mise à jour », ce qui est au moins une question qu'on sait traiter —
+   les clés publiques, elles, sont déjà l'ancre véritable.
+
+**Ce qui est épinglé dans le code reste les CLÉS**, et c'est ce qui rend les
+trois issues envisageables plutôt qu'urgentes : une adresse qui change ne trahit
+personne tant que la signature ne suit pas.
+
 Deux conséquences qu'il faut regarder en face :
 
 - **Ces adresses ne se renumérotent pas.** Elles sont dans du code déployé chez

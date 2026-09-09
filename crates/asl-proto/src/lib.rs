@@ -85,6 +85,40 @@ use asl_id::{Genre, Identifiant};
 
 // ── Les bornes ──────────────────────────────────────────────────────────────
 
+/// Le port d'écoute par défaut d'un annuaire.
+///
+/// # POURQUOI CELUI-LÀ, ET COMMENT IL A ÉTÉ CHOISI
+///
+/// **Il est libre au registre de l'IANA, en TCP ET EN UDP**, vérifié le
+/// 2026-09-09 contre `service-names-port-numbers.csv` : les lignes 6630 et 6631
+/// y portent toutes deux la mention `Unassigned`, sans qualificatif de
+/// protocole.
+///
+/// C'est plus rare qu'il n'y paraît : sur les 48 128 ports de la plage
+/// utilisateur (1024–49151), **cent quatre seulement** sont libres dans les deux
+/// protocoles. Et cette plage est la seule où l'IANA attribue sur demande —
+/// au-delà de 49151, l'espace est dynamique et privé, donc rien n'y est
+/// attribuable.
+///
+/// Trois critères ont départagé les cent quatre :
+///
+///   1. **Un voisin libre.** 6631 l'est aussi, ce qui laisse de la place si la
+///      réplication entre annuaires devait un jour prendre son propre port, et
+///      signale un bloc réellement vide plutôt qu'un interstice.
+///   2. **Loin des ports que les boîtiers intermédiaires manipulent.** 4501 et
+///      4502 étaient libres et ont été écartés pour cette seule raison : ils
+///      jouxtent 4500, l'IPsec NAT-Traversal, que tout équipement de traversée
+///      de NAT traite à part. Pour un service UDP dont le cas dégradé EST le
+///      NAT, c'est le pire voisinage possible. 5090 et 5091, voisins de SIP,
+///      ont été écartés de même.
+///   3. **Loin du bruit.** Les 8000 et les 9000 sont l'habitat des serveurs de
+///      développement et des balayages qui les cherchent.
+///
+/// **Ce n'est pas une attribution.** Tant que l'IANA n'a rien enregistré, ce
+/// port est libre pour nous comme pour n'importe qui. La demande officielle
+/// reste à faire, et ce commentaire est ce qui la documentera.
+pub const PORT_PAR_DEFAUT: u16 = 6630;
+
 /// La longueur maximale d'un nom de service, en octets.
 pub const NOM_MAX: usize = 64;
 

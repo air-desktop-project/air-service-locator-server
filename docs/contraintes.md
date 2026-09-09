@@ -14,7 +14,7 @@ encore ».
 | C5 | Aucune abstraction d'exécution | Revue |
 | C6 | L'annuaire n'affirme jamais ce qu'il n'a pas mesuré | Revue, et les noms de l'API |
 | C7 | Aucune donnée biométrique ne traverse le réseau | Revue |
-| C8 | Refus de démarrer en root | Essai |
+| C8 | Refus de démarrer en root | `asl-loop-tokio::privileges`, et quatre essais |
 | C9 | Réponses en temps constant sur les chemins d'autorisation | `asl-auth` : le type, et un essai |
 | C10 | Rien ne se lit sans autorisation nominative | `asl-auth` : la forme de la fonction, un essai et une cible de fuzz |
 | C11 | Un annuaire n'accepte d'un pair que ce dont ce pair est l'autorité | Essai — **à écrire** |

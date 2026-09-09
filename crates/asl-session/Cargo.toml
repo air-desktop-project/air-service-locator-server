@@ -9,6 +9,8 @@ repository.workspace = true
 
 [dependencies]
 asl-api.workspace = true
+asl-id.workspace = true
+asl-registre.workspace = true
 # `ams-h3` et `ams-proto-http` SONT DES DÉPENDANCES D'ÉTAGE 2, ET C'EST LICITE :
 # toutes deux portent en tête de leur manifeste « sans entrée-sortie ». Ce sont
 # des grammaires, pas des boucles. Ce qui est interdit ici, c'est `tokio` et une

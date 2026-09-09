@@ -180,6 +180,8 @@ dependencies = [
  "ams-h3",
  "ams-proto-http",
  "asl-api",
+ "asl-id",
+ "asl-registre",
 ]
 
 [[package]]

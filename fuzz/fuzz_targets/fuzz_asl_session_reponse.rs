@@ -22,8 +22,9 @@
 //!    exactement la longueur du corps de ce statut, ou n'est pas là. C'est
 //!    l'invariant que `composer` a été écrit pour tenir : un « 5 » pour
 //!    cinquante-sept octets ferait couper la lecture au mauvais endroit.
-//! 5. **`HEAD` RÉPOND COMME `GET`** (§9.3.2 de RFC 9110) : même statut, même
-//!    `content-length`, et **jamais de corps**.
+//! 5. **`HEAD` DÉCIDE COMME `GET`** (§9.3.2 de RFC 9110) : même statut et même
+//!    `content-length`. Le corps, lui, est tu par `ams-h3`, qui écrit les
+//!    trames — pas par cette couche-ci.
 //! 6. **TOUTE RÉPONSE PORTE SES GARDES** — `no-store` et `nosniff` —, y compris
 //!    celles composées dans un tampon trop court.
 
@@ -33,7 +34,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
-use asl_session::Session;
+use asl_session::Trouvaille;
 
 /// Ce qu'on soumet.
 #[derive(Arbitrary, Debug)]
@@ -94,14 +95,20 @@ fuzz_target!(|entree: Entree| {
     let taille = usize::from(entree.tampon) % 101;
     let mut sortie = vec![0_u8; taille];
 
-    let mut session = Session::new();
-    let reponse = session.servir(&tete_reelle, entree.corps, &mut sortie);
+    // **LA TROUVAILLE EST TOUJOURS `Rien` ICI**, et c'est délibéré : cette
+    // cible éprouve la COMPOSITION, pas l'entrepôt. Ce qui vient de la base
+    // n'est pas contrôlé par un inconnu ; ce qui l'est, c'est la requête.
+    let besoin = asl_session::besoin(&tete_reelle, entree.corps);
+    let reponse = asl_session::repondre(&besoin, &Trouvaille::Rien, &mut sortie);
     let statut = reponse.status();
 
     // ── PROPRIÉTÉ 3 ─────────────────────────────────────────────────────────
+    //
+    // Sans trouvaille, aucune requête ne peut aboutir à un `200` : les seules
+    // ressources qui se servent sans preuve exigent une lecture.
     assert!(
         ATTENDUS.contains(&statut),
-        "un statut hors table est sorti : {statut:?}"
+        "un statut hors table est sorti : {statut:?} (besoin {besoin:?})"
     );
 
     // ── PROPRIÉTÉ 2 ─────────────────────────────────────────────────────────
@@ -151,19 +158,18 @@ fuzz_target!(|entree: Entree| {
 
     // ── PROPRIÉTÉ 5 : `HEAD` répond comme `GET` ─────────────────────────────
     if verbe == b"HEAD" {
-        assert!(
-            reponse.body().is_empty(),
-            "un `HEAD` a rendu un corps de {} octets",
-            reponse.body().len()
-        );
+        // **LE CORPS N'EST PLUS TU ICI**, et c'est un changement assumé :
+        // `ams-h3` écrit les trames, donc c'est lui qui tait le corps d'une
+        // réponse à `HEAD`. Ce qui doit rester vrai de CE côté-ci, c'est que le
+        // `HEAD` et le `GET` décident la MÊME chose — §9.3.2.
         // `dite` emprunte `sortie` ; on en prend une copie pour pouvoir servir
         // le `GET` dans un tampon à lui et comparer les deux.
         let longueur_de_head = dite.to_vec();
 
         if let Some(tete_get) = tete(b"GET", entree.cible) {
             let mut autre = vec![0_u8; taille];
-            let mut session_get = Session::new();
-            let par_get = session_get.servir(&tete_get, entree.corps, &mut autre);
+            let besoin_get = asl_session::besoin(&tete_get, entree.corps);
+            let par_get = asl_session::repondre(&besoin_get, &Trouvaille::Rien, &mut autre);
             assert_eq!(
                 par_get.status(),
                 statut,

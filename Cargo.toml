@@ -272,6 +272,9 @@ ams-quic-client = { git = "https://github.com/air-desktop-project/air-mail-serve
 # regarder.
 redb = "4"
 
+# Voir `asl-loop-tokio/src/privileges.rs` : un seul appel, `geteuid`.
+libc = { version = "0.2", default-features = false }
+
 rustls = { version = "0.23", default-features = false, features = ["std"] }
 tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 

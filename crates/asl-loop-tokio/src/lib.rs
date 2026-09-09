@@ -38,6 +38,7 @@
 //! | [`quic`] | La socket, la carte des connexions, la boucle, l'extinction. |
 //! | [`pont`] | Marie `ams_h3::Transport` et `ams_quic_tls::Connection`. |
 //! | [`h3`] | Présente `asl-session` à `ams-h3`, connexion par connexion. |
+//! | [`privileges`] | Le refus de tourner en root (C8). |
 //!
 //! # CE QUI MANQUE ENCORE
 //!
@@ -46,10 +47,12 @@
 
 pub mod h3;
 pub mod pont;
+pub mod privileges;
 pub mod quic;
 
 pub use h3::Annuaire;
 pub use pont::Pont;
+pub use privileges::{EstRoot, refuser_root};
 pub use quic::{
     Application, Comptes, GRACE_EXTINCTION_US, SansApplication, maintenant, servir_quic,
 };

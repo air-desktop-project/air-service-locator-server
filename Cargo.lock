@@ -187,12 +187,17 @@ version = "0.1.0"
 dependencies = [
  "ams-h3",
  "ams-proto-h3",
+ "ams-proto-http",
  "ams-proto-quic",
  "ams-quic",
  "ams-quic-client",
  "ams-quic-tls",
  "ams-tls",
+ "asl-id",
+ "asl-registre",
  "asl-session",
+ "asl-store",
+ "libc",
  "rustls",
  "tokio",
 ]
@@ -222,6 +227,8 @@ dependencies = [
  "ams-h3",
  "ams-proto-http",
  "asl-api",
+ "asl-id",
+ "asl-registre",
 ]
 
 [[package]]

@@ -7,6 +7,17 @@
 //! ouvrir et dans quel ordre. Ce module ne fait que les présenter l'un à
 //! l'autre, connexion par connexion.
 //!
+//! # C'EST ICI QUE LE BESOIN EST SATISFAIT, ET NULLE PART AILLEURS
+//!
+//! `asl-session` ne lit pas l'entrepôt : elle dit ce qu'il lui faut
+//! (`besoin`), et répond quand on le lui apporte (`repondre`). **L'entre-deux
+//! est ici**, parce que c'est le seul étage qui a le droit d'attendre.
+//!
+//! Ce n'est pas un détour : `ams_h3::Service::serve` doit rendre une réponse
+//! SYNCHRONE, donc quelqu'un doit tenir les deux bouts. Que ce soit l'étage 3
+//! est ce qui garde à l'étage 2 sa propriété — **il ne peut pas attendre, parce
+//! qu'il n'a personne à appeler.**
+//!
 //! # UNE SESSION PAR CONNEXION, ET C'EST LE BAIL QUI L'EXIGE
 //!
 //! `asl_session::Session` portera la machine authentifiée : la connexion QUIC
@@ -21,10 +32,12 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use ams_h3::Http3;
+use ams_h3::{Http3, Reponse};
+use ams_proto_http::RequestHead;
 use ams_proto_quic::StreamId;
 use ams_quic_tls::Connection;
-use asl_session::Session;
+use asl_session::{Besoin, Session, Trouvaille};
+use asl_store::Entrepot;
 
 use crate::pont::Pont;
 use crate::quic::{Application, maintenant};
@@ -38,20 +51,92 @@ struct ParConnexion {
     session: Session,
 }
 
+/// Ce qui sert une requête : la session décide, l'entrepôt fournit.
+///
+/// # POURQUOI CE TYPE EXISTE
+///
+/// `ams_h3::Service` veut un seul objet ; le travail en demande deux. Celui-ci
+/// les tient le temps d'une requête, et **c'est lui qui fait le voyage à
+/// l'entrepôt** — entre `besoin` et `repondre`, là où l'étage 2 ne peut pas
+/// aller.
+struct Service<'a> {
+    /// Ce qui décide.
+    session: &'a mut Session,
+    /// Ce qui se souvient.
+    entrepot: &'a Entrepot,
+}
+
+impl ams_h3::Service for Service<'_> {
+    fn serve<'o>(
+        &mut self,
+        tete: &RequestHead<'_>,
+        corps: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Reponse<'o> {
+        let _ = &self.session;
+        let besoin = asl_session::besoin(tete, corps);
+        let trouvaille = self.chercher(&besoin);
+        asl_session::repondre(&besoin, &trouvaille, sortie)
+    }
+}
+
+impl Service<'_> {
+    /// Va chercher ce que la session a demandé.
+    ///
+    /// # UNE FAUTE DE L'ENTREPÔT REND `Rien`, ET IL FAUT LE DIRE
+    ///
+    /// Une base qui refuse et un compte qui n'existe pas donnent la même
+    /// réponse : `404`. **Ce n'est pas satisfaisant**, et c'est délibéré tant
+    /// qu'il n'y a pas de journal d'exploitation : distinguer les deux dans la
+    /// RÉPONSE dirait à un inconnu que notre base a un problème, et c'est
+    /// précisément ce qu'on ne veut pas lui apprendre. La distinction ira au
+    /// journal, quand il existera.
+    fn chercher(&self, besoin: &Besoin<'_>) -> Trouvaille {
+        match besoin {
+            Besoin::Deja(_) => Trouvaille::Rien,
+            Besoin::Compte(qui) => match self.entrepot.compte(*qui) {
+                Ok(Some(compte)) => Trouvaille::Compte {
+                    qui: *qui,
+                    alias: compte.alias,
+                },
+                Ok(None) | Err(_) => Trouvaille::Rien,
+            },
+            Besoin::CompteParAlias(alias) => match self.entrepot.compte_par_alias(alias) {
+                Ok(Some(qui)) => match self.entrepot.compte(qui) {
+                    Ok(Some(compte)) => Trouvaille::Compte {
+                        qui,
+                        alias: compte.alias,
+                    },
+                    // **L'INDEX DÉSIGNE UN COMPTE QUI N'EXISTE PAS.** C'est une
+                    // incohérence de la base, pas une requête fautive ; on rend
+                    // `404` plutôt que d'inventer un compte vide.
+                    Ok(None) | Err(_) => Trouvaille::Rien,
+                },
+                Ok(None) | Err(_) => Trouvaille::Rien,
+            },
+        }
+    }
+}
+
 /// L'application qui sert l'API de l'annuaire en HTTP/3.
-#[derive(Default)]
-pub struct Annuaire {
+pub struct Annuaire<'a> {
     /// Un conducteur et une session par connexion vivante.
     connexions: HashMap<Vec<u8>, ParConnexion>,
+    /// Ce qui se souvient, partagé par toutes les connexions.
+    entrepot: &'a Entrepot,
     /// Combien de connexions ont parlé HTTP/3.
     servies: u64,
 }
 
-impl Annuaire {
-    /// Une application neuve.
+impl<'a> Annuaire<'a> {
+    /// Une application neuve, servant depuis cet entrepôt.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(entrepot: &'a Entrepot) -> Self {
+        Self {
+            connexions: HashMap::new(),
+            entrepot,
+            servies: 0,
+        }
     }
 
     /// Combien de connexions ont parlé HTTP/3.
@@ -69,7 +154,7 @@ impl Annuaire {
     }
 }
 
-impl Application for Annuaire {
+impl Application for Annuaire<'_> {
     fn a_l_etablissement(&mut self, connexion: &mut Connection, _pair: SocketAddr) {
         let clef = connexion.local_id().as_bytes().to_vec();
         let etat = self.connexions.entry(clef).or_default();
@@ -93,7 +178,11 @@ impl Application for Annuaire {
             conducteur,
             session,
         } = etat;
-        if let Err(faute) = conducteur.on_readable(&mut Pont(connexion), session, flux) {
+        let mut service = Service {
+            session,
+            entrepot: self.entrepot,
+        };
+        if let Err(faute) = conducteur.on_readable(&mut Pont(connexion), &mut service, flux) {
             Self::condamner(connexion, &faute);
         }
     }
