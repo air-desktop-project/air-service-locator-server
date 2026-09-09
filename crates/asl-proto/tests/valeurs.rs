@@ -416,6 +416,26 @@ fn chaque_erreur_se_dit_a_un_humain() {
         Erreur::PasUneMachine {
             obtenu: Genre::Service,
         },
+        // Celles du cadrage. Une erreur qu'on ne peut pas afficher n'aide
+        // personne, et un daemon tiers ne lira que ce message.
+        Erreur::MessageTropLong { obtenue: 9_999 },
+        Erreur::IdentifiantInvalide { position: 11 },
+        Erreur::JsonAttendu {
+            position: 3,
+            attendu: "un objet",
+        },
+        Erreur::JsonInattendu { position: 3 },
+        Erreur::ChampInconnu { position: 12 },
+        Erreur::ChampEnDouble { position: 12 },
+        Erreur::ChampManquant { nom: "machine" },
+        Erreur::EchappementRefuse { position: 7 },
+        Erreur::CaractereBrutRefuse { position: 7 },
+        Erreur::NombreNonCanonique { position: 40 },
+        Erreur::NombreNonEntier { position: 40 },
+        Erreur::NombreHorsBornes { position: 40 },
+        Erreur::AdresseInvalide { position: 60 },
+        Erreur::DonneesEnTrop { position: 128 },
+        Erreur::TamponTropPetit,
     ];
     for erreur in toutes {
         let message = format!("{erreur}");

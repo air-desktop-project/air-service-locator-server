@@ -12,19 +12,25 @@
 //! une `IpAddr` est une valeur, pas une socket — et la réimplémenter serait
 //! réécrire un analyseur d'IPv6 pour le plaisir d'en avoir un à nous.
 //!
-//! # DEUX TRANCHES, ET CELLE-CI EST LA PREMIÈRE
+//! # CE QUI EST ÉCRIT, ET CE QUI NE L'EST PAS
 //!
-//! **Écrite ici** : les VALEURS du protocole et leurs invariants — protocoles,
-//! ports, noms de service, points d'écoute, candidats d'adresse — plus le
-//! message d'annonce et sa validation.
+//! **Écrit** : les VALEURS et leurs invariants — protocoles, ports, noms de
+//! service, points d'écoute, candidats d'adresse —, le message d'ANNONCE avec sa
+//! validation, et son CADRAGE JSON dans les deux sens ([`cadrage`]).
 //!
-//! **Pas encore écrit** : le CADRAGE, c'est-à-dire le JSON qui les transporte
-//! (`docs/protocole.md` §0).
+//! **Pas écrit** : le message de RÉPONSE — bail, `vu_depuis`, `derriere_nat`,
+//! verdicts de joignabilité (`docs/protocole.md` §1.1). Et le retrait, qui n'a
+//! pas de corps.
 //!
-//! Cette frontière n'est pas une commodité de découpage : c'est celle que §4.3
-//! du même document désigne comme la seule qui bougera si l'on passe un jour à
-//! un cadrage binaire. Les valeurs, elles, ne bougeront pas — ce sont elles que
-//! `asl-annuaire` manipule et que `asl-client` expose.
+//! # La frontière entre valeurs et cadrage
+//!
+//! Elle n'est pas une commodité de découpage : c'est celle que §4.3 du même
+//! document désigne comme la seule qui bougera si l'on passe un jour à un
+//! cadrage binaire. Les valeurs, elles, ne bougeront pas — ce sont elles que
+//! `asl-annuaire` manipule et que `asl-client` expose à cinq langages.
+//!
+//! C'est pourquoi le cadrage est un module à part, et non un jeu de méthodes
+//! posées sur les types.
 //!
 //! # La règle qui gouverne tout ce fichier
 //!
@@ -43,6 +49,10 @@
 //! deux services pour l'annuaire et un seul pour l'humain qui les lit.
 
 #![no_std]
+
+pub mod cadrage;
+
+pub use cadrage::{MESSAGE_MAX, Tampons};
 
 use core::fmt;
 use core::net::IpAddr;
@@ -121,6 +131,95 @@ pub enum Erreur {
         /// Le genre réellement fourni.
         obtenu: Genre,
     },
+
+    // ── Le cadrage ──────────────────────────────────────────────────────────
+    /// Le message dépasse [`MESSAGE_MAX`] octets.
+    MessageTropLong {
+        /// La longueur reçue.
+        obtenue: usize,
+    },
+    /// Le message n'est pas l'identifiant de machine attendu.
+    IdentifiantInvalide {
+        /// Où il commence.
+        position: usize,
+    },
+    /// Quelque chose d'autre était attendu à cet endroit.
+    JsonAttendu {
+        /// Où.
+        position: usize,
+        /// Quoi.
+        attendu: &'static str,
+    },
+    /// Le message est mal formé d'une façon qui ne devrait pas arriver.
+    JsonInattendu {
+        /// Où.
+        position: usize,
+    },
+    /// Un champ que ce lecteur ne connaît pas.
+    ///
+    /// **Refusé, et non ignoré** : un champ qu'on ignore est un champ que
+    /// l'émetteur croit avoir transmis.
+    ChampInconnu {
+        /// Où commence sa clé.
+        position: usize,
+    },
+    /// Un champ apparaît deux fois.
+    ///
+    /// JSON ne l'interdit pas ; deux analyseurs qui ne choisiraient pas le même
+    /// gagnant liraient deux messages dans les mêmes octets.
+    ChampEnDouble {
+        /// Où commence la deuxième clé.
+        position: usize,
+    },
+    /// Un champ obligatoire manque.
+    ChampManquant {
+        /// Son nom.
+        nom: &'static str,
+    },
+    /// Une chaîne porte un échappement.
+    ///
+    /// Aucune valeur de ce protocole n'emploie de caractère qui en demande un.
+    EchappementRefuse {
+        /// Où.
+        position: usize,
+    },
+    /// Une chaîne porte un octet de contrôle ou du non-ASCII.
+    CaractereBrutRefuse {
+        /// Où.
+        position: usize,
+    },
+    /// Un nombre porte un zéro en tête.
+    NombreNonCanonique {
+        /// Où il commence.
+        position: usize,
+    },
+    /// Un nombre porte une fraction ou un exposant.
+    ///
+    /// Aucun champ de ce protocole n'a de sens en virgule flottante.
+    NombreNonEntier {
+        /// Où il commence.
+        position: usize,
+    },
+    /// Un nombre dépasse ce que son champ peut porter.
+    NombreHorsBornes {
+        /// Où il commence.
+        position: usize,
+    },
+    /// Une adresse ne se lit ni en IPv6 ni en IPv4.
+    AdresseInvalide {
+        /// Où.
+        position: usize,
+    },
+    /// Des octets suivent la fin du message.
+    ///
+    /// Deux messages collés dans un tampon, c'est un lecteur qui en voit un et
+    /// un autre qui en voit deux.
+    DonneesEnTrop {
+        /// Où commence le surplus.
+        position: usize,
+    },
+    /// La tranche de sortie ne suffit pas à écrire le message.
+    TamponTropPetit,
 }
 
 impl fmt::Display for Erreur {
@@ -153,6 +252,47 @@ impl fmt::Display for Erreur {
                     "identifiant de genre {obtenu:?} là où une machine est attendue"
                 )
             }
+            Self::MessageTropLong { obtenue } => {
+                write!(f, "message de {obtenue} octets, maximum {MESSAGE_MAX}")
+            }
+            Self::IdentifiantInvalide { position } => {
+                write!(f, "identifiant de machine invalide en position {position}")
+            }
+            Self::JsonAttendu { position, attendu } => {
+                write!(f, "{attendu} attendu en position {position}")
+            }
+            Self::JsonInattendu { position } => {
+                write!(f, "message mal formé en position {position}")
+            }
+            Self::ChampInconnu { position } => {
+                write!(f, "champ inconnu en position {position}")
+            }
+            Self::ChampEnDouble { position } => {
+                write!(f, "champ répété en position {position}")
+            }
+            Self::ChampManquant { nom } => write!(f, "champ `{nom}` manquant"),
+            Self::EchappementRefuse { position } => {
+                write!(f, "échappement refusé en position {position}")
+            }
+            Self::CaractereBrutRefuse { position } => {
+                write!(f, "octet de contrôle ou non-ASCII en position {position}")
+            }
+            Self::NombreNonCanonique { position } => {
+                write!(f, "nombre avec un zéro en tête en position {position}")
+            }
+            Self::NombreNonEntier { position } => {
+                write!(f, "nombre non entier en position {position}")
+            }
+            Self::NombreHorsBornes { position } => {
+                write!(f, "nombre hors bornes en position {position}")
+            }
+            Self::AdresseInvalide { position } => {
+                write!(f, "adresse IP invalide en position {position}")
+            }
+            Self::DonneesEnTrop { position } => {
+                write!(f, "octets en trop après le message, en position {position}")
+            }
+            Self::TamponTropPetit => f.write_str("tampon de sortie trop petit"),
         }
     }
 }
@@ -224,6 +364,19 @@ impl fmt::Display for Protocole {
 pub struct Port(NonZeroU16);
 
 impl Port {
+    /// Le port `1`.
+    ///
+    /// Il ne sert qu'à **remplir** les tampons du décodeur (`cadrage`), dont le
+    /// contenu initial n'est jamais lu : un tableau de taille fixe doit bien
+    /// commencer par quelque chose, et `Port` n'a pas de valeur nulle par
+    /// construction.
+    pub const UN: Self = match NonZeroU16::new(1) {
+        Some(port) => Self(port),
+        // Inatteignable : `1` n'est pas zéro. Un `match` plutôt qu'un `unwrap`
+        // parce que ce dernier n'est pas `const` sur cette version.
+        None => Self(NonZeroU16::MIN),
+    };
+
     /// Depuis un entier.
     ///
     /// # Erreurs
