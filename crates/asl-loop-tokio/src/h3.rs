@@ -190,6 +190,17 @@ impl Service<'_> {
                 .rassembler(*machine, service)
                 .map_or(Trouvaille::Rien, Trouvaille::Resolution),
 
+            // ── LES VERBES DE LISTE ─────────────────────────────────────
+            //
+            // **ON RASSEMBLE TOUT, ET L'ÉTAGE 2 ÉCARTE.** Filtrer ici mettrait
+            // « un service ne se rend qu'à qui y a droit » à deux endroits, et
+            // c'est celle qu'on oublie de corriger qui laisse passer.
+            Besoin::OuParNom { service } => {
+                Trouvaille::Resolutions(self.rassembler_par_nom(service))
+            }
+            Besoin::ServicesDeMachine { machine } => self.rassembler_les_services(*machine),
+            Besoin::MesAutorisations => self.rassembler_les_autorisations(),
+
             // ── CE QUI CRÉE ─────────────────────────────────────────────
             //
             // **TOUT SE PASSE ICI**, et rien à l'étage 2 : créer, c'est écrire,
@@ -752,6 +763,135 @@ impl Service<'_> {
 
         self.vivier.poser(service, &self.connexion, vivante);
         Some(sortie)
+    }
+
+    /// Toutes les instances portant ce nom que le demandeur POURRAIT voir.
+    ///
+    /// # OÙ L'ON CHERCHE, ET POURQUOI PAS PARTOUT
+    ///
+    /// Un nom de service n'est unique que sur une machine : `depot` existe chez
+    /// tout le monde. Chercher « tous les services nommés `depot` » dans
+    /// l'annuaire entier reviendrait à balayer une base dont la taille ne dépend
+    /// pas de la question posée — et à composer une liste dont l'étage 2
+    /// écarterait presque tout.
+    ///
+    /// On part donc des COMPTES qui peuvent avoir quelque chose à nous montrer :
+    /// le nôtre, et ceux qui nous ont accordé une autorisation. C'est un
+    /// sur-ensemble de ce qui se rendra — **l'étage 2 décide encore, une par
+    /// une** —, mais un sur-ensemble borné par nos propres droits.
+    fn rassembler_par_nom(&self, nom: &str) -> Vec<Resolution> {
+        let Some(qui) = self.session.machine() else {
+            return Vec::new();
+        };
+        let Ok(Some(rangee)) = self.entrepot.machine(qui) else {
+            return Vec::new();
+        };
+
+        // Le compte du demandeur, et ceux qui lui ont accordé quelque chose.
+        let mut comptes = vec![rangee.proprietaire];
+        if let Ok(recues) = self.entrepot.autorisations_recues(rangee.proprietaire) {
+            for quoi in recues {
+                if !comptes.contains(&quoi.par) {
+                    comptes.push(quoi.par);
+                }
+            }
+        }
+
+        let mut trouvees = Vec::new();
+        for compte in comptes {
+            let Ok(machines) = self.entrepot.machines_de_compte(compte) else {
+                continue;
+            };
+            for (quelle, _) in machines {
+                let Ok(Some(service)) = self.entrepot.service_par_nom(quelle, nom) else {
+                    continue;
+                };
+                if let Some(resolution) = self.rassembler(quelle, nom) {
+                    trouvees.push(resolution);
+                }
+                let _ = service;
+            }
+        }
+        trouvees
+    }
+
+    /// Tous les services d'une machine, tels qu'ils sont annoncés.
+    ///
+    /// **LE DEMANDEUR EST UN APPAREIL, ET NON UNE MACHINE** : c'est
+    /// l'application mobile qui regarde. On rassemble donc au nom de son COMPTE,
+    /// et l'on emprunte la même décision — celle qui sert la résolution — parce
+    /// qu'il n'y a aucune raison qu'un écran voie ce qu'un daemon ne verrait pas.
+    fn rassembler_les_services(&self, machine: Identifiant) -> Trouvaille {
+        let Some(appareil) = self.session.appareil() else {
+            return Trouvaille::Rien;
+        };
+        let Ok(Some(rangee)) = self.entrepot.appareil(appareil) else {
+            return Trouvaille::Rien;
+        };
+        // **LA MACHINE VISÉE EST LUE MAINTENANT, ET LA DÉCISION SE PREND APRÈS.**
+        // C'est notre propre mémoire : la lire ne dit rien à personne. La RENDRE
+        // est une décision, et elle se prend à l'étage 2.
+        let Ok(Some(visee)) = self.entrepot.machine(machine) else {
+            return Trouvaille::Rien;
+        };
+        let Ok(services) = self.entrepot.services_de_machine(machine) else {
+            return Trouvaille::Rien;
+        };
+
+        let annonces = services
+            .into_iter()
+            .filter_map(|(quel, _)| {
+                let vivante = self.vivier.annonce(quel)?;
+                let mut sortie = alloc_reponse();
+                let combien = vivante.reponse().ok()?.encoder(&mut sortie).ok()?;
+                sortie.truncate(combien);
+                Some(sortie)
+            })
+            .collect();
+
+        Trouvaille::ServicesDeMachine {
+            demandeur: rangee.proprietaire,
+            proprietaire: visee.proprietaire,
+            annonces,
+        }
+    }
+
+    /// Les autorisations d'un compte, dans les deux sens.
+    fn rassembler_les_autorisations(&self) -> Trouvaille {
+        let Some(appareil) = self.session.appareil() else {
+            return Trouvaille::Rien;
+        };
+        let Ok(Some(rangee)) = self.entrepot.appareil(appareil) else {
+            return Trouvaille::Rien;
+        };
+        let compte = rangee.proprietaire;
+
+        let (Ok(accordees), Ok(recues)) = (
+            self.entrepot.autorisations_accordees(compte),
+            self.entrepot.autorisations_recues_nommees(compte),
+        ) else {
+            return Trouvaille::Rien;
+        };
+
+        // **UN SEUL TABLEAU POUR LES DEUX SENS.** `par` et `a` disent déjà de
+        // quel côté chacune est, et un lecteur qui connaît son identifiant sait
+        // lequel il est. Deux tableaux auraient obligé l'application à savoir
+        // dans lequel chercher.
+        let rendre = |(quelle, quoi): (Identifiant, asl_registre::Autorisation)| {
+            asl_api::corps::AutorisationRendue {
+                autorisation: quelle,
+                par: quoi.par,
+                a: quoi.a,
+                portee: match quoi.portee {
+                    asl_registre::Portee::ToutLeCompte => asl_api::corps::Portee::ToutLeCompte,
+                    asl_registre::Portee::UneMachine(q) => asl_api::corps::Portee::UneMachine(q),
+                    asl_registre::Portee::UnService(q) => asl_api::corps::Portee::UnService(q),
+                },
+                revoquee: quoi.revoquee,
+            }
+        };
+
+        Trouvaille::Autorisations(accordees.into_iter().chain(recues).map(rendre).collect())
     }
 
     /// Lance une sonde par point sondable, et rend la main aussitôt.

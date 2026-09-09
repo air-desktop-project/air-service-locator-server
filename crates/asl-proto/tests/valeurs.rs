@@ -455,6 +455,9 @@ fn chaque_erreur_se_dit_a_un_humain() {
         Erreur::VerdictImpossible,
         Erreur::ChampHorsPropos { position: 42 },
         Erreur::CandidatInvalide { position: 42 },
+        // Celles des listes.
+        Erreur::ListeMalFormee { position: 42 },
+        Erreur::TropDElements { obtenu: 99 },
     ];
     for erreur in toutes {
         let message = format!("{erreur}");

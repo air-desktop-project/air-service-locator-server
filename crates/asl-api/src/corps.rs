@@ -366,6 +366,189 @@ impl DemandeAutorisation {
     }
 }
 
+/// Ce que `GET /v1/autorisations` rend, une par élément.
+///
+/// # ELLE VIT À CÔTÉ DE [`DemandeAutorisation`], ET NON DANS `asl-proto`
+///
+/// Elle emploie le MÊME vocabulaire de portée — le mot `tout`, ou un identifiant
+/// dont le genre la désigne. Un `Portee` écrit dans un fichier et relu dans un
+/// autre finirait par diverger : la demande accepterait ce que la réponse
+/// n'écrit plus.
+///
+/// # LES DEUX SENS SONT DANS LE MÊME TABLEAU
+///
+/// `protocole.md` §2.2 : « les deux sens — ce que j'ai accordé, ce qu'on m'a
+/// accordé ». Deux tableaux séparés auraient obligé l'application à savoir dans
+/// lequel chercher ; `par` et `a` le disent déjà, et un lecteur qui connaît son
+/// propre identifiant sait de quel côté il est.
+///
+/// # LES RÉVOQUÉES SONT RENDUES, ET MARQUÉES
+///
+/// Même raison qu'un appareil révoqué (`protocole.md` §2.2) : **l'écran qu'on
+/// regarde après avoir retiré un accès doit montrer ce qu'on a retiré.** Les
+/// taire ferait douter d'avoir cliqué.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutorisationRendue {
+    /// L'identifiant de l'autorisation elle-même.
+    ///
+    /// **C'est lui qu'on passe à `DELETE /v1/autorisations/{g}`.** Une liste
+    /// dont les éléments ne se désignent pas est une liste qu'on ne peut que
+    /// regarder.
+    pub autorisation: Identifiant,
+    /// Le compte qui accorde.
+    pub par: Identifiant,
+    /// Le compte qui en bénéficie.
+    pub a: Identifiant,
+    /// Jusqu'où elle porte.
+    pub portee: Portee,
+    /// A-t-elle été retirée ?
+    pub revoquee: bool,
+}
+
+impl AutorisationRendue {
+    /// Encode une autorisation.
+    ///
+    /// ```jsonc
+    /// {"autorisation":"g-…","par":"u-…","a":"u-…","portee":"tout","revoquee":false}
+    /// ```
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`].
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{\"autorisation\":\"");
+        ecrivain.pousser(self.autorisation.texte().as_str().as_bytes());
+        ecrivain.pousser(b"\",\"par\":\"");
+        ecrivain.pousser(self.par.texte().as_str().as_bytes());
+        ecrivain.pousser(b"\",\"a\":\"");
+        ecrivain.pousser(self.a.texte().as_str().as_bytes());
+        ecrivain.pousser(b"\",\"portee\":\"");
+        match self.portee {
+            Portee::ToutLeCompte => ecrivain.pousser(TOUT.as_bytes()),
+            Portee::UneMachine(quoi) | Portee::UnService(quoi) => {
+                ecrivain.pousser(quoi.texte().as_str().as_bytes());
+            }
+        }
+        ecrivain.pousser(b"\",\"revoquee\":");
+        ecrivain.pousser(if self.revoquee { b"true" } else { b"false" });
+        ecrivain.pousser(b"}");
+        ecrivain.achever()
+    }
+
+    /// Décode une autorisation rendue.
+    ///
+    /// **ELLE EXISTE POUR LES ESSAIS ET POUR LES LIAISONS**, pas pour le
+    /// serveur : celui-ci n'a qu'à écrire. Un encodeur sans décodeur ne se
+    /// vérifie que par comparaison de chaînes, et une comparaison de chaînes ne
+    /// dit pas qu'un lecteur saura relire.
+    ///
+    /// # Erreurs
+    ///
+    /// Celles du cadrage.
+    pub fn decoder(octets: &[u8]) -> Result<Self, Erreur> {
+        let mut lecteur = asl_proto::cadrage::Lecteur::nouveau(octets);
+        lecteur.attendre(b'{', "un objet")?;
+
+        let mut autorisation = None;
+        let mut par = None;
+        let mut a = None;
+        let mut portee = None;
+        let mut revoquee = None;
+
+        loop {
+            lecteur.sauter_blancs();
+            let position = lecteur.position();
+            let champ = lecteur.chaine()?;
+            lecteur.attendre(b':', "deux-points")?;
+
+            match champ {
+                "autorisation" => {
+                    poser(
+                        &mut autorisation,
+                        lire_genre(&mut lecteur, Genre::Autorisation)?,
+                        position,
+                    )?;
+                }
+                "par" => poser(
+                    &mut par,
+                    lire_genre(&mut lecteur, Genre::Utilisateur)?,
+                    position,
+                )?,
+                "a" => poser(
+                    &mut a,
+                    lire_genre(&mut lecteur, Genre::Utilisateur)?,
+                    position,
+                )?,
+                "portee" => {
+                    let ou = lecteur.position();
+                    let texte = lecteur.chaine()?;
+                    poser(&mut portee, lire_portee(texte, ou)?, position)?;
+                }
+                "revoquee" => poser(&mut revoquee, lire_booleen(&mut lecteur)?, position)?,
+                _ => return Err(Erreur::ChampInconnu { position }),
+            }
+
+            lecteur.sauter_blancs();
+            match lecteur.regarder() {
+                Some(b',') => lecteur.avancer(),
+                _ => break,
+            }
+        }
+
+        lecteur.attendre(b'}', "la fin de l'objet")?;
+        lecteur.fin()?;
+
+        Ok(Self {
+            autorisation: autorisation.ok_or(Erreur::ChampManquant {
+                nom: "autorisation",
+            })?,
+            par: par.ok_or(Erreur::ChampManquant { nom: "par" })?,
+            a: a.ok_or(Erreur::ChampManquant { nom: "a" })?,
+            portee: portee.ok_or(Erreur::ChampManquant { nom: "portee" })?,
+            revoquee: revoquee.ok_or(Erreur::ChampManquant { nom: "revoquee" })?,
+        })
+    }
+}
+
+/// Pose une valeur, ou refuse le champ en double.
+///
+/// **UN CHAMP EN DOUBLE EST UN REFUS, ET NON UN DERNIER-GAGNE.** Deux lecteurs
+/// qui choisiraient différemment liraient deux messages dans un seul.
+fn poser<T>(place: &mut Option<T>, valeur: T, position: usize) -> Result<(), Erreur> {
+    if place.is_some() {
+        return Err(Erreur::ChampEnDouble { position });
+    }
+    *place = Some(valeur);
+    Ok(())
+}
+
+/// Lit un identifiant, et exige son genre.
+fn lire_genre(
+    lecteur: &mut asl_proto::cadrage::Lecteur<'_>,
+    attendu: Genre,
+) -> Result<Identifiant, Erreur> {
+    let position = lecteur.position();
+    let texte = lecteur.chaine()?;
+    Identifiant::analyser_genre(attendu, texte)
+        .map_err(|_| Erreur::IdentifiantInvalide { position })
+}
+
+/// Lit `true` ou `false`, et rien d'autre.
+fn lire_booleen(lecteur: &mut asl_proto::cadrage::Lecteur<'_>) -> Result<bool, Erreur> {
+    lecteur.sauter_blancs();
+    let position = lecteur.position();
+    for (mot, valeur) in [("true", true), ("false", false)] {
+        if lecteur.mot(mot) {
+            return Ok(valeur);
+        }
+    }
+    Err(Erreur::JsonAttendu {
+        position,
+        attendu: "true ou false",
+    })
+}
+
 /// Lit une portée : le mot `tout`, ou un identifiant dont le genre la désigne.
 fn lire_portee(texte: &str, position: usize) -> Result<Portee, Erreur> {
     if texte == TOUT {

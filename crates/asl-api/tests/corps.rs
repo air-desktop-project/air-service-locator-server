@@ -503,3 +503,317 @@ fn une_demande_d_alias_mal_formee_est_refusee() {
     let mut sortie = [0_u8; 4];
     assert_eq!(lue.encoder(&mut sortie), Err(Erreur::TamponTropPetit));
 }
+
+// ── Ce qu'une autorisation rend ─────────────────────────────────────────────
+
+use asl_api::corps::AutorisationRendue;
+
+/// Encode, et rend les octets.
+fn encoder_rendue(quoi: &AutorisationRendue) -> Vec<u8> {
+    let mut sortie = vec![0_u8; CORPS_MAX];
+    let combien = quoi.encoder(&mut sortie).expect("elle s'encode");
+    sortie.truncate(combien);
+    sortie
+}
+
+fn une_rendue(portee: Portee, revoquee: bool) -> AutorisationRendue {
+    AutorisationRendue {
+        autorisation: Identifiant::depuis_entropie(Genre::Autorisation, [0x11; 16]),
+        par: Identifiant::depuis_entropie(Genre::Utilisateur, [0x22; 16]),
+        a: Identifiant::depuis_entropie(Genre::Utilisateur, [0x33; 16]),
+        portee,
+        revoquee,
+    }
+}
+
+#[test]
+fn une_autorisation_rendue_fait_l_aller_et_le_retour() {
+    // **L'ENCODEUR A UN DÉCODEUR, ET C'EST POUR CELA.** Un encodeur seul ne se
+    // vérifie que par comparaison de chaînes, et une comparaison de chaînes ne
+    // dit pas qu'un lecteur saura relire.
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0x44; 16]);
+    let service = Identifiant::depuis_entropie(Genre::Service, [0x55; 16]);
+
+    for portee in [
+        Portee::ToutLeCompte,
+        Portee::UneMachine(machine),
+        Portee::UnService(service),
+    ] {
+        for revoquee in [false, true] {
+            let avant = une_rendue(portee, revoquee);
+            let octets = encoder_rendue(&avant);
+            let apres = AutorisationRendue::decoder(&octets).expect("elle se relit");
+            assert_eq!(apres, avant, "{portee:?} révoquée={revoquee}");
+        }
+    }
+}
+
+#[test]
+fn elle_porte_son_propre_identifiant() {
+    // **C'EST LUI QU'ON PASSE À `DELETE /v1/autorisations/{g}`.** Une liste dont
+    // les éléments ne se désignent pas est une liste qu'on ne peut que regarder.
+    let rendue = une_rendue(Portee::ToutLeCompte, false);
+    let octets = encoder_rendue(&rendue);
+    let texte = core::str::from_utf8(&octets).expect("de l'ASCII");
+    assert!(
+        texte.contains(rendue.autorisation.texte().as_str()),
+        "{texte}"
+    );
+    assert!(texte.starts_with(r#"{"autorisation":"#), "{texte}");
+}
+
+#[test]
+fn une_revocation_se_lit_dans_la_liste() {
+    // **L'ÉCRAN QU'ON REGARDE APRÈS AVOIR RETIRÉ UN ACCÈS DOIT MONTRER CE QU'ON
+    // A RETIRÉ.** Taire les révoquées ferait douter d'avoir cliqué.
+    let vive = encoder_rendue(&une_rendue(Portee::ToutLeCompte, false));
+    let morte = encoder_rendue(&une_rendue(Portee::ToutLeCompte, true));
+    assert!(
+        core::str::from_utf8(&vive)
+            .unwrap()
+            .contains(r#""revoquee":false"#)
+    );
+    assert!(
+        core::str::from_utf8(&morte)
+            .unwrap()
+            .contains(r#""revoquee":true"#)
+    );
+    assert_ne!(vive, morte);
+}
+
+#[test]
+fn les_deux_sens_se_distinguent_par_par_et_a() {
+    // `protocole.md` §2.2 : « les deux sens ». Deux tableaux séparés auraient
+    // obligé l'application à savoir dans lequel chercher.
+    let rendue = une_rendue(Portee::ToutLeCompte, false);
+    let relue = AutorisationRendue::decoder(&encoder_rendue(&rendue)).unwrap();
+    assert_ne!(relue.par, relue.a, "un compte ne s'autorise pas lui-même");
+}
+
+#[test]
+fn un_genre_qui_ne_convient_pas_est_refuse() {
+    // Un appareil n'accorde rien, et une machine ne bénéficie de rien : ce sont
+    // des COMPTES qui s'autorisent.
+    let bon = encoder_rendue(&une_rendue(Portee::ToutLeCompte, false));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0x66; 16]);
+
+    let faux = texte.replacen(
+        &format!(
+            r#""par":"{}""#,
+            une_rendue(Portee::ToutLeCompte, false).par.texte().as_str()
+        ),
+        &format!(r#""par":"{}""#, machine.texte().as_str()),
+        1,
+    );
+    assert!(matches!(
+        AutorisationRendue::decoder(faux.as_bytes()),
+        Err(Erreur::IdentifiantInvalide { .. })
+    ));
+}
+
+#[test]
+fn un_champ_manquant_est_nomme() {
+    for (retire, nom) in [
+        (r#""revoquee":false"#, "revoquee"),
+        (r#""portee":"tout""#, "portee"),
+    ] {
+        let bon = encoder_rendue(&une_rendue(Portee::ToutLeCompte, false));
+        let texte = core::str::from_utf8(&bon).unwrap();
+        let ampute = texte.replacen(&format!(",{retire}"), "", 1);
+        assert_eq!(
+            AutorisationRendue::decoder(ampute.as_bytes()),
+            Err(Erreur::ChampManquant { nom }),
+            "{ampute}"
+        );
+    }
+}
+
+#[test]
+fn un_champ_en_double_est_refuse_quel_qu_il_soit() {
+    // **ET NON UN DERNIER-GAGNE** : deux lecteurs qui choisiraient différemment
+    // liraient deux messages dans un seul. La règle vaut pour LES CINQ champs,
+    // et l'éprouver sur un seul laisserait quatre refus que personne n'a lus.
+    let modele = une_rendue(Portee::ToutLeCompte, false);
+    let bon = encoder_rendue(&modele);
+    let texte = core::str::from_utf8(&bon).unwrap().to_owned();
+
+    let morceaux = [
+        format!(
+            r#""autorisation":"{}""#,
+            modele.autorisation.texte().as_str()
+        ),
+        format!(r#""par":"{}""#, modele.par.texte().as_str()),
+        format!(r#""a":"{}""#, modele.a.texte().as_str()),
+        r#""portee":"tout""#.to_owned(),
+        r#""revoquee":false"#.to_owned(),
+    ];
+
+    for morceau in morceaux {
+        let double = texte.replacen(&morceau, &format!("{morceau},{morceau}"), 1);
+        assert!(
+            matches!(
+                AutorisationRendue::decoder(double.as_bytes()),
+                Err(Erreur::ChampEnDouble { .. })
+            ),
+            "{double}"
+        );
+    }
+}
+
+#[test]
+fn ce_qui_n_est_ni_true_ni_false_est_refuse() {
+    let bon = encoder_rendue(&une_rendue(Portee::ToutLeCompte, false));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    for quoi in [
+        r#""revoquee":1"#,
+        r#""revoquee":"false""#,
+        r#""revoquee":null"#,
+    ] {
+        let faux = texte.replacen(r#""revoquee":false"#, quoi, 1);
+        assert!(
+            AutorisationRendue::decoder(faux.as_bytes()).is_err(),
+            "{faux}"
+        );
+    }
+}
+
+#[test]
+fn un_champ_inconnu_est_refuse() {
+    let bon = encoder_rendue(&une_rendue(Portee::ToutLeCompte, false));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    let ajoute = texte.replacen(
+        r#""revoquee":false"#,
+        r#""etiquette":"x","revoquee":false"#,
+        1,
+    );
+    assert!(matches!(
+        AutorisationRendue::decoder(ajoute.as_bytes()),
+        Err(Erreur::ChampInconnu { .. })
+    ));
+}
+
+#[test]
+fn ce_qui_n_est_pas_un_objet_est_refuse() {
+    for brut in [b"".as_slice(), b"[]", b"{", br#"{"autorisation":}"#] {
+        assert!(AutorisationRendue::decoder(brut).is_err(), "{brut:?}");
+    }
+}
+
+#[test]
+fn ce_qui_suit_l_objet_est_refuse() {
+    let bon = encoder_rendue(&une_rendue(Portee::ToutLeCompte, false));
+    let mut trop = bon.clone();
+    trop.extend_from_slice(b" et la suite");
+    assert!(AutorisationRendue::decoder(&trop).is_err());
+}
+
+#[test]
+fn un_tampon_trop_petit_se_dit_pour_une_autorisation_rendue() {
+    let mut sortie = [0_u8; 8];
+    assert_eq!(
+        une_rendue(Portee::ToutLeCompte, false).encoder(&mut sortie),
+        Err(Erreur::TamponTropPetit)
+    );
+}
+
+#[test]
+fn chaque_champ_exige_son_genre_et_sa_forme() {
+    // **CHAQUE `?` DE CE DÉCODEUR EST UN REFUS QUE QUELQU'UN DÉCLENCHERA.** Les
+    // laisser inatteints reviendrait à croire éprouvé ce que personne n'a lu.
+    let bon = encoder_rendue(&une_rendue(Portee::ToutLeCompte, false));
+    let texte = core::str::from_utf8(&bon).unwrap().to_owned();
+    let modele = une_rendue(Portee::ToutLeCompte, false);
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0x66; 16]);
+
+    // Un genre qui ne convient pas, champ par champ.
+    for (champ, attendu) in [
+        ("autorisation", modele.autorisation),
+        ("par", modele.par),
+        ("a", modele.a),
+    ] {
+        let faux = texte.replacen(
+            &format!(r#""{champ}":"{}""#, attendu.texte().as_str()),
+            &format!(r#""{champ}":"{}""#, machine.texte().as_str()),
+            1,
+        );
+        assert!(
+            matches!(
+                AutorisationRendue::decoder(faux.as_bytes()),
+                Err(Erreur::IdentifiantInvalide { .. })
+            ),
+            "{champ} : {faux}"
+        );
+    }
+
+    // Chaque champ, retiré, se nomme.
+    for (champ, morceau) in [
+        (
+            "autorisation",
+            format!(
+                r#""autorisation":"{}","#,
+                modele.autorisation.texte().as_str()
+            ),
+        ),
+        (
+            "par",
+            format!(r#""par":"{}","#, modele.par.texte().as_str()),
+        ),
+        ("a", format!(r#""a":"{}","#, modele.a.texte().as_str())),
+    ] {
+        let ampute = texte.replacen(&morceau, "", 1);
+        assert_eq!(
+            AutorisationRendue::decoder(ampute.as_bytes()),
+            Err(Erreur::ChampManquant { nom: champ }),
+            "{ampute}"
+        );
+    }
+}
+
+#[test]
+fn une_ponctuation_manquante_est_refusee() {
+    let bon = encoder_rendue(&une_rendue(Portee::ToutLeCompte, false));
+    let texte = core::str::from_utf8(&bon).unwrap().to_owned();
+
+    // Les deux-points après une clé.
+    let sans = texte.replacen(r#""revoquee":"#, r#""revoquee""#, 1);
+    assert!(
+        AutorisationRendue::decoder(sans.as_bytes()).is_err(),
+        "{sans}"
+    );
+
+    // L'accolade fermante.
+    let ouvert = texte.trim_end_matches('}').to_owned();
+    assert!(
+        AutorisationRendue::decoder(ouvert.as_bytes()).is_err(),
+        "{ouvert}"
+    );
+}
+
+#[test]
+fn une_portee_illisible_est_refusee() {
+    let bon = encoder_rendue(&une_rendue(Portee::ToutLeCompte, false));
+    let texte = core::str::from_utf8(&bon).unwrap().to_owned();
+
+    // Pas une chaîne.
+    let nombre = texte.replacen(r#""portee":"tout""#, r#""portee":7"#, 1);
+    assert!(
+        AutorisationRendue::decoder(nombre.as_bytes()).is_err(),
+        "{nombre}"
+    );
+
+    // Un genre qui ne délimite rien : un compte n'est pas une portée.
+    let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0x77; 16]);
+    let faux = texte.replacen(
+        r#""portee":"tout""#,
+        &format!(r#""portee":"{}""#, compte.texte().as_str()),
+        1,
+    );
+    assert!(
+        matches!(
+            AutorisationRendue::decoder(faux.as_bytes()),
+            Err(Erreur::IdentifiantInvalide { .. })
+        ),
+        "{faux}"
+    );
+}

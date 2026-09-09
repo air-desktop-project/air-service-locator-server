@@ -106,6 +106,20 @@ const SERVICES_PAR_NOM: TableDefinition<'_, &[u8], &[u8]> =
 const AUTORISATIONS: TableDefinition<'_, &[u8], &[u8; AUTORISATION_OCTETS]> =
     TableDefinition::new("autorisations");
 
+/// L'index des machines d'un compte : `compte ‖ machine`.
+///
+/// # POURQUOI IL A FALLU L'AJOUTER
+///
+/// `MACHINES` est indexée par machine, et porte son propriétaire à l'intérieur.
+/// Répondre à « quelles sont les machines de ce compte ? » demandait donc de
+/// balayer TOUTES les machines de l'annuaire — un balayage qui grandit avec
+/// l'annuaire entier, quand la réponse ne dépend que d'un compte.
+///
+/// C'est la même forme que [`SERVICES_PAR_NOM`] : le compte en tête fait que ses
+/// machines se suivent, donc qu'un intervalle remplace un balayage.
+const MACHINES_PAR_COMPTE: TableDefinition<'_, &[u8], &[u8]> =
+    TableDefinition::new("machines-par-compte");
+
 /// L'index des autorisations reçues : `bénéficiaire ‖ autorisation`.
 ///
 /// **C'EST LE SENS DANS LEQUEL ON INTERROGE.** Une résolution demande « ce
@@ -113,6 +127,26 @@ const AUTORISATIONS: TableDefinition<'_, &[u8], &[u8; AUTORISATION_OCTETS]> =
 /// donneur obligerait à tout balayer pour répondre à la question qu'on pose.
 const AUTORISATIONS_RECUES: TableDefinition<'_, &[u8], &[u8]> =
     TableDefinition::new("autorisations-recues");
+
+/// L'index des autorisations accordées : `donneur ‖ autorisation`.
+///
+/// # LE SECOND SENS, QUE LA RÉSOLUTION N'AVAIT PAS BESOIN DE CONNAÎTRE
+///
+/// [`AUTORISATIONS_RECUES`] dit pourquoi l'on indexe par bénéficiaire : c'est le
+/// sens dans lequel une résolution interroge. **`GET /v1/autorisations` demande
+/// les DEUX** (`protocole.md` §2.2) — « ce que j'ai accordé, ce qu'on m'a
+/// accordé » —, et le premier n'avait aucun index.
+///
+/// # CETTE TABLE EST NEUVE, ET RIEN NE LA REMPLIT RÉTROACTIVEMENT
+///
+/// Une autorisation posée avant ce commit n'y figure pas : elle se lira encore
+/// par son identifiant et par le sens « reçue », mais pas dans « accordées ».
+///
+/// **C'EST SANS CONSÉQUENCE PARCE QUE RIEN N'EST DÉPLOYÉ**, et cela ne le serait
+/// plus après la bascule. Le jour où une table s'ajoutera à un annuaire qui
+/// tourne, il faudra une reprise — et elle ne s'improvise pas.
+const AUTORISATIONS_ACCORDEES: TableDefinition<'_, &[u8], &[u8]> =
+    TableDefinition::new("autorisations-accordees");
 
 /// Le journal des requêtes (C18).
 const JOURNAL: TableDefinition<'_, &[u8], &[u8; ENTREE_OCTETS]> = TableDefinition::new("journal");
@@ -224,9 +258,25 @@ fn clef_de_nom(machine: Identifiant, nom: &[u8]) -> Vec<u8> {
 /// elle, deux autorisations au même compte s'écraseraient, et l'on n'en verrait
 /// qu'une — celle qui, par malchance, n'accorderait pas ce qu'il fallait.
 fn clef_recue(beneficiaire: Identifiant, autorisation: Identifiant) -> Vec<u8> {
-    let mut composee = clef(beneficiaire).to_vec();
-    composee.extend_from_slice(&clef(autorisation));
+    paire(beneficiaire, autorisation)
+}
+
+/// Une clé d'index : ce par quoi l'on cherche, puis ce qu'on trouve.
+///
+/// **L'ORDRE EST TOUT** : le premier membre en tête fait que ses entrées se
+/// suivent, donc qu'un intervalle remplace un balayage.
+fn paire(par_quoi: Identifiant, quoi: Identifiant) -> Vec<u8> {
+    let mut composee = clef(par_quoi).to_vec();
+    composee.extend_from_slice(&clef(quoi));
     composee
+}
+
+/// Les bornes d'un intervalle qui couvre tout ce qui commence par cette clé.
+fn intervalle(par_quoi: Identifiant) -> ([u8; IDENTIFIANT_OCTETS], Vec<u8>) {
+    let debut = clef(par_quoi);
+    let mut fin = debut.to_vec();
+    fin.push(0xFF);
+    (debut, fin)
 }
 
 // ── L'entrepôt ──────────────────────────────────────────────────────────────
@@ -370,6 +420,15 @@ impl Entrepot {
         {
             let mut machines = ecriture.open_table(MACHINES)?;
             machines.insert(clef(qui).as_slice(), &octets)?;
+            // **LE PROPRIÉTAIRE NE CHANGE JAMAIS** : une machine qu'on
+            // réécrirait pour un autre compte serait une autre machine. Il n'y a
+            // donc pas d'ancienne entrée d'index à retirer, contrairement à
+            // l'alias d'un compte ou au nom d'un service.
+            let mut par_compte = ecriture.open_table(MACHINES_PAR_COMPTE)?;
+            par_compte.insert(
+                paire(machine.proprietaire, qui).as_slice(),
+                clef(qui).as_slice(),
+            )?;
         }
         ecriture.commit()?;
         Ok(())
@@ -392,6 +451,130 @@ impl Entrepot {
     }
 
     // ── Les services ────────────────────────────────────────────────────────
+
+    /// Les machines d'un compte, avec leur identifiant.
+    ///
+    /// **UN INTERVALLE, ET NON UN BALAYAGE** — voir [`MACHINES_PAR_COMPTE`].
+    ///
+    /// # Erreurs
+    ///
+    /// [`Faute::Base`], [`Faute::Enregistrement`].
+    pub fn machines_de_compte(
+        &self,
+        compte: Identifiant,
+    ) -> Result<Vec<(Identifiant, Machine)>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let index = lecture.open_table(MACHINES_PAR_COMPTE)?;
+        let table = lecture.open_table(MACHINES)?;
+
+        let (debut, fin) = intervalle(compte);
+        let mut trouvees = Vec::new();
+        for entree in index.range(debut.as_slice()..fin.as_slice())? {
+            let (_, valeur) = entree?;
+            let quelle = depuis_clef(valeur.value())?;
+            if let Some(brute) = table.get(valeur.value())? {
+                trouvees.push((
+                    quelle,
+                    Machine::lire(brute.value()).map_err(Faute::Enregistrement)?,
+                ));
+            }
+        }
+        Ok(trouvees)
+    }
+
+    /// Les services d'une machine, avec leur identifiant.
+    ///
+    /// **UN INTERVALLE, ET NON UN BALAYAGE** : [`SERVICES_PAR_NOM`] range la
+    /// machine en tête, précisément pour que « tous les services de cette
+    /// machine » en soit un.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Faute::Base`], [`Faute::Enregistrement`].
+    pub fn services_de_machine(
+        &self,
+        machine: Identifiant,
+    ) -> Result<Vec<(Identifiant, Service)>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let index = lecture.open_table(SERVICES_PAR_NOM)?;
+        let table = lecture.open_table(SERVICES)?;
+
+        let (debut, fin) = intervalle(machine);
+        let mut trouves = Vec::new();
+        for entree in index.range(debut.as_slice()..fin.as_slice())? {
+            let (_, valeur) = entree?;
+            let quel = depuis_clef(valeur.value())?;
+            if let Some(brut) = table.get(valeur.value())? {
+                trouves.push((
+                    quel,
+                    Service::lire(brut.value()).map_err(Faute::Enregistrement)?,
+                ));
+            }
+        }
+        Ok(trouves)
+    }
+
+    /// Les autorisations qu'un compte a ACCORDÉES, avec leur identifiant.
+    ///
+    /// **RÉVOQUÉES COMPRISES** : `protocole.md` §2.2 veut que l'écran montre ce
+    /// qu'on a retiré. Les filtrer ici les rendrait invisibles à l'application
+    /// qui vient de les retirer.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Faute::Base`], [`Faute::Enregistrement`].
+    pub fn autorisations_accordees(
+        &self,
+        par: Identifiant,
+    ) -> Result<Vec<(Identifiant, Autorisation)>, Faute> {
+        self.autorisations_par(AUTORISATIONS_ACCORDEES, par)
+    }
+
+    /// Les autorisations qu'un compte a REÇUES, avec leur identifiant.
+    ///
+    /// [`autorisations_recues`](Entrepot::autorisations_recues) rend les mêmes
+    /// enregistrements sans leur identifiant : c'est tout ce dont une résolution
+    /// a besoin. **Une liste, elle, doit pouvoir se désigner** — c'est
+    /// l'identifiant qu'on passe à `DELETE /v1/autorisations/{g}`.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Faute::Base`], [`Faute::Enregistrement`].
+    pub fn autorisations_recues_nommees(
+        &self,
+        a: Identifiant,
+    ) -> Result<Vec<(Identifiant, Autorisation)>, Faute> {
+        self.autorisations_par(AUTORISATIONS_RECUES, a)
+    }
+
+    /// Le corps commun des deux sens.
+    ///
+    /// **ÉCRIT UNE FOIS, EMPLOYÉ DEUX** : deux copies de ce parcours finiraient
+    /// par diverger, et c'est celle qu'on oublie de corriger qui rendrait un sens
+    /// faux.
+    fn autorisations_par(
+        &self,
+        index: TableDefinition<'_, &[u8], &[u8]>,
+        compte: Identifiant,
+    ) -> Result<Vec<(Identifiant, Autorisation)>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let index = lecture.open_table(index)?;
+        let table = lecture.open_table(AUTORISATIONS)?;
+
+        let (debut, fin) = intervalle(compte);
+        let mut trouvees = Vec::new();
+        for entree in index.range(debut.as_slice()..fin.as_slice())? {
+            let (_, valeur) = entree?;
+            let quelle = depuis_clef(valeur.value())?;
+            if let Some(brute) = table.get(valeur.value())? {
+                trouvees.push((
+                    quelle,
+                    Autorisation::lire(brute.value()).map_err(Faute::Enregistrement)?,
+                ));
+            }
+        }
+        Ok(trouvees)
+    }
 
     /// Écrit ce service, et met son index de nom d'accord avec lui.
     ///
@@ -489,6 +672,13 @@ impl Entrepot {
             // à l'alias d'un compte ou au nom d'un service.
             recues.insert(
                 clef_recue(autorisation.a, quelle).as_slice(),
+                clef_autorisation.as_slice(),
+            )?;
+            // L'autre sens, pour `GET /v1/autorisations`. Même remarque : le
+            // donneur ne change pas plus que le bénéficiaire.
+            let mut accordees = ecriture.open_table(AUTORISATIONS_ACCORDEES)?;
+            accordees.insert(
+                paire(autorisation.par, quelle).as_slice(),
                 clef_autorisation.as_slice(),
             )?;
         }

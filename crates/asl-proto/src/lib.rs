@@ -136,6 +136,23 @@ pub const POINTS_MAX: usize = 8;
 /// IPv4 privée, parfois une seconde interface.
 pub const ADRESSES_MAX: usize = 8;
 
+/// Le nombre maximal d'éléments dans une liste.
+///
+/// # POURQUOI UNE BORNE, ET POURQUOI CELLE-CI
+///
+/// Les verbes de liste rendent ce qu'un demandeur a le droit de voir. Sans
+/// borne, un compte qui aurait mille machines ferait composer un mébioctet en
+/// mémoire, sur une boucle qui n'a qu'une tâche.
+///
+/// **SOIXANTE-QUATRE, PARCE QUE C'EST LE PRODUIT** : `protocole.md` §3 décrit
+/// « le même daemon sur cinq machines », et un compte personnel n'en a pas mille.
+///
+/// Le jour où l'un en aura, ce sera une PAGINATION à écrire — et une pagination
+/// se conçoit, elle ne s'improvise pas sous la pression d'un débordement. En
+/// attendant, une liste tronquée serait pire qu'un refus : elle mentirait par
+/// omission, et le demandeur croirait avoir tout vu.
+pub const LISTE_MAX: usize = 64;
+
 // ── Les erreurs ─────────────────────────────────────────────────────────────
 
 /// Ce qui peut clocher dans une valeur du protocole.
@@ -351,6 +368,20 @@ pub enum Erreur {
         /// Où.
         position: usize,
     },
+    /// Une liste ne se lit pas : crochet manquant, virgule égarée, imbrication
+    /// qui ne se referme pas.
+    ListeMalFormee {
+        /// Où le parcours s'est arrêté.
+        position: usize,
+    },
+    /// Une liste porte plus d'éléments que [`LISTE_MAX`].
+    ///
+    /// **Ce n'est pas une pagination**, et le refus est délibéré : voir
+    /// [`cadrage::Liste`].
+    TropDElements {
+        /// Combien on en a comptés avant de s'arrêter.
+        obtenu: usize,
+    },
 }
 
 impl fmt::Display for Erreur {
@@ -464,6 +495,15 @@ impl fmt::Display for Erreur {
                     f,
                     "champ hors de propos pour ce verdict, en position {position}"
                 )
+            }
+            Self::ListeMalFormee { position } => {
+                write!(
+                    f,
+                    "la liste ne se lit pas, à partir de la position {position}"
+                )
+            }
+            Self::TropDElements { obtenu } => {
+                write!(f, "{obtenu} éléments, maximum {LISTE_MAX}")
             }
             Self::CandidatInvalide { position } => {
                 write!(f, "couple adresse/port illisible en position {position}")

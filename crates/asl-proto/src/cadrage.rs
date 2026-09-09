@@ -333,6 +333,23 @@ impl<'a> Lecteur<'a> {
         Ok(texte)
     }
 
+    /// Consomme ce mot s'il est là, et dit si c'était le cas.
+    ///
+    /// # POURQUOI CE N'EST PAS UN `Result`
+    ///
+    /// Un appelant qui cherche `true` puis `false` essaie les deux : le premier
+    /// échec n'est pas une faute, c'est une réponse. Rendre une `Erreur` ici
+    /// l'obligerait à la jeter, et une erreur qu'on jette est une erreur qu'on
+    /// finit par jeter ailleurs, où elle comptait.
+    pub fn mot(&mut self, attendu: &str) -> bool {
+        let fin = self.position.saturating_add(attendu.len());
+        if self.octets.get(self.position..fin) != Some(attendu.as_bytes()) {
+            return false;
+        }
+        self.position = fin;
+        true
+    }
+
     /// Lit un entier non signé.
     ///
     /// **Une seule écriture par nombre** : pas de signe, pas de zéro en tête,
@@ -1424,5 +1441,260 @@ impl<'a> Poussee<'a> {
         ecrivain.pousser(b"]}");
 
         ecrivain.achever()
+    }
+}
+
+// ── Les listes ──────────────────────────────────────────────────────────────
+
+/// Compose un tableau à partir d'éléments DÉJÀ ENCODÉS.
+///
+/// # LA LISTE EST LE MÊME OBJET, RÉPÉTÉ
+///
+/// `GET /v1/ou?service=` et `GET /v1/machines/{m}/services` rendent tous deux
+/// des [`Reponse`](crate::Reponse) — le premier une par instance du nom, le
+/// second une par service de la machine. **Ce sont les mêmes objets que rend la
+/// forme par machine**, et c'est ce qui permet aux cinq liaisons de n'avoir
+/// qu'un lecteur : une forme propre aux listes aurait demandé un second
+/// décodeur, écrit cinq fois.
+///
+/// # ELLE NE VALIDE PAS CE QU'ON LUI DONNE, ET C'EST DÉLIBÉRÉ
+///
+/// Les éléments viennent d'un encodeur de cette même crate, quelques
+/// instructions plus haut. Les relire pour vérifier qu'ils sont bien formés
+/// coûterait un analyseur complet à chaque composition, pour se défendre contre
+/// une faute qui serait la nôtre — et que les essais de l'encodeur attrapent
+/// déjà.
+///
+/// Ce qui vient du RÉSEAU, lui, passe par [`elements`], qui valide.
+pub struct Liste<'a> {
+    ecrivain: Ecrivain<'a>,
+    combien: usize,
+}
+
+impl<'a> Liste<'a> {
+    /// Une liste vide, sur cette tranche.
+    #[must_use]
+    pub fn nouvelle(sortie: &'a mut [u8]) -> Self {
+        let mut ecrivain = Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"[");
+        Self {
+            ecrivain,
+            combien: 0,
+        }
+    }
+
+    /// Ajoute un élément déjà encodé.
+    ///
+    /// **AU-DELÀ DE [`LISTE_MAX`](crate::LISTE_MAX), L'ÉLÉMENT EST REFUSÉ ET LA
+    /// LISTE SE SOUVIENT.** Elle ne tronque pas en silence : [`achever`] rendra
+    /// [`Erreur::TropDElements`]. Une liste tronquée mentirait par omission, et
+    /// le demandeur croirait avoir tout vu.
+    ///
+    /// [`achever`]: Liste::achever
+    pub fn ajouter(&mut self, element: &[u8]) {
+        self.combien = self.combien.saturating_add(1);
+        if self.combien > crate::LISTE_MAX {
+            return;
+        }
+        if self.combien > 1 {
+            self.ecrivain.pousser(b",");
+        }
+        self.ecrivain.pousser(element);
+    }
+
+    /// Combien d'éléments ont été présentés — y compris ceux qui débordent.
+    #[must_use]
+    pub const fn combien(&self) -> usize {
+        self.combien
+    }
+
+    /// Ferme la liste et rend le nombre d'octets écrits.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TropDElements`], [`Erreur::TamponTropPetit`].
+    pub fn achever(mut self) -> Result<usize, Erreur> {
+        if self.combien > crate::LISTE_MAX {
+            return Err(Erreur::TropDElements {
+                obtenu: self.combien,
+            });
+        }
+        self.ecrivain.pousser(b"]");
+        self.ecrivain.achever()
+    }
+}
+
+/// Les éléments d'un tableau encodé, sans les décoder.
+///
+/// # POURQUOI DÉCOUPER PLUTÔT QUE DÉCODER
+///
+/// Chaque élément est un message que [`Reponse::decoder`](crate::Reponse::decoder)
+/// sait lire, et qui a besoin de SES tampons. Les décoder tous d'un coup
+/// demanderait autant de jeux de tampons qu'il y a d'éléments — soixante-quatre
+/// fois [`TamponsReponse`], sur une pile.
+///
+/// Découper rend des tranches ; l'appelant décode celle qu'il veut, quand il
+/// veut, avec un seul jeu de tampons réemployé.
+///
+/// # CE QU'IL VALIDE, ET CE QU'IL NE VALIDE PAS
+///
+/// Il valide la STRUCTURE du tableau : les crochets, les virgules,
+/// l'imbrication, les chaînes et leurs échappements. Il ne regarde pas dans les
+/// éléments — c'est le travail du décodeur de chacun.
+///
+/// # Erreurs
+///
+/// [`Erreur::MessageTropLong`], [`Erreur::ListeMalFormee`],
+/// [`Erreur::TropDElements`].
+pub fn elements(octets: &[u8]) -> Result<impl Iterator<Item = &[u8]>, Erreur> {
+    if octets.len() > MESSAGE_MAX {
+        return Err(Erreur::MessageTropLong {
+            obtenue: octets.len(),
+        });
+    }
+
+    let mut tranches: [&[u8]; crate::LISTE_MAX] = [&[]; crate::LISTE_MAX];
+    let mut combien = 0_usize;
+
+    let mut lecteur = Lecteur::nouveau(octets);
+    lecteur.sauter_blancs();
+    if lecteur.regarder() != Some(b'[') {
+        return Err(Erreur::ListeMalFormee {
+            position: lecteur.position(),
+        });
+    }
+    lecteur.avancer();
+    lecteur.sauter_blancs();
+
+    if lecteur.regarder() == Some(b']') {
+        lecteur.avancer();
+        lecteur.fin()?;
+        return Ok(tranches.into_iter().take(0));
+    }
+
+    loop {
+        lecteur.sauter_blancs();
+        let debut = lecteur.position();
+        sauter_une_valeur(&mut lecteur)?;
+        let fin = lecteur.position();
+
+        // **CE CHEMIN NE PEUT PAS ÉCHOUER** : `debut` et `fin` viennent du même
+        // lecteur, sur les mêmes octets, et `sauter_une_valeur` n'avance jamais
+        // au-delà. Le repli est le vide, et un élément vide ne se décode pas.
+        let tranche = octets.get(debut..fin).unwrap_or(&[]);
+
+        match tranches.get_mut(combien) {
+            Some(place) => *place = tranche,
+            // **ON S'ARRÊTE AU LIEU DE TRONQUER.** Voir [`Liste::ajouter`].
+            None => {
+                return Err(Erreur::TropDElements {
+                    obtenu: combien.saturating_add(1),
+                });
+            }
+        }
+        combien = combien.saturating_add(1);
+
+        lecteur.sauter_blancs();
+        match lecteur.regarder() {
+            Some(b',') => lecteur.avancer(),
+            Some(b']') => {
+                lecteur.avancer();
+                break;
+            }
+            _ => {
+                return Err(Erreur::ListeMalFormee {
+                    position: lecteur.position(),
+                });
+            }
+        }
+    }
+
+    lecteur.fin()?;
+    Ok(tranches.into_iter().take(combien))
+}
+
+/// Avance le lecteur au-delà d'une valeur, sans l'interpréter.
+///
+/// # LES CHAÎNES SONT SUIVIES, ET C'EST TOUT L'ENJEU
+///
+/// Un `}` à l'intérieur d'une chaîne ne ferme rien. Un découpage qui compterait
+/// naïvement les accolades couperait un élément en deux au premier nom de
+/// service qui en contient une — et rendrait deux moitiés qui ne se décodent
+/// pas, ou pire, qui se décodent en autre chose.
+fn sauter_une_valeur(lecteur: &mut Lecteur<'_>) -> Result<(), Erreur> {
+    let mal_formee = |lecteur: &Lecteur<'_>| Erreur::ListeMalFormee {
+        position: lecteur.position(),
+    };
+
+    let mut profondeur = 0_usize;
+    let debut = lecteur.position();
+
+    loop {
+        let Some(octet) = lecteur.regarder() else {
+            return Err(mal_formee(lecteur));
+        };
+
+        match octet {
+            b'"' => sauter_une_chaine(lecteur)?,
+            b'{' | b'[' => {
+                profondeur = profondeur.saturating_add(1);
+                lecteur.avancer();
+            }
+            b'}' | b']' => {
+                if profondeur == 0 {
+                    // Un `]` qui ferme le tableau alors qu'on cherchait une
+                    // valeur : c'est une virgule en trop chez l'émetteur.
+                    return Err(mal_formee(lecteur));
+                }
+                profondeur = profondeur.saturating_sub(1);
+                lecteur.avancer();
+                if profondeur == 0 {
+                    return Ok(());
+                }
+            }
+            b',' if profondeur == 0 => {
+                // Une valeur nue — un nombre, `true` — se termine à la virgule.
+                return if lecteur.position() == debut {
+                    Err(mal_formee(lecteur))
+                } else {
+                    Ok(())
+                };
+            }
+            _ => lecteur.avancer(),
+        }
+
+        if profondeur == 0 && lecteur.position() > debut && lecteur.regarder() == Some(b']') {
+            return Ok(());
+        }
+    }
+}
+
+/// Avance au-delà d'une chaîne, échappements compris.
+fn sauter_une_chaine(lecteur: &mut Lecteur<'_>) -> Result<(), Erreur> {
+    lecteur.avancer();
+    loop {
+        match lecteur.regarder() {
+            None => {
+                return Err(Erreur::ListeMalFormee {
+                    position: lecteur.position(),
+                });
+            }
+            // **UN `\"` NE FERME PAS LA CHAÎNE**, et un `\\` juste avant le
+            // guillemet, si. C'est la seule subtilité de ce parcours.
+            Some(b'\\') => {
+                lecteur.avancer();
+                if lecteur.regarder().is_none() {
+                    return Err(Erreur::ListeMalFormee {
+                        position: lecteur.position(),
+                    });
+                }
+                lecteur.avancer();
+            }
+            Some(b'"') => {
+                lecteur.avancer();
+                return Ok(());
+            }
+            Some(_) => lecteur.avancer(),
+        }
     }
 }

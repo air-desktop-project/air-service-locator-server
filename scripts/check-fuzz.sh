@@ -89,6 +89,7 @@ fuzz_asl_id_aller_retour identifiant
 fuzz_asl_proto_valeurs valeurs
 fuzz_asl_proto_annonce valeurs
 fuzz_asl_proto_cadrage cadrage
+fuzz_asl_proto_liste liste
 fuzz_asl_proto_reponse reponse
 fuzz_asl_proto_poussee poussee
 fuzz_asl_annuaire_session session

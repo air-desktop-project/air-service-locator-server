@@ -126,6 +126,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_asl_proto_liste"
+path = "fuzz_targets/fuzz_asl_proto_liste.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_asl_proto_reponse"
 path = "fuzz_targets/fuzz_asl_proto_reponse.rs"
 test = false

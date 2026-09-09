@@ -78,7 +78,9 @@ extern crate alloc;
 
 use ams_h3::Reponse;
 use ams_proto_http::{Method, RequestHead, StatusCode};
-use asl_api::corps::{Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation, Portee};
+use asl_api::corps::{
+    AutorisationRendue, Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation, Portee,
+};
 use asl_api::{Exigence, Ressource};
 use asl_cle::{ClePublique, Defi, LiaisonDeCanal, Signature};
 use asl_cle::{CodeEnrolement, TexteCode};
@@ -201,6 +203,36 @@ pub enum Besoin<'a> {
         /// Le nom du service.
         service: &'a str,
     },
+    /// Toutes les instances d'un service portant ce nom.
+    ///
+    /// # C'EST LA FORME QUE LE PRODUIT EMPLOIE
+    ///
+    /// `protocole.md` §3 : « le scénario du produit n'est pas *un service* mais
+    /// *le même daemon sur cinq machines* ». Demander une machine à la fois
+    /// obligerait le demandeur à connaître les cinq identifiants, **et à les
+    /// tenir à jour quand on en ajoute une sixième**.
+    ///
+    /// Ce besoin en cache autant que [`Besoin::Ou`], multiplié par le nombre
+    /// d'instances : l'étage 3 rassemble une [`Resolution`] par candidat, et
+    /// c'est ici qu'on décide, une par une, laquelle se rend.
+    OuParNom {
+        /// Le nom cherché.
+        service: &'a str,
+    },
+    /// Les services d'une machine, avec leur état.
+    ///
+    /// **CE N'EST PAS LE MÊME PUBLIC QUE [`Besoin::Ou`]** : celui-là est parlé
+    /// par une machine qui cherche un port, celui-ci par l'application mobile
+    /// qui regarde SES machines. D'où deux exigences différentes — une clé de
+    /// machine là-bas, un appareil ici.
+    ServicesDeMachine {
+        /// La machine dont on veut les services.
+        machine: Identifiant,
+    },
+    /// Les autorisations d'un compte, **dans les deux sens**.
+    ///
+    /// `protocole.md` §2.2 : « ce que j'ai accordé, ce qu'on m'a accordé ».
+    MesAutorisations,
     /// Une preuve de possession a été présentée, et elle ne vaut pas.
     ///
     /// # POURQUOI CE N'EST PAS UN `Deja(401)`
@@ -353,6 +385,42 @@ pub enum Trouvaille {
     Cle(ClePublique),
     /// De quoi décider d'une résolution.
     Resolution(Resolution),
+    /// De quoi décider d'une LISTE de résolutions.
+    ///
+    /// # POURQUOI UNE LISTE DE `Resolution`, ET NON UNE LISTE DE RÉPONSES
+    ///
+    /// Parce que la décision n'est pas prise. L'étage 3 rassemble tout ce qui
+    /// PORTE le nom cherché — ou tout ce que porte la machine visée —, et c'est
+    /// ici, une par une, qu'`asl_auth::decider_resolution` dit lesquelles se
+    /// rendent.
+    ///
+    /// **Ce qui est écarté ne laisse aucune trace.** Contrairement à la forme
+    /// par machine, qui rend `404` aussi bien pour « absent » que pour
+    /// « interdit », une liste OMET — et l'omission ne dit rien de ce qu'elle
+    /// omet. C'est C10 servie par la forme même de la réponse.
+    Resolutions(alloc::vec::Vec<Resolution>),
+    /// Les services d'une machine, et de quoi décider s'ils se rendent.
+    ///
+    /// # POURQUOI CE N'EST PAS UNE [`Trouvaille::Resolutions`]
+    ///
+    /// Le demandeur n'est pas une machine : c'est un APPAREIL, et
+    /// `asl_auth::Machine` ne sait pas le représenter. La décision n'est donc pas
+    /// la même — [`asl_auth::decider_services_de_machine`], qui ne regarde
+    /// aucune autorisation.
+    ServicesDeMachine {
+        /// Le compte de l'appareil qui demande.
+        demandeur: Identifiant,
+        /// Le compte qui possède la machine visée.
+        proprietaire: Identifiant,
+        /// Ce que chaque service annonce, déjà encodé.
+        annonces: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+    },
+    /// Les autorisations d'un compte, dans les deux sens.
+    ///
+    /// **RÉVOQUÉES COMPRISES, ET MARQUÉES.** Même raison qu'un appareil révoqué
+    /// (`protocole.md` §2.2) : l'écran qu'on regarde après avoir retiré un accès
+    /// doit montrer ce qu'on a retiré.
+    Autorisations(alloc::vec::Vec<AutorisationRendue>),
     /// L'annonce a été prise, et voici ce qu'il faut répondre.
     ///
     /// Le corps est déjà encodé par `asl_proto::Reponse` — l'étage 3 l'a
@@ -602,6 +670,10 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
             machine,
             service: service.as_str(),
         },
+        Ressource::OuParNom { service } => Besoin::OuParNom {
+            service: service.as_str(),
+        },
+        Ressource::ServicesMachine { machine } => Besoin::ServicesDeMachine { machine },
         Ressource::Comptes => lire_creation_de_compte(session, corps),
         Ressource::Appareils => lire_creation_d_appareil(corps),
         Ressource::Machines => match DeclarationMachine::decoder(corps) {
@@ -613,12 +685,24 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         },
         Ressource::EnrolementMachine { machine } => Besoin::NouveauCode { machine },
         Ressource::Enrolement => lire_un_enrolement(session, corps),
-        Ressource::Autorisations => match DemandeAutorisation::decoder(corps) {
-            Ok(demande) => Besoin::Autoriser {
-                a: demande.a,
-                portee: demande.portee,
+        // **DEUX VERBES, DEUX BESOINS.** Le routage sert `GET` et `POST` sur
+        // cette ressource depuis toujours ; la répartition, elle, ne regardait
+        // que la ressource. Un `GET /v1/autorisations` — la forme que
+        // `protocole.md` §2.2 décrit — tombait donc dans le décodeur d'une
+        // demande, sur un corps vide, et rendait `400`.
+        //
+        // **`400` ÉTAIT PIRE QU'UN `501`** : il disait « votre requête est mal
+        // formée » à une requête parfaite, et envoyait chercher la faute chez
+        // l'appelant.
+        Ressource::Autorisations => match methode {
+            asl_api::Methode::Get => Besoin::MesAutorisations,
+            _ => match DemandeAutorisation::decoder(corps) {
+                Ok(demande) => Besoin::Autoriser {
+                    a: demande.a,
+                    portee: demande.portee,
+                },
+                Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
-            Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
         },
         Ressource::Appareil { appareil } => Besoin::RevoquerAppareil { appareil },
         Ressource::CleMachine { machine } => Besoin::RevoquerCleMachine { machine },
@@ -887,6 +971,41 @@ pub fn repondre<'o>(
             ),
         },
 
+        // ── LES VERBES DE LISTE ─────────────────────────────────────────
+        //
+        // **UNE LISTE VIDE EST UN `200`, ET NON UN `404`.** « Je n'ai rien à te
+        // montrer » et « cette ressource n'existe pas » ne se corrigent pas au
+        // même endroit, et un client qui lirait `404` là où il devait lire `[]`
+        // croirait son appel fautif.
+        //
+        // **ET L'OMISSION NE DIT RIEN DE CE QU'ELLE OMET** (C10). La forme par
+        // machine rend `404` aussi bien pour « absent » que pour « interdit » ;
+        // une liste, elle, se contente de ne pas porter ce qu'on n'a pas le
+        // droit de voir. Personne ne peut compter ce qui manque.
+        Besoin::OuParNom { .. } => match trouvaille {
+            Trouvaille::Resolutions(quoi) => composer_les_resolutions(quoi, sortie),
+            _ => composer_les_resolutions(&alloc::vec::Vec::new(), sortie),
+        },
+
+        Besoin::ServicesDeMachine { .. } => match trouvaille {
+            Trouvaille::ServicesDeMachine {
+                demandeur,
+                proprietaire,
+                annonces,
+            } if asl_auth::decider_services_de_machine(*demandeur, *proprietaire)
+                == asl_auth::Decision::Servir =>
+            {
+                composer_une_liste(annonces, sortie)
+            }
+            // Refusé, ou rien trouvé : un tableau vide, pour la raison ci-dessus.
+            _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
+        },
+
+        Besoin::MesAutorisations => match trouvaille {
+            Trouvaille::Autorisations(quoi) => composer_les_autorisations(quoi, sortie),
+            _ => composer_les_autorisations(&alloc::vec::Vec::new(), sortie),
+        },
+
         // ── CE QUI CRÉE, ET CE QUI DÉPENSE UN DÉFI ──────────────────────
         //
         // Les trois besoins qui portent une preuve de possession consomment le
@@ -920,7 +1039,7 @@ pub fn repondre<'o>(
                     // que le second tour produirait — la clé y est signée, alors
                     // que `/v1/defi` ne signe qu'un identifiant.
                     session.pair = Some(*appareil);
-                    let mut corps = Corps::neuf();
+                    let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
                     corps.pousser(br#"{"compte":""#);
                     corps.pousser(compte.texte().as_str().as_bytes());
                     corps.pousser(br#"","appareil":""#);
@@ -935,7 +1054,7 @@ pub fn repondre<'o>(
             session.consommer_le_defi();
             match trouvaille {
                 Trouvaille::Enrolee(machine) => {
-                    let mut corps = Corps::neuf();
+                    let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
                     corps.pousser(br#"{"machine":""#);
                     corps.pousser(machine.texte().as_str().as_bytes());
                     corps.pousser(br#""}"#);
@@ -948,7 +1067,7 @@ pub fn repondre<'o>(
         }
         Besoin::CreerAppareil { .. } => match trouvaille {
             Trouvaille::AppareilCree(appareil) => {
-                let mut corps = Corps::neuf();
+                let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
                 corps.pousser(br#"{"appareil":""#);
                 corps.pousser(appareil.texte().as_str().as_bytes());
                 corps.pousser(br#""}"#);
@@ -962,7 +1081,7 @@ pub fn repondre<'o>(
                 code,
                 expire_a,
             } => {
-                let mut corps = Corps::neuf();
+                let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
                 corps.pousser(br#"{"machine":""#);
                 corps.pousser(machine.texte().as_str().as_bytes());
                 corps.pousser(br#"","code":""#);
@@ -976,7 +1095,7 @@ pub fn repondre<'o>(
         },
         Besoin::NouveauCode { .. } => match trouvaille {
             Trouvaille::CodeEmis { code, expire_a } => {
-                let mut corps = Corps::neuf();
+                let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
                 corps.pousser(br#"{"code":""#);
                 corps.pousser(code.as_str().as_bytes());
                 corps.pousser(br#"","expire_a":"#);
@@ -988,7 +1107,7 @@ pub fn repondre<'o>(
         },
         Besoin::Autoriser { .. } => match trouvaille {
             Trouvaille::AutorisationCreee(autorisation) => {
-                let mut corps = Corps::neuf();
+                let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
                 corps.pousser(br#"{"autorisation":""#);
                 corps.pousser(autorisation.texte().as_str().as_bytes());
                 corps.pousser(br#""}"#);
@@ -1089,6 +1208,150 @@ const _: () = assert!(
     "un corps de création pourrait être tronqué en silence"
 );
 
+/// Compose un tableau de résolutions, en n'y mettant que ce qui se rend.
+///
+/// # LA DÉCISION EST PRISE ICI, UNE PAR UNE
+///
+/// `asl_auth::decider_resolution` est appelée pour chaque candidat, exactement
+/// comme pour la forme par machine. **La règle « un service ne se rend qu'à qui
+/// y a droit » vit à un seul endroit**, et une liste qui l'aurait réécrite pour
+/// aller plus vite serait celle qui finit par diverger.
+///
+/// Un service DÉCLARÉ mais non annoncé n'entre pas : il n'y a rien à joindre, et
+/// une entrée sans candidat ferait essayer une adresse qui n'existe pas.
+fn composer_les_resolutions<'o>(quoi: &[Resolution], sortie: &'o mut [u8]) -> Reponse<'o> {
+    let mut place = [0_u8; asl_proto::cadrage::MESSAGE_MAX];
+    let combien = {
+        let mut liste = asl_proto::cadrage::Liste::nouvelle(&mut place);
+        for resolution in quoi {
+            if asl_auth::decider_resolution(
+                &resolution.demandeur,
+                &resolution.cible,
+                &resolution.autorisations,
+            ) != asl_auth::Decision::Servir
+            {
+                continue;
+            }
+            if let Some(annonce) = resolution.annonce.as_deref() {
+                liste.ajouter(annonce);
+            }
+        }
+        match liste.achever() {
+            Ok(combien) => combien,
+            // **AU-DELÀ DE LA BORNE, C'EST `500` ET NON UNE LISTE TRONQUÉE.**
+            //
+            // Une liste tronquée mentirait par omission, et le demandeur
+            // croirait avoir tout vu. `asl_proto::LISTE_MAX` porte la raison, et
+            // la pagination qui la remplacera un jour.
+            //
+            // **`500` EST LE MOT JUSTE** : le demandeur n'a rien fait de mal,
+            // c'est nous qui avons plus à dire que notre protocole ne sait
+            // exprimer. Il réessaiera et obtiendra la même chose — ce qui est
+            // exactement ce qu'un `500` veut dire, et ce qui doit remonter
+            // jusqu'à nous.
+            Err(_) => {
+                return composer(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    PROBLEME_MEDIA,
+                    probleme(StatusCode::INTERNAL_SERVER_ERROR),
+                    sortie,
+                );
+            }
+        }
+    };
+    composer(
+        StatusCode::OK,
+        JSON_MEDIA,
+        place.get(..combien).unwrap_or_default(),
+        sortie,
+    )
+}
+
+/// Compose un tableau d'éléments déjà encodés.
+fn composer_une_liste<'o>(quoi: &[alloc::vec::Vec<u8>], sortie: &'o mut [u8]) -> Reponse<'o> {
+    let mut place = [0_u8; asl_proto::cadrage::MESSAGE_MAX];
+    let combien = {
+        let mut liste = asl_proto::cadrage::Liste::nouvelle(&mut place);
+        for element in quoi {
+            liste.ajouter(element);
+        }
+        match liste.achever() {
+            Ok(combien) => combien,
+            // Même raison que dans `composer_les_resolutions`.
+            Err(_) => {
+                return composer(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    PROBLEME_MEDIA,
+                    probleme(StatusCode::INTERNAL_SERVER_ERROR),
+                    sortie,
+                );
+            }
+        }
+    };
+    composer(
+        StatusCode::OK,
+        JSON_MEDIA,
+        place.get(..combien).unwrap_or_default(),
+        sortie,
+    )
+}
+
+/// Compose un tableau d'autorisations, dans les deux sens.
+fn composer_les_autorisations<'o>(
+    quoi: &[AutorisationRendue],
+    sortie: &'o mut [u8],
+) -> Reponse<'o> {
+    let mut place = [0_u8; asl_proto::cadrage::MESSAGE_MAX];
+    let combien = {
+        let mut liste = asl_proto::cadrage::Liste::nouvelle(&mut place);
+        for autorisation in quoi {
+            // **UN CORPS QUI BORNE, ET NON UN `Result` QU'ON JETTE.**
+            //
+            // `AutorisationRendue::encoder` peut rendre `TamponTropPetit` — et
+            // ici il ne le peut PAS : les cinq champs sont de taille connue, et
+            // `AUTORISATION_RENDUE_MAX` porte le calcul qui le démontre.
+            //
+            // Écrire quand même une branche pour ce cas poserait du code que
+            // rien ne peut atteindre, donc que personne n'éprouvera jamais et
+            // que tout le monde croira éprouvé. C'est l'idiome de [`Corps`],
+            // employé ici pour la septième fois.
+            let mut une = Corps::<AUTORISATION_RENDUE_MAX>::neuf();
+            une.pousser_encode(autorisation);
+            liste.ajouter(une.rendu());
+        }
+        match liste.achever() {
+            Ok(combien) => combien,
+            // Même raison que ci-dessus.
+            Err(_) => {
+                return composer(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    PROBLEME_MEDIA,
+                    probleme(StatusCode::INTERNAL_SERVER_ERROR),
+                    sortie,
+                );
+            }
+        }
+    };
+    composer(
+        StatusCode::OK,
+        JSON_MEDIA,
+        place.get(..combien).unwrap_or_default(),
+        sortie,
+    )
+}
+
+/// Ce qu'occupe une autorisation encodée, au plus.
+///
+/// Quatre identifiants de vingt-huit caractères, les noms de champs, la
+/// ponctuation, et `false`. **Démontré plutôt qu'estimé**, comme
+/// [`CREATION_CORPS_MAX`].
+const AUTORISATION_RENDUE_MAX: usize = 256;
+
+const _: () = assert!(
+    AUTORISATION_RENDUE_MAX >= 4 * 28 + 64,
+    "une autorisation rendue pourrait être tronquée en silence"
+);
+
 /// Un corps de création, qui BORNE au lieu d'échouer.
 ///
 /// # POURQUOI PAS `asl_proto::cadrage::Ecrivain`
@@ -1102,24 +1365,24 @@ const _: () = assert!(
 ///
 /// C'est l'idiome de [`rendre_un_compte`], sorti dans un type parce qu'il sert
 /// désormais six fois.
-struct Corps {
-    octets: [u8; CREATION_CORPS_MAX],
+struct Corps<const N: usize> {
+    octets: [u8; N],
     ecrits: usize,
 }
 
-impl Corps {
+impl<const N: usize> Corps<N> {
     /// Un corps vide.
     const fn neuf() -> Self {
         Self {
-            octets: [0; CREATION_CORPS_MAX],
+            octets: [0; N],
             ecrits: 0,
         }
     }
 
     /// Ajoute ces octets, autant qu'il en tient.
     fn pousser(&mut self, quoi: &[u8]) {
-        let debut = self.ecrits.min(CREATION_CORPS_MAX);
-        let fin = debut.saturating_add(quoi.len()).min(CREATION_CORPS_MAX);
+        let debut = self.ecrits.min(N);
+        let fin = debut.saturating_add(quoi.len()).min(N);
         for (place, octet) in self
             .octets
             .get_mut(debut..fin)
@@ -1143,11 +1406,19 @@ impl Corps {
         self.pousser(chiffres.get(..combien).unwrap_or_default());
     }
 
+    /// Encode une autorisation dedans, en bornant.
+    ///
+    /// L'encodeur rend un `Result` parce qu'il ne connaît pas son tampon ; ici
+    /// on le connaît, et `AUTORISATION_RENDUE_MAX` porte la preuve qu'il suffit.
+    fn pousser_encode(&mut self, quoi: &AutorisationRendue) {
+        let mut place = [0_u8; N];
+        let combien = quoi.encoder(&mut place).unwrap_or(0);
+        self.pousser(place.get(..combien).unwrap_or_default());
+    }
+
     /// Ce qui a été écrit.
     fn rendu(&self) -> &[u8] {
-        self.octets
-            .get(..self.ecrits.min(CREATION_CORPS_MAX))
-            .unwrap_or_default()
+        self.octets.get(..self.ecrits.min(N)).unwrap_or_default()
     }
 }
 
@@ -2522,6 +2793,257 @@ mod resolution {
         );
         assert_eq!(reponse.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
+
+    // ── Les verbes de liste ─────────────────────────────────────────────────
+
+    use alloc::vec::Vec;
+    use asl_api::corps::{AutorisationRendue, Portee};
+
+    /// Ce que rend une réponse : son statut et son corps.
+    fn rendu(besoin_: &Besoin<'_>, trouvaille: &Trouvaille) -> (StatusCode, alloc::string::String) {
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 8192];
+        let reponse = repondre(&mut session, besoin_, trouvaille, None, &mut sortie);
+        let statut = reponse.status();
+        let corps = alloc::string::String::from_utf8_lossy(reponse.body()).into_owned();
+        (statut, corps)
+    }
+
+    fn une_autorisation_rendue(marque: u8) -> AutorisationRendue {
+        AutorisationRendue {
+            autorisation: un(Genre::Autorisation, marque),
+            par: un(Genre::Utilisateur, 1),
+            a: un(Genre::Utilisateur, 2),
+            portee: Portee::ToutLeCompte,
+            revoquee: false,
+        }
+    }
+
+    #[test]
+    fn une_liste_vide_est_un_tableau_vide_et_non_un_404() {
+        // **« JE N'AI RIEN À TE MONTRER » ET « CETTE RESSOURCE N'EXISTE PAS » NE
+        // SE CORRIGENT PAS AU MÊME ENDROIT.** Un client qui lirait `404` là où il
+        // devait lire `[]` croirait son appel fautif.
+        for (besoin_, trouvaille) in [
+            (Besoin::OuParNom { service: "depot" }, Trouvaille::Rien),
+            (
+                Besoin::ServicesDeMachine {
+                    machine: un(Genre::Machine, 2),
+                },
+                Trouvaille::Rien,
+            ),
+            (Besoin::MesAutorisations, Trouvaille::Rien),
+        ] {
+            let (statut, corps) = rendu(&besoin_, &trouvaille);
+            assert_eq!(statut, StatusCode::OK, "{besoin_:?}");
+            assert_eq!(corps, "[]", "{besoin_:?}");
+        }
+    }
+
+    #[test]
+    fn une_liste_de_resolutions_n_emporte_que_ce_qui_se_rend() {
+        // **L'OMISSION NE DIT RIEN DE CE QU'ELLE OMET** (C10) : la forme par
+        // machine rend `404` aussi bien pour « absent » que pour « interdit » ;
+        // une liste, elle, se contente de ne pas porter ce qu'on ne peut voir.
+        let moi = un(Genre::Utilisateur, 1);
+        let autre = un(Genre::Utilisateur, 2);
+
+        let quoi = vec![
+            // À moi, et annoncé : elle sort.
+            de_quoi_decider_avec_annonce(moi, moi, vec![]),
+            // À quelqu'un d'autre, sans autorisation : écartée.
+            de_quoi_decider_avec_annonce(moi, autre, vec![]),
+            // À moi, mais rien d'annoncé : rien à joindre, donc rien à rendre.
+            de_quoi_decider(moi, moi, vec![]),
+        ];
+
+        let (statut, corps) = rendu(
+            &Besoin::OuParNom { service: "depot" },
+            &Trouvaille::Resolutions(quoi),
+        );
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(
+            corps, r#"[{"service":"s-abc","joignabilite":[]}]"#,
+            "{corps}"
+        );
+    }
+
+    #[test]
+    fn une_autorisation_fait_entrer_ce_qui_n_est_pas_a_nous() {
+        // La règle est celle d'`asl_auth::decider_resolution`, la MÊME que pour
+        // la forme par machine. Une liste qui l'aurait réécrite pour aller plus
+        // vite serait celle qui finit par diverger.
+        let moi = un(Genre::Utilisateur, 1);
+        let autre = un(Genre::Utilisateur, 2);
+        let accordee =
+            asl_auth::Autorisation::nouvelle(autre, moi, asl_auth::Portee::ToutLeCompte, false)
+                .expect("une autorisation");
+
+        let (_, sans) = rendu(
+            &Besoin::OuParNom { service: "depot" },
+            &Trouvaille::Resolutions(vec![de_quoi_decider_avec_annonce(moi, autre, vec![])]),
+        );
+        assert_eq!(sans, "[]", "sans autorisation, rien ne sort");
+
+        let (_, avec) = rendu(
+            &Besoin::OuParNom { service: "depot" },
+            &Trouvaille::Resolutions(vec![de_quoi_decider_avec_annonce(
+                moi,
+                autre,
+                vec![accordee],
+            )]),
+        );
+        assert!(avec.contains("s-abc"), "{avec}");
+    }
+
+    #[test]
+    fn au_dela_de_la_borne_c_est_500_et_non_une_liste_tronquee() {
+        // **UNE LISTE TRONQUÉE MENTIRAIT PAR OMISSION**, et le demandeur croirait
+        // avoir tout vu. `500` est le mot juste : il n'a rien fait de mal, c'est
+        // nous qui avons plus à dire que notre protocole ne sait exprimer.
+        let moi = un(Genre::Utilisateur, 1);
+        let trop: Vec<Resolution> = (0..=asl_proto::LISTE_MAX)
+            .map(|_| de_quoi_decider_avec_annonce(moi, moi, vec![]))
+            .collect();
+
+        let (statut, _) = rendu(
+            &Besoin::OuParNom { service: "depot" },
+            &Trouvaille::Resolutions(trop),
+        );
+        assert_eq!(statut, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // La même borne, sur les deux autres verbes.
+        let annonces: Vec<Vec<u8>> = (0..=asl_proto::LISTE_MAX).map(|_| b"1".to_vec()).collect();
+        let (statut, _) = rendu(
+            &Besoin::ServicesDeMachine {
+                machine: un(Genre::Machine, 2),
+            },
+            &Trouvaille::ServicesDeMachine {
+                demandeur: moi,
+                proprietaire: moi,
+                annonces,
+            },
+        );
+        assert_eq!(statut, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let beaucoup: Vec<AutorisationRendue> = (0..=asl_proto::LISTE_MAX)
+            .map(|_| une_autorisation_rendue(3))
+            .collect();
+        let (statut, _) = rendu(
+            &Besoin::MesAutorisations,
+            &Trouvaille::Autorisations(beaucoup),
+        );
+        assert_eq!(statut, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn les_services_d_une_machine_ne_se_rendent_qu_a_leur_proprietaire() {
+        // **UNE AUTORISATION DE LECTURE N'OUVRE PAS L'ÉNUMÉRATION D'UN PARC.**
+        // `GET /v1/machines/{m}/services` est l'écran qui montre MES machines ;
+        // le chemin inter-comptes est `GET /v1/ou`.
+        let moi = un(Genre::Utilisateur, 1);
+        let autre = un(Genre::Utilisateur, 2);
+        let annonces = vec![br#"{"service":"s-abc"}"#.to_vec()];
+
+        let (statut, corps) = rendu(
+            &Besoin::ServicesDeMachine {
+                machine: un(Genre::Machine, 2),
+            },
+            &Trouvaille::ServicesDeMachine {
+                demandeur: moi,
+                proprietaire: moi,
+                annonces: annonces.clone(),
+            },
+        );
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(corps, r#"[{"service":"s-abc"}]"#);
+
+        let (statut, corps) = rendu(
+            &Besoin::ServicesDeMachine {
+                machine: un(Genre::Machine, 2),
+            },
+            &Trouvaille::ServicesDeMachine {
+                demandeur: moi,
+                proprietaire: autre,
+                annonces,
+            },
+        );
+        assert_eq!(
+            statut,
+            StatusCode::OK,
+            "un refus ne se distingue pas d'un vide"
+        );
+        assert_eq!(corps, "[]", "et il ne dit pas si la machine existe");
+    }
+
+    #[test]
+    fn les_autorisations_sortent_dans_les_deux_sens_et_marquees() {
+        // `protocole.md` §2.2 : « ce que j'ai accordé, ce qu'on m'a accordé ».
+        // Un seul tableau : `par` et `a` disent déjà de quel côté chacune est.
+        let mut accordee = une_autorisation_rendue(3);
+        accordee.revoquee = true;
+        let recue = AutorisationRendue {
+            autorisation: un(Genre::Autorisation, 4),
+            par: un(Genre::Utilisateur, 2),
+            a: un(Genre::Utilisateur, 1),
+            portee: Portee::UneMachine(un(Genre::Machine, 9)),
+            revoquee: false,
+        };
+
+        let (statut, corps) = rendu(
+            &Besoin::MesAutorisations,
+            &Trouvaille::Autorisations(vec![accordee, recue]),
+        );
+        assert_eq!(statut, StatusCode::OK);
+        assert!(corps.starts_with('['), "{corps}");
+        assert!(
+            corps.contains(r#""revoquee":true"#),
+            "les révoquées se voient : {corps}"
+        );
+        assert!(corps.contains(r#""revoquee":false"#), "{corps}");
+        assert_eq!(corps.matches("autorisation").count(), 2, "{corps}");
+    }
+
+    #[test]
+    fn une_trouvaille_qui_ne_correspond_pas_rend_un_tableau_vide() {
+        // Ce cas ne devrait pas arriver, et l'étage 2 ne le suppose pas.
+        for besoin_ in [
+            Besoin::OuParNom { service: "depot" },
+            Besoin::ServicesDeMachine {
+                machine: un(Genre::Machine, 2),
+            },
+            Besoin::MesAutorisations,
+        ] {
+            let (statut, corps) = rendu(&besoin_, &Trouvaille::Refus);
+            assert_eq!(statut, StatusCode::OK, "{besoin_:?}");
+            assert_eq!(corps, "[]", "{besoin_:?}");
+        }
+    }
+
+    #[test]
+    fn les_trois_verbes_de_liste_se_routent() {
+        let session = session_authentifiee();
+
+        // `GET /v1/ou?service=` — la forme que le produit emploie.
+        assert!(matches!(
+            besoin(&session, &tete(b"/v1/ou?service=depot"), b""),
+            Besoin::OuParNom { service: "depot" }
+        ));
+
+        // Les deux autres exigent un appareil, et la session n'en a pas :
+        // `401` est la bonne réponse, et elle prouve quand même le routage.
+        let sans = Session::new(liaison());
+        for cible in [
+            b"/v1/machines/m-0H248H248H248H248H248H248H/services".as_slice(),
+            b"/v1/autorisations",
+        ] {
+            assert_eq!(
+                besoin(&sans, &tete(cible), b""),
+                Besoin::Deja(StatusCode::UNAUTHORIZED),
+                "cette cible devrait exiger un appareil"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3194,6 +3716,51 @@ mod creations {
             let quoi = besoin(&session, &tete(b"POST", b"/v1/enrolement"), &corps);
             assert_eq!(rendre(&mut session, &quoi, &trouvaille).0, attendu);
         }
+    }
+
+    // ── Les deux verbes de liste qui exigent un appareil ────────────────────
+
+    #[test]
+    fn les_services_d_une_machine_se_routent() {
+        let machine = un(Genre::Machine, 5);
+        let cible = alloc::format!("/v1/machines/{}/services", machine.texte());
+        assert_eq!(
+            besoin(&session_d_appareil(), &tete(b"GET", cible.as_bytes()), b""),
+            Besoin::ServicesDeMachine { machine }
+        );
+    }
+
+    #[test]
+    fn get_et_post_sur_les_autorisations_ne_veulent_pas_dire_la_meme_chose() {
+        // **`GET` TOMBAIT DANS LE DÉCODEUR D'UNE DEMANDE**, sur un corps vide, et
+        // rendait `400`. Or le routage servait ce verbe depuis toujours : c'était
+        // la répartition qui ne regardait que la ressource.
+        //
+        // **`400` ÉTAIT PIRE QU'UN `501`** : il disait « votre requête est mal
+        // formée » à une requête parfaite, et envoyait chercher la faute chez
+        // l'appelant.
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"GET", b"/v1/autorisations"),
+                b""
+            ),
+            Besoin::MesAutorisations
+        );
+
+        let beneficiaire = un(Genre::Utilisateur, 3);
+        let corps = alloc::format!(r#"{{"a":"{}","portee":"tout"}}"#, beneficiaire.texte());
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"POST", b"/v1/autorisations"),
+                corps.as_bytes()
+            ),
+            Besoin::Autoriser {
+                a: beneficiaire,
+                portee: asl_api::corps::Portee::ToutLeCompte
+            }
+        );
     }
 
     // ── Accorder une autorisation ───────────────────────────────────────────

@@ -478,6 +478,41 @@ l'empêcherait de comprendre.
 | `GET /v1/expositions` | **Ce qui est exposé de MOI**, relation par relation. Tout utilisateur, pas seulement l'administrateur. |
 | `DELETE /v1/expositions/{relation}` | **Retire mes enregistrements** de cette exposition. Portée : tout mon compte, ou telle machine. |
 
+### Ce qu'une liste rend, et ce qu'elle ne dit pas
+
+**Une liste vide est un `200` et un tableau vide, jamais un `404`.** « Je n'ai
+rien à te montrer » et « cette ressource n'existe pas » ne se corrigent pas au
+même endroit, et un client qui lirait `404` là où il devait lire `[]` croirait son
+appel fautif.
+
+**Une liste OMET ce qu'on n'a pas le droit de voir, et l'omission ne dit rien de
+ce qu'elle omet.** C'est le pendant du `404` de `GET /v1/ou/{m}/{s}`, qui ne
+distingue pas « absent » de « interdit » : ici, il n'y a rien à distinguer,
+puisque rien ne paraît. Personne ne peut compter ce qui manque.
+
+**`GET /v1/ou?service=` et `GET /v1/machines/{m}/services` rendent les mêmes
+objets que la forme par machine**, répétés dans un tableau. Une forme propre aux
+listes aurait demandé un second décodeur, écrit cinq fois dans les cinq liaisons.
+
+**Une liste porte au plus soixante-quatre éléments, et au-delà c'est `500`.**
+Jamais une liste tronquée : elle mentirait par omission, et le demandeur croirait
+avoir tout vu. `500` est le mot juste — le demandeur n'a rien fait de mal, c'est
+l'annuaire qui a plus à dire que ce protocole ne sait exprimer, et la réponse est
+une **pagination à concevoir**, pas un réessai.
+
+**`GET /v1/machines/{m}/services` ne regarde aucune autorisation.** C'est l'écran
+qui montre MES machines ; le chemin inter-comptes est `GET /v1/ou`. Les confondre
+donnerait à une autorisation de lecture — accordée pour joindre un service — le
+droit d'énumérer le parc de celui qui l'a accordée. Ce n'est pas ce qu'il a
+accordé.
+
+**`GET /v1/autorisations` rend un seul tableau pour les deux sens**, et y laisse
+les révoquées, marquées. `par` et `a` disent de quel côté chacune est, et un
+lecteur qui connaît son identifiant sait lequel il est ; deux tableaux auraient
+obligé l'application à savoir dans lequel chercher. Taire les révoquées ferait
+douter d'avoir cliqué — même raison qu'un appareil révoqué, qui est marqué et non
+effacé.
+
 Les verbes d'administration d'une exposition — ce que l'annuaire expose à un pair,
 et ce qu'il en prend — sont réservés à l'administrateur de l'annuaire et ne
 figurent pas ici : ils relèvent de son exploitation, pas de l'application mobile.

@@ -873,3 +873,221 @@ fn revoquer_une_autorisation_la_marque_et_la_laisse_visible() {
 
     let _ = std::fs::remove_file(fichier);
 }
+
+// ── Ce que les verbes de liste interrogent ──────────────────────────────────
+
+/// Une machine de ce compte, avec ce nom.
+fn une_machine(proprietaire: Identifiant, nom: &str) -> Machine {
+    Machine {
+        provenance: Provenance::Ici,
+        proprietaire,
+        nom: NomRange::nouveau(nom).expect("il tient"),
+        annonce: true,
+        lecture: true,
+        cle: None,
+    }
+}
+
+/// Un service de cette machine, avec ce nom.
+fn un_service(machine: Identifiant, nom: &str) -> asl_registre::Service {
+    asl_registre::Service {
+        provenance: Provenance::Ici,
+        machine,
+        nom: NomRange::nouveau(nom).expect("il tient"),
+    }
+}
+
+#[test]
+fn les_machines_d_un_compte_se_retrouvent_sans_balayer_l_annuaire() {
+    // **L'INDEX EXISTE POUR CELA.** `MACHINES` porte le propriétaire à
+    // l'intérieur : sans index, répondre demanderait de balayer toutes les
+    // machines de l'annuaire, quand la réponse ne dépend que d'un compte.
+    let (entrepot, chemin) = entrepot("machines-de-compte");
+    let moi = un(Genre::Utilisateur, 1);
+    let autre = un(Genre::Utilisateur, 2);
+
+    for (marque, proprietaire) in [(10, moi), (11, moi), (12, autre)] {
+        let quelle = un(Genre::Machine, marque);
+        entrepot
+            .poser_machine(quelle, &une_machine(proprietaire, "grenier"))
+            .expect("elle s'écrit");
+    }
+
+    let miennes = entrepot.machines_de_compte(moi).expect("elles se lisent");
+    assert_eq!(miennes.len(), 2);
+    for (_, machine) in &miennes {
+        assert_eq!(
+            machine.proprietaire, moi,
+            "une machine d'un autre est sortie"
+        );
+    }
+
+    assert_eq!(
+        entrepot
+            .machines_de_compte(autre)
+            .expect("elles se lisent")
+            .len(),
+        1
+    );
+    assert!(
+        entrepot
+            .machines_de_compte(un(Genre::Utilisateur, 3))
+            .expect("elles se lisent")
+            .is_empty(),
+        "un compte sans machine rend une liste vide, et non une faute"
+    );
+
+    let _ = std::fs::remove_file(chemin);
+}
+
+#[test]
+fn les_services_d_une_machine_se_retrouvent_par_intervalle() {
+    // `SERVICES_PAR_NOM` range la machine en tête PRÉCISÉMENT pour que « tous
+    // les services de cette machine » soit un intervalle et non un balayage.
+    let (entrepot, chemin) = entrepot("services-de-machine");
+    let une = un(Genre::Machine, 10);
+    let autre = un(Genre::Machine, 11);
+
+    for (marque, machine, nom) in [(20, une, "depot"), (21, une, "imap"), (22, autre, "depot")] {
+        entrepot
+            .poser_service(un(Genre::Service, marque), &un_service(machine, nom))
+            .expect("il s'écrit");
+    }
+
+    let siens = entrepot.services_de_machine(une).expect("ils se lisent");
+    assert_eq!(siens.len(), 2);
+    for (_, service) in &siens {
+        assert_eq!(
+            service.machine, une,
+            "un service d'une autre machine est sorti"
+        );
+    }
+    assert_eq!(
+        entrepot
+            .services_de_machine(autre)
+            .expect("ils se lisent")
+            .len(),
+        1
+    );
+
+    let _ = std::fs::remove_file(chemin);
+}
+
+#[test]
+fn un_service_renomme_ne_sort_qu_une_fois() {
+    // L'index suit le service, comme l'alias suit le compte : sans cela, un
+    // service renommé sortirait deux fois de sa propre machine.
+    let (entrepot, chemin) = entrepot("service-renomme");
+    let machine = un(Genre::Machine, 10);
+    let quel = un(Genre::Service, 20);
+
+    entrepot
+        .poser_service(quel, &un_service(machine, "depot"))
+        .expect("il s'écrit");
+    entrepot
+        .poser_service(quel, &un_service(machine, "archives"))
+        .expect("il se renomme");
+
+    let siens = entrepot
+        .services_de_machine(machine)
+        .expect("ils se lisent");
+    assert_eq!(siens.len(), 1, "l'ancien nom est resté dans l'index");
+    assert_eq!(siens[0].1.nom.octets(), b"archives");
+
+    let _ = std::fs::remove_file(chemin);
+}
+
+#[test]
+fn les_autorisations_sortent_dans_les_deux_sens_avec_leur_identifiant() {
+    // **C'EST L'IDENTIFIANT QU'ON PASSE À `DELETE /v1/autorisations/{g}`.** Une
+    // liste dont les éléments ne se désignent pas est une liste qu'on ne peut
+    // que regarder.
+    let (entrepot, chemin) = entrepot("autorisations-deux-sens");
+    let moi = un(Genre::Utilisateur, 1);
+    let autre = un(Genre::Utilisateur, 2);
+
+    let accordee = un(Genre::Autorisation, 30);
+    let recue = un(Genre::Autorisation, 31);
+    let ailleurs = un(Genre::Autorisation, 32);
+
+    for (quelle, par, a) in [
+        (accordee, moi, autre),
+        (recue, autre, moi),
+        (ailleurs, autre, autre),
+    ] {
+        entrepot
+            .poser_autorisation(
+                quelle,
+                &asl_registre::Autorisation {
+                    provenance: Provenance::Ici,
+                    par,
+                    a,
+                    portee: asl_registre::Portee::ToutLeCompte,
+                    revoquee: false,
+                },
+            )
+            .expect("elle s'écrit");
+    }
+
+    let miennes = entrepot
+        .autorisations_accordees(moi)
+        .expect("elles se lisent");
+    assert_eq!(miennes.len(), 1);
+    assert_eq!(
+        miennes[0].0, accordee,
+        "l'identifiant doit sortir avec elle"
+    );
+    assert_eq!(miennes[0].1.a, autre);
+
+    let vers_moi = entrepot
+        .autorisations_recues_nommees(moi)
+        .expect("elles se lisent");
+    assert_eq!(vers_moi.len(), 1);
+    assert_eq!(vers_moi[0].0, recue);
+
+    // Et les deux sens ne se mélangent pas.
+    assert_eq!(
+        entrepot
+            .autorisations_accordees(autre)
+            .expect("elles se lisent")
+            .len(),
+        2
+    );
+
+    let _ = std::fs::remove_file(chemin);
+}
+
+#[test]
+fn une_autorisation_revoquee_reste_dans_la_liste() {
+    // **L'ÉCRAN QU'ON REGARDE APRÈS AVOIR RETIRÉ UN ACCÈS DOIT MONTRER CE QU'ON
+    // A RETIRÉ.** La filtrer ici la rendrait invisible à l'application qui vient
+    // de la retirer.
+    let (entrepot, chemin) = entrepot("autorisation-revoquee");
+    let moi = un(Genre::Utilisateur, 1);
+    let autre = un(Genre::Utilisateur, 2);
+    let quelle = un(Genre::Autorisation, 30);
+
+    entrepot
+        .poser_autorisation(
+            quelle,
+            &asl_registre::Autorisation {
+                provenance: Provenance::Ici,
+                par: moi,
+                a: autre,
+                portee: asl_registre::Portee::ToutLeCompte,
+                revoquee: false,
+            },
+        )
+        .expect("elle s'écrit");
+    entrepot
+        .revoquer_autorisation(quelle)
+        .expect("elle se révoque");
+
+    let miennes = entrepot
+        .autorisations_accordees(moi)
+        .expect("elles se lisent");
+    assert_eq!(miennes.len(), 1, "une révoquée disparue de la liste");
+    assert!(miennes[0].1.revoquee, "et elle doit être marquée");
+
+    let _ = std::fs::remove_file(chemin);
+}

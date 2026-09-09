@@ -325,6 +325,35 @@ impl Cible {
 
 // ── Les décisions ───────────────────────────────────────────────────────────
 
+/// Un appareil peut-il voir les services de cette machine ?
+///
+/// # UNE RÈGLE, ET NON UNE COMPARAISON ÉGARÉE DANS LA BOUCLE
+///
+/// Elle tient en une égalité, et c'est justement pourquoi elle doit être ici :
+/// une règle écrite au milieu d'un rassemblement est une règle que personne ne
+/// relit, et qu'aucun essai ne prend pour cible.
+///
+/// # ELLE NE REGARDE AUCUNE AUTORISATION, ET C'EST DÉLIBÉRÉ
+///
+/// `GET /v1/machines/{m}/services` appartient à l'administration d'un compte
+/// (`protocole.md` §2.2) : c'est l'écran qui montre MES machines. Le chemin
+/// inter-comptes est `GET /v1/ou`, qui passe par [`decider_resolution`] et ses
+/// autorisations.
+///
+/// Les confondre donnerait à une autorisation de LECTURE — accordée pour joindre
+/// un service — le droit d'énumérer le parc de celui qui l'a accordée. **Ce n'est
+/// pas ce qu'il a accordé.**
+// `const fn` serait plus joli, et `PartialEq` ne l'est pas encore : la
+// comparaison de deux identifiants passe par un `==` ordinaire.
+#[must_use]
+pub fn decider_services_de_machine(demandeur: Identifiant, proprietaire: Identifiant) -> Decision {
+    if demandeur == proprietaire {
+        Decision::Servir
+    } else {
+        Decision::Refuser
+    }
+}
+
 /// Cette machine peut-elle annoncer un service ?
 #[must_use]
 pub const fn decider_annonce(demandeur: &Machine) -> Decision {
