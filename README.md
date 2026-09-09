@@ -70,7 +70,7 @@ puis **l'annonce** ; ses clients **le demandent** avant de se connecter.
 | **Le client** | Demande à l'annuaire où joindre le daemon. |
 | **L'annuaire** | Ce dépôt. Tient l'état, et répond « en ligne » ou « hors ligne ». |
 
-## Les trois dépôts
+## Les quatre dépôts
 
 | Dépôt | Ce qu'il porte |
 |---|---|
@@ -79,8 +79,8 @@ puis **l'annonce** ; ses clients **le demandent** avant de se connecter.
 | `air-service-locator-ios` | L'application iOS (Swift). |
 | `air-service-locator-android` | L'application Android (Kotlin). |
 
-**Le modèle et le protocole sont spécifiés ICI**, dans `docs/`, et les deux
-dépôts mobiles y renvoient par lien. Trois copies vieilliraient, et deux d'entre
+**Le modèle et le protocole sont spécifiés ICI**, dans `docs/`, et les trois
+autres dépôts y renvoient par lien. Quatre copies vieilliraient, et trois d'entre
 elles en silence.
 
 Les deux applications ne s'installent que sur des appareils capables de
@@ -110,17 +110,33 @@ la règle qui n'était qu'un conseil.
 
 ## Les barrières
 
-Quatre aujourd'hui, et le fait qu'elles soient quatre et non dix est expliqué en
-tête de [`scripts/check-tout.sh`](scripts/check-tout.sh) : les six autres
-mesureraient du vide.
+Sept, plus la couverture et le fuzz. Elles n'étaient que quatre tant que le
+graphe était vide : les autres n'avaient rien à mesurer, et un rapport vert qui
+n'a rien examiné est un mensonge poli.
 
 ```sh
-scripts/check-tout.sh     # compile, clippy, essais, format — dans cet ordre
+scripts/check-tout.sh     # tout : étages, pile, sans-C, clippy, essais, fuzz, couverture, format
 scripts/check-dco.sh      # après avoir committé : DCO et paternité
 ```
 
 L'ordre n'est pas arbitraire, et le formatage est en dernier : une faute de forme
 ne doit pas cacher une faute de fond.
+
+## L'autorité de certification
+
+Ce n'est **pas** une barrière : on la lance à la main, et le fichier ne s'appelle
+donc pas `check-…`.
+
+```sh
+scripts/ca.sh racine                              # la racine air-desktop-project
+scripts/ca.sh serveur banc localhost ::1          # un certificat de serveur
+scripts/ca.sh montrer                             # ce qui existe
+```
+
+Elle écrit dans `local/`, **ignoré par git** : une clé privée poussée sur un
+dépôt public ne se retire jamais vraiment d'un historique. Le pourquoi de
+l'autorité, de l'algorithme et des SAN d'adresse est en
+[`docs/transport.md` §8](docs/transport.md).
 
 ## Licence
 

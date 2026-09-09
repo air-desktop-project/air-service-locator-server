@@ -45,3 +45,15 @@ desktop.ini
 
 __pycache__/
 *.pyc
+
+# `local/` — CE QUI NE DOIT JAMAIS ÊTRE POUSSÉ, ET SURTOUT PAS ICI.
+#
+# `scripts/ca.sh` y dépose l'autorité d'air-desktop-project : la clé privée de
+# la racine, et les clés des certificats de serveur. **Ce dépôt est PUBLIC.**
+# Une clé privée poussée par mégarde ne se retire jamais vraiment d'un
+# historique — elle se révoque, et il n'y a pas de révocation ici.
+#
+# La règle est donc posée AVANT que le script n'ait été lancé une seule fois, et
+# elle porte sur le répertoire entier plutôt que sur `*.key` : une extension
+# oubliée un jour ferait passer un secret.
+local/

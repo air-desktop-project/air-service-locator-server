@@ -17,5 +17,8 @@ ams-proto-quic.workspace = true
 ams-quic.workspace = true
 ams-quic-tls.workspace = true
 
+[dev-dependencies]
+ams-tls.workspace = true
+
 [lints]
 workspace = true

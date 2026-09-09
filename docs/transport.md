@@ -175,9 +175,91 @@ Nommé ici pour ne pas être redécouvert :
 - **La socket UDP et le routage des paquets vers les connexions** — c'est le
   gros de `asl-loop-tokio`, et il n'existe pas encore.
 - **L'horloge des délais de renvoi**, et l'expiration des connexions.
-- **D'où viennent les certificats.** Un serveur QUIC en présente un. Le produit
-  n'a pas dit s'il est auto-signé, obtenu par ACME, ou fourni par
-  l'administrateur de l'annuaire — et la réponse change ce que la boucle lit au
-  démarrage. **C'est une décision, pas un détail d'implémentation.**
+- ~~D'où viennent les certificats.~~ **Tranché le 2026-09-09 — voir §8.**
 - **L'entrepôt.** `asl-session` route et refuse correctement ; tout ce qui se
   route rend `501`, parce qu'aucune ressource de cette API ne se sert sans état.
+
+---
+
+## 8. Les certificats : une autorité à nous, et pourquoi
+
+Tranché le **2026-09-09**. La cérémonie est `scripts/ca.sh`.
+
+### La CA d'`air` ne pouvait pas servir, et il faut dire pourquoi
+
+C'était la première piste, et elle est fausse : **l'autorité d'`air` est une CA
+SSH.** `air-keystore ca create` et `cert issue-host` émettent au format
+**OpenSSH** (`air-ssh-proto::cert`, ADR-109 et ADR-162), pour `air-sshd`. Le
+format n'a rien de commun avec X.509, et `air-crypto` écrit noir sur blanc que
+« PEM/DER, certificats X.509 » sont **hors de son périmètre**. `air-tls`, elle,
+est une spécification : elle *valide* des chaînes X.509, elle n'en émet pas.
+
+Une CA SSH ne peut pas signer un certificat de serveur TLS. Le jour où Air aura
+une autorité X.509, cette cérémonie sera à reprendre.
+
+### Une racine à nous, épinglée, plutôt qu'une CA publique
+
+**Nous tenons les deux bouts** : le serveur est à nous, et le client aussi —
+`asl-client` et les applications mobiles. Aucun navigateur ne se connectera
+jamais à un annuaire.
+
+Une CA publique coûterait un nom de domaine par annuaire, un renouvellement
+automatique, et un tiers dans la boucle — pour convaincre des logiciels qui ne
+viendront pas. Une racine `air-desktop-project` épinglée dans le client dit
+exactement ce qu'on veut dire, et le dit **sans dépendre de la liste des
+autorités du système**, que nous ne contrôlons pas.
+
+### Ed25519, et la raison est vérifiable
+
+Le fournisseur cryptographique sous notre pile est `rustls-rustcrypto`. Son
+module `sign/eddsa.rs` charge une clé **Ed25519 au format PKCS#8** et signe avec
+— exactement ce que produit `openssl genpkey -algorithm ed25519`. C'est aussi
+l'algorithme des clés de machine (`asl-cle`) : **une seule courbe dans tout le
+produit**, donc une seule à auditer.
+
+### Des SAN d'ADRESSE, et c'est « IPv6 d'abord » qui l'impose
+
+C'est le point qu'une cérémonie naïve rate. Un daemon rejoint un annuaire par
+son **adresse**, pas nécessairement par un nom : une machine à IPv6 publique n'a
+besoin d'aucun DNS. Un certificat qui ne porterait que des `DNS:` serait refusé,
+et le refus serait juste.
+
+`ca.sh` classe donc ses arguments : ce qui a la forme d'une adresse devient un
+`IP:`, le reste un `DNS:`.
+
+### `openssl` frappe le certificat, et C4 n'en souffre pas
+
+C4 interdit à `asl-client` de **lier** du C, parce qu'elle est chargée dans des
+interpréteurs qui ont déjà leur libcrypto. Employer un outil pour frapper un
+certificat une fois n'a rien à voir : rien de ce que fait la cérémonie n'entre
+dans le binaire livré, et `check-sans-c.sh` — qui mesure ce qui est **construit**
+— ne verra jamais openssl.
+
+### CE QUI EST VÉRIFIÉ, ET PAS SEULEMENT AFFIRMÉ
+
+`ca.sh` finit par `openssl verify`, et **cela ne prouve rien** : openssl s'y
+donne raison à lui-même. Deux essais d'intégration (`asl-loop-tokio/tests/`)
+frappent donc une autorité dans un répertoire temporaire, puis la font charger
+par la pile qui servira réellement, via `ams_tls::quic_server_config` :
+
+  1. une chaîne et sa clé sont **acceptées** — ce qui éprouve l'algorithme, le
+     format PKCS#8 et l'encodage ;
+  2. la clé d'un serveur croisée avec le certificat d'un autre est **refusée** —
+     ce qui éprouve que le contrôle d'accord est vivant. Sans lui, un serveur
+     monté sur une clé dépareillée démarrerait pour échouer à la première
+     connexion.
+
+Ils n'ouvrent jamais la racine réelle : `ASL_CA` déplace la cérémonie, et
+`local/` — où vit la vraie — est ignoré par git.
+
+### CE QUE LA CÉRÉMONIE N'EST PAS ENCORE, ET QU'IL NE FAUT PAS CROIRE
+
+- **Pas d'intermédiaire.** La racine signe les serveurs directement. Un
+  intermédiaire sert à garder la racine hors ligne, et cela n'a de sens que le
+  jour où elle le sera vraiment.
+- **Pas de révocation.** Ni CRL, ni OCSP. La validité d'un an des certificats de
+  serveur en tient lieu — c'est un aveu, pas un choix.
+- **La racine de production n'existe pas.** Celle que `ca.sh` crée aujourd'hui
+  est une racine de développement. Le certificat de la vraie racine sera à
+  épingler dans `asl-client`, et sa clé privée relève d'une cérémonie hors ligne
+  qui reste à écrire.

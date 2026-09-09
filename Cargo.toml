@@ -219,6 +219,13 @@ ams-proto-quic = { git = "https://github.com/air-desktop-project/air-mail-server
 ams-quic = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
 ams-quic-tls = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
 
+# `ams-tls` N'ENTRE QUE COMME DÉPENDANCE DE DÉVELOPPEMENT, et la nuance compte.
+# Elle est DÉJÀ dans le graphe construit, tirée par `ams-quic-tls` ; ce qu'on
+# déclare ici, c'est le droit de l'appeler NOUS-MÊMES depuis un essai — pour
+# faire charger par notre propre pile le certificat que `scripts/ca.sh` frappe.
+# Un certificat qu'openssl valide n'est qu'un certificat qu'openssl valide.
+ams-tls = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
+
 # `default-features = false` et la liste exacte d'`air-mail-server` : deux
 # fournisseurs cryptographiques activés en même temps, c'est `rustls` qui refuse
 # de choisir au démarrage.
