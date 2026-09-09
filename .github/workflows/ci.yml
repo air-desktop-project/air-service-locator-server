@@ -181,3 +181,45 @@ jobs:
 
       - name: check-couverture
         run: ./scripts/check-couverture.sh
+
+  # ── Smoke-fuzz borné (C3) ─────────────────────────────────────────────────
+  #
+  # UN DÉTECTEUR DE RÉGRESSION, PAS UNE CAMPAGNE. Quelques secondes par cible
+  # depuis un corpus neuf n'explorent pas ce que des heures explorent ; ce job
+  # attrape la panique qu'un changement vient d'introduire sur un chemin déjà
+  # connu, et rien de plus. Une vraie campagne se lance à la main (fuzz/README).
+  #
+  # **AUCUN NIGHTLY À INSTALLER ICI**, contrairement à `air-mail-server` : ce
+  # dépôt est DÉJÀ sur le nightly d'Air (C16), et `rust-toolchain.toml` s'applique
+  # aussi à `fuzz/` — rustup remonte l'arborescence. Recopier l'étape
+  # d'installation de là-bas aurait posé une TROISIÈME toolchain, c'est-à-dire
+  # exactement ce que C16 interdit.
+  #
+  # Le formatage et la compilation de `fuzz/` ne sont PAS refaits ici :
+  # `check-format.sh` et `check-compile.sh` couvrent les deux portées, dans le
+  # job de vérification.
+  fuzz:
+    name: smoke-fuzz (C3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain épinglée
+        run: rustup show active-toolchain
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      # L'outil doit répondre AVANT qu'on lui confie une campagne : sans cela,
+      # une installation muette ne se voit que deux étapes plus loin, sur un
+      # « no such command » qui ne désigne pas sa cause.
+      - name: cargo-fuzz est bien là
+        run: cargo fuzz --version
+
+      # LA LISTE DES CIBLES VIT DANS LE SCRIPT, PAS ICI. Un contrôle qu'on ne
+      # peut pas rejouer chez soi est un contrôle qu'on découvre après un
+      # `push` — et c'est ainsi qu'une cible a cessé de compiler pendant deux
+      # commits, ailleurs, sans que rien ne le dise.
+      - name: smoke-fuzz de toutes les cibles
+        run: scripts/check-fuzz.sh --smoke

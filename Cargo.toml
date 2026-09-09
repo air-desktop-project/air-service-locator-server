@@ -56,6 +56,18 @@ members = [
     "crates/asl-server",
 ]
 
+# `fuzz/` est une crate cargo-fuzz HORS de ce workspace, et les trois raisons
+# sont en tête de `fuzz/Cargo.toml` — AUCUNE n'est celle d'`air-mail-server`,
+# dont la séparation vient d'un conflit de toolchain qui n'existe pas ici.
+#
+# En deux mots : `libfuzzer-sys` et `arbitrary` n'ont rien à faire dans le lock
+# du produit, que `check-pile.sh` inspecte et que `check-couverture.sh` mesure ;
+# les drapeaux du sanitizer n'ont rien à faire dans la vérification ordinaire ;
+# et rien de ce qui est tiré là-bas n'est livré.
+#
+# Elle a donc son propre `Cargo.lock`. Lancement : `scripts/check-fuzz.sh`.
+exclude = ["fuzz"]
+
 # `asl-client` A QUITTÉ CE DÉPÔT pour `air-service-locator-client`.
 #
 # Ce n'est pas un rangement : cette bibliothèque est un PRODUIT à part. Elle est

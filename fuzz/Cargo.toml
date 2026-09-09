@@ -1,0 +1,72 @@
+# Crate de fuzzing d'air-service-locator (cargo-fuzz). **HORS du workspace.**
+#
+# # POURQUOI DEHORS — ET LA RAISON N'EST PAS CELLE D'`air-mail-server`
+#
+# Là-bas, la séparation existe parce que `cargo-fuzz` exige un nightly alors que
+# le workspace est épinglé sur stable : deux toolchains, deux LLVM, et un gate de
+# couverture qui ne peut plus conclure.
+#
+# **Ici, ce problème n'existe pas** : le workspace est DÉJÀ sur le nightly d'Air
+# (contrainte C16), et cette crate emploie donc exactement la même toolchain.
+# Écrire « hors du workspace parce que cargo-fuzz exige nightly » serait recopier
+# un raisonnement qui ne s'applique pas.
+#
+# Les trois raisons qui valent ICI :
+#
+#   1. **LE GRAPHE.** `libfuzzer-sys` et `arbitrary` n'ont rien à faire dans le
+#      `Cargo.lock` du produit. `check-pile.sh` lit ce graphe pour y refuser une
+#      pile QUIC tierce (C15), et `check-couverture.sh` mesure ce qu'il contient
+#      (C2) — deux contrôles qu'un harnais de fuzz fausserait.
+#   2. **LES DRAPEAUX.** Une cible de fuzz se compile avec un sanitizer et une
+#      instrumentation de couverture propres à libFuzzer. Les imposer au
+#      workspace changerait ce que la vérification ordinaire vérifie.
+#   3. **RIEN D'ICI N'EST LIVRÉ.** Le runtime de libFuzzer n'entre dans aucun
+#      binaire du produit, et sa présence dans le lock laisserait croire le
+#      contraire.
+#
+# La crate a donc son propre `Cargo.lock`.
+#
+# # LA CONSÉQUENCE, ET ELLE A COÛTÉ CHER AILLEURS
+#
+# `cargo build --workspace` ne touche PAS cette crate. Une cible qui cesse de
+# compiler ne se voit ni au build, ni aux essais, ni au clippy. Sur
+# `air-mail-server`, deux tranches y ont perdu une campagne pour une signature de
+# trait non répercutée.
+#
+# C'est pourquoi `scripts/check-compile.sh` compile ICI aussi, et pourquoi
+# `scripts/check-format.sh` formate les deux portées.
+#
+# Lancement : `cargo fuzz run <cible>` (voir README.md).
+
+[package]
+name = "air-service-locator-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MPL-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.asl-id]
+path = "../crates/asl-id"
+
+# `[[bin]]` par cible, et `test = false` : ces binaires ne sont pas des essais,
+# et `cargo test` ne doit pas essayer de les lancer sans harnais libFuzzer.
+[[bin]]
+name = "fuzz_asl_id_analyser"
+path = "fuzz_targets/fuzz_asl_id_analyser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_asl_id_aller_retour"
+path = "fuzz_targets/fuzz_asl_id_aller_retour.rs"
+test = false
+doc = false
+bench = false

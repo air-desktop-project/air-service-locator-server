@@ -9,7 +9,7 @@ encore ».
 |---|---|---|
 | C1 | Étages 1 et 2 sans entrée-sortie | `check-etages.sh` |
 | C2 | 100 % de couverture aux étages 1 et 2 | `check-couverture.sh` |
-| C3 | Tout décodeur est fuzzé | `check-fuzz.sh` — **à écrire** |
+| C3 | Tout décodeur est fuzzé | `check-fuzz.sh` |
 | C4 | `asl-client` reste mince | `check-client.sh` — **à écrire** |
 | C5 | Aucune abstraction d'exécution | Revue |
 | C6 | L'annuaire n'affirme jamais ce qu'il n'a pas mesuré | Revue, et les noms de l'API |
@@ -103,6 +103,22 @@ Cas particulier qui mérite d'être nommé : un **numéro de port** hors de
 `1..=65535` se REFUSE, il ne se tronque pas. Un port qui vaudrait `0` après
 troncature ferait annoncer un service injoignable sans qu'aucune erreur ne soit
 rendue.
+
+**`check-fuzz.sh` existe**, avec deux cibles sur `asl-id` — le seul décodeur que
+ce dépôt possède aujourd'hui. Elles partent des deux bouts : l'une lit des octets
+quelconques, l'autre écrit seize octets quelconques et les relit. Ce n'est pas
+une redondance — la première n'explore que ce que le décodeur accepte, la seconde
+couvre l'espace des valeurs.
+
+**Ce que le gate N'EST PAS** : une campagne. Quelques secondes par cible depuis
+un corpus neuf attrapent la panique qu'un changement vient d'introduire sur un
+chemin déjà connu, et rien de plus. S'en réclamer davantage serait affirmer une
+garantie qu'il n'a pas.
+
+**Ce que la crate `fuzz/` coûte, et qui est nommé** : elle vit hors du workspace,
+donc `cargo build --workspace` ne la touche pas. `check-compile.sh` et
+`check-format.sh` couvrent les DEUX portées pour cette raison — ailleurs, deux
+tranches ont perdu une campagne sur une signature de trait non répercutée.
 
 ## C4 — `asl-client` n'embarque que ce qu'il faut, et pas une ligne de C
 

@@ -25,17 +25,20 @@
 #   4. `check-pile`      — le graphe résolu, donc les dépendances transitives.
 #   5. `check-clippy`    — les lints du produit.
 #   6. `cargo test`
-#   7. `check-couverture` — LENTE : elle recompile tout sous instrumentation.
+#   7. `check-fuzz --smoke` — quelques secondes par cible, plus la construction
+#      instrumentée. Elle vient APRÈS les essais, qui disent la même chose
+#      beaucoup plus vite quand une propriété est cassée sur un cas connu.
+#   8. `check-couverture` — LENTE : elle recompile tout sous instrumentation.
 #      Elle passe donc APRÈS les essais ordinaires, qui disent la même chose en
 #      quelques secondes quand quelque chose est cassé. Il n'y a aucune raison
 #      d'attendre une recompilation complète pour apprendre qu'un essai échoue.
-#   8. `check-format`    — EN DERNIER (voir ci-dessus).
+#   9. `check-format`    — EN DERNIER (voir ci-dessus).
 #
 # # CE QUI MANQUE ENCORE, ET QUI EST DIT PLUTÔT QUE TU
 #
-# `air-mail-server` en porte dix. Ce dépôt en porte SEPT. Celles qui manquent
-# encore attendent le code qu'elles jugent : le fuzz n'a qu'une grammaire et pas
-# encore de cible, le paquet `.deb` et l'installateur n'existent pas.
+# `air-mail-server` en porte dix. Ce dépôt en porte HUIT. Celles qui manquent
+# encore attendent le code qu'elles jugent : le paquet `.deb` et l'installateur
+# n'existent pas.
 #
 # `check-couverture` est ENTRÉE avec `asl-id`, la première crate à porter du
 # code. Elle serait arrivée trop tard si on l'avait attendue davantage : c'est
@@ -84,6 +87,15 @@ else
 fi
 echo
 
+echo "═══ scripts/check-fuzz.sh --smoke"
+if ./scripts/check-fuzz.sh --smoke; then
+    echo "─── scripts/check-fuzz.sh : OK"
+else
+    echo "─── scripts/check-fuzz.sh : ÉCHEC"
+    echecs+=("scripts/check-fuzz.sh")
+fi
+echo
+
 echo "═══ scripts/check-couverture.sh"
 if ./scripts/check-couverture.sh; then
     echo "─── scripts/check-couverture.sh : OK"
@@ -99,7 +111,7 @@ if [ "${#echecs[@]}" -gt 0 ]; then
     exit 1
 fi
 
-echo "OK : les ${#barrieres[@]} barrières, la couverture et les essais passent."
+echo "OK : les ${#barrieres[@]} barrières, le fuzz, la couverture et les essais passent."
 echo
 echo "Le DCO ne fait PAS partie de ce lot : il juge des messages de commit, donc"
 echo "il se lance APRÈS avoir committé — scripts/check-dco.sh."
