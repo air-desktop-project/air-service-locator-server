@@ -552,20 +552,20 @@ impl Machine {
 // ── L'appareil ──────────────────────────────────────────────────────────────
 
 /// Ce qu'un appareil occupe.
-pub const APPAREIL_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS;
+pub const APPAREIL_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS + 1;
 
 /// Un téléphone enrôlé, tel qu'il est rangé.
 ///
-/// # TROIS CHAMPS, ET C'EST TOUT CE QU'UN APPAREIL EST
+/// # QUATRE CHAMPS, ET C'EST TOUT CE QU'UN APPAREIL EST
 ///
 /// Ni modèle, ni système, ni nom, ni adresse : rien de ce qui désignerait
 /// l'appareil ou son porteur (C13). Un appareil, pour l'annuaire, est **une clé
 /// publique rattachée à un compte**, et rien d'autre.
 ///
-/// `docs/modele.md` §2.2 lui donne aussi un jeton de poussée, une date
-/// d'enrôlement et une date de révocation. **Ils ne sont pas ici, et c'est un
-/// manque nommé** : rien ne les écrit ni ne les lit encore, et un champ qu'on
-/// range toujours vide ment sur ce que l'annuaire sait.
+/// `docs/modele.md` §2.2 lui donne aussi un jeton de poussée et deux dates.
+/// **Elles ne sont pas ici, et c'est un manque nommé** : rien ne les écrit ni ne
+/// les lit encore, et un champ qu'on range toujours vide ment sur ce que
+/// l'annuaire sait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Appareil {
     /// D'où vient cet enregistrement.
@@ -577,6 +577,17 @@ pub struct Appareil {
     /// Celle qui vit dans le matériel sécurisé du téléphone. **L'annuaire n'en
     /// connaît que la partie publique**, et il ne saurait rien faire de l'autre.
     pub cle: [u8; CLE_OCTETS],
+    /// A-t-il été révoqué ?
+    ///
+    /// # POURQUOI UN DRAPEAU, ET NON UNE LIGNE SUPPRIMÉE
+    ///
+    /// Supprimer marcherait — une clé qu'on ne trouve plus ne prouve plus rien.
+    /// **Mais l'application doit pouvoir MONTRER ce qui a été révoqué** : c'est
+    /// l'écran qu'on regarde après avoir perdu un téléphone, et une ligne
+    /// disparue n'y dit rien. Un appareil révoqué reste donc, et ne vaut plus.
+    ///
+    /// C'est le même choix que pour une autorisation, et pour la même raison.
+    pub revoque: bool,
 }
 
 impl Appareil {
@@ -591,9 +602,16 @@ impl Appareil {
                 .get_mut(PROVENANCE_OCTETS..apres_provenance)
                 .unwrap_or_default(),
         );
+        let apres_cle = apres_provenance.saturating_add(CLE_OCTETS);
         poser(
-            sortie.get_mut(apres_provenance..).unwrap_or_default(),
+            sortie
+                .get_mut(apres_provenance..apres_cle)
+                .unwrap_or_default(),
             &self.cle,
+        );
+        poser_un(
+            sortie.get_mut(apres_cle..).unwrap_or_default(),
+            u8::from(self.revoque),
         );
     }
 
@@ -611,12 +629,24 @@ impl Appareil {
                 .unwrap_or_default(),
             Genre::Utilisateur,
         )?;
+        let apres_cle = apres_provenance.saturating_add(CLE_OCTETS);
         let mut cle = [0_u8; CLE_OCTETS];
-        poser(&mut cle, octets.get(apres_provenance..).unwrap_or_default());
+        poser(
+            &mut cle,
+            octets.get(apres_provenance..apres_cle).unwrap_or_default(),
+        );
+        // **UN BOOLÉEN N'A QUE DEUX ÉCRITURES**, et `2` n'en est pas une : un
+        // enregistrement relu se réécrirait alors différemment de lui-même.
+        let revoque = match octets.get(apres_cle).copied().unwrap_or(0) {
+            0 => false,
+            1 => true,
+            lue => return Err(Faute::Etiquette { lue }),
+        };
         Ok(Self {
             provenance,
             proprietaire,
             cle,
+            revoque,
         })
     }
 }
@@ -1831,6 +1861,7 @@ mod tests {
             provenance: Provenance::Ici,
             proprietaire: un(Genre::Utilisateur, 7),
             cle: [0x33; CLE_OCTETS],
+            revoque: false,
         };
         let mut octets = [0_u8; APPAREIL_OCTETS];
         appareil.ecrire(&mut octets);
@@ -1845,6 +1876,8 @@ mod tests {
             provenance: Provenance::Annuaire(un(Genre::Annuaire, 2)),
             proprietaire: un(Genre::Utilisateur, 7),
             cle: [0; CLE_OCTETS],
+            // **RÉVOQUÉ**, pour que les deux états fassent l'aller-retour.
+            revoque: true,
         };
         let mut octets = [0_u8; APPAREIL_OCTETS];
         appareil.ecrire(&mut octets);
@@ -1940,5 +1973,23 @@ mod tests {
             Enrolement::lire(&enrolement),
             Err(Faute::Etiquette { lue: 0x7F })
         );
+    }
+
+    #[test]
+    fn un_drapeau_de_revocation_qui_n_est_ni_zero_ni_un_est_refuse() {
+        // **UN BOOLÉEN N'A QUE DEUX ÉCRITURES.** En accepter une troisième
+        // rendrait l'encodage non canonique : un enregistrement relu se
+        // réécrirait différemment de lui-même, et c'est le fuzz qui le dirait.
+        let appareil = Appareil {
+            provenance: Provenance::Ici,
+            proprietaire: un(Genre::Utilisateur, 7),
+            cle: [0x33; CLE_OCTETS],
+            revoque: false,
+        };
+        let mut octets = [0_u8; APPAREIL_OCTETS];
+        appareil.ecrire(&mut octets);
+        let dernier = APPAREIL_OCTETS.saturating_sub(1);
+        octets[dernier] = 2;
+        assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 2 }));
     }
 }

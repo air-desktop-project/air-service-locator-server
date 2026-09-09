@@ -20,12 +20,18 @@
 //!    caractère qui change l'affichage de ce qui l'entoure.
 //! 4. **UN NOM ACCEPTÉ TIENT DANS LA PLACE QUE L'ENTREPÔT LUI RÉSERVE.** Sans
 //!    cela, une requête bien formée finirait en `500`.
+//! 5. **UN ALIAS ACCEPTÉ RESTE DE L'ASCII GRAPHIQUE.** C'est la propriété qui
+//!    sépare une CLÉ d'un texte d'affichage : l'alias se cherche, se compare, et
+//!    repart dans un chemin — deux écritures d'une même valeur feraient croire à
+//!    deux comptes qu'ils la possèdent chacun.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 
-use asl_api::corps::{CORPS_MAX, DeclarationMachine, DemandeAutorisation, NOM_MACHINE_MAX};
+use asl_api::corps::{
+    CORPS_MAX, DeclarationMachine, DemandeAlias, DemandeAutorisation, NOM_MACHINE_MAX,
+};
 
 /// Ce caractère change-t-il l'affichage de ce qui l'entoure ?
 ///
@@ -72,6 +78,29 @@ fuzz_target!(|octets: &[u8]| {
         let ecrit = &sortie[..combien];
         let relue = DeclarationMachine::decoder(ecrit).expect("ce qu'on écrit se relit");
         assert_eq!(relue, machine, "l'aller-retour a changé la demande");
+
+        let mut encore = [0_u8; CORPS_MAX];
+        let deux = relue.encoder(&mut encore).expect("elle se réécrit");
+        assert_eq!(&encore[..deux], ecrit, "l'écriture n'est pas canonique");
+    }
+
+    if let Ok(demande) = DemandeAlias::decoder(octets) {
+        // **UN ALIAS EST UNE CLÉ, ET SA GRAMMAIRE EST ÉTROITE.** Vérifié sur ce
+        // qui est RENDU : c'est de là que `GET /v1/alias/{alias}` repartira, et
+        // un alias accepté ici doit pouvoir se remettre dans un chemin.
+        let texte = demande.alias.as_str();
+        assert!(
+            texte.bytes().all(|o| o.is_ascii_graphic()),
+            "un alias accepté porte autre chose que de l'ASCII graphique : {texte:?}"
+        );
+
+        let mut sortie = [0_u8; CORPS_MAX];
+        let combien = demande
+            .encoder(&mut sortie)
+            .expect("ce qui a été compris se réécrit");
+        let ecrit = &sortie[..combien];
+        let relue = DemandeAlias::decoder(ecrit).expect("ce qu'on écrit se relit");
+        assert_eq!(relue, demande, "l'aller-retour a changé la demande");
 
         let mut encore = [0_u8; CORPS_MAX];
         let deux = relue.encoder(&mut encore).expect("elle se réécrit");

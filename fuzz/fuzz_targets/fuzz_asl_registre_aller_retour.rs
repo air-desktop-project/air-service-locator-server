@@ -302,6 +302,7 @@ fuzz_target!(|entree: Entree| {
         provenance,
         proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine; 16]),
         cle: [entree.graine; 32],
+        revoque: entree.graine & 16 != 0,
     };
     let mut octets = [0_u8; APPAREIL_OCTETS];
     appareil.ecrire(&mut octets);

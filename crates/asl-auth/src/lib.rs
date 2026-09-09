@@ -655,6 +655,32 @@ pub fn decider_gestion(demandeur: Identifiant, proprietaire: Identifiant) -> Dec
     }
 }
 
+/// Cet appareil peut-il en révoquer un autre ?
+///
+/// # UN APPAREIL NE SE RÉVOQUE PAS LUI-MÊME, ET CE N'EST PAS UNE COMMODITÉ
+///
+/// `protocole.md` §2.2 le dit : **sinon un téléphone volé et déverrouillé
+/// révoque les autres et confisque le compte.** Le voleur tiendrait alors le
+/// seul justificatif restant, et le propriétaire n'aurait plus rien pour le lui
+/// reprendre. La règle inverse — « n'importe quel appareil enrôlé peut révoquer
+/// n'importe quel autre, sauf lui-même » — laisse toujours au propriétaire un
+/// appareil pour se défendre.
+///
+/// # ET ELLE FAIT TOMBER UN AUTRE PROBLÈME, SANS QU'ON AIT À LE TRAITER
+///
+/// **Un compte ne peut pas se retrouver sans aucun appareil.** Il en faut deux
+/// pour qu'une révocation soit possible, et il en reste donc au moins un après.
+/// Un compte à un seul appareil ne peut que tenter de se révoquer lui-même, et
+/// c'est refusé — il n'y a pas de compte à confisquer par mégarde.
+#[must_use]
+pub fn decider_revocation_d_appareil(demandeur: Identifiant, vise: Identifiant) -> Decision {
+    if demandeur == vise {
+        Decision::Refuser
+    } else {
+        Decision::Servir
+    }
+}
+
 // ── L'attestation de plate-forme ────────────────────────────────────────────
 
 /// Ce que l'annuaire exige d'un appareil qui s'enrôle.

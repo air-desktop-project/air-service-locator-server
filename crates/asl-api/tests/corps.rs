@@ -1,7 +1,8 @@
 //! Les corps de l'API mobile : ce qu'ils acceptent, et ce qu'ils refusent.
 
 use asl_api::corps::{
-    CORPS_MAX, Capacites, DeclarationMachine, DemandeAutorisation, NOM_MACHINE_MAX, Portee,
+    CORPS_MAX, Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation, NOM_MACHINE_MAX,
+    Portee,
 };
 use asl_id::{Genre, Identifiant};
 use asl_proto::Erreur;
@@ -422,4 +423,83 @@ fn une_machine_de_lecture_seule_se_reecrit_sans_virgule_orpheline() {
         &sortie[..combien],
         br#"{"nom":"n","capacites":["lecture"]}"#
     );
+}
+
+// ── Poser un alias ──────────────────────────────────────────────────────────
+
+#[test]
+fn un_alias_se_lit_et_se_reecrit_a_l_identique() {
+    let octets = br#"{"alias":"thierry"}"#;
+    let lue = DemandeAlias::decoder(octets).expect("il se lit");
+    assert_eq!(lue.alias.as_str(), "thierry");
+
+    let mut sortie = [0_u8; CORPS_MAX];
+    let combien = lue.encoder(&mut sortie).expect("il se réécrit");
+    assert_eq!(&sortie[..combien], &octets[..]);
+}
+
+#[test]
+fn un_alias_reste_une_cle_et_refuse_ce_qu_un_nom_accepte() {
+    // **LA DIFFÉRENCE AVEC LE NOM D'UNE MACHINE EST TOUT LE PROPOS.** Un alias
+    // se CHERCHE : deux écritures d'une même valeur feraient croire à deux
+    // comptes qu'ils la possèdent chacun. Le non-ASCII y est donc refusé, là où
+    // un nom d'affichage l'accepte.
+    for texte in [
+        "Thérèse",
+        "屋根裏",
+        "THIERRY",
+        "ab",
+        "a".repeat(33).as_str(),
+    ] {
+        let corps = format!(r#"{{"alias":"{texte}"}}"#);
+        assert!(
+            DemandeAlias::decoder(corps.as_bytes()).is_err(),
+            "{texte:?} devrait être refusé"
+        );
+    }
+}
+
+#[test]
+fn un_alias_qui_ressemble_a_un_identifiant_est_refuse() {
+    // Sinon `GET /v1/alias/{alias}` et `GET /v1/utilisateurs/{u}` se
+    // confondraient à l'œil, et l'alias servirait à imiter un identifiant.
+    let corps = format!(
+        r#"{{"alias":"{}"}}"#,
+        un(Genre::Utilisateur).texte().as_str().to_lowercase()
+    );
+    assert!(matches!(
+        DemandeAlias::decoder(corps.as_bytes()),
+        Err(Erreur::IdentifiantInvalide { .. })
+    ));
+}
+
+#[test]
+fn une_demande_d_alias_mal_formee_est_refusee() {
+    for octets in [
+        &b""[..],
+        &b"["[..],
+        &br#"{"alias":"thierry""#[..],
+        &br#"{"alias":"thierry"}x"#[..],
+        &br#"{"pseudo":"thierry"}"#[..],
+        &br#"{"alias":1}"#[..],
+        &br#"{"alias" "thierry"}"#[..],
+        &br#"{"alias":"thierry","alias":"autre"}"#[..],
+        &b"{1:2}"[..],
+    ] {
+        assert!(
+            DemandeAlias::decoder(octets).is_err(),
+            "{:?} devrait être refusé",
+            String::from_utf8_lossy(octets)
+        );
+    }
+    let trop = vec![b'{'; CORPS_MAX + 1];
+    assert_eq!(
+        DemandeAlias::decoder(&trop).map(|_| ()),
+        Err(Erreur::MessageTropLong {
+            obtenue: CORPS_MAX + 1
+        })
+    );
+    let lue = DemandeAlias::decoder(br#"{"alias":"thierry"}"#).expect("il se lit");
+    let mut sortie = [0_u8; 4];
+    assert_eq!(lue.encoder(&mut sortie), Err(Erreur::TamponTropPetit));
 }

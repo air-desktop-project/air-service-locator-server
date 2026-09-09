@@ -68,6 +68,12 @@ struct Service<'a> {
     session: &'a mut Session,
     /// Ce que l'annuaire exige d'un appareil qui s'enrôle.
     politique: asl_auth::Politique,
+    /// Les pairs qu'une révocation vient de condamner, sur CETTE requête.
+    ///
+    /// **Ce sont des pairs, pas des connexions** : la requête qui révoque ne
+    /// sait pas quelles connexions ce pair tient — c'est `Annuaire` qui les
+    /// connaît, et qui traduira. Voir `Annuaire::au_tour`.
+    a_fermer: &'a mut Vec<Identifiant>,
     /// Ce qui se souvient.
     entrepot: &'a Entrepot,
     /// Ce qui vit.
@@ -198,6 +204,15 @@ impl Service<'_> {
             Besoin::Enroler { empreinte, cle } => self.enroler(empreinte, cle),
             Besoin::Autoriser { a, portee } => self.autoriser(*a, *portee),
 
+            // ── CE QUI RETIRE ───────────────────────────────────────────
+            Besoin::RevoquerAppareil { appareil } => self.revoquer_un_appareil(*appareil),
+            Besoin::RevoquerCleMachine { machine } => self.revoquer_une_cle(*machine),
+            Besoin::RevoquerAutorisation { autorisation } => {
+                self.revoquer_une_autorisation(*autorisation)
+            }
+            Besoin::PoserAlias { alias } => self.poser_l_alias(Some(alias)),
+            Besoin::RetirerAlias => self.poser_l_alias(None),
+
             Besoin::CompteParAlias(alias) => match self.entrepot.compte_par_alias(alias) {
                 Ok(Some(qui)) => match self.entrepot.compte(qui) {
                     Ok(Some(compte)) => Trouvaille::Compte {
@@ -227,6 +242,11 @@ impl Service<'_> {
             .appareil(appareil)
             .ok()
             .flatten()
+            // **UN APPAREIL RÉVOQUÉ N'AGIT PLUS**, même sur une connexion qu'il
+            // avait authentifiée avant. La connexion est fermée par ailleurs,
+            // mais s'en remettre à cette fermeture seule ferait dépendre une
+            // règle d'autorisation du bon déroulement d'un tour de boucle.
+            .filter(|rangee| !rangee.revoque)
             .map(|rangee| rangee.proprietaire)
     }
 
@@ -274,6 +294,7 @@ impl Service<'_> {
                     provenance: asl_registre::Provenance::Ici,
                     proprietaire: compte,
                     cle: cle.octets(),
+                    revoque: false,
                 },
             )
             .is_err()
@@ -300,6 +321,7 @@ impl Service<'_> {
                 provenance: asl_registre::Provenance::Ici,
                 proprietaire: compte,
                 cle: cle.octets(),
+                revoque: false,
             },
         ) {
             Ok(()) => Trouvaille::AppareilCree(appareil),
@@ -514,6 +536,123 @@ impl Service<'_> {
             },
         ) {
             Ok(()) => Trouvaille::AutorisationCreee(quelle),
+            Err(_) => Trouvaille::Rien,
+        }
+    }
+
+    /// Révoque un appareil du compte de cette connexion.
+    fn revoquer_un_appareil(&mut self, vise: Identifiant) -> Trouvaille {
+        let (Some(compte), Some(demandeur)) =
+            (self.compte_de_la_connexion(), self.session.appareil())
+        else {
+            return Trouvaille::Rien;
+        };
+        // **LE REFUS DE SE RÉVOQUER SOI-MÊME SE PREND AVANT LA LECTURE**, parce
+        // qu'il ne dépend pas de l'entrepôt — et parce qu'il ne se cache pas :
+        // celui qui demande connaît déjà son propre identifiant.
+        if asl_auth::decider_revocation_d_appareil(demandeur, vise) == asl_auth::Decision::Refuser {
+            return Trouvaille::Refus;
+        }
+        let Ok(Some(rangee)) = self.entrepot.appareil(vise) else {
+            return Trouvaille::Rien;
+        };
+        // **L'APPAREIL D'UN AUTRE COMPTE REND `Rien`, ET NON UN REFUS** : les
+        // deux réponses doivent être la même, sinon un inconnu apprend quels
+        // identifiants existent en essayant.
+        if asl_auth::decider_gestion(compte, rangee.proprietaire) == asl_auth::Decision::Refuser {
+            return Trouvaille::Rien;
+        }
+        match self.entrepot.revoquer_appareil(vise) {
+            Ok(Some(_)) => {
+                self.a_fermer.push(vise);
+                Trouvaille::Fait
+            }
+            Ok(None) => Trouvaille::Rien,
+            Err(_) => Trouvaille::Rien,
+        }
+    }
+
+    /// Retire la clé d'une machine du compte de cette connexion.
+    fn revoquer_une_cle(&mut self, machine: Identifiant) -> Trouvaille {
+        let (Some(compte), Ok(Some(rangee))) = (
+            self.compte_de_la_connexion(),
+            self.entrepot.machine(machine),
+        ) else {
+            return Trouvaille::Rien;
+        };
+        if asl_auth::decider_gestion(compte, rangee.proprietaire) == asl_auth::Decision::Refuser {
+            return Trouvaille::Rien;
+        }
+        // **LA CLÉ S'EFFACE, LA MACHINE RESTE.** Elle garde son nom, ses
+        // capacités et ses services ; ce qu'elle perd est le moyen de prouver
+        // qu'elle est elle. Un nouveau code la remettra en marche.
+        match self.entrepot.poser_machine(
+            machine,
+            &asl_registre::Machine {
+                cle: None,
+                ..rangee
+            },
+        ) {
+            Ok(()) => {
+                self.a_fermer.push(machine);
+                Trouvaille::Fait
+            }
+            Err(_) => Trouvaille::Rien,
+        }
+    }
+
+    /// Retire une autorisation que ce compte a accordée.
+    fn revoquer_une_autorisation(&self, quelle: Identifiant) -> Trouvaille {
+        let (Some(compte), Ok(Some(rangee))) = (
+            self.compte_de_la_connexion(),
+            self.entrepot.autorisation(quelle),
+        ) else {
+            return Trouvaille::Rien;
+        };
+        // **C'EST CELUI QUI A ACCORDÉ QUI RETIRE**, jamais le bénéficiaire :
+        // une arête qu'on pourrait retirer soi-même serait une arête qu'un
+        // compromis effacerait pour brouiller les pistes.
+        if asl_auth::decider_gestion(compte, rangee.par) == asl_auth::Decision::Refuser {
+            return Trouvaille::Rien;
+        }
+        match self.entrepot.revoquer_autorisation(quelle) {
+            Ok(Some(_)) => Trouvaille::Fait,
+            Ok(None) | Err(_) => Trouvaille::Rien,
+        }
+    }
+
+    /// Pose ou retire l'alias public du compte de cette connexion.
+    ///
+    /// # LES DEUX VERBES SONT LA MÊME ÉCRITURE
+    ///
+    /// `poser_compte` tient déjà l'index des alias, et le met d'accord avec le
+    /// compte qu'on écrit : l'ancien alias part, le neuf entre, et un alias déjà
+    /// pris est refusé. Écrire un chemin à part pour le retrait aurait dédoublé
+    /// cette mise d'accord — et c'est la copie qu'on oublie qui laisse un index
+    /// désignant un compte qui n'a plus cet alias.
+    fn poser_l_alias(&self, alias: Option<&str>) -> Trouvaille {
+        let (Some(compte),) = (self.compte_de_la_connexion(),) else {
+            return Trouvaille::Rien;
+        };
+        let range = match alias {
+            Some(texte) => match asl_registre::AliasRange::nouveau(texte) {
+                Ok(range) => Some(range),
+                Err(_) => return Trouvaille::Rien,
+            },
+            None => None,
+        };
+        let Ok(Some(rangee)) = self.entrepot.compte(compte) else {
+            return Trouvaille::Rien;
+        };
+        match self.entrepot.poser_compte(
+            compte,
+            &asl_registre::Compte {
+                alias: range,
+                ..rangee
+            },
+        ) {
+            Ok(()) => Trouvaille::Fait,
+            Err(asl_store::Faute::AliasPris) => Trouvaille::Conflit,
             Err(_) => Trouvaille::Rien,
         }
     }
@@ -823,6 +962,8 @@ pub struct Annuaire<'a> {
     politique: asl_auth::Politique,
     /// Quand les codes expirés ont été balayés pour la dernière fois.
     dernier_balayage: u64,
+    /// Les pairs révoqués dont il reste des connexions à fermer.
+    revoques: Vec<Identifiant>,
 }
 
 impl<'a> Annuaire<'a> {
@@ -853,6 +994,7 @@ impl<'a> Annuaire<'a> {
             servies: 0,
             politique,
             dernier_balayage: 0,
+            revoques: Vec::new(),
         }
     }
 
@@ -866,6 +1008,38 @@ impl<'a> Annuaire<'a> {
     #[must_use]
     pub const fn servies(&self) -> u64 {
         self.servies
+    }
+
+    /// Traduit les pairs révoqués en connexions à fermer.
+    ///
+    /// # C'EST ICI QUE « EFFET IMMÉDIAT » DEVIENT VRAI
+    ///
+    /// Révoquer écrit dans l'entrepôt, ce qui suffit à refuser la PROCHAINE
+    /// authentification. Mais une connexion déjà authentifiée porte son pair
+    /// avec elle — c'est tout l'intérêt du transport tenu (`protocole.md` §3) —,
+    /// et elle continuerait donc de servir. **La connexion EST le bail** : la
+    /// fermer fait tomber les annonces du daemon, sans qu'on ait à toucher au
+    /// vivier ; `a_la_fermeture` s'en charge, comme pour un départ ordinaire.
+    ///
+    /// **Une seule traduction par tour, et la liste est vidée.** Un pair qui
+    /// ouvrirait une connexion neuve après coup ne s'authentifierait pas : sa
+    /// clé n'est plus là. Il n'y a donc rien à retenir.
+    fn consignes_de_fermeture(&mut self) -> crate::quic::Consignes {
+        if self.revoques.is_empty() {
+            return crate::quic::Consignes::default();
+        }
+        let revoques = core::mem::take(&mut self.revoques);
+        let a_fermer = self
+            .connexions
+            .iter()
+            .filter(|(_, etat)| {
+                etat.session
+                    .pair()
+                    .is_some_and(|pair| revoques.contains(&pair))
+            })
+            .map(|(clef, _)| clef.clone())
+            .collect();
+        crate::quic::Consignes { a_fermer }
     }
 
     /// Efface les codes d'enrôlement périmés, de loin en loin.
@@ -898,7 +1072,7 @@ impl<'a> Annuaire<'a> {
 }
 
 impl Application for Annuaire<'_> {
-    fn au_tour(&mut self, _maintenant: u64) {
+    fn au_tour(&mut self, _maintenant: u64) -> crate::quic::Consignes {
         // **LES VERDICTS ARRIVENT ICI, ET NULLE PART AILLEURS.** Une sonde est
         // une tâche à part : elle ne touche pas au vivier, elle rapporte. C'est
         // ce qui permet d'attendre trois secondes un trois-temps sans arrêter
@@ -911,6 +1085,7 @@ impl Application for Annuaire<'_> {
         // tombée sans qu'on l'apprenne n'a personne pour la retirer.
         self.vivier.oublier_les_expirees(instant());
         self.balayer_les_codes();
+        self.consignes_de_fermeture()
     }
 
     fn a_l_etablissement(&mut self, connexion: &mut Connection, _pair: SocketAddr) {
@@ -950,6 +1125,7 @@ impl Application for Annuaire<'_> {
         let mut service = Service {
             session,
             politique: self.politique,
+            a_fermer: &mut self.revoques,
             entrepot: self.entrepot,
             vivier: &mut self.vivier,
             rapports: self.rapports.clone(),

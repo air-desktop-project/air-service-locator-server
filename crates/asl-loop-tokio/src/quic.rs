@@ -110,6 +110,27 @@ struct Vivante {
     pair: SocketAddr,
 }
 
+/// Ce qu'un tour demande à l'écoute.
+///
+/// # POURQUOI L'APPLICATION NE FERME PAS ELLE-MÊME
+///
+/// Elle n'a pas les connexions : la boucle les tient, et ne les prête qu'aux
+/// rendez-vous liés à L'UNE d'elles. Or une révocation ferme **une AUTRE
+/// connexion que celle qui la demande** — le téléphone révoque la machine, et
+/// c'est justement l'intérêt.
+///
+/// Elle rend donc des CONSIGNES, et l'écoute les exécute. C'est la même
+/// séparation qu'entre `asl-annuaire` et l'étage 3 : ce qui décide dit quoi
+/// faire, ce qui exécute le fait.
+#[derive(Debug, Default)]
+pub struct Consignes {
+    /// Les connexions à fermer, par identifiant local.
+    ///
+    /// **Vide au tour ordinaire**, et un `Vec` vide n'alloue pas : ce
+    /// rendez-vous passe des milliers de fois par seconde.
+    pub a_fermer: Vec<Vec<u8>>,
+}
+
 /// Ce qu'une application fait des flux d'une connexion.
 ///
 /// # LA BOUCLE CONDUIT LE TRANSPORT, CETTE INTERFACE DÉCIDE DU RESTE
@@ -143,7 +164,9 @@ pub trait Application {
     /// réveillés : une application qui n'aurait de nouvelles que lorsqu'un pair
     /// parle ne saurait rien pendant qu'il se tait, ce qui est exactement le
     /// moment où les délais échoient.
-    fn au_tour(&mut self, _maintenant: u64) {}
+    fn au_tour(&mut self, _maintenant: u64) -> Consignes {
+        Consignes::default()
+    }
 
     /// Une connexion vient de s'établir.
     ///
@@ -276,7 +299,8 @@ where
         };
 
         let maintenant = maintenant();
-        application.au_tour(maintenant);
+        let consignes = application.au_tour(maintenant);
+        ecoute.executer(&consignes, application, maintenant);
         ecoute.un_tour(arrivee, &mut recu, application, maintenant);
         ecoute.emettre(&mut place, maintenant).await;
         ecoute.oublier_les_eteintes(application);
@@ -304,7 +328,8 @@ where
             lu = ecoute.socket.recv_from(&mut recu) => Some(lu),
         };
         let maintenant = maintenant();
-        application.au_tour(maintenant);
+        let consignes = application.au_tour(maintenant);
+        ecoute.executer(&consignes, application, maintenant);
         ecoute.un_tour(arrivee, &mut recu, application, maintenant);
         ecoute.emettre(&mut place, maintenant).await;
         ecoute.oublier_les_eteintes(application);
@@ -467,6 +492,41 @@ impl Ecoute {
             etablie_dite: false,
         });
         self.comptes.acceptees = self.comptes.acceptees.saturating_add(1);
+    }
+
+    /// Exécute ce que l'application a demandé.
+    ///
+    /// # FERMER EST IMMÉDIAT, ET C'EST CE QU'ON PROMET
+    ///
+    /// `au_tour` passe AVANT la lecture du datagramme arrivé : une connexion
+    /// qu'une révocation condamne au tour N est fermée au début du tour N+1,
+    /// donc **avant qu'une seule de ses requêtes ne soit servie de plus**.
+    ///
+    /// Un identifiant qu'on ne retrouve pas n'est pas une faute : la connexion a
+    /// pu tomber d'elle-même entre la décision et son exécution, et c'est
+    /// exactement le résultat qu'on voulait.
+    fn executer<App: Application>(
+        &mut self,
+        consignes: &Consignes,
+        application: &App,
+        maintenant: u64,
+    ) {
+        if consignes.a_fermer.is_empty() {
+            return;
+        }
+        let code = application.code_de_fermeture();
+        for clef in &consignes.a_fermer {
+            let Some(rang) = self.carte.get(clef.as_slice()).copied() else {
+                continue;
+            };
+            let Some(vivante) = self.connexions.get_mut(rang) else {
+                continue;
+            };
+            if vivante.conduite.is_closed() {
+                continue;
+            }
+            vivante.conduite.close_with(code, maintenant);
+        }
     }
 
     /// Le prochain délai à attendre, en microsecondes.

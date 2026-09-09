@@ -78,7 +78,7 @@ extern crate alloc;
 
 use ams_h3::Reponse;
 use ams_proto_http::{Method, RequestHead, StatusCode};
-use asl_api::corps::{Capacites, DeclarationMachine, DemandeAutorisation, Portee};
+use asl_api::corps::{Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation, Portee};
 use asl_api::{Exigence, Ressource};
 use asl_auth::{CodeEnrolement, TexteCode};
 use asl_cle::{ClePublique, Defi, LiaisonDeCanal, Signature};
@@ -265,6 +265,36 @@ pub enum Besoin<'a> {
         /// Jusqu'où elle porte.
         portee: Portee,
     },
+    /// Révoquer un appareil du compte de cette connexion.
+    ///
+    /// **JAMAIS CELUI QUI DEMANDE** : c'est `asl_auth::
+    /// decider_revocation_d_appareil` qui le refuse, et son en-tête dit
+    /// pourquoi — un téléphone volé et déverrouillé confisquerait le compte.
+    RevoquerAppareil {
+        /// L'appareil visé.
+        appareil: Identifiant,
+    },
+    /// Retirer la clé d'une machine.
+    ///
+    /// **EFFET IMMÉDIAT** : la clé s'efface, les connexions que cette machine
+    /// tient sont fermées, et ses baux tombent avec elles. C'est l'étage 3 qui
+    /// ferme, parce que c'est lui qui tient les connexions.
+    RevoquerCleMachine {
+        /// La machine visée.
+        machine: Identifiant,
+    },
+    /// Retirer une autorisation qu'on a accordée.
+    RevoquerAutorisation {
+        /// L'autorisation visée.
+        autorisation: Identifiant,
+    },
+    /// Enregistrer ou changer l'alias public du compte.
+    PoserAlias {
+        /// L'alias demandé, déjà validé.
+        alias: &'a str,
+    },
+    /// Retirer l'alias public du compte.
+    RetirerAlias,
 }
 
 /// Ce qu'il faut savoir pour décider d'une résolution.
@@ -371,6 +401,20 @@ pub enum Trouvaille {
     Enrolee(Identifiant),
     /// Une autorisation a été accordée.
     AutorisationCreee(Identifiant),
+    /// C'est fait, et il n'y a rien à rendre.
+    ///
+    /// Les révocations et l'alias : **la réponse est le fait qu'elle réussisse**.
+    /// Rendre l'objet modifié n'apprendrait rien à qui vient de le modifier.
+    Fait,
+    /// Cet alias appartient déjà à quelqu'un d'autre.
+    ///
+    /// # CE N'EST NI UN REFUS NI UNE PANNE, ET LE STATUT DOIT LE DIRE
+    ///
+    /// `403` dirait « vous n'avez pas le droit », ce qui est faux — n'importe
+    /// qui a le droit de demander un alias. `500` dirait que la faute est de
+    /// notre côté. C'est un CONFLIT : la demande est légitime, et l'état du
+    /// monde s'y oppose. Le client doit en proposer un autre, et lui seul peut.
+    Conflit,
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -419,6 +463,16 @@ impl Session {
     #[must_use]
     pub fn machine(&self) -> Option<Identifiant> {
         self.pair.filter(|qui| qui.genre() == Genre::Machine)
+    }
+
+    /// Le pair — machine ou appareil — authentifié sur cette connexion.
+    ///
+    /// **C'est ce qui permet de FERMER ce qu'une révocation ferme.** L'étage 3
+    /// cherche les connexions dont le pair vient d'être révoqué ; sans cet
+    /// accesseur, il devrait demander deux fois et recoller lui-même.
+    #[must_use]
+    pub const fn pair(&self) -> Option<Identifiant> {
+        self.pair
     }
 
     /// L'appareil authentifié sur cette connexion.
@@ -565,6 +619,18 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
                 portee: demande.portee,
             },
             Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+        },
+        Ressource::Appareil { appareil } => Besoin::RevoquerAppareil { appareil },
+        Ressource::CleMachine { machine } => Besoin::RevoquerCleMachine { machine },
+        Ressource::Autorisation { autorisation } => Besoin::RevoquerAutorisation { autorisation },
+        Ressource::Alias => match methode {
+            asl_api::Methode::Delete => Besoin::RetirerAlias,
+            _ => match DemandeAlias::decoder(corps) {
+                Ok(demande) => Besoin::PoserAlias {
+                    alias: demande.alias.as_str(),
+                },
+                Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+            },
         },
         // Ce qui reste — révoquer, modifier, lister, l'alias, les expositions —
         // n'est pas écrit. Le dire par `501` est exact : la ressource existe, le
@@ -930,6 +996,43 @@ pub fn repondre<'o>(
             }
             autre => rendre_l_echec(autre, sortie),
         },
+        // ── CE QUI RETIRE, ET L'ALIAS ───────────────────────────────────
+        //
+        // **UNE SEULE FORME DE RÉPONSE POUR LES CINQ**, et c'est ce qui les rend
+        // sûres : `204` quand c'est fait, `404` quand l'objet visé n'existe pas
+        // **OU N'EST PAS À NOUS**. Les distinguer dirait à qui essaie des
+        // identifiants au hasard lesquels existent — et un identifiant qui
+        // existe est un compte qu'on vient de découvrir.
+        //
+        // `403` reste pour le seul refus qui ne se cache pas : un appareil qui
+        // se révoque lui-même. Celui-là connaît déjà son propre identifiant, et
+        // il doit savoir pourquoi on lui dit non.
+        Besoin::RevoquerAppareil { .. }
+        | Besoin::RevoquerCleMachine { .. }
+        | Besoin::RevoquerAutorisation { .. }
+        | Besoin::PoserAlias { .. }
+        | Besoin::RetirerAlias => match trouvaille {
+            Trouvaille::Fait => composer(StatusCode::NO_CONTENT, JSON_MEDIA, &[], sortie),
+            Trouvaille::Conflit => composer(
+                StatusCode::CONFLICT,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::CONFLICT),
+                sortie,
+            ),
+            Trouvaille::Refus => composer(
+                StatusCode::FORBIDDEN,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::FORBIDDEN),
+                sortie,
+            ),
+            _ => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+        },
+
         Besoin::Compte(_) | Besoin::CompteParAlias(_) => match trouvaille {
             // **UN COMPTE QU'ON NE TROUVE PAS EST UN `404`**, et jamais un
             // corps vide avec un `200` : le client doit pouvoir distinguer
@@ -1167,6 +1270,7 @@ const fn probleme(statut: StatusCode) -> &'static [u8] {
             br#"{"type":"about:blank","title":"Unauthorized","status":401}"#
         }
         StatusCode::FORBIDDEN => br#"{"type":"about:blank","title":"Forbidden","status":403}"#,
+        StatusCode::CONFLICT => br#"{"type":"about:blank","title":"Conflict","status":409}"#,
         StatusCode::INTERNAL_SERVER_ERROR => {
             br#"{"type":"about:blank","title":"Internal Server Error","status":500}"#
         }
@@ -3217,5 +3321,217 @@ mod creations {
         // `Signature` est `Copy` : on s'assure que le type public sert bien.
         let brute = Signature::depuis_octets([0; asl_cle::SIGNATURE_OCTETS]);
         assert_eq!(brute.octets().len(), asl_cle::SIGNATURE_OCTETS);
+    }
+}
+
+#[cfg(test)]
+mod retraits {
+    //! Ce qui RETIRE, et l'alias.
+    //!
+    //! # UNE SEULE FORME DE RÉPONSE, ET C'EST CE QUI LES REND SÛRES
+    //!
+    //! `204` quand c'est fait, `404` quand l'objet visé n'existe pas **ou n'est
+    //! pas à nous**. Les distinguer dirait à qui essaie des identifiants au
+    //! hasard lesquels existent — et un identifiant qui existe est un compte
+    //! qu'on vient de découvrir.
+
+    extern crate alloc;
+
+    use alloc::vec::Vec;
+    use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
+    use asl_cle::LiaisonDeCanal;
+    use asl_id::{Genre, Identifiant};
+
+    use super::{Besoin, Session, Trouvaille, besoin, repondre};
+
+    fn liaison() -> LiaisonDeCanal {
+        asl_cle::liaison_depuis_certificat(b"le certificat du banc")
+    }
+
+    fn un(genre: Genre, graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(genre, [graine; 16])
+    }
+
+    /// Une session dont un appareil a prouvé la clé.
+    fn session_d_appareil() -> Session {
+        let mut session = Session::new(liaison());
+        session.pair = Some(un(Genre::Appareil, 9));
+        session
+    }
+
+    fn tete<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
+        let limites = Limits::default();
+        let mut constructeur = HeadBuilder::new(&limites);
+        constructeur.field(b":method", verbe).expect("le verbe");
+        constructeur.field(b":scheme", b"https").expect("le schéma");
+        constructeur
+            .field(b":authority", b"annuaire.example")
+            .expect("l'autorité");
+        constructeur.field(b":path", cible).expect("la cible");
+        constructeur.finish().expect("une tête close")
+    }
+
+    fn rendre(quoi: &Besoin<'_>, trouvaille: &Trouvaille) -> (StatusCode, Vec<u8>) {
+        let mut session = session_d_appareil();
+        let mut sortie = [0_u8; 512];
+        let reponse = repondre(&mut session, quoi, trouvaille, None, &mut sortie);
+        (reponse.status(), reponse.body().to_vec())
+    }
+
+    // ── Les trois révocations ───────────────────────────────────────────────
+
+    #[test]
+    fn les_trois_revocations_se_routent_vers_leur_besoin() {
+        let appareil = un(Genre::Appareil, 1);
+        let machine = un(Genre::Machine, 2);
+        let autorisation = un(Genre::Autorisation, 3);
+
+        let cible = alloc::format!("/v1/appareils/{}", appareil.texte());
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"DELETE", cible.as_bytes()),
+                b""
+            ),
+            Besoin::RevoquerAppareil { appareil }
+        );
+
+        let cible = alloc::format!("/v1/machines/{}/cle", machine.texte());
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"DELETE", cible.as_bytes()),
+                b""
+            ),
+            Besoin::RevoquerCleMachine { machine }
+        );
+
+        let cible = alloc::format!("/v1/autorisations/{}", autorisation.texte());
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"DELETE", cible.as_bytes()),
+                b""
+            ),
+            Besoin::RevoquerAutorisation { autorisation }
+        );
+    }
+
+    #[test]
+    fn une_revocation_exige_un_appareil_et_pas_une_machine() {
+        let cible = alloc::format!("/v1/appareils/{}", un(Genre::Appareil, 1).texte());
+
+        assert_eq!(
+            besoin(
+                &Session::new(liaison()),
+                &tete(b"DELETE", cible.as_bytes()),
+                b""
+            ),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+
+        // **LA CLÉ D'UNE MACHINE VIT EN CLAIR SUR UN DISQUE** que tout daemon
+        // peut lire. Lui ouvrir la révocation permettrait à un daemon compromis
+        // d'écarter les appareils de son propriétaire.
+        let mut session = Session::new(liaison());
+        session.pair = Some(un(Genre::Machine, 4));
+        assert_eq!(
+            besoin(&session, &tete(b"DELETE", cible.as_bytes()), b""),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn ce_qui_est_fait_rend_204_et_le_reste_rend_404() {
+        let quoi = Besoin::RevoquerAppareil {
+            appareil: un(Genre::Appareil, 1),
+        };
+        let (statut, corps) = rendre(&quoi, &Trouvaille::Fait);
+        assert_eq!(statut, StatusCode::NO_CONTENT);
+        assert!(corps.is_empty(), "`204` ne porte pas de corps");
+
+        // **INCONNU ET PAS-À-NOUS SONT LE MÊME `404`.**
+        let (statut, _) = rendre(&quoi, &Trouvaille::Rien);
+        assert_eq!(statut, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn se_revoquer_soi_meme_rend_403_et_non_404() {
+        // **CE REFUS-LÀ NE SE CACHE PAS** : celui qui demande connaît déjà son
+        // propre identifiant, et il doit savoir pourquoi on lui dit non.
+        let quoi = Besoin::RevoquerAppareil {
+            appareil: un(Genre::Appareil, 9),
+        };
+        let (statut, corps) = rendre(&quoi, &Trouvaille::Refus);
+        assert_eq!(statut, StatusCode::FORBIDDEN);
+        assert!(corps.windows(3).any(|f| f == b"403"));
+    }
+
+    // ── L'alias ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn poser_et_retirer_un_alias_se_routent() {
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"PUT", b"/v1/alias"),
+                br#"{"alias":"thierry"}"#
+            ),
+            Besoin::PoserAlias { alias: "thierry" }
+        );
+        assert_eq!(
+            besoin(&session_d_appareil(), &tete(b"DELETE", b"/v1/alias"), b""),
+            Besoin::RetirerAlias
+        );
+    }
+
+    #[test]
+    fn un_alias_mal_forme_est_refuse_avant_toute_ecriture() {
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"PUT", b"/v1/alias"),
+                // Un alias est une CLÉ : le non-ASCII y est refusé, là où le nom
+                // d'une machine l'accepte.
+                "{\"alias\":\"Th\u{e9}r\u{e8}se\"}".as_bytes()
+            ),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn un_alias_deja_pris_rend_409_et_non_403() {
+        // `403` dirait « vous n'avez pas le droit », ce qui est faux — n'importe
+        // qui a le droit de demander un alias. C'est un CONFLIT : la demande est
+        // légitime, et l'état du monde s'y oppose.
+        let quoi = Besoin::PoserAlias { alias: "thierry" };
+        let (statut, corps) = rendre(&quoi, &Trouvaille::Conflit);
+        assert_eq!(statut, StatusCode::CONFLICT);
+        assert!(corps.windows(3).any(|f| f == b"409"), "il porte son code");
+
+        assert_eq!(rendre(&quoi, &Trouvaille::Fait).0, StatusCode::NO_CONTENT);
+        assert_eq!(
+            rendre(&Besoin::RetirerAlias, &Trouvaille::Fait).0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            rendre(&Besoin::RetirerAlias, &Trouvaille::Rien).0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn le_pair_de_la_session_se_lit_quel_que_soit_son_genre() {
+        // C'est ce qui permet à l'étage 3 de savoir quelles connexions fermer.
+        let session = session_d_appareil();
+        assert_eq!(session.pair(), session.appareil());
+
+        let mut session = Session::new(liaison());
+        let machine = un(Genre::Machine, 4);
+        session.pair = Some(machine);
+        assert_eq!(session.pair(), Some(machine));
+        assert_eq!(session.appareil(), None);
+
+        assert_eq!(Session::new(liaison()).pair(), None);
     }
 }

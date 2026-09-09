@@ -1452,3 +1452,180 @@ async fn enroler(
     assert_eq!(statut, b"200", "{}", String::from_utf8_lossy(&rendu));
     Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine")
 }
+
+#[tokio::test]
+async fn revoquer_la_cle_d_une_machine_ferme_sa_connexion_et_fait_tomber_son_bail() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // `protocole.md` §2.2 promet un EFFET IMMÉDIAT : « connexions fermées, baux
+    // tombés ». Effacer la clé dans l'entrepôt ne suffirait pas — une connexion
+    // déjà authentifiée porte son pair avec elle, c'est tout l'intérêt du
+    // transport tenu, et elle continuerait de servir.
+    //
+    // Ici le daemon annonce, son propriétaire révoque la clé depuis une AUTRE
+    // connexion, et l'annonce disparaît sans que le daemon ait rien fait.
+    let (autorite, racine, chaine, cle) = materiel("revoque");
+    let (base, fichier) = entrepot("revoque");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    // A crée son compte, déclare une machine, et l'enrôle.
+    let mut alice = connecter(&racine, adresse).await;
+    let (_compte, _appareil, _secrete) = creer_un_compte(&mut alice, &chaine, 0, 0xA1).await;
+    let (statut, rendu) = poster(
+        &mut alice,
+        8,
+        b"/v1/machines",
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let machine = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let code = valeur_json(&rendu, "code");
+
+    let mut daemon = connecter(&racine, adresse).await;
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xD1; 32]);
+    assert_eq!(
+        enroler(&mut daemon, &chaine, 0, &code, &secrete).await,
+        machine
+    );
+    authentifier(&mut daemon, &chaine, machine, &secrete, 12, 16).await;
+
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}]}}"#,
+        machine.texte()
+    );
+    let (statut, _) = poster(
+        &mut daemon,
+        20,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"200", "l'annonce est prise");
+
+    // ── LA RÉVOCATION, DEPUIS L'AUTRE CONNEXION ─────────────────────────────
+    let cible = format!("/v1/machines/{}/cle", machine.texte());
+    // `16` est l'index QPACK de `:method: DELETE` (annexe A de RFC 9204).
+    ams_quic_client::envoyer_une_requete(&mut alice, 12, 16, cible.as_bytes(), None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 12).await;
+    assert_eq!(
+        champ(&champs(alice.recu(12)), b":status"),
+        Some(&b"204"[..]),
+        "la clé est retirée"
+    );
+
+    // ── ET LA CONNEXION DU DAEMON TOMBE ─────────────────────────────────────
+    //
+    // On laisse la boucle passer quelques tours : `au_tour` traduit le pair
+    // révoqué en connexions à fermer, et la fermeture part au tour suivant.
+    for _ in 0..32_u32 {
+        daemon.parler().await;
+        if !daemon.ecouter().await {
+            break;
+        }
+    }
+    // `ferme()` rend le code applicatif reçu dans le `CONNECTION_CLOSE`.
+    assert!(
+        daemon.ferme().is_some(),
+        "la connexion du daemon aurait dû être fermée par la révocation"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn l_alias_se_pose_se_cherche_et_se_retire() {
+    // **C'EST LA SEULE DONNÉE PERSONNELLE DU PRODUIT** (C13), et jusqu'ici aucun
+    // verbe ne savait la poser : `GET /v1/alias/{alias}` interrogeait un champ
+    // que rien ne remplissait.
+    let (autorite, racine, chaine, cle) = materiel("alias-api");
+    let (base, fichier) = entrepot("alias-api");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte, _appareil, _secrete) = creer_un_compte(&mut alice, &chaine, 0, 0xA1).await;
+
+    // Avant : personne ne répond à cet alias.
+    ams_quic_client::envoyer_une_requete(&mut alice, 8, 17, b"/v1/alias/thierry", None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 8).await;
+    assert_eq!(champ(&champs(alice.recu(8)), b":status"), Some(&b"404"[..]));
+
+    // On le pose. `21` est l'index QPACK de `:method: PUT`.
+    ams_quic_client::envoyer_avec_media(
+        &mut alice,
+        12,
+        21,
+        b"/v1/alias",
+        None,
+        br#"{"alias":"thierry"}"#,
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 12).await;
+    assert_eq!(
+        champ(&champs(alice.recu(12)), b":status"),
+        Some(&b"204"[..]),
+        "l'alias est posé"
+    );
+
+    // **ET IL EST PUBLIC** : la recherche n'exige rien, et ne rend QUE
+    // l'identifiant.
+    ams_quic_client::envoyer_une_requete(&mut alice, 16, 17, b"/v1/alias/thierry", None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut alice, 16).await;
+    assert_eq!(
+        champ(&champs(alice.recu(16)), b":status"),
+        Some(&b"200"[..])
+    );
+    let texte = String::from_utf8_lossy(&rendu).into_owned();
+    assert!(texte.contains(compte.texte().as_str()), "{texte}");
+    assert!(
+        !texte.contains("machine") && !texte.contains("service"),
+        "l'alias ne rend qu'un identifiant : {texte}"
+    );
+
+    // Un autre compte ne peut pas le prendre.
+    let mut bob = connecter(&racine, adresse).await;
+    let (_, _, _) = creer_un_compte(&mut bob, &chaine, 0, 0xB1).await;
+    ams_quic_client::envoyer_avec_media(
+        &mut bob,
+        12,
+        21,
+        b"/v1/alias",
+        None,
+        br#"{"alias":"thierry"}"#,
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut bob, 12).await;
+    assert_eq!(
+        champ(&champs(bob.recu(12)), b":status"),
+        Some(&b"409"[..]),
+        "un alias pris est un CONFLIT, et non un refus de droit"
+    );
+
+    // A le retire, et il redevient introuvable.
+    ams_quic_client::envoyer_une_requete(&mut alice, 20, 16, b"/v1/alias", None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 20).await;
+    assert_eq!(
+        champ(&champs(alice.recu(20)), b":status"),
+        Some(&b"204"[..])
+    );
+
+    ams_quic_client::envoyer_une_requete(&mut alice, 24, 17, b"/v1/alias/thierry", None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 24).await;
+    assert_eq!(
+        champ(&champs(alice.recu(24)), b":status"),
+        Some(&b"404"[..]),
+        "l'index part avec l'alias"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}

@@ -551,6 +551,7 @@ fn un_appareil_se_pose_et_se_relit() {
         provenance: Provenance::Ici,
         proprietaire: un(Genre::Utilisateur, 1),
         cle: [0x77; 32],
+        revoque: false,
     };
     base.poser_appareil(quel, &appareil).expect("écrit");
     assert_eq!(base.appareil(quel).expect("lisible"), Some(appareil));
@@ -718,6 +719,7 @@ fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
             provenance: venu,
             proprietaire: compte,
             cle: [2; 32],
+            revoque: false,
         },
     )
     .expect("écrit");
@@ -783,6 +785,91 @@ fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
         1,
         "LE JOURNAL SURVIT — c'est l'exception de C17, et la seule"
     );
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+// ── Les révocations ─────────────────────────────────────────────────────────
+
+#[test]
+fn revoquer_un_appareil_le_marque_sans_l_effacer() {
+    // **L'APPLICATION DOIT POUVOIR MONTRER CE QUI A ÉTÉ RÉVOQUÉ.** C'est
+    // l'écran qu'on regarde après avoir perdu un téléphone, et une ligne
+    // disparue n'y dit rien.
+    let (base, fichier) = entrepot("revoque-appareil");
+    let quel = un(Genre::Appareil, 3);
+    assert!(
+        base.revoquer_appareil(quel).expect("lisible").is_none(),
+        "révoquer ce qui n'existe pas ne crée rien"
+    );
+
+    base.poser_appareil(
+        quel,
+        &asl_registre::Appareil {
+            provenance: Provenance::Ici,
+            proprietaire: un(Genre::Utilisateur, 1),
+            cle: [0x77; 32],
+            revoque: false,
+        },
+    )
+    .expect("écrit");
+
+    let avant = base.revoquer_appareil(quel).expect("révoqué");
+    assert_eq!(
+        avant.map(|quoi| quoi.revoque),
+        Some(false),
+        "ce qu'il ÉTAIT"
+    );
+    let apres = base.appareil(quel).expect("lisible").expect("il reste");
+    assert!(apres.revoque);
+    assert_eq!(apres.cle, [0x77; 32], "la clé reste, et ne vaut plus");
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+#[test]
+fn revoquer_une_autorisation_la_marque_et_la_laisse_visible() {
+    let (base, fichier) = entrepot("revoque-autorisation");
+    let quelle = un(Genre::Autorisation, 6);
+    let beneficiaire = un(Genre::Utilisateur, 7);
+    assert!(base.autorisation(quelle).expect("lisible").is_none());
+    assert!(
+        base.revoquer_autorisation(quelle)
+            .expect("lisible")
+            .is_none()
+    );
+
+    base.poser_autorisation(
+        quelle,
+        &asl_registre::Autorisation {
+            provenance: Provenance::Ici,
+            par: un(Genre::Utilisateur, 2),
+            a: beneficiaire,
+            portee: asl_registre::Portee::ToutLeCompte,
+            revoquee: false,
+        },
+    )
+    .expect("écrit");
+
+    assert_eq!(
+        base.revoquer_autorisation(quelle)
+            .expect("révoquée")
+            .map(|quoi| quoi.revoquee),
+        Some(false)
+    );
+    assert!(
+        base.autorisation(quelle)
+            .expect("lisible")
+            .expect("elle reste")
+            .revoquee
+    );
+
+    // **L'INDEX DES REÇUES NE BOUGE PAS** : le bénéficiaire doit continuer de
+    // voir ce qu'on lui a retiré. C'est `couvre` qui refuse, pas l'index qui
+    // cache.
+    let recues = base.autorisations_recues(beneficiaire).expect("lisible");
+    assert_eq!(recues.len(), 1);
+    assert!(recues[0].revoquee);
 
     let _ = std::fs::remove_file(fichier);
 }

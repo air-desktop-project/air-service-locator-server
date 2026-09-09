@@ -496,6 +496,69 @@ impl Entrepot {
         Ok(())
     }
 
+    /// Cette autorisation, si elle existe.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn autorisation(&self, quelle: Identifiant) -> Result<Option<Autorisation>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let table = lecture.open_table(AUTORISATIONS)?;
+        match table.get(clef(quelle).as_slice())? {
+            Some(brut) => Ok(Some(
+                Autorisation::lire(brut.value()).map_err(Faute::Enregistrement)?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Marque cette autorisation révoquée, et rend ce qu'elle était.
+    ///
+    /// # ELLE RESTE, ET NE VAUT PLUS
+    ///
+    /// La supprimer marcherait — `couvre` ne la trouverait plus. **Mais
+    /// l'utilisateur doit pouvoir voir ce qu'il a retiré** : `GET
+    /// /v1/autorisations` rend les deux sens, et une ligne disparue ne dit pas
+    /// qu'on a repris un droit. C'est `asl_auth::Autorisation::couvre` qui
+    /// l'écarte, et à un seul endroit.
+    ///
+    /// Rend `None` si aucune autorisation ne répond à cet identifiant.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn revoquer_autorisation(
+        &self,
+        quelle: Identifiant,
+    ) -> Result<Option<Autorisation>, Faute> {
+        let clef_autorisation = clef(quelle);
+        let ecriture = self.base.begin_write()?;
+        let trouve;
+        {
+            let mut table = ecriture.open_table(AUTORISATIONS)?;
+            trouve = match table.get(clef_autorisation.as_slice())? {
+                Some(brut) => {
+                    Some(Autorisation::lire(brut.value()).map_err(Faute::Enregistrement)?)
+                }
+                None => None,
+            };
+            if let Some(autorisation) = &trouve {
+                let mut octets = [0_u8; AUTORISATION_OCTETS];
+                Autorisation {
+                    revoquee: true,
+                    ..*autorisation
+                }
+                .ecrire(&mut octets);
+                table.insert(clef_autorisation.as_slice(), &octets)?;
+            }
+            // **L'INDEX DES REÇUES NE BOUGE PAS**, et c'est voulu : le
+            // bénéficiaire doit continuer de voir ce qu'on lui a retiré. C'est
+            // `couvre` qui refuse, pas l'index qui cache.
+        }
+        ecriture.commit()?;
+        Ok(trouve)
+    }
+
     /// Toutes les autorisations reçues par ce compte.
     ///
     /// **RÉVOQUÉES COMPRISES** : c'est `asl_auth::Autorisation::couvre` qui les
@@ -557,6 +620,45 @@ impl Entrepot {
             )),
             None => Ok(None),
         }
+    }
+
+    /// Marque cet appareil révoqué, et rend ce qu'il était.
+    ///
+    /// # LIRE ET ÉCRIRE SONT UNE SEULE TRANSACTION
+    ///
+    /// La décision de révoquer se prend sur le propriétaire de l'appareil, qu'il
+    /// faut donc lire ; l'écrire ensuite dans une autre transaction laisserait
+    /// deux révocations concurrentes se croiser. Ce n'est pas grave ici — les
+    /// deux écriraient la même chose — mais la forme est celle qu'il faudra le
+    /// jour où le champ portera une date.
+    ///
+    /// Rend `None` si aucun appareil ne répond à cet identifiant.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn revoquer_appareil(&self, quel: Identifiant) -> Result<Option<Appareil>, Faute> {
+        let clef_appareil = clef(quel);
+        let ecriture = self.base.begin_write()?;
+        let trouve;
+        {
+            let mut table = ecriture.open_table(APPAREILS)?;
+            trouve = match table.get(clef_appareil.as_slice())? {
+                Some(brut) => Some(Appareil::lire(brut.value()).map_err(Faute::Enregistrement)?),
+                None => None,
+            };
+            if let Some(appareil) = &trouve {
+                let mut octets = [0_u8; APPAREIL_OCTETS];
+                Appareil {
+                    revoque: true,
+                    ..*appareil
+                }
+                .ecrire(&mut octets);
+                table.insert(clef_appareil.as_slice(), &octets)?;
+            }
+        }
+        ecriture.commit()?;
+        Ok(trouve)
     }
 
     // ── Les codes d'enrôlement ──────────────────────────────────────────────

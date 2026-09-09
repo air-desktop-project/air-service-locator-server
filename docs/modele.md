@@ -250,6 +250,18 @@ machine sont fermées, ses baux tombent. Il faut alors ré-enrôler sur place.
 C'est l'opération à faire quand une machine est compromise, et elle est
 délibérément visible plutôt qu'enfouie dans un menu.
 
+**La machine RESTE**, et c'est ce qui rend le ré-enrôlement possible sans tout
+redéclarer : elle garde son identifiant, son nom, ses capacités et ses services.
+Ce qu'elle perd est sa clé — le moyen de prouver qu'elle est elle. Un nouveau
+code la remet en marche, et les autorisations qui la nommaient valent toujours.
+
+**Fermer les connexions n'est pas une précaution de plus, c'est la moitié du
+travail.** Effacer la clé refuse la prochaine authentification ; une connexion
+déjà authentifiée, elle, porte son pair avec elle et continuerait de servir. Et
+comme la connexion EST le bail (§4), la fermer fait tomber les annonces par le
+chemin ordinaire d'un départ — il n'y a pas de second mécanisme à tenir d'accord
+avec le premier.
+
 ### 2.4 Service
 
 Ce qu'un daemon annonce. **Identifié par le couple (machine, nom).**

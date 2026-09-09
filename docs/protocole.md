@@ -414,6 +414,47 @@ qui vient de le faire.
 La règle, en une phrase : **celui qui PRÉSENTE une clé signe qu'il la détient ;
 celui pour qui un tiers déjà authentifié l'apporte ne signe pas.**
 
+### 2.1 quater Ce que « effet immédiat » veut dire, et ce qu'il coûte
+
+Effacer une clé dans l'entrepôt suffit à refuser la PROCHAINE authentification.
+Cela ne suffit pas à arrêter une machine : **une connexion déjà authentifiée
+porte son pair avec elle** — c'est tout l'intérêt du transport tenu (§3) —, et
+elle continuerait de servir jusqu'à ce qu'elle tombe d'elle-même.
+
+La révocation d'une clé de machine, et celle d'un appareil, **ferment donc les
+connexions de ce pair**. Et comme **la connexion EST le bail** (§1.2), les
+annonces du daemon tombent avec elle, par le chemin ordinaire d'un départ — il
+n'y a pas de second mécanisme à écrire, ni à tenir d'accord avec le premier.
+
+Ce que cela coûte, et il faut le dire : la fermeture n'est pas synchrone de la
+réponse. L'annuaire répond `204` à l'application, puis ferme au tour de boucle
+suivant. **Aucune requête de plus n'est servie entre les deux** — le rendez-vous
+qui ferme passe avant la lecture du datagramme suivant —, mais un daemon peut
+avoir des octets en vol au moment où la porte se ferme.
+
+**La révocation d'une AUTORISATION ne ferme rien**, et n'en a pas besoin : la
+résolution relit l'entrepôt à chaque requête, donc l'effet est immédiat sans
+qu'on touche à quoi que ce soit de vivant.
+
+### 2.1 quinquies Ce qu'un retrait répond, et pourquoi c'est toujours la même chose
+
+| Cas | Réponse |
+|---|---|
+| C'est fait | `204`, sans corps |
+| L'objet n'existe pas | `404` |
+| L'objet existe et **n'est pas à nous** | `404`, le même |
+| Un appareil se révoque lui-même | `403` |
+| L'alias demandé est pris | `409` |
+
+**Les deux `404` sont le même `404`, et c'est la propriété qui compte.** Les
+distinguer dirait à qui essaie des identifiants au hasard lesquels existent — et
+un identifiant qui existe est un compte qu'on vient de découvrir. C'est la même
+règle que pour la résolution (§3, contrainte C9).
+
+**Le `403` est le seul refus qui ne se cache pas**, et il le peut : celui qui
+demande connaît déjà son propre identifiant. Le lui taire ne protégerait rien et
+l'empêcherait de comprendre.
+
 ### 2.2 Le reste
 
 | Verbe | Ce qu'il fait |
@@ -421,12 +462,12 @@ celui pour qui un tiers déjà authentifié l'apporte ne signe pas.**
 | `POST /v1/comptes` | Crée le compte et enrôle le premier appareil. Rend `u-…`. |
 | `POST /v1/appareils` | Enrôle un appareil de plus. **Signé par un appareil déjà enrôlé.** |
 | `PUT /v1/appareils/{a}/poussee` | Dépose ou renouvelle le jeton APNs / FCM. |
-| `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. |
+| `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. **Il est marqué, non effacé** : l'écran qu'on regarde après avoir perdu un téléphone doit montrer ce qu'on a retiré. |
 | `POST /v1/machines` | Déclare une machine, avec son **nom** et ses **capacités** (`annonce`, `lecture`). **Rend un code d'enrôlement** — dix symboles, à usage unique, valable dix minutes. La machine n'a **pas encore de clé**. |
 | `PATCH /v1/machines/{m}` | Change le nom ou les capacités. |
 | `POST /v1/machines/{m}/enrolement` | Émet un nouveau code, pour ré-enrôler une machine dont la clé a été révoquée ou perdue. **Le code précédent meurt à l'émission du suivant.** |
-| `DELETE /v1/machines/{m}/cle` | Révoque la clé. Effet immédiat : connexions fermées, baux tombés. |
-| `PUT /v1/alias` | Enregistre ou change l'alias public. **La seule donnée que l'utilisateur nous confie.** |
+| `DELETE /v1/machines/{m}/cle` | Révoque la clé. **Effet immédiat : connexions fermées, baux tombés** (voir ci-dessous). La machine reste — son nom, ses capacités, ses services ; elle perd le moyen de prouver qu'elle est elle. |
+| `PUT /v1/alias` | Enregistre ou change l'alias public. **La seule donnée que l'utilisateur nous confie.** Un alias déjà pris rend `409`, et non `403` : la demande est légitime, c'est l'état du monde qui s'y oppose. |
 | `DELETE /v1/alias` | Le retire. |
 | `GET /v1/alias/{alias}` | Rend l'identifiant, **et rien d'autre**. Public — c'est l'emploi de l'alias, et son coût (`modele.md` §2.1). |
 | `GET /v1/machines/{m}/services` | Les services, leurs candidats, leur état et la date de la dernière sonde. |

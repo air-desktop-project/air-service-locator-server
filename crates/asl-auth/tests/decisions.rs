@@ -10,7 +10,7 @@
 use asl_auth::{
     Autorisation, Capacites, Cible, CodeEnrolement, Decision, EtatCode, Faute, Machine, Politique,
     Portee, decider_annonce, decider_attestation, decider_enrolement, decider_gestion,
-    decider_resolution,
+    decider_resolution, decider_revocation_d_appareil,
 };
 use asl_id::{Genre, Identifiant};
 
@@ -491,4 +491,29 @@ fn le_texte_groupe_s_affiche() {
     // Il se recopie d'un écran vers un terminal : il doit s'écrire.
     let code = CodeEnrolement::analyser("4K9M2P7R1T").unwrap();
     assert_eq!(code.texte_groupe().to_string(), "4K9M2-P7R1T");
+}
+
+// ── Révoquer un appareil ────────────────────────────────────────────────────
+
+#[test]
+fn un_appareil_ne_se_revoque_pas_lui_meme() {
+    // **UN TÉLÉPHONE VOLÉ ET DÉVERROUILLÉ NE DOIT PAS CONFISQUER LE COMPTE.**
+    // S'il pouvait révoquer les autres ET lui-même, il ne resterait rien au
+    // propriétaire pour le lui reprendre.
+    let moi = ident(Genre::Appareil, 1);
+    let autre = ident(Genre::Appareil, 2);
+
+    assert_eq!(decider_revocation_d_appareil(moi, moi), Decision::Refuser);
+    assert_eq!(decider_revocation_d_appareil(moi, autre), Decision::Servir);
+    assert_eq!(decider_revocation_d_appareil(autre, moi), Decision::Servir);
+}
+
+#[test]
+fn un_compte_ne_peut_pas_se_retrouver_sans_appareil() {
+    // Ce n'est pas une règle de plus : c'est une CONSÉQUENCE de la précédente.
+    // Il faut deux appareils pour qu'une révocation soit possible, donc il en
+    // reste toujours un après. Un compte à un seul appareil ne peut que tenter
+    // de se révoquer lui-même — et c'est refusé.
+    let seul = ident(Genre::Appareil, 1);
+    assert_eq!(decider_revocation_d_appareil(seul, seul), Decision::Refuser);
 }

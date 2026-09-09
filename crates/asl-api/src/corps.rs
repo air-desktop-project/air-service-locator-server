@@ -18,6 +18,7 @@
 //! Restent ceux qui portent des NOMS et des IDENTIFIANTS. Ceux-là se débogueront
 //! avec `curl`, et JSON est ce qu'il faut pour cela.
 
+use crate::Alias;
 use asl_id::{Genre, Identifiant};
 use asl_proto::Erreur;
 use asl_proto::cadrage::Lecteur;
@@ -378,5 +379,85 @@ fn lire_portee(texte: &str, position: usize) -> Result<Portee, Erreur> {
         // Un compte, un appareil, une autorisation, un annuaire : aucun de ceux-là
         // ne délimite ce qu'une autorisation couvre.
         _ => Err(Erreur::IdentifiantInvalide { position }),
+    }
+}
+
+// ── Poser un alias ──────────────────────────────────────────────────────────
+
+/// Le champ de `PUT /v1/alias`.
+const CHAMP_ALIAS: &str = "alias";
+
+/// Ce que `PUT /v1/alias` demande.
+///
+/// # UN SEUL CHAMP, ET C'EST LA SEULE DONNÉE PERSONNELLE DU PRODUIT
+///
+/// C13 : rien d'autre n'est hébergé de l'utilisateur. Cet alias est **public par
+/// construction** (`docs/modele.md` §2.1) — il est la seule surface énumérable
+/// de l'annuaire, et c'est son emploi autant que son coût.
+///
+/// Il reste **facultatif**, et le rester est une position tenable : un compte
+/// sans alias n'est trouvable que par son identifiant, transmis de la main à la
+/// main.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DemandeAlias<'a> {
+    /// L'alias demandé, déjà validé.
+    pub alias: Alias<'a>,
+}
+
+impl<'a> DemandeAlias<'a> {
+    /// Décode une demande d'alias.
+    ///
+    /// ```jsonc
+    /// {"alias": "thierry"}
+    /// ```
+    ///
+    /// **Il passe par [`Lecteur::chaine`], et non par `texte_libre`.** Un alias
+    /// est une CLÉ — on le cherche, on le compare, il doit être unique. C'est
+    /// exactement le cas où l'équivalence Unicode ferait qu'un même alias
+    /// s'écrirait de deux façons, et que deux comptes croiraient chacun le
+    /// posséder.
+    ///
+    /// # Erreurs
+    ///
+    /// Celles du cadrage, plus [`Erreur::IdentifiantInvalide`] quand l'alias ne
+    /// suit pas sa grammaire — voir [`Alias::analyser`]. **Cette faute-là ne dit
+    /// PAS laquelle des quatre règles a été enfreinte** : longueur, alphabet,
+    /// bord, ou ressemblance avec un identifiant. Le détail appartient à
+    /// [`crate::Erreur`], que le routage rend ; ce cadrage-ci ne fait que
+    /// refuser.
+    pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
+        if octets.len() > CORPS_MAX {
+            return Err(Erreur::MessageTropLong {
+                obtenue: octets.len(),
+            });
+        }
+        let mut lecteur = Lecteur::nouveau(octets);
+        lecteur.attendre(b'{', "un objet")?;
+
+        let position = lecteur.position();
+        if lecteur.chaine()? != CHAMP_ALIAS {
+            return Err(Erreur::ChampInconnu { position });
+        }
+        lecteur.attendre(b':', "deux-points")?;
+        let position = lecteur.position();
+        let texte = lecteur.chaine()?;
+        let alias = Alias::analyser(texte).map_err(|_| Erreur::IdentifiantInvalide { position })?;
+
+        lecteur.attendre(b'}', "la fin de l'objet")?;
+        lecteur.fin()?;
+        Ok(Self { alias })
+    }
+
+    /// Encode cette demande, et rend le nombre d'octets écrits.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`].
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{\"alias\":\"");
+        ecrivain.pousser(self.alias.as_str().as_bytes());
+        ecrivain.pousser(b"\"}");
+        ecrivain.achever()
     }
 }
