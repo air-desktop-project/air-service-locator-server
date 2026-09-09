@@ -205,6 +205,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "asl-registre"
+version = "0.1.0"
+dependencies = [
+ "asl-id",
+]
+
+[[package]]
 name = "asl-server"
 version = "0.1.0"
 
@@ -220,6 +227,11 @@ dependencies = [
 [[package]]
 name = "asl-store"
 version = "0.1.0"
+dependencies = [
+ "asl-id",
+ "asl-registre",
+ "redb",
+]
 
 [[package]]
 name = "autocfg"
@@ -529,7 +541,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -869,6 +881,15 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
+name = "redb"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "rfc6979"

@@ -50,6 +50,7 @@ dependencies = [
  "asl-cle",
  "asl-id",
  "asl-proto",
+ "asl-registre",
  "asl-session",
  "libfuzzer-sys",
 ]
@@ -160,6 +161,13 @@ version = "0.1.0"
 
 [[package]]
 name = "asl-proto"
+version = "0.1.0"
+dependencies = [
+ "asl-id",
+]
+
+[[package]]
+name = "asl-registre"
 version = "0.1.0"
 dependencies = [
  "asl-id",

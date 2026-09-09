@@ -70,6 +70,9 @@ path = "../crates/asl-api"
 [dependencies.asl-cle]
 path = "../crates/asl-cle"
 
+[dependencies.asl-registre]
+path = "../crates/asl-registre"
+
 [dependencies.asl-session]
 path = "../crates/asl-session"
 
@@ -167,6 +170,13 @@ bench = false
 [[bin]]
 name = "fuzz_asl_session_reponse"
 path = "fuzz_targets/fuzz_asl_session_reponse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_asl_registre_aller_retour"
+path = "fuzz_targets/fuzz_asl_registre_aller_retour.rs"
 test = false
 doc = false
 bench = false

@@ -46,6 +46,7 @@ members = [
     "crates/asl-id",
     "crates/asl-proto",
     "crates/asl-api",
+    "crates/asl-registre",
     # Étage 2 — décisions, sans entrée-sortie
     "crates/asl-annuaire",
     "crates/asl-auth",
@@ -111,6 +112,7 @@ asl-cle = { path = "crates/asl-cle", version = "0.1.0" }
 asl-id = { path = "crates/asl-id", version = "0.1.0" }
 asl-loop-tokio = { path = "crates/asl-loop-tokio", version = "0.1.0" }
 asl-proto = { path = "crates/asl-proto", version = "0.1.0" }
+asl-registre = { path = "crates/asl-registre", version = "0.1.0" }
 asl-server = { path = "crates/asl-server", version = "0.1.0" }
 asl-session = { path = "crates/asl-session", version = "0.1.0" }
 asl-store = { path = "crates/asl-store", version = "0.1.0" }
@@ -235,6 +237,41 @@ ams-quic-client = { git = "https://github.com/air-desktop-project/air-mail-serve
 # `default-features = false` et la liste exacte d'`air-mail-server` : deux
 # fournisseurs cryptographiques activés en même temps, c'est `rustls` qui refuse
 # de choisir au démarrage.
+
+# ── L'ENTREPÔT : `redb`, ET LE CHOIX EST MESURÉ ────────────────────────────
+#
+# `docs/contraintes.md` laissait la décision ouverte, avec la consigne « le jour
+# où le magasin sera choisi, cette section devra dire lequel des deux a gagné, et
+# pourquoi ». Voici le relevé qui a tranché, fait le 2026-09-09 :
+#
+#   | Candidat   | Unités construites | Suspects                        |
+#   |------------|--------------------|---------------------------------|
+#   | `redb`     | **2**              | aucun                           |
+#   | `rusqlite` | 12                 | `libsqlite3-sys`, `pkg-config`  |
+#   | `fjall`    | 42                 | `linux-raw-sys`                 |
+#
+# **`redb` ne tire que `libc`**, déjà dans le graphe et déjà admise par
+# `check-sans-c.sh` avec sa raison écrite : ce sont des déclarations d'ABI, pas
+# une ligne de C. Le coût NET est donc d'une unité.
+#
+# TROIS RAISONS, ET LA PREMIÈRE N'EST PAS LE NOMBRE
+#
+#   1. **`linux-air` arrive.** Tous les composants Rust auront une version
+#      reposant sur la bibliothèque standard de `linux-air`. Une dépendance qui
+#      lie du C devrait y être portée ; du Rust pur suit la toolchain.
+#   2. **La barrière resterait rouge.** `check-sans-c.sh` porte sur le workspace
+#      entier. SQLite y ferait entrer `libsqlite3-sys` et `pkg-config`, et il
+#      faudrait soit désarmer le contrôle, soit lui ajouter une exception —
+#      c'est-à-dire l'affaiblir là où il vient d'être renforcé.
+#   3. **Le graphe.** C4 borne à 120 unités construites ; il en restait treize.
+#
+# CE QUE `redb` COÛTE EN ÉCHANGE, ET IL FAUT LE DIRE : **pas de SQL ad hoc, et
+# aucun outil externe** pour ouvrir le fichier. Un administrateur qui veut
+# regarder passe par notre code. C'est acceptable ici — les données sont peu
+# nombreuses, les accès sont connus, et C13 fait qu'il n'y a presque rien à
+# regarder.
+redb = "4"
+
 rustls = { version = "0.23", default-features = false, features = ["std"] }
 tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 

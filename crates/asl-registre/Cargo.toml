@@ -1,6 +1,6 @@
 [package]
-name = "asl-store"
-description = "L'entrepôt durable : redb, des tables, et rien qui décide."
+name = "asl-registre"
+description = "Le format des enregistrements durables : des octets vers des enregistrements, et retour. Aucune entrée-sortie."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,8 +9,6 @@ repository.workspace = true
 
 [dependencies]
 asl-id.workspace = true
-asl-registre.workspace = true
-redb.workspace = true
 
 [lints]
 workspace = true

@@ -19,12 +19,12 @@ encore ».
 | C10 | Rien ne se lit sans autorisation nominative | `asl-auth` : la forme de la fonction, un essai et une cible de fuzz |
 | C11 | Un annuaire n'accepte d'un pair que ce dont ce pair est l'autorité | Essai — **à écrire** |
 | C12 | La surface publique d'`asl-client` traverse une ABI C, et elle est stable | `check-abi.sh` (dépôt client) |
-| C13 | Aucune donnée personnelle hébergée, hors l'alias public choisi | Revue, et le schéma du magasin |
+| C13 | Aucune donnée personnelle hébergée, hors l'alias public choisi | Revue, et **le schéma d'`asl-registre`** — une colonne qui n'existe pas ne se remplit pas |
 | C14 | Aucune authentification par secret partagé — des clés, et rien d'autre | `asl-cle`, une cible de fuzz, et la revue |
 | C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` : aucune pile tierce, et la greffe épinglée sur UN commit |
 | C16 | Une seule toolchain, celle d'Air, datée | `check-toolchain.sh` |
-| C17 | Tout enregistrement porte son origine, et rompre une relation efface ce qui en vient — **sauf le journal** | Essai — **à écrire** |
-| C18 | Le journal expire à 90 jours, et n'ouvre aucun canal temporel | Essai de temporisation, et supervision de l'âge — **à écrire** |
+| C17 | Tout enregistrement porte son origine, et rompre une relation efface ce qui en vient — **sauf le journal** | `asl-registre` : le type ; `asl-store` : trois essais |
+| C18 | Le journal expire à 90 jours, et n'ouvre aucun canal temporel | `asl-store` : l'expiration par intervalle et trois essais ; la temporisation reste **à écrire** |
 
 ---
 
@@ -581,12 +581,40 @@ ferait du journal une carte historique de l'infrastructure de tout le monde,
 alors que la base courante n'en garde que l'état présent. **C'est le réglage
 qu'on peut relâcher plus tard ; l'inverse ne se rattrape pas.**
 
-**« Aucune ligne de C » DANS LE SERVEUR.** Elle est posée pour `asl-client`
-(C4), où elle est structurelle. Côté serveur elle ne l'est pas — et ce n'est pas
-un oubli : elle dépend de la persistance, un SQLite lie du C, un magasin écrit
-ici n'en lie pas. Le choix du magasin n'est pas fait (`modele.md` §6), et poser
-la contrainte avant lui reviendrait à trancher par la bande une décision qui n'a
-pas été prise.
+**« Aucune ligne de C » DANS LE SERVEUR — TRANCHÉ LE 2026-09-09.** Elle est
+posée pour `asl-client` (C4), où elle est structurelle. Côté serveur elle ne
+l'était pas, parce qu'elle dépendait du magasin : un SQLite lie du C, un magasin
+en Rust pur n'en lie pas. Cette section devait dire lequel des deux avait gagné,
+et pourquoi. Le voici.
 
-Le jour où le magasin sera choisi, cette section devra dire lequel des deux a
-gagné, et pourquoi.
+**`redb` a gagné, et le relevé est ce qui a tranché :**
+
+| Candidat | Unités construites | Suspects |
+|---|---|---|
+| **`redb`** | **2** | aucun |
+| `rusqlite` | 12 | `libsqlite3-sys`, `pkg-config` |
+| `fjall` | 42 | `linux-raw-sys` |
+
+`redb` ne tire que `libc`, **déjà dans le graphe et déjà admise ici** : ce sont
+des déclarations d'ABI, pas une ligne de C. Le coût net est donc d'UNE unité.
+
+Trois raisons, et la première n'est pas le nombre :
+
+1. **`linux-air` arrive.** Tous les composants Rust auront une version reposant
+   sur la bibliothèque standard de `linux-air` (C16). Une dépendance qui lie du
+   C devrait y être portée ; du Rust pur suit la toolchain.
+2. **La barrière serait restée rouge.** `check-sans-c.sh` porte sur le workspace
+   entier. SQLite y ferait entrer `libsqlite3-sys` et `pkg-config` : il faudrait
+   soit désarmer le contrôle, soit lui ajouter une exception — c'est-à-dire
+   l'affaiblir là où il vient d'être renforcé.
+3. **Le graphe.** La borne est à 120 unités ; il en restait treize.
+
+**CE QUE CE CHOIX COÛTE, ET IL FAUT LE DIRE** : pas de SQL ad hoc, et **aucun
+outil externe** pour ouvrir le fichier. Un administrateur qui veut regarder passe
+par notre code. C'est tenable ici — les données sont peu nombreuses, les accès
+sont connus d'avance, et C13 fait qu'il n'y a presque rien à regarder. Ce serait
+un mauvais choix pour un produit dont la base se consulte à la main.
+
+**La règle « aucune ligne de C » vaut donc désormais pour le serveur AUSSI**, et
+ce n'est plus une intention : c'est ce que `check-sans-c.sh` mesure sur le
+workspace entier.
