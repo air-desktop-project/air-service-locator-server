@@ -465,11 +465,16 @@ mais celui-là **est** le serveur, et aucune liaison de canal n'y peut rien.
 
 ### CE QUE CELA A COÛTÉ, ET QU'IL FAUT SAVOIR
 
-**`asl-client` doit dériver la même valeur, et il ne le fait pas encore.** Il vit
-dans un autre dépôt, épinglé sur une révision antérieure de celui-ci : il compile
-toujours, et un daemon bâti dessus ne s'authentifierait plus. Rien n'est déployé,
-donc rien n'est cassé — mais la mise à jour de ce dépôt-là est une tranche, et
-elle est nommée ici pour qu'on ne la découvre pas sur une machine.
+**`asl-client` DÉRIVE LA MÊME VALEUR**, et cette réserve est levée. Elle disait :
+« Il vit dans un autre dépôt, épinglé sur une révision antérieure de celui-ci : il
+compile toujours, et un daemon bâti dessus ne s'authentifierait plus. »
+
+Son épingle est relevée, et il réexporte `ETIQUETTE_LIAISON` plutôt que de
+laisser un porteur écrire la chaîne à la main — qui aurait une chance de se
+tromper et zéro chance de s'en apercevoir avant la production. Il sait aussi
+composer `POST /v1/enrolement`, ce qui a demandé de descendre la grammaire d'un
+code d'enrôlement dans `asl-cle` : un daemon ne peut pas embarquer `asl-auth`,
+qui est la couche de décision de l'annuaire.
 
 **L'étiquette de l'exportateur est écrite dans `asl-cle`**
 (`ETIQUETTE_LIAISON`), et une seule fois, pour la raison qui met déjà le message
