@@ -25,6 +25,9 @@ version = "0.1.0"
 [[package]]
 name = "asl-proto"
 version = "0.1.0"
+dependencies = [
+ "asl-id",
+]
 
 [[package]]
 name = "asl-server"

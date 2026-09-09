@@ -47,6 +47,13 @@ hors=(asl-store asl-loop-tokio asl-server)
 # `SystemTime` et `Instant` aussi : l'heure est un PARAMÈTRE de l'étage 2
 # (`docs/contraintes.md` C1), et une machine à états qui la lirait elle-même ne
 # se piloterait plus depuis un essai.
+# `core::net` N'EST PAS INTERDIT, et il faut le dire ici plutôt que de laisser
+# quelqu'un l'ajouter à cette liste par symétrie avec `std::net`. Une `IpAddr`
+# est une VALEUR — pas une socket, pas un descripteur, rien qui attende. C'est
+# `std::net` qui porte l'entrée-sortie, et c'est lui qui est refusé.
+#
+# La réimplémenter reviendrait à réécrire un analyseur d'IPv6 pour le plaisir
+# d'en avoir un à nous, avec les bogues qui vont avec.
 chemins_interdits=(
     'std::fs'
     'std::net'

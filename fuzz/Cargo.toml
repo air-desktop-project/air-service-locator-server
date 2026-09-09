@@ -55,6 +55,9 @@ arbitrary = { version = "1", features = ["derive"] }
 [dependencies.asl-id]
 path = "../crates/asl-id"
 
+[dependencies.asl-proto]
+path = "../crates/asl-proto"
+
 # `[[bin]]` par cible, et `test = false` : ces binaires ne sont pas des essais,
 # et `cargo test` ne doit pas essayer de les lancer sans harnais libFuzzer.
 [[bin]]
@@ -67,6 +70,20 @@ bench = false
 [[bin]]
 name = "fuzz_asl_id_aller_retour"
 path = "fuzz_targets/fuzz_asl_id_aller_retour.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_asl_proto_valeurs"
+path = "fuzz_targets/fuzz_asl_proto_valeurs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_asl_proto_annonce"
+path = "fuzz_targets/fuzz_asl_proto_annonce.rs"
 test = false
 doc = false
 bench = false

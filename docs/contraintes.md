@@ -104,11 +104,20 @@ Cas particulier qui mérite d'être nommé : un **numéro de port** hors de
 troncature ferait annoncer un service injoignable sans qu'aucune erreur ne soit
 rendue.
 
-**`check-fuzz.sh` existe**, avec deux cibles sur `asl-id` — le seul décodeur que
-ce dépôt possède aujourd'hui. Elles partent des deux bouts : l'une lit des octets
-quelconques, l'autre écrit seize octets quelconques et les relit. Ce n'est pas
-une redondance — la première n'explore que ce que le décodeur accepte, la seconde
-couvre l'espace des valeurs.
+**`check-fuzz.sh` existe**, avec quatre cibles : deux sur `asl-id`, deux sur
+`asl-proto`.
+
+Sur `asl-id`, elles partent des deux bouts — l'une lit des octets quelconques,
+l'autre écrit seize octets quelconques et les relit. Sur `asl-proto`, elles
+éprouvent deux choses différentes : les DÉCODEURS de valeurs, et la VALIDATION
+d'un assemblage. Un port bien lu ne dit rien sur une annonce qui en porterait
+deux fois le même.
+
+**Les propriétés se vérifient sur le RÉSULTAT, jamais sur l'entrée.** Vérifier
+l'entrée reviendrait à réécrire la validation dans le harnais et à comparer une
+fonction à elle-même — ce qui passe toujours, y compris quand les deux sont
+fausses de la même manière. Et un refus est éprouvé lui aussi : la raison rendue
+doit s'appliquer vraiment.
 
 **Ce que le gate N'EST PAS** : une campagne. Quelques secondes par cible depuis
 un corpus neuf attrapent la panique qu'un changement vient d'introduire sur un

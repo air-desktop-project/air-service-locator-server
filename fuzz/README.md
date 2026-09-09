@@ -11,11 +11,29 @@ cran sur une entrée que personne n'a imaginée. C'est la contrainte C3.
 |---|---|---|
 | `fuzz_asl_id_analyser` | `identifiant` | La LECTURE : des octets quelconques vers un identifiant, ou vers un refus. Aller-retour, canonicité, casse, rattrapage de Crockford, accord de `analyser_genre`. |
 | `fuzz_asl_id_aller_retour` | `identifiant` | L'ÉCRITURE : seize octets quelconques vers un texte, et retour. C'est le sens qui compte en production — un identifiant naît d'un tirage. |
+| `fuzz_asl_proto_valeurs` | `valeurs` | Les trois décodeurs du protocole : protocole, port, nom de service. Le port est celui où une faute coûte le plus cher — un `65536` tronqué vaudrait `0`. |
+| `fuzz_asl_proto_annonce` | `valeurs` | La VALIDATION d'une annonce. `Annonce::nouvelle` est le seul constructeur : une annonce qui existe est valide, et une seule brèche suffirait pour que les couches au-dessus héritent d'un invariant qu'elles croient tenu. |
 
-**Deux cibles pour une seule crate, et ce n'est pas une redondance.** Elles
-partent des deux bouts et n'atteignent pas les mêmes valeurs : la première
-n'explore que ce que le décodeur accepte, la seconde couvre l'espace des seize
-octets, y compris ceux qu'aucune chaîne plausible ne produit.
+**Deux cibles par crate, et ce n'est pas une redondance.**
+
+Pour `asl-id`, elles partent des deux bouts et n'atteignent pas les mêmes
+valeurs : la première n'explore que ce que le décodeur accepte, la seconde couvre
+l'espace des seize octets, y compris ceux qu'aucune chaîne plausible ne produit.
+
+Pour `asl-proto`, elles éprouvent deux choses différentes : les DÉCODEURS de
+valeurs d'un côté, la VALIDATION d'un assemblage de l'autre. Un port bien lu ne
+dit rien sur une annonce qui en porterait deux fois le même.
+
+## La forme des propriétés
+
+Elles se vérifient **sur le RÉSULTAT, jamais sur l'entrée**. Vérifier l'entrée
+reviendrait à réécrire la validation dans le harnais et à comparer une fonction à
+elle-même — ce qui passe toujours, y compris quand les deux sont fausses de la
+même manière.
+
+Et un refus est éprouvé lui aussi : la raison rendue doit **s'appliquer
+vraiment**. Une erreur juste qui désigne la mauvaise cause est crue, donc pire
+qu'une erreur vague.
 
 ## Lancer
 

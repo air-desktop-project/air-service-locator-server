@@ -80,6 +80,8 @@ cd "$racine/fuzz"
 CIBLES=$(cat <<'TABLE'
 fuzz_asl_id_analyser identifiant
 fuzz_asl_id_aller_retour identifiant
+fuzz_asl_proto_valeurs valeurs
+fuzz_asl_proto_annonce valeurs
 TABLE
 )
 
