@@ -14,6 +14,7 @@ cran sur une entrée que personne n'a imaginée. C'est la contrainte C3.
 | `fuzz_asl_proto_valeurs` | `valeurs` | Les trois décodeurs du protocole : protocole, port, nom de service. Le port est celui où une faute coûte le plus cher — un `65536` tronqué vaudrait `0`. |
 | `fuzz_asl_proto_cadrage` | `cadrage` | **La cible qui vaut le plus cher** : des octets ENTIÈREMENT contrôlés par un inconnu vers une annonce, et retour. Aller-retour, idempotence de l'écriture, bornes du tampon de sortie, et le refus des échappements vérifié sur l'entrée. |
 | `fuzz_asl_proto_reponse` | `reponse` | Le message de réponse, et **C6 dans un type** : un point UDP n'est jamais dit joignable, un `joignable` porte toujours sa date, un bail tolère toujours un keepalive manqué. |
+| `fuzz_asl_proto_poussee` | `poussee` | La poussée de verdict. Elle éprouve les MÊMES invariants que la réponse — et c'est le but : la validation est écrite une fois pour les deux, et une cible par message attrape le jour où quelqu'un en recopierait une version affaiblie. |
 | `fuzz_asl_proto_annonce` | `valeurs` | La VALIDATION d'une annonce. `Annonce::nouvelle` est le seul constructeur : une annonce qui existe est valide, et une seule brèche suffirait pour que les couches au-dessus héritent d'un invariant qu'elles croient tenu. |
 
 **Deux cibles par crate, et ce n'est pas une redondance.**

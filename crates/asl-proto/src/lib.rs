@@ -21,8 +21,16 @@
 //! **Écrit aussi** : le message de RÉPONSE — bail, `vu_depuis`, `derriere_nat`,
 //! verdicts de joignabilité — avec son cadrage.
 //!
-//! **Pas écrit** : le retrait, qui n'a pas de corps, et la poussée d'un verdict
-//! de sonde arrivée après la réponse (`docs/protocole.md` §1.1, `en_cours`).
+//! **Écrit aussi** : la POUSSÉE de verdict ([`Poussee`]), que l'annuaire envoie
+//! de sa propre initiative dans la connexion tenue — c'est elle qui referme un
+//! [`Verdict::EnCours`].
+//!
+//! **LE RETRAIT N'EST PAS UN MESSAGE, ET N'EN SERA JAMAIS UN.** Fermer la
+//! connexion EST le retrait (`docs/protocole.md` §1.3), et l'extinction QUIC en
+//! deux temps distingue déjà l'arrêt propre de la coupure. Un verbe de retrait
+//! ferait deux façons de dire la même chose, et obligerait à décider quoi faire
+//! d'un retrait suivi d'une connexion qui reste ouverte. **Rien n'est donc à
+//! écrire ici pour lui — et c'est dit pour que personne ne l'ajoute.**
 //!
 //! # C6 EST ÉCRITE DANS LES TYPES DE LA RÉPONSE
 //!
@@ -1277,33 +1285,7 @@ impl<'a> Reponse<'a> {
                 obtenu: service.genre(),
             });
         }
-        if joignabilite.is_empty() {
-            return Err(Erreur::AucuneJoignabilite);
-        }
-        if joignabilite.len() > POINTS_MAX {
-            return Err(Erreur::TropDeJoignabilites {
-                obtenu: joignabilite.len(),
-            });
-        }
-
-        for (rang, entree) in joignabilite.iter().enumerate() {
-            if joignabilite
-                .iter()
-                .skip(rang.saturating_add(1))
-                .any(|autre| autre.point == entree.point)
-            {
-                return Err(Erreur::PointEnDouble);
-            }
-
-            // C6 : un point qui ne se sonde pas n'a pas pu être mesuré.
-            let mesure = matches!(
-                entree.verdict,
-                Verdict::Joignable { .. } | Verdict::Injoignable { .. }
-            );
-            if mesure && !entree.point.protocole.se_sonde() {
-                return Err(Erreur::VerdictImpossible);
-            }
-        }
+        valider_joignabilite(joignabilite)?;
 
         Ok(Self {
             service,
@@ -1324,5 +1306,131 @@ impl<'a> Reponse<'a> {
         self.joignabilite
             .iter()
             .any(|entree| matches!(entree.verdict, Verdict::Joignable { .. }))
+    }
+}
+
+/// Les invariants d'une liste de verdicts, partagés par la réponse et la
+/// poussée.
+///
+/// **Écrit une fois, appliqué aux deux.** Deux copies de cette vérification
+/// finiraient par diverger, et c'est celle qu'on oublie de corriger qui laisse
+/// passer ce que l'autre refuse.
+fn valider_joignabilite(entrees: &[Joignabilite]) -> Result<(), Erreur> {
+    if entrees.is_empty() {
+        return Err(Erreur::AucuneJoignabilite);
+    }
+    if entrees.len() > POINTS_MAX {
+        return Err(Erreur::TropDeJoignabilites {
+            obtenu: entrees.len(),
+        });
+    }
+
+    for (rang, entree) in entrees.iter().enumerate() {
+        if entrees
+            .iter()
+            .skip(rang.saturating_add(1))
+            .any(|autre| autre.point == entree.point)
+        {
+            return Err(Erreur::PointEnDouble);
+        }
+
+        // C6 : un point qui ne se sonde pas n'a pas pu être mesuré.
+        let mesure = matches!(
+            entree.verdict,
+            Verdict::Joignable { .. } | Verdict::Injoignable { .. }
+        );
+        if mesure && !entree.point.protocole.se_sonde() {
+            return Err(Erreur::VerdictImpossible);
+        }
+    }
+
+    Ok(())
+}
+
+// ── La poussée ──────────────────────────────────────────────────────────────
+
+/// Ce que l'annuaire envoie au daemon **de sa propre initiative**, dans la
+/// connexion déjà tenue.
+///
+/// # Pourquoi ce message existe
+///
+/// La réponse à une annonce rend souvent [`Verdict::EnCours`] : l'annuaire ne
+/// fait pas attendre le démarrage d'un daemon le temps d'une connexion TCP vers
+/// une machine qui peut ne jamais répondre. **Le verdict arrive donc plus tard**,
+/// et c'est ce message qui le porte.
+///
+/// C'est exactement ce que le transport tenu a été choisi pour permettre
+/// (`docs/protocole.md` §0) : un protocole requête-réponse aurait obligé le
+/// daemon à redemander, donc à deviner quand.
+///
+/// # ELLE NE PORTE PAS D'IDENTIFIANT DE SERVICE
+///
+/// **La connexion le détermine déjà.** L'y remettre serait un champ qui peut
+/// CONTREDIRE la connexion sur laquelle il arrive — la même faute que le champ
+/// `famille` retiré de [`VuDepuis`], et que les champs en double du cadrage.
+///
+/// # ELLE PORTE LA LISTE ENTIÈRE, ET NON UN DELTA
+///
+/// Un delta oblige le receveur à FUSIONNER, donc à décider quoi faire d'une
+/// entrée qu'il ne connaît pas ou d'un ordre inattendu. Deux receveurs qui
+/// fusionnent différemment lisent deux états dans les mêmes messages : c'est la
+/// même classe de bogue que les clés en double, déplacée dans le temps.
+///
+/// Une liste entière se remplace, et il n'y a rien à décider.
+///
+/// # CE QU'ELLE NE PORTE PAS, ET POURQUOI
+///
+/// **Pas le bail.** Il est accordé une fois, à l'annonce. Le changer en cours de
+/// connexion demanderait son propre message et sa propre règle — que se
+/// passe-t-il pour un keepalive déjà en vol ? — et rien de cela n'est décidé.
+///
+/// Elle porte en revanche `vu_depuis` et `derriere_nat`, **parce qu'ils peuvent
+/// changer** : QUIC fait migrer une connexion quand la machine change d'adresse
+/// — bascule 4G, renumérotation IPv6 —, et l'observation de l'annuaire change
+/// avec elle. C'est une conséquence directe du transport choisi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Poussee<'a> {
+    /// Sous quelle adresse l'annuaire voit le daemon **maintenant**.
+    pub vu_depuis: VuDepuis,
+    /// Le verdict de NAT, qui peut lui aussi avoir changé.
+    pub derriere_nat: VerdictNat,
+    /// L'état complet de la joignabilité, qui REMPLACE le précédent.
+    pub joignabilite: &'a [Joignabilite],
+}
+
+impl<'a> Poussee<'a> {
+    /// Construit une poussée **et la valide**.
+    ///
+    /// Les mêmes invariants que [`Reponse::nouvelle`] sur la liste des
+    /// verdicts — ils sont écrits une seule fois et appliqués aux deux.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::AucuneJoignabilite`], [`Erreur::TropDeJoignabilites`],
+    /// [`Erreur::PointEnDouble`], [`Erreur::VerdictImpossible`].
+    pub fn nouvelle(
+        vu_depuis: VuDepuis,
+        derriere_nat: VerdictNat,
+        joignabilite: &'a [Joignabilite],
+    ) -> Result<Self, Erreur> {
+        valider_joignabilite(joignabilite)?;
+        Ok(Self {
+            vu_depuis,
+            derriere_nat,
+            joignabilite,
+        })
+    }
+
+    /// Reste-t-il un verdict que l'annuaire n'a pas encore rendu ?
+    ///
+    /// **Un daemon qui voit `true` sait qu'une autre poussée viendra.** Sans
+    /// cela il ne pourrait pas distinguer « la sonde n'a pas fini » de « la
+    /// sonde a fini et voici le résultat », et il attendrait indéfiniment ou
+    /// conclurait trop tôt.
+    #[must_use]
+    pub fn attend_encore(&self) -> bool {
+        self.joignabilite
+            .iter()
+            .any(|entree| matches!(entree.verdict, Verdict::EnCours))
     }
 }

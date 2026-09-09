@@ -1,0 +1,1 @@
+{"vu_depuis":{"adresse":"2001:db8::1","port":51840},"derriere_nat":"non","joignabilite":[{"protocole":"tcp","port":49152,"verdict":"joignable","candidat":"[2001:db8::1]:49152","origine":"reflexif","a":1789217731000}]}

@@ -209,7 +209,49 @@ C'est le gain le plus net du transport tenu. Avec des annonces périodiques, un
 daemon arrêté proprement restait faussement présent jusqu'à l'expiration de son
 bail.
 
-### 1.4 Reprise — ce que fait `asl-client` quand l'annuaire ne répond pas
+**ET LE RETRAIT N'EST PAS UN MESSAGE — il ne le sera jamais.** Une version
+antérieure de ce document listait un `DELETE /v1/annonce/{service}`, hérité d'une
+conception requête-réponse. Avec une connexion tenue, un tel verbe ferait deux
+façons de dire la même chose, et un annuaire devrait décider quoi faire d'un
+retrait suivi d'une connexion qui reste ouverte. Fermer suffit, et une seule
+façon de partir vaut mieux que deux.
+
+### 1.4 La poussée de verdict
+
+**L'annuaire répond souvent `en_cours`** (§1.1) : il ne fait pas attendre le
+démarrage d'un daemon le temps d'une sonde. Le verdict arrive ensuite, dans la
+connexion déjà tenue.
+
+```jsonc
+{
+  "vu_depuis": { "adresse": "203.0.113.4", "port": 61003 },
+  "derriere_nat": "oui",
+  "joignabilite": [
+    { "protocole": "tcp", "port": 49152, "verdict": "injoignable", "a": 1789217752000 }
+  ]
+}
+```
+
+**Elle ne porte AUCUN identifiant de service.** La connexion le détermine déjà ;
+l'y remettre serait un champ qui peut CONTREDIRE la connexion sur laquelle il
+arrive — la même faute que le `famille` retiré de `vu_depuis`.
+
+**Elle porte la liste ENTIÈRE, et non un delta.** Un delta oblige le receveur à
+fusionner, donc à décider quoi faire d'une entrée inconnue ou d'un ordre
+inattendu ; deux receveurs qui fusionnent différemment lisent deux états dans les
+mêmes messages. Une liste entière se remplace, et il n'y a rien à décider.
+
+**Elle porte aussi `vu_depuis` et `derriere_nat`, parce qu'ils peuvent changer.**
+QUIC fait migrer une connexion quand la machine change d'adresse — bascule 4G,
+renumérotation IPv6 — et l'observation de l'annuaire change avec elle. C'est une
+conséquence directe du transport choisi, et le daemon doit l'apprendre : il peut
+être passé derrière un NAT sans avoir rien fait.
+
+**Elle ne porte PAS le bail.** Il est accordé une fois, à l'annonce. Le changer
+en cours de connexion demanderait son propre message et sa propre règle — que
+devient un keepalive déjà en vol ? — et rien de cela n'est décidé.
+
+### 1.5 Reprise — ce que fait `asl-client` quand l'annuaire ne répond pas
 
 **L'annuaire injoignable NE DOIT PAS empêcher un daemon de démarrer.** Un
 service de découverte en panne rendrait sinon indisponibles tous les daemons qui

@@ -1,0 +1,1 @@
+{"vu_depuis":{"adresse":"10.0.0.1","port":1},"derriere_nat":"indetermine","joignabilite":[{"protocole":"tcp","port":80,"verdict":"en_cours"}]}

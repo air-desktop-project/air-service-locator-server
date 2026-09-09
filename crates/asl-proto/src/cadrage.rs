@@ -66,8 +66,8 @@ use asl_id::{Genre, Identifiant};
 
 use crate::{
     ADRESSES_MAX, Annonce, Bail, Candidat, Erreur, Horodatage, Joignabilite, NomService, Origine,
-    POINTS_MAX, PointEcoute, Port, Protocole, RaisonNonSonde, Reponse, Verdict, VerdictNat,
-    VuDepuis,
+    POINTS_MAX, PointEcoute, Port, Poussee, Protocole, RaisonNonSonde, Reponse, Verdict,
+    VerdictNat, VuDepuis,
 };
 
 /// La taille maximale d'un message d'annonce, en octets.
@@ -809,38 +809,52 @@ impl<'a> Reponse<'a> {
             self.derriere_nat,
         );
 
-        for (rang, entree) in self.joignabilite.iter().enumerate() {
-            if rang > 0 {
-                ecrivain.pousser(b",");
-            }
-            let _ = write!(
-                ecrivain,
-                "{{\"protocole\":\"{}\",\"port\":{},\"verdict\":\"{}\"",
-                entree.point.protocole,
-                entree.point.port.valeur(),
-                entree.verdict.texte(),
-            );
-            match entree.verdict {
-                Verdict::Joignable { candidat, a } => {
-                    let _ = write!(
-                        ecrivain,
-                        ",\"candidat\":\"{candidat}\",\"origine\":\"{}\",\"a\":{a}",
-                        candidat.origine
-                    );
-                }
-                Verdict::Injoignable { a } => {
-                    let _ = write!(ecrivain, ",\"a\":{a}");
-                }
-                Verdict::NonSonde { raison } => {
-                    let _ = write!(ecrivain, ",\"raison\":\"{raison}\"");
-                }
-                Verdict::EnCours => {}
-            }
-            ecrivain.pousser(b"}");
-        }
+        ecrire_joignabilite(&mut ecrivain, self.joignabilite);
         ecrivain.pousser(b"]}");
 
         ecrivain.achever()
+    }
+}
+
+/// Écrit le contenu d'un tableau de verdicts, crochets NON compris.
+///
+/// **Partagée par la réponse et la poussée.** Deux copies de cette écriture
+/// finiraient par diverger, et l'une des deux produirait alors des messages que
+/// notre propre décodeur refuserait.
+fn ecrire_joignabilite(ecrivain: &mut Ecrivain<'_>, entrees: &[Joignabilite]) {
+    use fmt::Write as _;
+
+    for (rang, entree) in entrees.iter().enumerate() {
+        if rang > 0 {
+            ecrivain.pousser(b",");
+        }
+        let _ = write!(
+            ecrivain,
+            "{{\"protocole\":\"{}\",\"port\":{},\"verdict\":\"{}\"",
+            entree.point.protocole,
+            entree.point.port.valeur(),
+            entree.verdict.texte(),
+        );
+        // CHAQUE VERDICT N'ÉCRIT QUE LES CHAMPS QU'IL PORTE. Le décodeur refuse
+        // les champs hors de propos : écrire une date sur un `en_cours`
+        // produirait un message que nous-mêmes ne saurions pas relire.
+        match entree.verdict {
+            Verdict::Joignable { candidat, a } => {
+                let _ = write!(
+                    ecrivain,
+                    ",\"candidat\":\"{candidat}\",\"origine\":\"{}\",\"a\":{a}",
+                    candidat.origine
+                );
+            }
+            Verdict::Injoignable { a } => {
+                let _ = write!(ecrivain, ",\"a\":{a}");
+            }
+            Verdict::NonSonde { raison } => {
+                let _ = write!(ecrivain, ",\"raison\":\"{raison}\"");
+            }
+            Verdict::EnCours => {}
+        }
+        ecrivain.pousser(b"}");
     }
 }
 
@@ -1144,4 +1158,123 @@ fn decoder_un_verdict(lecteur: &mut Lecteur<'_>) -> Result<Joignabilite, Erreur>
         point: PointEcoute::nouveau(protocole, port),
         verdict,
     })
+}
+
+// ── La poussée ──────────────────────────────────────────────────────────────
+
+/// Les champs de la poussée, dans l'ordre où l'encodeur les écrit.
+const CHAMPS_POUSSEE: [&str; 3] = ["vu_depuis", "derriere_nat", "joignabilite"];
+
+impl<'a> Poussee<'a> {
+    /// Décode une poussée.
+    ///
+    /// Elle emprunte les mêmes tampons que la réponse : c'est la même liste de
+    /// verdicts, dans un message plus court.
+    ///
+    /// # Erreurs
+    ///
+    /// Celles du cadrage, plus celles de [`Poussee::nouvelle`].
+    pub fn decoder(octets: &'a [u8], tampons: &'a mut TamponsReponse) -> Result<Self, Erreur> {
+        if octets.len() > MESSAGE_MAX {
+            return Err(Erreur::MessageTropLong {
+                obtenue: octets.len(),
+            });
+        }
+
+        let mut lecteur = Lecteur::nouveau(octets);
+        lecteur.attendre(b'{', "un objet")?;
+
+        let mut vus = 0_u8;
+        let mut vu_depuis: Option<VuDepuis> = None;
+        let mut derriere_nat: Option<VerdictNat> = None;
+        let mut compte = 0_usize;
+
+        lecteur.sauter_blancs();
+        if lecteur.regarder() != Some(b'}') {
+            loop {
+                let position_cle = lecteur.position;
+                let cle = lecteur.chaine()?;
+                let rang = CHAMPS_POUSSEE
+                    .iter()
+                    .position(|champ| *champ == cle)
+                    .ok_or(Erreur::ChampInconnu {
+                        position: position_cle,
+                    })?;
+
+                let bit = 1_u8 << rang;
+                if vus & bit != 0 {
+                    return Err(Erreur::ChampEnDouble {
+                        position: position_cle,
+                    });
+                }
+                vus |= bit;
+
+                lecteur.attendre(b':', "deux-points")?;
+
+                match rang {
+                    0 => vu_depuis = Some(decoder_vu_depuis(&mut lecteur)?),
+                    1 => derriere_nat = Some(VerdictNat::analyser(lecteur.chaine()?)?),
+                    _ => {
+                        compte = decoder_joignabilite(&mut lecteur, &mut tampons.joignabilite)?;
+                    }
+                }
+
+                lecteur.sauter_blancs();
+                match lecteur.regarder() {
+                    Some(b',') => lecteur.avancer(),
+                    Some(b'}') => {
+                        lecteur.avancer();
+                        break;
+                    }
+                    _ => {
+                        return Err(Erreur::JsonAttendu {
+                            position: lecteur.position,
+                            attendu: "une virgule ou la fin de l'objet",
+                        });
+                    }
+                }
+            }
+        } else {
+            lecteur.avancer();
+        }
+        lecteur.fin()?;
+
+        let vu_depuis = vu_depuis.ok_or(Erreur::ChampManquant {
+            nom: CHAMPS_POUSSEE[0],
+        })?;
+        let derriere_nat = derriere_nat.ok_or(Erreur::ChampManquant {
+            nom: CHAMPS_POUSSEE[1],
+        })?;
+        if vus & 0b100 == 0 {
+            return Err(Erreur::ChampManquant {
+                nom: CHAMPS_POUSSEE[2],
+            });
+        }
+
+        let joignabilite = tampons.joignabilite.get(..compte).unwrap_or(&[]);
+        Self::nouvelle(vu_depuis, derriere_nat, joignabilite)
+    }
+
+    /// Encode une poussée, et rend le nombre d'octets écrits.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`].
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        use fmt::Write as _;
+
+        let mut ecrivain = Ecrivain::nouveau(sortie);
+        let _ = write!(
+            ecrivain,
+            "{{\"vu_depuis\":{{\"adresse\":\"{}\",\"port\":{}}},\"derriere_nat\":\"{}\",\
+             \"joignabilite\":[",
+            self.vu_depuis.adresse,
+            self.vu_depuis.port.valeur(),
+            self.derriere_nat,
+        );
+        ecrire_joignabilite(&mut ecrivain, self.joignabilite);
+        ecrivain.pousser(b"]}");
+
+        ecrivain.achever()
+    }
 }
