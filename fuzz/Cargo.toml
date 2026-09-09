@@ -180,3 +180,10 @@ path = "fuzz_targets/fuzz_asl_registre_aller_retour.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_asl_api_corps"
+path = "fuzz_targets/fuzz_asl_api_corps.rs"
+test = false
+doc = false
+bench = false

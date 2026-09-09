@@ -66,6 +66,8 @@ struct ParConnexion {
 struct Service<'a> {
     /// Ce qui décide.
     session: &'a mut Session,
+    /// Ce que l'annuaire exige d'un appareil qui s'enrôle.
+    politique: asl_auth::Politique,
     /// Ce qui se souvient.
     entrepot: &'a Entrepot,
     /// Ce qui vit.
@@ -137,13 +139,34 @@ impl Service<'_> {
             // d'autre : une machine inconnue, une clé illisible et une
             // signature fausse donnent le même refus, et c'est `asl-session`
             // qui le compose.
-            Besoin::ClePourPreuve { machine, .. } => match self.entrepot.machine(*machine) {
-                Ok(Some(rangee)) => match ClePublique::depuis_octets(rangee.cle) {
-                    Ok(cle) => Trouvaille::Cle(cle),
-                    Err(_) => Trouvaille::Rien,
-                },
-                Ok(None) | Err(_) => Trouvaille::Rien,
-            },
+            // **DEUX GENRES PROUVENT UNE CLÉ ICI** : une machine, ou un
+            // appareil. Le genre de l'identifiant dit dans quelle table
+            // chercher, et il vient de la SIGNATURE — `asl-session` l'a lu du
+            // corps, mais c'est le message signé qui le rend contraignant.
+            Besoin::ClePourPreuve { machine: qui, .. } => {
+                let rangee = match qui.genre() {
+                    asl_id::Genre::Appareil => self
+                        .entrepot
+                        .appareil(*qui)
+                        .ok()
+                        .flatten()
+                        .map(|appareil| appareil.cle),
+                    // **UNE MACHINE SANS CLÉ NE PROUVE RIEN.** Elle est
+                    // déclarée et pas encore enrôlée ; c'est `None`, et non
+                    // trente-deux zéros dont n'importe qui forgerait la
+                    // signature.
+                    _ => self
+                        .entrepot
+                        .machine(*qui)
+                        .ok()
+                        .flatten()
+                        .and_then(|m| m.cle),
+                };
+                match rangee.map(ClePublique::depuis_octets) {
+                    Some(Ok(cle)) => Trouvaille::Cle(cle),
+                    Some(Err(_)) | None => Trouvaille::Rien,
+                }
+            }
             Besoin::Compte(qui) => match self.entrepot.compte(*qui) {
                 Ok(Some(compte)) => Trouvaille::Compte {
                     qui: *qui,
@@ -160,6 +183,20 @@ impl Service<'_> {
             Besoin::Ou { machine, service } => self
                 .rassembler(*machine, service)
                 .map_or(Trouvaille::Rien, Trouvaille::Resolution),
+
+            // ── CE QUI CRÉE ─────────────────────────────────────────────
+            //
+            // **TOUT SE PASSE ICI**, et rien à l'étage 2 : créer, c'est écrire,
+            // et tirer un identifiant, c'est lire l'entropie du noyau. Ce que
+            // `asl-session` a fait avant, elle, est ce qu'elle seule pouvait
+            // faire : vérifier une preuve contre le défi de cette connexion.
+            Besoin::PreuveRefusee => Trouvaille::Rien,
+            Besoin::CreerCompte { cle } => self.creer_un_compte(cle),
+            Besoin::CreerAppareil { cle } => self.creer_un_appareil(cle),
+            Besoin::CreerMachine { nom, capacites } => self.creer_une_machine(nom, *capacites),
+            Besoin::NouveauCode { machine } => self.emettre_un_code(*machine),
+            Besoin::Enroler { empreinte, cle } => self.enroler(empreinte, cle),
+            Besoin::Autoriser { a, portee } => self.autoriser(*a, *portee),
 
             Besoin::CompteParAlias(alias) => match self.entrepot.compte_par_alias(alias) {
                 Ok(Some(qui)) => match self.entrepot.compte(qui) {
@@ -179,6 +216,308 @@ impl Service<'_> {
 }
 
 impl Service<'_> {
+    /// Le compte au nom duquel cette connexion agit.
+    ///
+    /// **C'est l'APPAREIL qui a prouvé sa clé qui le désigne**, jamais ce
+    /// qu'une requête a nommé. C10 tient par là : aucun verbe d'administration
+    /// ne prend un compte en paramètre.
+    fn compte_de_la_connexion(&self) -> Option<Identifiant> {
+        let appareil = self.session.appareil()?;
+        self.entrepot
+            .appareil(appareil)
+            .ok()
+            .flatten()
+            .map(|rangee| rangee.proprietaire)
+    }
+
+    /// Tire un identifiant de ce genre.
+    fn un_identifiant(&self, genre: asl_id::Genre) -> Option<Identifiant> {
+        Some(Identifiant::depuis_entropie(
+            genre,
+            (self.tirer_un_identifiant)()?,
+        ))
+    }
+
+    /// Crée un compte et enrôle l'appareil qui vient de prouver sa clé.
+    fn creer_un_compte(&self, cle: &ClePublique) -> Trouvaille {
+        // **L'ATTESTATION EST LA SEULE CHOSE QUI GARDE CE CHEMIN.** Il n'exige
+        // aucune signature de compte, pour la raison la plus simple : il n'y a
+        // pas encore de compte.
+        if asl_auth::decider_attestation(false, self.politique) == asl_auth::Decision::Refuser {
+            return Trouvaille::Refus;
+        }
+        let (Some(compte), Some(appareil)) = (
+            self.un_identifiant(asl_id::Genre::Utilisateur),
+            self.un_identifiant(asl_id::Genre::Appareil),
+        ) else {
+            return Trouvaille::Rien;
+        };
+
+        if self
+            .entrepot
+            .poser_compte(
+                compte,
+                &asl_registre::Compte {
+                    provenance: asl_registre::Provenance::Ici,
+                    alias: None,
+                },
+            )
+            .is_err()
+        {
+            return Trouvaille::Rien;
+        }
+        if self
+            .entrepot
+            .poser_appareil(
+                appareil,
+                &asl_registre::Appareil {
+                    provenance: asl_registre::Provenance::Ici,
+                    proprietaire: compte,
+                    cle: cle.octets(),
+                },
+            )
+            .is_err()
+        {
+            return Trouvaille::Rien;
+        }
+        Trouvaille::CompteCree { compte, appareil }
+    }
+
+    /// Enrôle un appareil de plus sur le compte de cette connexion.
+    fn creer_un_appareil(&self, cle: &ClePublique) -> Trouvaille {
+        if asl_auth::decider_attestation(false, self.politique) == asl_auth::Decision::Refuser {
+            return Trouvaille::Refus;
+        }
+        let (Some(compte), Some(appareil)) = (
+            self.compte_de_la_connexion(),
+            self.un_identifiant(asl_id::Genre::Appareil),
+        ) else {
+            return Trouvaille::Rien;
+        };
+        match self.entrepot.poser_appareil(
+            appareil,
+            &asl_registre::Appareil {
+                provenance: asl_registre::Provenance::Ici,
+                proprietaire: compte,
+                cle: cle.octets(),
+            },
+        ) {
+            Ok(()) => Trouvaille::AppareilCree(appareil),
+            Err(_) => Trouvaille::Rien,
+        }
+    }
+
+    /// Déclare une machine, et émet son premier code d'enrôlement.
+    fn creer_une_machine(&self, nom: &str, capacites: asl_api::corps::Capacites) -> Trouvaille {
+        let (Some(compte), Some(machine)) = (
+            self.compte_de_la_connexion(),
+            self.un_identifiant(asl_id::Genre::Machine),
+        ) else {
+            return Trouvaille::Rien;
+        };
+        let Ok(nom) = asl_registre::NomRange::nouveau(nom) else {
+            return Trouvaille::Rien;
+        };
+
+        if self
+            .entrepot
+            .poser_machine(
+                machine,
+                &asl_registre::Machine {
+                    provenance: asl_registre::Provenance::Ici,
+                    proprietaire: compte,
+                    // **SANS CLÉ**, et c'est l'état d'une machine déclarée : la
+                    // clé arrivera avec le code, générée sur place.
+                    cle: None,
+                    annonce: capacites.annonce,
+                    lecture: capacites.lecture,
+                    nom,
+                },
+            )
+            .is_err()
+        {
+            return Trouvaille::Rien;
+        }
+        match self.tirer_un_code(machine) {
+            Some((code, expire_a)) => Trouvaille::MachineCreee {
+                machine,
+                code,
+                expire_a,
+            },
+            None => Trouvaille::Rien,
+        }
+    }
+
+    /// Émet un nouveau code pour une machine déjà déclarée.
+    fn emettre_un_code(&self, machine: Identifiant) -> Trouvaille {
+        let (Some(compte), Ok(Some(rangee))) = (
+            self.compte_de_la_connexion(),
+            self.entrepot.machine(machine),
+        ) else {
+            return Trouvaille::Rien;
+        };
+        // **UNE MACHINE QUI N'EST PAS À NOUS NE SE RÉ-ENRÔLE PAS.** Sans ce
+        // refus, quiconque a un compte pourrait émettre un code pour la machine
+        // d'un autre, puis y lier sa propre clé.
+        if asl_auth::decider_gestion(compte, rangee.proprietaire) == asl_auth::Decision::Refuser {
+            return Trouvaille::Refus;
+        }
+        match self.tirer_un_code(machine) {
+            Some((code, expire_a)) => Trouvaille::CodeEmis { code, expire_a },
+            None => Trouvaille::Rien,
+        }
+    }
+
+    /// Tire un code pour cette machine, et le range sous son empreinte.
+    fn tirer_un_code(&self, machine: Identifiant) -> Option<(asl_auth::TexteCode, u64)> {
+        // Huit octets suffisent : dix symboles n'en portent que cinquante bits.
+        // On puise à la même source que les identifiants — c'est le même noyau,
+        // et la même exigence.
+        let graine = (self.tirer_un_identifiant)()?;
+        let mut huit = [0_u8; 8];
+        for (place, octet) in huit.iter_mut().zip(graine.iter()) {
+            *place = *octet;
+        }
+        let code = asl_auth::CodeEnrolement::depuis_entropie(huit);
+        let expire_a = maintenant()
+            .saturating_div(1_000)
+            .saturating_add(asl_auth::VALIDITE_CODE_SECONDES.saturating_mul(1_000));
+
+        self.entrepot
+            .poser_enrolement(
+                &code.empreinte(),
+                &asl_registre::Enrolement {
+                    provenance: asl_registre::Provenance::Ici,
+                    machine,
+                    expire_a,
+                },
+            )
+            .ok()?;
+        Some((code.texte_groupe(), expire_a))
+    }
+
+    /// Lie cette clé à la machine que ce code désigne.
+    fn enroler(&self, empreinte: &[u8], cle: &ClePublique) -> Trouvaille {
+        // **LE CODE MEURT ICI, QU'IL SERVE OU NON.** Consommer d'abord et
+        // décider ensuite est ce qui rend « à usage unique » vrai : un code
+        // expiré qu'on laisserait en place resterait un secret vivant, et deux
+        // enrôlements simultanés du même code en verraient tous deux un valide.
+        let Ok(trouve) = self.entrepot.consommer_enrolement(empreinte) else {
+            return Trouvaille::Rien;
+        };
+        let etat = match &trouve {
+            None => asl_auth::EtatCode::Inconnu,
+            Some(enrolement) if enrolement.expire_a < maintenant().saturating_div(1_000) => {
+                asl_auth::EtatCode::Expire
+            }
+            Some(_) => asl_auth::EtatCode::Utilisable,
+        };
+        if asl_auth::decider_enrolement(etat) == asl_auth::Decision::Refuser {
+            return Trouvaille::Refus;
+        }
+        let Some(enrolement) = trouve else {
+            return Trouvaille::Refus;
+        };
+        let Ok(Some(rangee)) = self.entrepot.machine(enrolement.machine) else {
+            return Trouvaille::Rien;
+        };
+        match self.entrepot.poser_machine(
+            enrolement.machine,
+            &asl_registre::Machine {
+                cle: Some(cle.octets()),
+                ..rangee
+            },
+        ) {
+            Ok(()) => Trouvaille::Enrolee(enrolement.machine),
+            Err(_) => Trouvaille::Rien,
+        }
+    }
+
+    /// Accorde une autorisation à un autre compte.
+    fn autoriser(&self, a: Identifiant, portee: asl_api::corps::Portee) -> Trouvaille {
+        let (Some(par), Some(quelle)) = (
+            self.compte_de_la_connexion(),
+            self.un_identifiant(asl_id::Genre::Autorisation),
+        ) else {
+            return Trouvaille::Rien;
+        };
+
+        // **LE BÉNÉFICIAIRE DOIT EXISTER.** Une autorisation vers un compte
+        // inexistant est MUETTE : elle s'affiche comme accordée et n'ouvre rien.
+        // `protocole.md` §2.2 donne `GET /v1/utilisateurs/{u}` pour qu'une faute
+        // de frappe se voie ; le vérifier ici est ce qui la rend impossible.
+        match self.entrepot.compte(a) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Trouvaille::Refus,
+            Err(_) => return Trouvaille::Rien,
+        }
+
+        // **ON N'ACCORDE QUE SUR CE QU'ON POSSÈDE.** Une portée qui nomme la
+        // machine d'un autre n'ouvrirait rien — `Autorisation::couvre` vérifie
+        // les deux bouts —, mais elle s'afficherait comme accordée. Un droit qui
+        // ment sur ce qu'il donne est pire qu'un refus.
+        let portee = match portee {
+            asl_api::corps::Portee::ToutLeCompte => asl_registre::Portee::ToutLeCompte,
+            asl_api::corps::Portee::UneMachine(machine) => {
+                let Ok(Some(rangee)) = self.entrepot.machine(machine) else {
+                    return Trouvaille::Refus;
+                };
+                if asl_auth::decider_gestion(par, rangee.proprietaire)
+                    == asl_auth::Decision::Refuser
+                {
+                    return Trouvaille::Refus;
+                }
+                asl_registre::Portee::UneMachine(machine)
+            }
+            asl_api::corps::Portee::UnService(service) => {
+                let Ok(Some(rangee)) = self.entrepot.service(service) else {
+                    return Trouvaille::Refus;
+                };
+                let Ok(Some(machine)) = self.entrepot.machine(rangee.machine) else {
+                    return Trouvaille::Refus;
+                };
+                if asl_auth::decider_gestion(par, machine.proprietaire)
+                    == asl_auth::Decision::Refuser
+                {
+                    return Trouvaille::Refus;
+                }
+                asl_registre::Portee::UnService(service)
+            }
+        };
+
+        // **`Autorisation::nouvelle` REFUSE QU'UN COMPTE S'AUTORISE LUI-MÊME**,
+        // et c'est là que ce refus se prend. Le répéter ici en ferait une règle
+        // à deux endroits.
+        if asl_auth::Autorisation::nouvelle(
+            par,
+            a,
+            match portee {
+                asl_registre::Portee::ToutLeCompte => asl_auth::Portee::ToutLeCompte,
+                asl_registre::Portee::UneMachine(quoi) => asl_auth::Portee::UneMachine(quoi),
+                asl_registre::Portee::UnService(quoi) => asl_auth::Portee::UnService(quoi),
+            },
+            false,
+        )
+        .is_err()
+        {
+            return Trouvaille::Refus;
+        }
+
+        match self.entrepot.poser_autorisation(
+            quelle,
+            &asl_registre::Autorisation {
+                provenance: asl_registre::Provenance::Ici,
+                par,
+                a,
+                portee,
+                revoquee: false,
+            },
+        ) {
+            Ok(()) => Trouvaille::AutorisationCreee(quelle),
+            Err(_) => Trouvaille::Rien,
+        }
+    }
+
     /// Prend une annonce, ouvre sa session vivante, et compose la réponse.
     ///
     /// # POURQUOI TOUT CECI EST À L'ÉTAGE 3
@@ -428,6 +767,12 @@ const BAIL_PAR_DEFAUT: asl_proto::Bail = match asl_proto::Bail::nouveau(15, 45) 
     Err(_) => panic!("quinze et quarante-cinq forment un bail valide"),
 };
 
+/// Combien de temps entre deux balayages des codes périmés, en millisecondes.
+///
+/// Cinq minutes. Un code vaut dix minutes ; il ne survit donc jamais plus de
+/// quinze à sa mort, et il est refusé pendant tout ce temps.
+const BALAYAGE_DES_CODES_MS: u64 = 5 * 60 * 1_000;
+
 /// Le port qu'on note quand un pair prétend parler depuis le zéro.
 const PORT_DE_SECOURS: asl_proto::Port = match asl_proto::Port::depuis_u16(1) {
     Ok(port) => port,
@@ -471,6 +816,13 @@ pub struct Annuaire<'a> {
     tirer_un_defi: &'a (dyn Fn() -> Option<Defi> + Send + Sync),
     /// Combien de connexions ont parlé HTTP/3.
     servies: u64,
+    /// Ce que cet annuaire exige d'un appareil qui s'enrôle.
+    ///
+    /// **Il n'y a pas de défaut** — voir `asl_auth::Politique`. L'exploitant
+    /// dit laquelle il tient, et `asl-server` refuse de démarrer sans.
+    politique: asl_auth::Politique,
+    /// Quand les codes expirés ont été balayés pour la dernière fois.
+    dernier_balayage: u64,
 }
 
 impl<'a> Annuaire<'a> {
@@ -485,6 +837,7 @@ impl<'a> Annuaire<'a> {
         liaison: LiaisonDeCanal,
         tirer_un_defi: &'a (dyn Fn() -> Option<Defi> + Send + Sync),
         tirer_un_identifiant: &'a (dyn Fn() -> Option<[u8; 16]> + Send + Sync),
+        politique: asl_auth::Politique,
     ) -> Self {
         let (rapports, verdicts) = tokio::sync::mpsc::unbounded_channel();
         Self {
@@ -498,6 +851,8 @@ impl<'a> Annuaire<'a> {
             tirer_un_identifiant,
             tirer_un_defi,
             servies: 0,
+            politique,
+            dernier_balayage: 0,
         }
     }
 
@@ -511,6 +866,26 @@ impl<'a> Annuaire<'a> {
     #[must_use]
     pub const fn servies(&self) -> u64 {
         self.servies
+    }
+
+    /// Efface les codes d'enrôlement périmés, de loin en loin.
+    ///
+    /// # POURQUOI PAS À CHAQUE TOUR
+    ///
+    /// C'est un balayage de table, et la boucle en fait des milliers par
+    /// seconde. **Il ne change aucune décision** — un code expiré est refusé de
+    /// toute façon, `asl_auth::decider_enrolement` le dit —, donc rien n'exige
+    /// qu'il soit prompt. Il empêche seulement une table de secrets morts de
+    /// grandir sans fin.
+    fn balayer_les_codes(&mut self) {
+        let maintenant_ms = maintenant().saturating_div(1_000);
+        if maintenant_ms.saturating_sub(self.dernier_balayage) < BALAYAGE_DES_CODES_MS {
+            return;
+        }
+        self.dernier_balayage = maintenant_ms;
+        // Une base qui refuse ne doit pas arrêter la boucle : le balayage
+        // reviendra, et rien ne dépend de lui.
+        let _ = self.entrepot.expirer_les_enrolements(maintenant_ms);
     }
 
     /// Ferme cette connexion sur une faute d'HTTP/3.
@@ -535,6 +910,7 @@ impl Application for Annuaire<'_> {
         // Et l'on oublie ce qui a expiré — une annonce dont la connexion est
         // tombée sans qu'on l'apprenne n'a personne pour la retirer.
         self.vivier.oublier_les_expirees(instant());
+        self.balayer_les_codes();
     }
 
     fn a_l_etablissement(&mut self, connexion: &mut Connection, _pair: SocketAddr) {
@@ -573,6 +949,7 @@ impl Application for Annuaire<'_> {
         } = etat;
         let mut service = Service {
             session,
+            politique: self.politique,
             entrepot: self.entrepot,
             vivier: &mut self.vivier,
             rapports: self.rapports.clone(),

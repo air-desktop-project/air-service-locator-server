@@ -399,7 +399,8 @@ impl Compte {
 // ── La machine ──────────────────────────────────────────────────────────────
 
 /// Ce qu'une machine occupe.
-pub const MACHINE_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS + 1;
+pub const MACHINE_OCTETS: usize =
+    PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS + 1 + 1 + NOM_OCTETS_MAX;
 
 /// Une machine, telle qu'elle est rangée.
 ///
@@ -418,16 +419,35 @@ pub struct Machine {
     pub provenance: Provenance,
     /// Le compte qui possède cette machine.
     pub proprietaire: Identifiant,
-    /// Sa clé publique Ed25519, telle quelle.
+    /// Sa clé publique Ed25519, **si elle en a une**.
+    ///
+    /// # UNE MACHINE DÉCLARÉE N'A PAS ENCORE DE CLÉ
+    ///
+    /// Elle est créée par l'application mobile, qui ne connaît que son nom ; la
+    /// clé arrive plus tard, quand la machine présente son code d'enrôlement
+    /// (`docs/modele.md` §2.3). Entre les deux, il y a un état — et il faut
+    /// pouvoir le RANGER.
+    ///
+    /// **Trente-deux zéros n'auraient pas fait l'affaire.** Ce n'est pas une
+    /// valeur absurde pour Ed25519 : c'est un point d'ordre faible, que certaines
+    /// vérifications acceptent, et dont on peut forger des signatures. Une
+    /// machine sans clé aurait alors eu une clé que n'importe qui détient.
     ///
     /// **Elle n'est pas interprétée ici.** `asl_cle::ClePublique::depuis_octets`
     /// sait dire si ces octets forment un point de la courbe ; ce module range
     /// des octets, et une seconde vérification serait une seconde vérité.
-    pub cle: [u8; CLE_OCTETS],
+    pub cle: Option<[u8; CLE_OCTETS]>,
     /// Cette machine peut-elle annoncer des services ?
     pub annonce: bool,
     /// Cette machine peut-elle interroger l'annuaire ?
     pub lecture: bool,
+    /// Le nom que son propriétaire lui a donné.
+    ///
+    /// **Pour l'humain, jamais pour la machine** (`docs/modele.md` §2.3) : rien
+    /// ne se cherche par ce nom, rien ne s'y compare. C'est ce qui permet qu'il
+    /// porte du texte libre là où le nom d'un SERVICE ne le peut pas — celui-là
+    /// est une clé, et une clé qui a deux écritures n'en est pas une.
+    pub nom: NomRange,
 }
 
 impl Machine {
@@ -435,6 +455,12 @@ impl Machine {
     const BIT_ANNONCE: u8 = 0b0000_0001;
     /// Le bit de lecture.
     const BIT_LECTURE: u8 = 0b0000_0010;
+    /// Le bit qui dit qu'une clé est posée.
+    ///
+    /// **Il n'est pas une capacité**, et il partage pourtant leur octet : c'est
+    /// un drapeau de plus dans une place déjà là. Le nommer autrement aurait
+    /// coûté un octet pour dire la même chose.
+    const BIT_CLE: u8 = 0b0000_0100;
 
     /// Écrit cette machine.
     pub fn ecrire(&self, sortie: &mut [u8; MACHINE_OCTETS]) {
@@ -448,12 +474,14 @@ impl Machine {
                 .unwrap_or_default(),
         );
         let apres_cle = apres_provenance.saturating_add(CLE_OCTETS);
-        poser(
-            sortie
-                .get_mut(apres_provenance..apres_cle)
-                .unwrap_or_default(),
-            &self.cle,
-        );
+        let place = sortie
+            .get_mut(apres_provenance..apres_cle)
+            .unwrap_or_default();
+        match &self.cle {
+            Some(cle) => poser(place, cle),
+            // Le bourrage à zéro, pour la raison écrite sur `bourrage_nul`.
+            None => place.fill(0),
+        }
         let mut drapeaux = 0_u8;
         if self.annonce {
             drapeaux |= Self::BIT_ANNONCE;
@@ -461,7 +489,13 @@ impl Machine {
         if self.lecture {
             drapeaux |= Self::BIT_LECTURE;
         }
+        if self.cle.is_some() {
+            drapeaux |= Self::BIT_CLE;
+        }
         poser_un(sortie.get_mut(apres_cle..).unwrap_or_default(), drapeaux);
+        let apres_drapeaux = apres_cle.saturating_add(1);
+        self.nom
+            .ecrire(sortie.get_mut(apres_drapeaux..).unwrap_or_default());
     }
 
     /// Relit une machine.
@@ -479,26 +513,183 @@ impl Machine {
             Genre::Utilisateur,
         )?;
         let apres_cle = apres_provenance.saturating_add(CLE_OCTETS);
-        let mut cle = [0_u8; CLE_OCTETS];
-        poser(
-            &mut cle,
-            octets.get(apres_provenance..apres_cle).unwrap_or_default(),
-        );
+        let brute = octets.get(apres_provenance..apres_cle).unwrap_or_default();
         // **LES BITS INCONNUS SONT REFUSÉS.** Les accepter en silence ferait
         // relire sans broncher un enregistrement écrit par une version qui en
         // sait plus que nous — et lui prêterait des capacités qu'on ne
         // comprendrait pas.
         let drapeaux = octets.get(apres_cle).copied().unwrap_or(0);
-        let connus = Self::BIT_ANNONCE | Self::BIT_LECTURE;
+        let connus = Self::BIT_ANNONCE | Self::BIT_LECTURE | Self::BIT_CLE;
         if drapeaux & !connus != 0 {
             return Err(Faute::Etiquette { lue: drapeaux });
         }
+        let cle = if drapeaux & Self::BIT_CLE == 0 {
+            // **PAS DE CLÉ VEUT DIRE QUE LA PLACE EST NULLE.** Sans ce contrôle,
+            // deux enregistrements différents se reliraient identiques, et l'un
+            // d'eux ne se réécrirait pas comme il a été lu.
+            if !bourrage_nul(brute) {
+                return Err(Faute::Bourrage);
+            }
+            None
+        } else {
+            let mut octets = [0_u8; CLE_OCTETS];
+            poser(&mut octets, brute);
+            Some(octets)
+        };
+        let apres_drapeaux = apres_cle.saturating_add(1);
+        let nom = NomRange::lire(octets.get(apres_drapeaux..).unwrap_or_default())?;
         Ok(Self {
             provenance,
             proprietaire,
             cle,
             annonce: drapeaux & Self::BIT_ANNONCE != 0,
             lecture: drapeaux & Self::BIT_LECTURE != 0,
+            nom,
+        })
+    }
+}
+
+// ── L'appareil ──────────────────────────────────────────────────────────────
+
+/// Ce qu'un appareil occupe.
+pub const APPAREIL_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS;
+
+/// Un téléphone enrôlé, tel qu'il est rangé.
+///
+/// # TROIS CHAMPS, ET C'EST TOUT CE QU'UN APPAREIL EST
+///
+/// Ni modèle, ni système, ni nom, ni adresse : rien de ce qui désignerait
+/// l'appareil ou son porteur (C13). Un appareil, pour l'annuaire, est **une clé
+/// publique rattachée à un compte**, et rien d'autre.
+///
+/// `docs/modele.md` §2.2 lui donne aussi un jeton de poussée, une date
+/// d'enrôlement et une date de révocation. **Ils ne sont pas ici, et c'est un
+/// manque nommé** : rien ne les écrit ni ne les lit encore, et un champ qu'on
+/// range toujours vide ment sur ce que l'annuaire sait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Appareil {
+    /// D'où vient cet enregistrement.
+    pub provenance: Provenance,
+    /// Le compte dont cet appareil est un justificatif.
+    pub proprietaire: Identifiant,
+    /// Sa clé publique Ed25519, telle quelle.
+    ///
+    /// Celle qui vit dans le matériel sécurisé du téléphone. **L'annuaire n'en
+    /// connaît que la partie publique**, et il ne saurait rien faire de l'autre.
+    pub cle: [u8; CLE_OCTETS],
+}
+
+impl Appareil {
+    /// Écrit cet appareil.
+    pub fn ecrire(&self, sortie: &mut [u8; APPAREIL_OCTETS]) {
+        self.provenance
+            .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
+        let apres_provenance = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+        ecrire_identifiant(
+            self.proprietaire,
+            sortie
+                .get_mut(PROVENANCE_OCTETS..apres_provenance)
+                .unwrap_or_default(),
+        );
+        poser(
+            sortie.get_mut(apres_provenance..).unwrap_or_default(),
+            &self.cle,
+        );
+    }
+
+    /// Relit un appareil.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un appareil.
+    pub fn lire(octets: &[u8; APPAREIL_OCTETS]) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        let apres_provenance = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+        let proprietaire = lire_identifiant(
+            octets
+                .get(PROVENANCE_OCTETS..apres_provenance)
+                .unwrap_or_default(),
+            Genre::Utilisateur,
+        )?;
+        let mut cle = [0_u8; CLE_OCTETS];
+        poser(&mut cle, octets.get(apres_provenance..).unwrap_or_default());
+        Ok(Self {
+            provenance,
+            proprietaire,
+            cle,
+        })
+    }
+}
+
+// ── Le code d'enrôlement en attente ─────────────────────────────────────────
+
+/// Ce qu'un enrôlement en attente occupe.
+pub const ENROLEMENT_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + 8;
+
+/// Un code d'enrôlement émis et pas encore consommé.
+///
+/// # LE CODE N'EST PAS ICI, ET C'EST TOUT L'INTÉRÊT
+///
+/// Cet enregistrement est rangé SOUS l'empreinte du code
+/// (`asl_cle::CodeEnrolement::empreinte`) et ne la porte donc pas. Le code
+/// lui-même n'est écrit nulle part : une base qui fuirait ne livrerait aucune
+/// machine en cours d'enrôlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Enrolement {
+    /// D'où vient cet enregistrement.
+    pub provenance: Provenance,
+    /// La machine dont ce code liera la clé.
+    pub machine: Identifiant,
+    /// Quand il cesse de valoir, en millisecondes d'époque.
+    ///
+    /// **L'expiration est rangée, et non calculée à la lecture.** Un code dont
+    /// la validité dépendrait de la durée en vigueur au moment où on le relit
+    /// changerait de durée quand on change la constante — y compris pour les
+    /// codes déjà en vol.
+    pub expire_a: u64,
+}
+
+impl Enrolement {
+    /// Écrit cet enrôlement.
+    pub fn ecrire(&self, sortie: &mut [u8; ENROLEMENT_OCTETS]) {
+        self.provenance
+            .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
+        let apres_provenance = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+        ecrire_identifiant(
+            self.machine,
+            sortie
+                .get_mut(PROVENANCE_OCTETS..apres_provenance)
+                .unwrap_or_default(),
+        );
+        poser(
+            sortie.get_mut(apres_provenance..).unwrap_or_default(),
+            &self.expire_a.to_be_bytes(),
+        );
+    }
+
+    /// Relit un enrôlement.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un enrôlement.
+    pub fn lire(octets: &[u8; ENROLEMENT_OCTETS]) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        let apres_provenance = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+        let machine = lire_identifiant(
+            octets
+                .get(PROVENANCE_OCTETS..apres_provenance)
+                .unwrap_or_default(),
+            Genre::Machine,
+        )?;
+        let mut quand = [0_u8; 8];
+        poser(
+            &mut quand,
+            octets.get(apres_provenance..).unwrap_or_default(),
+        );
+        Ok(Self {
+            provenance,
+            machine,
+            expire_a: u64::from_be_bytes(quand),
         })
     }
 }
@@ -923,10 +1114,11 @@ mod tests {
     use asl_id::{Genre, Identifiant};
 
     use super::{
-        ALIAS_OCTETS_MAX, AUTORISATION_OCTETS, AliasRange, Autorisation, CLEF_JOURNAL_OCTETS,
-        COMPTE_OCTETS, Compte, Court, ENTREE_OCTETS, EntreeJournal, Faute, IDENTIFIANT_OCTETS,
-        MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, PROVENANCE_OCTETS, Portee, Provenance,
-        SERVICE_OCTETS, Service, Verdict,
+        ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Autorisation,
+        CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte, Court, ENROLEMENT_OCTETS,
+        ENTREE_OCTETS, Enrolement, EntreeJournal, Faute, IDENTIFIANT_OCTETS, MACHINE_OCTETS,
+        Machine, NOM_OCTETS_MAX, NomRange, PROVENANCE_OCTETS, Portee, Provenance, SERVICE_OCTETS,
+        Service, Verdict,
     };
 
     /// Un identifiant de ce genre, reproductible.
@@ -1202,9 +1394,10 @@ mod tests {
         let machine = Machine {
             provenance: Provenance::Ici,
             proprietaire: un(Genre::Utilisateur, 5),
-            cle: [0x42; 32],
+            cle: Some([0x42; 32]),
             annonce: true,
             lecture: false,
+            nom: nom_de_machine("grenier"),
         };
         let mut sortie = [0_u8; MACHINE_OCTETS];
         machine.ecrire(&mut sortie);
@@ -1217,9 +1410,10 @@ mod tests {
             let machine = Machine {
                 provenance: Provenance::Ici,
                 proprietaire: un(Genre::Utilisateur, 1),
-                cle: [0; 32],
+                cle: Some([0; 32]),
                 annonce,
                 lecture,
+                nom: nom_de_machine("grenier"),
             };
             let mut sortie = [0_u8; MACHINE_OCTETS];
             machine.ecrire(&mut sortie);
@@ -1235,18 +1429,59 @@ mod tests {
         let machine = Machine {
             provenance: Provenance::Ici,
             proprietaire: un(Genre::Utilisateur, 1),
-            cle: [0; 32],
+            cle: Some([0; 32]),
             annonce: true,
             lecture: true,
+            nom: nom_de_machine("grenier"),
         };
         let mut octets = [0_u8; MACHINE_OCTETS];
         machine.ecrire(&mut octets);
-        let dernier = MACHINE_OCTETS - 1;
-        octets[dernier] |= 0b1000_0000;
+        // **L'OCTET DES DRAPEAUX N'EST PLUS LE DERNIER** : le nom le suit
+        // désormais. Le calculer depuis les constantes plutôt que de compter à
+        // rebours est ce qui empêche cet essai de viser à côté au prochain champ
+        // — il a visé à côté une fois, et il a rendu `Bourrage`.
+        let drapeaux = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS;
+        octets[drapeaux] |= 0b1000_0000;
         assert_eq!(
+            // `0b111` : annonce, lecture, et la clé posée.
             Machine::lire(&octets),
-            Err(Faute::Etiquette { lue: 0b1000_0011 })
+            Err(Faute::Etiquette { lue: 0b1000_0111 })
         );
+    }
+
+    #[test]
+    fn une_machine_sans_cle_se_relit_sans_cle() {
+        // C'est l'état d'une machine DÉCLARÉE et pas encore enrôlée, et il doit
+        // faire l'aller-retour comme les autres.
+        let machine = Machine {
+            provenance: Provenance::Ici,
+            proprietaire: un(Genre::Utilisateur, 1),
+            cle: None,
+            annonce: false,
+            lecture: true,
+            nom: nom_de_machine("portable"),
+        };
+        let mut octets = [0_u8; MACHINE_OCTETS];
+        machine.ecrire(&mut octets);
+        assert_eq!(Machine::lire(&octets), Ok(machine));
+    }
+
+    #[test]
+    fn une_machine_sans_cle_dont_la_place_n_est_pas_nulle_est_refusee() {
+        // **DEUX ÉCRITURES POUR UNE MÊME VALEUR, ET C'EST NON.** Sans ce refus,
+        // un enregistrement relu ne se réécrirait pas comme il a été lu.
+        let machine = Machine {
+            provenance: Provenance::Ici,
+            proprietaire: un(Genre::Utilisateur, 1),
+            cle: None,
+            annonce: true,
+            lecture: false,
+            nom: nom_de_machine("grenier"),
+        };
+        let mut octets = [0_u8; MACHINE_OCTETS];
+        machine.ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + IDENTIFIANT_OCTETS] = 0x01;
+        assert_eq!(Machine::lire(&octets), Err(Faute::Bourrage));
     }
 
     #[test]
@@ -1581,5 +1816,129 @@ mod tests {
     #[test]
     fn une_clef_fait_la_taille_annoncee() {
         assert_eq!(une_entree(1).clef(0).len(), CLEF_JOURNAL_OCTETS);
+    }
+
+    /// Un nom de machine, pour les essais.
+    fn nom_de_machine(texte: &str) -> NomRange {
+        NomRange::nouveau(texte).expect("un nom court se range")
+    }
+
+    // ── L'appareil et l'enrôlement ──────────────────────────────────────────
+
+    #[test]
+    fn un_appareil_fait_l_aller_retour() {
+        let appareil = Appareil {
+            provenance: Provenance::Ici,
+            proprietaire: un(Genre::Utilisateur, 7),
+            cle: [0x33; CLE_OCTETS],
+        };
+        let mut octets = [0_u8; APPAREIL_OCTETS];
+        appareil.ecrire(&mut octets);
+        assert_eq!(Appareil::lire(&octets), Ok(appareil));
+    }
+
+    #[test]
+    fn un_appareil_venu_d_un_pair_fait_l_aller_retour() {
+        // C17 : il porte son origine comme tout le reste, même si rien ne
+        // fédère un téléphone aujourd'hui.
+        let appareil = Appareil {
+            provenance: Provenance::Annuaire(un(Genre::Annuaire, 2)),
+            proprietaire: un(Genre::Utilisateur, 7),
+            cle: [0; CLE_OCTETS],
+        };
+        let mut octets = [0_u8; APPAREIL_OCTETS];
+        appareil.ecrire(&mut octets);
+        assert_eq!(Appareil::lire(&octets), Ok(appareil));
+    }
+
+    #[test]
+    fn un_proprietaire_d_appareil_qui_n_est_pas_un_utilisateur_est_refuse() {
+        let mut octets = [0_u8; APPAREIL_OCTETS];
+        octets[PROVENANCE_OCTETS] = Genre::Machine.prefixe();
+        assert_eq!(
+            Appareil::lire(&octets),
+            Err(Faute::Genre {
+                attendu: Genre::Utilisateur
+            })
+        );
+    }
+
+    #[test]
+    fn un_enrolement_fait_l_aller_retour() {
+        let enrolement = Enrolement {
+            provenance: Provenance::Ici,
+            machine: un(Genre::Machine, 4),
+            expire_a: 1_757_000_000_000,
+        };
+        let mut octets = [0_u8; ENROLEMENT_OCTETS];
+        enrolement.ecrire(&mut octets);
+        assert_eq!(Enrolement::lire(&octets), Ok(enrolement));
+    }
+
+    #[test]
+    fn un_enrolement_venu_d_un_pair_fait_l_aller_retour() {
+        let enrolement = Enrolement {
+            provenance: Provenance::Annuaire(un(Genre::Annuaire, 9)),
+            machine: un(Genre::Machine, 4),
+            expire_a: 0,
+        };
+        let mut octets = [0_u8; ENROLEMENT_OCTETS];
+        enrolement.ecrire(&mut octets);
+        assert_eq!(Enrolement::lire(&octets), Ok(enrolement));
+    }
+
+    #[test]
+    fn un_enrolement_qui_ne_designe_pas_une_machine_est_refuse() {
+        let mut octets = [0_u8; ENROLEMENT_OCTETS];
+        octets[PROVENANCE_OCTETS] = Genre::Service.prefixe();
+        assert_eq!(
+            Enrolement::lire(&octets),
+            Err(Faute::Genre {
+                attendu: Genre::Machine
+            })
+        );
+    }
+
+    #[test]
+    fn une_machine_dont_le_nom_est_illisible_est_refusee() {
+        // La longueur annoncée du nom dépasse la place : c'est une corruption,
+        // et elle se lit plutôt qu'elle ne se devine.
+        let machine = Machine {
+            provenance: Provenance::Ici,
+            proprietaire: un(Genre::Utilisateur, 1),
+            cle: Some([9; CLE_OCTETS]),
+            annonce: true,
+            lecture: true,
+            nom: nom_de_machine("grenier"),
+        };
+        let mut octets = [0_u8; MACHINE_OCTETS];
+        machine.ecrire(&mut octets);
+        let longueur_du_nom = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS + 1;
+        octets[longueur_du_nom] = 200;
+        assert_eq!(
+            Machine::lire(&octets),
+            Err(Faute::Longueur {
+                annoncee: 200,
+                maximum: NOM_OCTETS_MAX
+            })
+        );
+    }
+
+    #[test]
+    fn une_provenance_illisible_est_refusee_sur_les_deux_enregistrements_neufs() {
+        // L'étiquette de provenance vient en tête : elle est le premier refus.
+        let mut appareil = [0_u8; APPAREIL_OCTETS];
+        appareil[0] = 0x7F;
+        assert_eq!(
+            Appareil::lire(&appareil),
+            Err(Faute::Etiquette { lue: 0x7F })
+        );
+
+        let mut enrolement = [0_u8; ENROLEMENT_OCTETS];
+        enrolement[0] = 0x7F;
+        assert_eq!(
+            Enrolement::lire(&enrolement),
+            Err(Faute::Etiquette { lue: 0x7F })
+        );
     }
 }

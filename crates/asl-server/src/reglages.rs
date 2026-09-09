@@ -43,6 +43,21 @@ pub struct Reglages {
     pub inactivite_s: u64,
     /// La rétention du journal, en jours (C18).
     pub retention_jours: u64,
+    /// Ce que l'annuaire exige d'un appareil qui s'enrôle.
+    ///
+    /// **IL N'Y A PAS DE DÉFAUT, ET C'EST LE SEUL RÉGLAGE DANS CE CAS.**
+    ///
+    /// `protocole.md` §2.1 tranche : la v1 refuse un enrôlement sans
+    /// attestation de plate-forme. **Mais la vérification n'est pas écrite** —
+    /// App Attest et Play Integrity demandent les racines d'Apple et de Google,
+    /// du CBOR et une chaîne à valider. Exiger l'attestation aujourd'hui, c'est
+    /// donc refuser TOUS les enrôlements.
+    ///
+    /// Les deux postures sont défendables et aucune ne peut être le défaut :
+    /// `exigee` livrerait un annuaire qui ne crée aucun compte, `facultative`
+    /// livrerait en silence la posture faible. **L'exploitant dit laquelle il
+    /// tient**, et l'annuaire ne démarre pas tant qu'il ne l'a pas dit.
+    pub politique: asl_auth::Politique,
 }
 
 /// Ce qui empêche de lire les réglages.
@@ -61,6 +76,8 @@ pub enum Faute {
     },
     /// Un réglage obligatoire qui manque.
     Manque(&'static str),
+    /// `--attestation` a reçu autre chose que `exigee` ou `facultative`.
+    AttestationInconnue(String),
 }
 
 impl core::fmt::Display for Faute {
@@ -68,6 +85,12 @@ impl core::fmt::Display for Faute {
         match self {
             Self::Inconnu(quoi) => write!(sortie, "drapeau inconnu : {quoi}"),
             Self::SansValeur(quoi) => write!(sortie, "{quoi} attend une valeur"),
+            Self::AttestationInconnue(quoi) => {
+                write!(
+                    sortie,
+                    "--attestation attend `exigee` ou `facultative`, et non « {quoi} »"
+                )
+            }
             Self::PasUnNombre { drapeau, donnee } => {
                 write!(
                     sortie,
@@ -92,6 +115,12 @@ asl-server — un annuaire de services air-service-locator.
   --connexions <nombre>   connexions simultanées au plus    (défaut : 1024)
   --inactivite <secondes> l'inactivité annoncée aux pairs   (défaut : 45)
   --retention  <jours>    la rétention du journal           (défaut : 90)
+  --attestation <exigee|facultative>                        (obligatoire)
+
+`--attestation` N'A PAS DE DÉFAUT, ET C'EST DÉLIBÉRÉ. La vérification de
+l'attestation de plate-forme n'est pas écrite : `exigee` refuse donc TOUT
+enrôlement d'appareil, et `facultative` laisse n'importe qui créer un compte.
+Aucune des deux ne peut être choisie à votre place.
 
 L'écoute est en DOUBLE PILE : IPv6 d'abord, IPv4 accepté sur la même socket.
 L'annuaire REFUSE de démarrer en root — il n'a besoin d'aucun privilège.
@@ -124,6 +153,7 @@ impl Reglages {
         // sur de vrais NAT.
         let mut inactivite_s = 45_u64;
         let mut retention_jours = 90_u64;
+        let mut politique = None;
 
         let mut arguments = arguments.into_iter();
         while let Some(drapeau) = arguments.next() {
@@ -143,6 +173,14 @@ impl Reglages {
                 "--connexions" => connexions_max = nombre(drapeau, valeur()?.as_ref())?,
                 "--inactivite" => inactivite_s = nombre(drapeau, valeur()?.as_ref())?,
                 "--retention" => retention_jours = nombre(drapeau, valeur()?.as_ref())?,
+                "--attestation" => {
+                    let donnee = valeur()?;
+                    politique = Some(match donnee.as_ref() {
+                        "exigee" => asl_auth::Politique::AttestationExigee,
+                        "facultative" => asl_auth::Politique::AttestationFacultative,
+                        autre => return Err(Faute::AttestationInconnue(autre.to_owned())),
+                    });
+                }
                 autre => return Err(Faute::Inconnu(autre.to_owned())),
             }
         }
@@ -155,6 +193,7 @@ impl Reglages {
             connexions_max,
             inactivite_s,
             retention_jours,
+            politique: politique.ok_or(Faute::Manque("--attestation"))?,
         })
     }
 
@@ -183,12 +222,64 @@ fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute
 mod tests {
     use super::{Faute, Reglages};
 
-    /// Les trois réglages obligatoires, et rien d'autre.
+    /// Les quatre réglages obligatoires, et rien d'autre.
     fn minimum() -> Vec<String> {
-        ["--entrepot", "/a", "--certificat", "/b", "--cle", "/c"]
+        [
+            "--entrepot",
+            "/a",
+            "--certificat",
+            "/b",
+            "--cle",
+            "/c",
+            "--attestation",
+            "facultative",
+        ]
+        .iter()
+        .map(|quoi| (*quoi).to_owned())
+        .collect()
+    }
+
+    #[test]
+    fn l_attestation_n_a_pas_de_defaut() {
+        // **AUCUNE DES DEUX POSTURES NE PEUT ÊTRE CHOISIE À LA PLACE DE
+        // L'EXPLOITANT** : `exigee` livre un annuaire qui ne crée aucun compte,
+        // `facultative` livre en silence la posture faible.
+        let sans: Vec<String> = ["--entrepot", "/a", "--certificat", "/b", "--cle", "/c"]
             .iter()
             .map(|quoi| (*quoi).to_owned())
-            .collect()
+            .collect();
+        assert_eq!(
+            Reglages::depuis(sans).map(|_| ()),
+            Err(Faute::Manque("--attestation"))
+        );
+    }
+
+    #[test]
+    fn les_deux_postures_se_lisent_et_les_autres_mots_sont_refuses() {
+        for (mot, attendue) in [
+            ("exigee", asl_auth::Politique::AttestationExigee),
+            ("facultative", asl_auth::Politique::AttestationFacultative),
+        ] {
+            let mut arguments = minimum();
+            arguments.pop();
+            arguments.push(mot.to_owned());
+            let lus = Reglages::depuis(arguments).expect("une posture connue");
+            assert_eq!(lus.politique, attendue, "{mot}");
+        }
+
+        let mut arguments = minimum();
+        arguments.pop();
+        arguments.push("peut-etre".to_owned());
+        assert_eq!(
+            Reglages::depuis(arguments).map(|_| ()),
+            Err(Faute::AttestationInconnue("peut-etre".to_owned()))
+        );
+        // Et la faute se dit à l'humain qui l'a commise.
+        assert!(
+            Faute::AttestationInconnue("peut-etre".to_owned())
+                .to_string()
+                .contains("facultative")
+        );
     }
 
     #[test]

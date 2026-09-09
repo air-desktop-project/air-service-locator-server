@@ -43,6 +43,8 @@
 
 #![no_std]
 
+pub mod corps;
+
 use asl_id::{Genre, Identifiant};
 use asl_proto::NomService;
 
@@ -144,6 +146,23 @@ pub enum Ressource<'a> {
     Defi,
     /// `/v1/comptes` — créer un compte et enrôler son premier appareil.
     Comptes,
+    /// `/v1/enrolement` — une MACHINE présente son code et sa clé publique.
+    ///
+    /// # ELLE MANQUAIT, ET SON ABSENCE ÉTAIT UN TROU DANS LA SPÉCIFICATION
+    ///
+    /// `protocole.md` §2.2 donnait `POST /v1/machines/{m}/enrolement`, qui ÉMET
+    /// un code depuis l'application mobile. Il ne disait nulle part par où la
+    /// machine RAPPORTE ce code avec sa clé — et `modele.md` §2.3 décrit
+    /// pourtant le geste : « la machine génère sa paire de clés, et présente sa
+    /// clé publique avec le code ».
+    ///
+    /// Les deux verbes sont aux deux bouts du même geste, et **ils n'ont ni le
+    /// même public ni la même exigence** : celui-là est parlé par la machine, à
+    /// qui l'annuaire ne connaît encore rien. C'est pourquoi il ne peut pas être
+    /// un verbe de plus sous `/v1/machines/{m}` — il faudrait nommer la machine
+    /// pour l'atteindre, et l'annuaire croirait alors sur parole celui qui la
+    /// nomme. **Le code désigne la machine ; personne ne la désigne.**
+    Enrolement,
     /// `/v1/utilisateurs/{u}` — **confirmer qu'un identifiant existe**, et rien
     /// d'autre : ni nom, ni machines, ni services.
     Utilisateur {
@@ -230,7 +249,7 @@ impl Ressource<'_> {
         match self {
             Self::Annonce => &[Methode::Post],
             Self::Defi => &[Methode::Get, Methode::Post],
-            Self::Comptes | Self::Appareils | Self::Machines => &[Methode::Post],
+            Self::Comptes | Self::Appareils | Self::Machines | Self::Enrolement => &[Methode::Post],
             Self::Utilisateur { .. }
             | Self::ServicesMachine { .. }
             | Self::Expositions
@@ -257,10 +276,14 @@ impl Ressource<'_> {
 
     /// Ce qu'il faut prouver pour l'atteindre.
     ///
-    /// # LES TROIS RESSOURCES SANS EXIGENCE, ET POURQUOI CHACUNE
+    /// # LES QUATRE RESSOURCES SANS EXIGENCE, ET POURQUOI CHACUNE
     ///
     /// - **`/v1/comptes`** : on n'a pas encore de compte. C'est l'attestation de
     ///   la plate-forme qui protège ce chemin, pas une signature de compte.
+    /// - **`/v1/enrolement`** : la machine n'a pas encore de clé — c'est
+    ///   justement ce qu'elle vient poser. **Le code d'enrôlement EST le
+    ///   justificatif**, et il est nommé comme tel (C14) : à usage unique,
+    ///   valable quelques minutes, et il n'ouvre que cette opération-là.
     /// - **`/v1/alias/{alias}`** : l'alias est **public par construction**
     ///   (`docs/modele.md` §2.1). C'est son emploi, et son coût — il rend
     ///   l'espace des alias énumérable, contrairement à tout le reste.
@@ -269,9 +292,11 @@ impl Ressource<'_> {
     #[must_use]
     pub const fn exigence(&self) -> Exigence {
         match self {
-            Self::Defi | Self::Comptes | Self::AliasResolu { .. } | Self::Utilisateur { .. } => {
-                Exigence::Aucune
-            }
+            Self::Defi
+            | Self::Comptes
+            | Self::Enrolement
+            | Self::AliasResolu { .. }
+            | Self::Utilisateur { .. } => Exigence::Aucune,
             Self::Annonce => Exigence::MachineAnnonce,
             Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
             _ => Exigence::Appareil,
@@ -520,6 +545,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "annonce"] => Ok(Ressource::Annonce),
         ["v1", "defi"] => Ok(Ressource::Defi),
         ["v1", "comptes"] => Ok(Ressource::Comptes),
+        ["v1", "enrolement"] => Ok(Ressource::Enrolement),
         ["v1", "utilisateurs", compte] => Ok(Ressource::Utilisateur {
             compte: identifiant(compte, Genre::Utilisateur)?,
         }),

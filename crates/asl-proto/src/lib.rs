@@ -245,6 +245,24 @@ pub enum Erreur {
         /// Où.
         position: usize,
     },
+    /// Un texte libre n'est pas de l'UTF-8 valide.
+    ///
+    /// Il n'y a que les textes LIBRES pour rencontrer cette faute : partout
+    /// ailleurs, l'alphabet est ASCII et [`Erreur::CaractereBrutRefuse`] a déjà
+    /// tranché.
+    TexteMalEncode {
+        /// Où le texte commence.
+        position: usize,
+    },
+    /// Un texte libre porte un caractère qui ment sur ce qui l'entoure.
+    ///
+    /// Les contrôles C1, les forceurs de sens d'écriture et la marque d'ordre
+    /// des octets. **Ils ne s'affichent pas eux-mêmes** : ils changent la façon
+    /// dont le reste s'affiche, et un nom de machine se lit à côté d'autres.
+    CaractereInvisibleRefuse {
+        /// Où.
+        position: usize,
+    },
     /// Un nombre porte un zéro en tête.
     NombreNonCanonique {
         /// Où il commence.
@@ -389,6 +407,12 @@ impl fmt::Display for Erreur {
             }
             Self::CaractereBrutRefuse { position } => {
                 write!(f, "octet de contrôle ou non-ASCII en position {position}")
+            }
+            Self::TexteMalEncode { position } => {
+                write!(f, "texte mal encodé en position {position}")
+            }
+            Self::CaractereInvisibleRefuse { position } => {
+                write!(f, "caractère invisible refusé en position {position}")
             }
             Self::NombreNonCanonique { position } => {
                 write!(f, "nombre avec un zéro en tête en position {position}")

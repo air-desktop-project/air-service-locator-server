@@ -12,6 +12,7 @@ name = "asl-server"
 path = "src/main.rs"
 
 [dependencies]
+asl-auth.workspace = true
 asl-cle.workspace = true
 asl-loop-tokio.workspace = true
 asl-proto.workspace = true

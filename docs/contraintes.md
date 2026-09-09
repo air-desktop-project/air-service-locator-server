@@ -241,6 +241,19 @@ jamais en gardant `uid 0`.
 
 ## C9 — Les chemins d'autorisation répondent en temps constant
 
+> **CE QUI A CHANGÉ AVEC L'ENRÔLEMENT.** `asl-auth` comparait un code présenté au
+> code attendu, en temps constant, avec `subtle`. **Il n'y a plus de code
+> attendu** : l'annuaire ne range que des empreintes et cherche par elles. La
+> comparaison a disparu, et sa dépendance avec elle. La bonne façon de tenir une
+> comparaison en temps constant reste de ne pas avoir de comparaison à faire.
+>
+> Ce que la contrainte exigeait tient toujours, et autrement : un code inconnu et
+> un code périmé donnent le même refus, et rien ne les distingue — un code
+> consommé est supprimé, pas marqué. Reste l'écart entre une recherche qui trouve
+> et une qui ne trouve pas ; il porte sur une empreinte de 256 bits que personne
+> ne sait approcher par tâtonnement.
+
+
 **Un service hors de la portée du demandeur et un service inexistant rendent la
 même réponse, après le même délai.**
 
@@ -387,8 +400,23 @@ transmettre ce qui est détenu.
 
 **La seule chose qui ressemble à un secret partagé est le code d'enrôlement**
 d'une machine, et il est nommé comme tel plutôt que déguisé : à usage unique,
-valable quelques minutes, et il n'ouvre qu'une opération — lier une clé. Le
+valable dix minutes, et il n'ouvre qu'une opération — lier une clé. Le
 justificatif durable est la clé.
+
+**Et l'annuaire ne le garde même pas.** Il range l'EMPREINTE du code (SHA-256,
+domaine séparé) et cherche par elle : une base qui fuit ne livre aucune machine
+en cours d'enrôlement. « À usage unique » est tenu par une SUPPRESSION, dans la
+même transaction que la liaison de la clé — deux enrôlements simultanés avec le
+même code lieraient sinon deux clés à la même machine, dont une que son
+propriétaire ignore.
+
+**Les preuves de possession sont un second message signé, et un second domaine.**
+Là où un pair prouve « je suis CETTE machine, déjà connue de toi », un porteur de
+clé prouve « je détiens la clé que je te présente » — création de compte,
+enrôlement d'une machine, là où l'identifiant N'EXISTE PAS ENCORE. **Les domaines
+sont séparés pour qu'une signature de l'un ne vaille jamais pour l'autre** : sans
+cela, il suffirait d'écouter une machine s'authentifier pour enrôler sa clé
+ailleurs.
 
 **Ed25519**, pur Rust, aucune dépendance C — c'est `asl-cle`, et
 `check-sans-c.sh` le vérifie.
@@ -498,6 +526,17 @@ Deux règles que le code doit tenir, et qu'un essai peut vérifier :
   rupture, aucun enregistrement ne doit subsister avec cette origine. Un essai
   qui se contenterait de compter ce qui a été supprimé ne verrait pas ce qui a
   été oublié.
+
+> **ELLE ÉTAIT TOMBÉE, ET EXACTEMENT COMME ANNONCÉ CI-DESSUS.** La rupture
+> n'atteignait que les comptes et les machines : un SERVICE ou une AUTORISATION
+> venus d'un pair survivaient, alors qu'ils portent leur origine depuis le
+> premier jour. Ce n'était pas une décision, c'était un `INSERT` ajouté à la hâte
+> — le défaut que cette contrainte nomme.
+>
+> `oublier_ce_qui_vient_de` balaie désormais les six tables qui portent une
+> origine — comptes, machines, services, autorisations, appareils, codes
+> d'enrôlement — **avec leurs index**, et l'essai les vérifie une à une. Le
+> journal, lui, survit : c'est l'exception, et elle est écrite plus bas.
 
 ### Le RETRAIT est une rupture partielle, et obéit aux mêmes règles
 

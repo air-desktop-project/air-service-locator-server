@@ -12,6 +12,7 @@ asl-api.workspace = true
 asl-auth.workspace = true
 asl-cle.workspace = true
 asl-id.workspace = true
+asl-proto.workspace = true
 asl-registre.workspace = true
 # `ams-h3` et `ams-proto-http` SONT DES DÉPENDANCES D'ÉTAGE 2, ET C'EST LICITE :
 # toutes deux portent en tête de leur manifeste « sans entrée-sortie ». Ce sont

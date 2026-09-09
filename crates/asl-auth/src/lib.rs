@@ -408,6 +408,25 @@ impl Autorisation {
 /// des milliards d'essais, et l'annuaire en compte.
 pub const CODE_SYMBOLES: usize = 10;
 
+/// La longueur du texte groupé d'un code, tiret compris : `XXXXX-XXXXX`.
+pub const CODE_TEXTE_OCTETS: usize = CODE_SYMBOLES + 1;
+
+/// Où le tiret se place dans le texte groupé.
+const COUPURE: usize = 5;
+
+/// La taille de l'empreinte d'un code.
+pub const EMPREINTE_OCTETS: usize = 32;
+
+/// Le séparateur de domaine de l'empreinte d'un code.
+const DOMAINE_CODE: &[u8] = b"air-service-locator/v1/code-d-enrolement\x00";
+
+/// Combien de temps un code vaut, en secondes.
+///
+/// Dix minutes : le temps d'aller du téléphone au terminal, et pas davantage.
+/// **Un code qui traîne est un secret qui traîne** — c'est la seule chose qui
+/// borne les essais d'un inconnu, avec ses cinquante bits.
+pub const VALIDITE_CODE_SECONDES: u64 = 600;
+
 /// Ce que le magasin sait d'un code.
 ///
 /// **C'est un FAIT, pas une décision.** L'expiration se constate avec une
@@ -416,9 +435,15 @@ pub const CODE_SYMBOLES: usize = 10;
 pub enum EtatCode {
     /// Le code n'a pas encore servi et n'a pas expiré.
     Utilisable,
-    /// Il a déjà servi.
-    Consomme,
-    /// Il a expiré.
+    /// Aucun code ne répond à cette empreinte.
+    ///
+    /// **Il a peut-être servi, il n'a peut-être jamais existé**, et l'annuaire
+    /// ne fait pas la différence : un code consommé est SUPPRIMÉ, pas marqué.
+    /// Garder les codes morts pour distinguer les deux cas aurait fait pousser
+    /// une table de secrets périmés, et n'aurait rien appris à personne
+    /// d'utile — sinon à qui essaie des codes au hasard.
+    Inconnu,
+    /// Il existe, mais sa date est passée.
     Expire,
 }
 
@@ -466,26 +491,41 @@ impl CodeEnrolement {
 
     /// Lit un code tapé par un humain.
     ///
-    /// La casse est indifférente, et les confusions de Crockford sont
-    /// rattrapées : c'est la raison d'être de cet alphabet, et elle vaut ici
-    /// autant que pour un identifiant.
+    /// La casse est indifférente, les confusions de Crockford sont rattrapées,
+    /// et **le tiret d'affichage est accepté autant qu'omis** : c'est la raison
+    /// d'être de cet alphabet, et elle vaut ici autant que pour un identifiant.
+    /// Refuser `4K9M2-P7R1T` parce qu'on a affiché `4K9M2-P7R1T` serait une
+    /// cruauté gratuite.
     ///
     /// # Erreurs
     ///
     /// [`Faute::CodeLongueur`], [`Faute::CodeSymboleInvalide`].
     pub fn analyser(texte: &str) -> Result<Self, Faute> {
         let octets = texte.as_bytes();
-        if octets.len() != CODE_SYMBOLES {
-            return Err(Faute::CodeLongueur {
-                attendue: CODE_SYMBOLES,
-                obtenue: octets.len(),
-            });
-        }
+        let (gauche, droite): (&[u8], &[u8]) = match octets.len() {
+            CODE_SYMBOLES => (octets, &[]),
+            CODE_TEXTE_OCTETS if octets.get(COUPURE) == Some(&b'-') => (
+                octets.get(..COUPURE).unwrap_or_default(),
+                octets.get(COUPURE.saturating_add(1)..).unwrap_or_default(),
+            ),
+            obtenue => {
+                return Err(Faute::CodeLongueur {
+                    attendue: CODE_SYMBOLES,
+                    obtenue,
+                });
+            }
+        };
+
         let mut symboles = [b'0'; CODE_SYMBOLES];
-        for (position, (place, octet)) in symboles.iter_mut().zip(octets.iter()).enumerate() {
+        for (position, (place, octet)) in symboles
+            .iter_mut()
+            .zip(gauche.iter().chain(droite.iter()))
+            .enumerate()
+        {
             let valeur = base32::valeur(*octet).ok_or(Faute::CodeSymboleInvalide { position })?;
             // On range la forme CANONIQUE, pas ce qui a été tapé : sans cela,
-            // `0` et `O` seraient deux codes différents à la comparaison.
+            // `0` et `O` donneraient deux EMPREINTES différentes, et le
+            // rattrapage de Crockford ne servirait à rien.
             *place = base32::ALPHABET[usize::from(valeur)];
         }
         Ok(Self { symboles })
@@ -497,52 +537,169 @@ impl CodeEnrolement {
         // Tous les octets viennent de l'alphabet, donc ASCII.
         core::str::from_utf8(&self.symboles).unwrap_or("")
     }
+
+    /// Le texte groupé pour l'œil : `XXXXX-XXXXX`.
+    ///
+    /// **C'est la forme qu'on AFFICHE**, et la seule différence avec
+    /// [`CodeEnrolement::texte`] est un tiret au milieu. Dix symboles d'affilée
+    /// se perdent des yeux entre l'écran et le clavier ; deux groupes de cinq,
+    /// non. [`CodeEnrolement::analyser`] accepte les deux formes, donc ce tiret
+    /// n'ajoute rien à taper.
+    #[must_use]
+    pub fn texte_groupe(&self) -> TexteCode {
+        let mut sortie = [b'-'; CODE_TEXTE_OCTETS];
+        for (position, &symbole) in self.symboles.iter().enumerate() {
+            let place = if position < COUPURE {
+                position
+            } else {
+                position.saturating_add(1)
+            };
+            sortie[place] = symbole;
+        }
+        TexteCode(sortie)
+    }
+
+    /// L'empreinte sous laquelle l'annuaire range ce code.
+    ///
+    /// # L'ANNUAIRE NE GARDE PAS LES CODES, IL GARDE LEURS EMPREINTES
+    ///
+    /// Deux choses en découlent, et la seconde a supprimé du code.
+    ///
+    /// **Une base qui fuit ne livre aucune machine en cours d'enrôlement.** Un
+    /// code en clair au repos serait un secret vivant de plus, pour rien : on ne
+    /// le relit jamais, on ne fait que le reconnaître.
+    ///
+    /// **Et il n'y a plus rien à comparer.** `POST /v1/enrolement` ne nomme pas
+    /// la machine — il ne peut pas, sinon l'annuaire croirait sur parole celui
+    /// qui la nomme —, donc l'empreinte est ce par quoi on CHERCHE. Une
+    /// recherche par clé n'est pas une comparaison : la fonction de comparaison
+    /// en temps constant qui vivait ici n'avait plus d'appelant, et elle est
+    /// partie.
+    ///
+    /// SHA-256 du domaine, puis des symboles canoniques. Le domaine est là pour
+    /// la raison habituelle : cette empreinte ne doit jamais valoir le condensat
+    /// de quelque chose d'autre.
+    #[must_use]
+    pub fn empreinte(&self) -> [u8; EMPREINTE_OCTETS] {
+        use sha2::Digest as _;
+        let mut condensat = sha2::Sha256::new();
+        condensat.update(DOMAINE_CODE);
+        condensat.update(self.symboles);
+        let mut octets = [0_u8; EMPREINTE_OCTETS];
+        octets.copy_from_slice(&condensat.finalize());
+        octets
+    }
 }
 
-/// Deux codes sont-ils égaux ?
-///
-/// **La comparaison ne s'arrête pas au premier écart** (contrainte C9).
-///
-/// # LA DETTE QUI ÉTAIT ÉCRITE ICI EST PAYÉE
-///
-/// Une première version employait une boucle et `core::hint::black_box`, avec
-/// cette réserve : « Rust ne garantit pas le temps constant ; un compilateur a
-/// le droit de remplacer cette boucle par une comparaison qui s'arrête tôt, et
-/// `black_box` le lui rend difficile, pas impossible. La garantie réelle demande
-/// `subtle`, et c'est une décision de la tranche de crypto. »
-///
-/// **La tranche de crypto est arrivée**, et `subtle` avec elle — elle entre dans
-/// le graphe par `ed25519-dalek`, qui en dépend déjà. La réserve n'a donc plus
-/// lieu d'être, et la comparaison est celle d'une bibliothèque écrite pour cela.
-#[must_use]
-pub fn egal_en_temps_constant(a: &CodeEnrolement, b: &CodeEnrolement) -> bool {
-    use subtle::ConstantTimeEq as _;
-    a.symboles.ct_eq(&b.symboles).into()
+/// Le texte groupé d'un code, sans allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TexteCode([u8; CODE_TEXTE_OCTETS]);
+
+impl TexteCode {
+    /// Le texte, ASCII par construction.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.0).unwrap_or("")
+    }
+}
+
+impl core::fmt::Display for TexteCode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Ce code permet-il de lier une clé ?
 ///
-/// # POURQUOI LA COMPARAISON A LIEU MÊME QUAND L'ÉTAT LA REND INUTILE
+/// # IL N'Y A PLUS QU'UN FAIT À EXAMINER, ET C'EST UN PROGRÈS
 ///
-/// Un `return` anticipé sur `Consomme` ou `Expire` rendrait la réponse PLUS
-/// RAPIDE dans ces cas — et un inconnu qui mesure les temps apprendrait alors si
-/// le code qu'il présente existe, ou s'il a déjà servi. C9 ferme exactement ce
-/// canal.
+/// Cette fonction comparait le code présenté au code attendu, en temps
+/// constant, parce que l'annuaire gardait les codes. Il garde désormais leurs
+/// EMPREINTES et cherche par elles (`CodeEnrolement::empreinte`) : il n'y a plus
+/// de code attendu à comparer, et l'état résume tout ce qu'on sait.
 ///
-/// La comparaison tourne donc toujours, et son résultat est combiné à l'état à
-/// la fin.
+/// **Ce que C9 exigeait tient toujours, et autrement** : `Inconnu` et `Expire`
+/// donnent le même refus, et rien dans la réponse ne les distingue. Ce qui les
+/// distinguait dans le TEMPS — un `return` anticipé — n'existe plus, puisqu'il
+/// n'y a plus de comparaison à écourter. Reste l'écart entre une recherche qui
+/// trouve et une qui ne trouve pas ; il porte sur une empreinte de 256 bits que
+/// personne ne sait approcher par tâtonnement.
 #[must_use]
-pub fn decider_enrolement(
-    presente: &CodeEnrolement,
-    attendu: &CodeEnrolement,
-    etat: EtatCode,
-) -> Decision {
-    let egaux = egal_en_temps_constant(presente, attendu);
-    let utilisable = matches!(etat, EtatCode::Utilisable);
-    if egaux && utilisable {
+pub const fn decider_enrolement(etat: EtatCode) -> Decision {
+    match etat {
+        EtatCode::Utilisable => Decision::Servir,
+        EtatCode::Inconnu | EtatCode::Expire => Decision::Refuser,
+    }
+}
+
+// ── Ce qu'un compte a le droit d'administrer ────────────────────────────────
+
+/// Ce compte peut-il administrer ce qui appartient à ce propriétaire ?
+///
+/// # LA RÈGLE TIENT EN UNE LIGNE, ET C'EST POUR CELA QU'ELLE EST ICI
+///
+/// Un compte administre ce qu'il possède, et rien d'autre. La règle est si
+/// simple qu'on serait tenté de l'écrire à l'appel — **et c'est exactement
+/// pourquoi elle ne doit pas l'être** : écrite à l'appel, elle serait écrite
+/// autant de fois qu'il y a de verbes d'administration, et c'est celui qu'on
+/// oublie qui ouvrirait les machines d'un autre.
+///
+/// Elle prend deux comptes DÉJÀ ÉTABLIS, jamais ce qu'une requête a nommé :
+/// c'est C10, et c'est la même forme que [`decider_resolution`].
+#[must_use]
+pub fn decider_gestion(demandeur: Identifiant, proprietaire: Identifiant) -> Decision {
+    if demandeur == proprietaire {
         Decision::Servir
     } else {
         Decision::Refuser
+    }
+}
+
+// ── L'attestation de plate-forme ────────────────────────────────────────────
+
+/// Ce que l'annuaire exige d'un appareil qui s'enrôle.
+///
+/// # POURQUOI CE CHOIX EST UN RÉGLAGE, ET NON UNE CONSTANTE
+///
+/// `protocole.md` §2.1 tranche : « La v1 REFUSE, et journalise, parce qu'un
+/// refus se relâche plus tard alors qu'une acceptation ne se resserre jamais
+/// sans casser des comptes existants. »
+///
+/// **Mais la vérification n'est pas écrite** — App Attest et Play Integrity
+/// demandent les racines d'Apple et de Google, du CBOR, et une chaîne à valider.
+/// Exiger l'attestation aujourd'hui, c'est donc refuser TOUS les enrôlements.
+///
+/// Les deux postures sont défendables et **aucune ne peut être le défaut** :
+/// exiger livre un produit qui ne crée aucun compte, dispenser livre en silence
+/// la posture faible. `asl-server` n'a donc pas de valeur par défaut — il refuse
+/// de démarrer tant qu'on ne lui a pas dit laquelle il tient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Politique {
+    /// L'attestation est exigée. **Aucun appareil ne s'enrôle** tant que sa
+    /// vérification n'est pas écrite, et c'est la posture de `protocole.md`.
+    AttestationExigee,
+    /// L'attestation n'est pas exigée. **N'importe qui crée un compte**, et le
+    /// journal d'exploitation doit le dire au démarrage.
+    AttestationFacultative,
+}
+
+/// Cet appareil peut-il s'enrôler ?
+///
+/// `atteste` est un FAIT que l'étage 3 établit — aujourd'hui toujours `false`,
+/// parce que rien ne sait encore le vérifier. **Il est en paramètre plutôt
+/// qu'absent** pour que le jour où la vérification s'écrit, elle se branche ici
+/// et nulle part ailleurs.
+#[must_use]
+pub const fn decider_attestation(atteste: bool, politique: Politique) -> Decision {
+    match politique {
+        Politique::AttestationFacultative => Decision::Servir,
+        Politique::AttestationExigee => {
+            if atteste {
+                Decision::Servir
+            } else {
+                Decision::Refuser
+            }
+        }
     }
 }
 

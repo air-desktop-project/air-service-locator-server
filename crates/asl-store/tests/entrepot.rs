@@ -176,9 +176,10 @@ fn une_machine_se_relit_entiere() {
     let machine = Machine {
         provenance: Provenance::Ici,
         proprietaire: un(Genre::Utilisateur, 1),
-        cle: [0x42; 32],
+        cle: Some([0x42; 32]),
         annonce: true,
         lecture: false,
+        nom: nom_de_machine("grenier"),
     };
     let qui = un(Genre::Machine, 9);
     base.poser_machine(qui, &machine).expect("écrit");
@@ -280,9 +281,10 @@ fn rompre_efface_ce_qui_vient_du_pair_et_lui_seul() {
         &Machine {
             provenance: Provenance::Annuaire(pair),
             proprietaire: du_pair,
-            cle: [1; 32],
+            cle: Some([1; 32]),
             annonce: true,
             lecture: true,
+            nom: nom_de_machine("grenier"),
         },
     )
     .expect("écrit");
@@ -530,4 +532,257 @@ fn un_compte_sans_autorisation_en_recoit_une_liste_vide() {
             .is_empty()
     );
     let _ = std::fs::remove_file(&chemin);
+}
+
+/// Un nom de machine, pour les essais.
+fn nom_de_machine(texte: &str) -> asl_registre::NomRange {
+    asl_registre::NomRange::nouveau(texte).expect("un nom court se range")
+}
+
+// ── Les appareils ───────────────────────────────────────────────────────────
+
+#[test]
+fn un_appareil_se_pose_et_se_relit() {
+    let (base, fichier) = entrepot("appareil");
+    let quel = un(Genre::Appareil, 3);
+    assert_eq!(base.appareil(quel).expect("lisible"), None, "base neuve");
+
+    let appareil = asl_registre::Appareil {
+        provenance: Provenance::Ici,
+        proprietaire: un(Genre::Utilisateur, 1),
+        cle: [0x77; 32],
+    };
+    base.poser_appareil(quel, &appareil).expect("écrit");
+    assert_eq!(base.appareil(quel).expect("lisible"), Some(appareil));
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+// ── Les codes d'enrôlement ──────────────────────────────────────────────────
+
+/// L'empreinte de ce code.
+fn empreinte(texte: &str) -> [u8; 32] {
+    asl_auth::CodeEnrolement::analyser(texte)
+        .expect("un code")
+        .empreinte()
+}
+
+#[test]
+fn un_code_se_pose_se_consomme_une_fois_et_pas_deux() {
+    let (base, fichier) = entrepot("code");
+    let machine = un(Genre::Machine, 4);
+    let clef = empreinte("0123456789");
+
+    base.poser_enrolement(
+        &clef,
+        &asl_registre::Enrolement {
+            provenance: Provenance::Ici,
+            machine,
+            expire_a: 1_000,
+        },
+    )
+    .expect("écrit");
+
+    let pris = base.consommer_enrolement(&clef).expect("lisible");
+    assert_eq!(pris.map(|quoi| quoi.machine), Some(machine));
+
+    // **À USAGE UNIQUE**, et c'est la suppression qui le rend vrai : un code
+    // consommé et un code inconnu sont le même fait.
+    assert_eq!(
+        base.consommer_enrolement(&clef)
+            .expect("lisible")
+            .map(|quoi| quoi.machine),
+        None
+    );
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+#[test]
+fn emettre_un_code_tue_le_precedent() {
+    // Deux secrets vivants pour une même machine, dont un que plus personne
+    // n'attend : c'est exactement ce qu'on ne veut pas laisser derrière soi.
+    let (base, fichier) = entrepot("code-remplace");
+    let machine = un(Genre::Machine, 4);
+    let vieux = empreinte("0123456789");
+    let neuf = empreinte("9876543210");
+
+    for clef in [&vieux, &neuf] {
+        base.poser_enrolement(
+            clef,
+            &asl_registre::Enrolement {
+                provenance: Provenance::Ici,
+                machine,
+                expire_a: 1_000,
+            },
+        )
+        .expect("écrit");
+    }
+
+    assert!(
+        base.consommer_enrolement(&vieux)
+            .expect("lisible")
+            .is_none(),
+        "le premier code aurait dû mourir avec l'émission du second"
+    );
+    assert!(base.consommer_enrolement(&neuf).expect("lisible").is_some());
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+#[test]
+fn les_codes_perimes_se_balaient_et_les_autres_restent() {
+    let (base, fichier) = entrepot("code-expire");
+    let perime = empreinte("0123456789");
+    let vivant = empreinte("9876543210");
+
+    for (clef, machine, expire_a) in [(&perime, 4_u8, 100_u64), (&vivant, 5, 10_000)] {
+        base.poser_enrolement(
+            clef,
+            &asl_registre::Enrolement {
+                provenance: Provenance::Ici,
+                machine: un(Genre::Machine, machine),
+                expire_a,
+            },
+        )
+        .expect("écrit");
+    }
+
+    assert_eq!(base.expirer_les_enrolements(1_000).expect("balayé"), 1);
+    assert!(
+        base.consommer_enrolement(&perime)
+            .expect("lisible")
+            .is_none()
+    );
+    assert!(
+        base.consommer_enrolement(&vivant)
+            .expect("lisible")
+            .is_some()
+    );
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+// ── C17 : la rupture atteint TOUT ce qui porte une origine ──────────────────
+
+#[test]
+fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
+    // **CETTE CONTRAINTE TOMBAIT.** C17 dit « aucun enregistrement ne doit
+    // subsister avec cette origine », et la rupture n'atteignait que les comptes
+    // et les machines — un service ou une autorisation venus d'un pair
+    // survivaient. C17 dit aussi COMMENT elle tombe : « par un `INSERT` ajouté à
+    // la hâte, jamais par une décision. »
+    let (base, fichier) = entrepot("rupture-complete");
+    let pair = un(Genre::Annuaire, 1);
+    let venu = Provenance::Annuaire(pair);
+
+    let compte = un(Genre::Utilisateur, 2);
+    let machine = un(Genre::Machine, 3);
+    let service = un(Genre::Service, 4);
+    let appareil = un(Genre::Appareil, 5);
+    let autorisation = un(Genre::Autorisation, 6);
+    let clef = empreinte("0123456789");
+
+    base.poser_compte(
+        compte,
+        &Compte {
+            provenance: venu,
+            alias: None,
+        },
+    )
+    .expect("écrit");
+    base.poser_machine(
+        machine,
+        &Machine {
+            provenance: venu,
+            proprietaire: compte,
+            cle: Some([1; 32]),
+            annonce: true,
+            lecture: true,
+            nom: nom_de_machine("grenier"),
+        },
+    )
+    .expect("écrit");
+    base.poser_service(
+        service,
+        &asl_registre::Service {
+            provenance: venu,
+            machine,
+            nom: NomRange::nouveau("depot").expect("un nom"),
+        },
+    )
+    .expect("écrit");
+    base.poser_appareil(
+        appareil,
+        &asl_registre::Appareil {
+            provenance: venu,
+            proprietaire: compte,
+            cle: [2; 32],
+        },
+    )
+    .expect("écrit");
+    base.poser_autorisation(
+        autorisation,
+        &asl_registre::Autorisation {
+            provenance: venu,
+            par: compte,
+            a: un(Genre::Utilisateur, 7),
+            portee: asl_registre::Portee::ToutLeCompte,
+            revoquee: false,
+        },
+    )
+    .expect("écrit");
+    base.poser_enrolement(
+        &clef,
+        &asl_registre::Enrolement {
+            provenance: venu,
+            machine,
+            expire_a: 10_000,
+        },
+    )
+    .expect("écrit");
+
+    // Et une ligne de journal, qui doit SURVIVRE — c'est la seule exception, et
+    // elle est écrite dans C17 : ce qui motive une rupture est souvent ce que le
+    // journal a enregistré.
+    base.journaliser(&EntreeJournal {
+        quand: 1,
+        demandeur: compte,
+        visee: machine,
+        service: NomRange::nouveau("depot").expect("un nom"),
+        verdict: Verdict::Servi,
+        provenance: venu,
+    })
+    .expect("écrit");
+
+    let efface = base.oublier_ce_qui_vient_de(pair).expect("rompu");
+    assert_eq!(
+        efface, 6,
+        "un compte, une machine, un service, une autorisation, un appareil, un code"
+    );
+
+    assert_eq!(base.compte(compte).expect("lisible"), None);
+    assert_eq!(base.machine(machine).expect("lisible"), None);
+    assert_eq!(base.service(service).expect("lisible"), None);
+    assert_eq!(base.appareil(appareil).expect("lisible"), None);
+    assert!(base.consommer_enrolement(&clef).expect("lisible").is_none());
+    assert!(
+        base.service_par_nom(machine, "depot")
+            .expect("lisible")
+            .is_none(),
+        "l'index par nom part avec le service"
+    );
+    assert!(
+        base.autorisations_recues(un(Genre::Utilisateur, 7))
+            .expect("lisible")
+            .is_empty(),
+        "l'index des reçues part avec l'autorisation"
+    );
+    assert_eq!(
+        base.entrees_du_journal().expect("lisible"),
+        1,
+        "LE JOURNAL SURVIT — c'est l'exception de C17, et la seule"
+    );
+
+    let _ = std::fs::remove_file(fichier);
 }

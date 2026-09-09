@@ -154,17 +154,22 @@ asl-store = { path = "crates/asl-store", version = "0.1.0" }
 # ferait entrer `std` par la porte de derrière, sans qu'aucune ligne de notre
 # code ne le demande.
 #
-# `subtle` arrive avec elle, et c'est ce qui permet ENFIN à C9 d'être tenue
-# plutôt qu'approchée : `asl-auth` comparait ses codes avec une boucle et un
-# `black_box`, en disant honnêtement que Rust ne garantit rien. `subtle` est
-# écrite pour cela.
+# `subtle` A ÉTÉ DÉCLARÉE ICI, PUIS RETIRÉE, ET LA RAISON MÉRITE D'ÊTRE ÉCRITE.
+#
+# Elle servait à `asl-auth`, qui comparait un code d'enrôlement présenté au code
+# attendu, en temps constant — C9. **Il n'y a plus de code attendu** : l'annuaire
+# ne range que l'EMPREINTE d'un code et cherche par elle, donc il ne compare
+# rien. La bonne façon de tenir une comparaison en temps constant reste de ne pas
+# avoir de comparaison à faire.
+#
+# Elle demeure dans le graphe, tirée par `ed25519-dalek`. Ce qui a disparu est
+# notre appel, pas la crate.
 
 ed25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }
-subtle = { version = "2", default-features = false }
 
-# `sha2` POUR UN SEUL USAGE : l'empreinte du certificat qui sert de liaison de
-# canal (`asl-cle`). Elle est DÉJÀ dans le graphe — `ams-quic-crypto` la tire —
-# et elle est en Rust pur.
+# `sha2` POUR DEUX USAGES : l'empreinte du certificat qui sert de liaison de
+# canal (`asl-cle`), et celle d'un code d'enrôlement (`asl-auth`). Elle est DÉJÀ
+# dans le graphe — `ams-quic-crypto` la tire — et elle est en Rust pur.
 sha2 = { version = "0.11", default-features = false }
 
 # ── LA PILE QUIC ET HTTP/3, GREFFÉE DEPUIS `air-mail-server` (C15) ─────────

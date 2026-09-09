@@ -44,9 +44,10 @@ use libfuzzer_sys::fuzz_target;
 
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
-    ALIAS_OCTETS_MAX, AUTORISATION_OCTETS, AliasRange, Autorisation, COMPTE_OCTETS, Compte,
-    ENTREE_OCTETS, EntreeJournal, Faute, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, Portee,
-    Provenance, SERVICE_OCTETS, Service, Verdict,
+    ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Autorisation,
+    COMPTE_OCTETS, Compte, ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement, EntreeJournal, Faute,
+    MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, Portee, Provenance, SERVICE_OCTETS, Service,
+    Verdict,
 };
 
 /// Ce qu'on soumet.
@@ -70,6 +71,12 @@ struct Entree {
     alias: String,
     /// Un nom de service quelconque.
     service: String,
+    /// Un nom de machine quelconque.
+    nom_de_machine: String,
+    /// Les octets d'un appareil.
+    appareil: [u8; APPAREIL_OCTETS],
+    /// Les octets d'un enrôlement.
+    enrolement: [u8; ENROLEMENT_OCTETS],
     /// Le verdict, choisi parmi trois.
     verdict: u8,
     /// L'instant.
@@ -99,6 +106,32 @@ fuzz_target!(|entree: Entree| {
                 "un compte relu ne se réécrit pas octet pour octet"
             );
             assert_eq!(Compte::lire(&refait), Ok(compte));
+        }
+        Err(faute) => nommee(faute),
+    }
+
+    match Appareil::lire(&entree.appareil) {
+        Ok(appareil) => {
+            let mut refait = [0_u8; APPAREIL_OCTETS];
+            appareil.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.appareil,
+                "un appareil relu ne se réécrit pas octet pour octet"
+            );
+            assert_eq!(Appareil::lire(&refait), Ok(appareil));
+        }
+        Err(faute) => nommee(faute),
+    }
+
+    match Enrolement::lire(&entree.enrolement) {
+        Ok(enrolement) => {
+            let mut refait = [0_u8; ENROLEMENT_OCTETS];
+            enrolement.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.enrolement,
+                "un enrôlement relu ne se réécrit pas octet pour octet"
+            );
+            assert_eq!(Enrolement::lire(&refait), Ok(enrolement));
         }
         Err(faute) => nommee(faute),
     }
@@ -246,11 +279,40 @@ fuzz_target!(|entree: Entree| {
     let machine = Machine {
         provenance,
         proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine; 16]),
-        cle: [entree.graine; 32],
+        // **LES DEUX ÉTATS D'UNE CLÉ**, et le second n'est pas cosmétique : une
+        // machine déclarée et pas encore enrôlée n'en a pas, et l'absence doit
+        // faire l'aller-retour aussi bien que la présence.
+        cle: (entree.graine & 8 != 0).then_some([entree.graine; 32]),
         annonce: entree.graine & 1 != 0,
         lecture: entree.graine & 2 != 0,
+        // **UN NOM DE MACHINE EST DU TEXTE LIBRE**, donc n'importe quelle suite
+        // d'octets valides en UTF-8 et assez courte. Le refus se prend ailleurs
+        // (`asl-api`) ; ce qui est éprouvé ici est le RANGEMENT.
+        nom: match NomRange::nouveau(&entree.nom_de_machine) {
+            Ok(nom) => nom,
+            Err(_) => return,
+        },
     };
     let mut octets = [0_u8; MACHINE_OCTETS];
     machine.ecrire(&mut octets);
     assert_eq!(Machine::lire(&octets), Ok(machine));
+
+    // ── L'APPAREIL ET LE CODE D'ENRÔLEMENT ──────────────────────────────────
+    let appareil = Appareil {
+        provenance,
+        proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine; 16]),
+        cle: [entree.graine; 32],
+    };
+    let mut octets = [0_u8; APPAREIL_OCTETS];
+    appareil.ecrire(&mut octets);
+    assert_eq!(Appareil::lire(&octets), Ok(appareil));
+
+    let enrolement = Enrolement {
+        provenance,
+        machine: Identifiant::depuis_entropie(Genre::Machine, [entree.graine; 16]),
+        expire_a: entree.quand,
+    };
+    let mut octets = [0_u8; ENROLEMENT_OCTETS];
+    enrolement.ecrire(&mut octets);
+    assert_eq!(Enrolement::lire(&octets), Ok(enrolement));
 });

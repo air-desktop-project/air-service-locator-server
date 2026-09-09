@@ -72,6 +72,9 @@ fn lancer(autorite: &Path, base: &Path) -> (Child, SocketAddr) {
         .arg("--cle")
         .arg(autorite.join("banc/serveur.key"))
         .args(["--port", "0"])
+        // Le banc crée des comptes : il tient donc la posture faible, et le
+        // binaire l'annonce dans son journal.
+        .args(["--attestation", "facultative"])
         .stderr(Stdio::piped())
         .spawn()
         .expect("le binaire se lance");

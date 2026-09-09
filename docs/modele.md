@@ -135,10 +135,40 @@ compte. Elle le prouve avec un secret, comme celle qui annonce.
 | Champ | Ce que c'est |
 |---|---|
 | `identifiant` | `m-` + 26 caractères. **Public.** |
-| `nom` | Libre, 1 à 64 caractères. Pour l'humain, jamais pour la machine. |
+| `nom` | Libre, 1 à 64 **octets**. Pour l'humain, jamais pour la machine. |
 | `propriétaire` | Un utilisateur. |
 | `capacités` | `annonce`, `lecture`, ou les deux. Choisies à la déclaration, modifiables. |
-| `clé publique` | Ed25519. **La partie privée est générée SUR la machine et n'en sort jamais.** |
+| `clé publique` | Ed25519, **ou rien**. Une machine déclarée n'en a pas encore : elle arrive à l'enrôlement, et la partie privée est générée SUR la machine et n'en sort jamais. |
+
+#### Le nom est le premier TEXTE LIBRE du produit, et c'est une décision
+
+Il porte les accents, les idéogrammes et les émoji — tout l'UTF-8. Ailleurs, le
+cadrage refuse le non-ASCII, et pour une raison qui tient : `é` s'écrit de deux
+façons en Unicode, et **deux écritures d'une même valeur ouvrent la porte à ce
+que deux lecteurs n'en voient pas le même nombre.**
+
+**Cette raison ne vaut que pour ce qui se COMPARE** — un identifiant, un alias,
+un nom de service, qui sont des clés. Un nom d'affichage n'est comparé à rien :
+la clé est l'identifiant, à côté. Refuser les accents n'achèterait donc rien, et
+coûterait à tout utilisateur dont la langue en porte.
+
+**Trois choses restent refusées, et chacune pour une raison :**
+
+— **les échappements JSON.** Les apprendre, c'est apprendre l'UTF-16, ses paires
+  de substitution et ses moitiés orphelines — la moitié des failles historiques
+  des analyseurs. Le prix se dit : un nom ne peut porter ni `"` ni `\` ;
+— **les contrôles C0 et DEL**, qu'un nom porterait jusqu'au terminal qui
+  l'affiche ;
+— **les contrôles C1, les forceurs de sens d'écriture et la marque d'ordre des
+  octets.** Ceux-là ne s'affichent pas eux-mêmes : ils changent la façon dont le
+  TEXTE AUTOUR s'affiche. Un nom de machine se lit dans une liste, à côté
+  d'autres noms ; l'un d'eux ne doit pas pouvoir retourner ses voisins.
+
+**Une machine déclarée et pas encore enrôlée n'a PAS de clé**, et l'enregistrement
+le dit — un drapeau, et une place laissée nulle. Trente-deux zéros n'auraient pas
+fait l'affaire : ce n'est pas une valeur absurde pour Ed25519, c'est un point
+d'ordre faible dont on peut forger des signatures. Une machine sans clé aurait
+alors eu une clé que n'importe qui détient.
 
 #### Les capacités, et pourquoi elles ne sont pas cumulées par défaut
 
@@ -181,12 +211,26 @@ sépare pas les daemons entre eux, elle sépare cette machine des autres.
 La difficulté est réelle : la machine génère sa clé, mais rien ne dit à
 l'annuaire que **cette** clé est bien celle d'une machine de **cet** utilisateur.
 
-1. L'application affiche un **code d'enrôlement** — court, à usage unique, valable
-   quelques minutes.
+1. L'application affiche un **code d'enrôlement** — dix symboles de l'alphabet de
+   Crockford, groupés pour l'œil (`4K9M2-P7R1T`), à usage unique, valable dix
+   minutes.
 2. L'administrateur le saisit sur la machine : `asl enrole <code>`.
 3. La machine **génère sa paire de clés**, et présente sa clé publique avec le
    code.
-4. L'annuaire lie la clé au compte, et le code est consommé.
+4. La machine POSTE le tout sur `/v1/enrolement` (`protocole.md` §2.0) ;
+5. l'annuaire lie la clé à la machine, et le code est consommé — c'est-à-dire
+   **supprimé**, dans la même transaction que la liaison.
+
+**Dix symboles font cinquante bits.** Au-dessous, le code se devine : c'est un
+secret qui ouvre la liaison d'une clé à un compte, présenté à un verbe que
+n'importe qui peut appeler. Au-dessus, il ne se tape plus — c'est un humain qui
+le recopie d'un téléphone vers un terminal, et chaque symbole de trop est une
+occasion de se tromper. **Cela ne dispense pas de limiter le débit**, et cette
+limite-là n'est pas encore écrite.
+
+**L'annuaire n'en garde que l'empreinte** (SHA-256, domaine séparé) : une base
+qui fuirait ne livrerait aucune machine en cours d'enrôlement. C'est aussi ce qui
+permet de chercher sans nommer la machine — voir `protocole.md` §2.0.
 
 **Le code d'enrôlement EST un secret partagé, et il faut le dire plutôt que de
 prétendre le contraire.** Ce qui le rend acceptable est qu'il n'authentifie rien

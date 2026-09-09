@@ -280,6 +280,44 @@ reconstruit ici, tout seul, en un keepalive (`annuaires.md` §3).
 
 ## 2. La voie des applications mobiles — `asl-api`
 
+### 2.0 Le verbe qui manquait, et par où la clé d'une machine arrive
+
+`POST /v1/machines/{m}/enrolement` ÉMET un code depuis l'application. **Rien ne
+disait par où la machine le RAPPORTE**, alors que `modele.md` §2.3 décrit
+pourtant le geste : « la machine génère sa paire de clés, et présente sa clé
+publique avec le code ». C'était un trou, et il est comblé :
+
+```
+POST /v1/enrolement
+     (dans une connexion QUIC, sans aucune authentification préalable)
+
+     corps = code (10 octets) ‖ clé publique (32) ‖ preuve (64)
+```
+
+**IL NE NOMME PAS LA MACHINE, ET C'EST TOUT LE DISPOSITIF.** Un verbe sous
+`/v1/machines/{m}` aurait obligé la machine à se désigner elle-même — et
+l'annuaire à croire sur parole celui qui la nomme. Ici, **le code désigne la
+machine**, et personne d'autre ne la désigne.
+
+**L'annuaire ne garde pas les codes, il garde leurs EMPREINTES** (SHA-256,
+domaine séparé). Deux conséquences :
+
+— une base qui fuit ne livre aucune machine en cours d'enrôlement ;
+— il n'y a **rien à comparer** : la recherche se fait par l'empreinte. La
+  fonction de comparaison en temps constant qui existait pour C9 n'a plus
+  d'appelant, et la meilleure façon de tenir une comparaison en temps constant
+  reste de ne pas avoir de comparaison à faire.
+
+**La preuve est une PREUVE DE POSSESSION**, et non la signature ordinaire d'un
+défi : la machine ne peut pas signer son identifiant, puisqu'elle ne le connaît
+pas. Elle signe donc la CLÉ qu'elle présente, sous un domaine distinct — sans
+quoi une preuve d'authentification captée ailleurs vaudrait preuve de possession
+ici.
+
+**Un code inconnu et un code périmé rendent le même refus**, et pour cause : un
+code consommé est SUPPRIMÉ, pas marqué. L'annuaire ne fait pas la différence, et
+n'a donc rien à en dire.
+
 ### 2.1 Enrôler un appareil
 
 Il n'y a **pas de mot de passe** dans ce produit. Un compte est un jeu
@@ -305,6 +343,77 @@ appareils légitimes ; accepter vide la garantie de sa substance. La v1
 **refuse**, et journalise, parce qu'un refus se relâche plus tard alors qu'une
 acceptation ne se resserre jamais sans casser des comptes existants.
 
+#### Et aujourd'hui, la vérification n'est pas écrite — d'où un réglage sans défaut
+
+App Attest et Play Integrity demandent les racines d'Apple et de Google, du CBOR,
+et une chaîne à valider. **Exiger l'attestation aujourd'hui, c'est donc refuser
+TOUS les enrôlements.**
+
+Les deux postures sont défendables et **aucune ne peut être le défaut** : exiger
+livrerait un annuaire qui ne crée aucun compte, dispenser livrerait en silence la
+posture faible. `asl-server` n'a donc **pas de valeur par défaut** — il refuse de
+démarrer tant qu'on ne lui a pas dit laquelle il tient :
+
+```
+asl-server --attestation exigee       # la posture de ce document, et rien ne passe
+asl-server --attestation facultative  # n'importe qui crée un compte, et c'est dit
+                                      # au démarrage, dans le journal d'exploitation
+```
+
+Le jour où la vérification s'écrira, elle se branchera à un seul endroit :
+`asl_auth::decider_attestation` prend déjà `atteste` en paramètre, aujourd'hui
+toujours faux.
+
+### 2.1 bis Ce que porte chaque corps, et pourquoi ce n'est pas toujours du JSON
+
+**Les corps qui portent des CLÉS et des SIGNATURES sont des octets bruts**, à
+champs de longueur fixe :
+
+| Verbe | Corps | Taille |
+|---|---|---|
+| `POST /v1/defi` | genre ‖ identifiant (17) ‖ signature (64) | 81 |
+| `POST /v1/comptes` | clé publique (32) ‖ preuve (64) | 96 |
+| `POST /v1/appareils` | clé publique (32) | 32 |
+| `POST /v1/enrolement` | code (10) ‖ clé publique (32) ‖ preuve (64) | 106 |
+
+C'est l'argument d'`asl_cle::message_a_signer`, appliqué au transport : un
+cadrage JSON demanderait d'encoder ces octets, donc **deux écritures possibles du
+même contenu** — sur un chemin cryptographique, trois occasions de se tromper
+pour zéro gain. Aucune longueur ne vient du réseau : le corps fait exactement la
+taille attendue, ou il est refusé.
+
+**Les corps qui portent des NOMS et des IDENTIFIANTS sont du JSON**, parce
+qu'eux se débogueront avec `curl` :
+
+```jsonc
+POST /v1/machines       {"nom": "grenier", "capacites": ["annonce"]}
+POST /v1/autorisations  {"a": "u-…", "portee": "tout"}
+POST /v1/autorisations  {"a": "u-…", "portee": "m-…"}
+```
+
+**La portée est un seul champ, et le genre de l'identifiant la désigne.** Un
+objet `{"sorte": …, "cible": …}` aurait rendu représentable une demande
+incohérente — `{"sorte":"machine","cible":"s-…"}` — qu'il faudrait refuser à la
+main. Et `tout` ne se confond avec aucun identifiant, qui en fait vingt-huit
+caractères.
+
+### 2.1 ter Ce que la création d'un compte prouve, et ce qu'elle ne prouve pas
+
+**`POST /v1/comptes` porte une preuve de possession, et elle authentifie la
+connexion.** L'appareil signe la clé qu'il présente, sur le défi de cette
+connexion, lié à ce canal ; l'annuaire lui attribue alors un identifiant — qu'il
+n'a donc pas pu signer, puisqu'il n'existait pas. Refaire le tour par `/v1/defi`
+coûterait deux allers-retours pour rejouer la même démonstration.
+
+**`POST /v1/appareils` n'en porte AUCUNE, et c'est l'autre moitié de la règle.**
+Le nouveau téléphone ne parle pas sur cette connexion : c'est un appareil DÉJÀ
+enrôlé qui apporte sa clé, lue d'un code affiché à l'écran. Un compte qui ajoute
+une clé que personne ne détient n'a nui qu'à lui-même, et il lui reste l'appareil
+qui vient de le faire.
+
+La règle, en une phrase : **celui qui PRÉSENTE une clé signe qu'il la détient ;
+celui pour qui un tiers déjà authentifié l'apporte ne signe pas.**
+
 ### 2.2 Le reste
 
 | Verbe | Ce qu'il fait |
@@ -313,9 +422,9 @@ acceptation ne se resserre jamais sans casser des comptes existants.
 | `POST /v1/appareils` | Enrôle un appareil de plus. **Signé par un appareil déjà enrôlé.** |
 | `PUT /v1/appareils/{a}/poussee` | Dépose ou renouvelle le jeton APNs / FCM. |
 | `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. |
-| `POST /v1/machines` | Déclare une machine, avec ses **capacités** (`annonce`, `lecture`). **Rend un code d'enrôlement** — court, à usage unique, valable quelques minutes. |
+| `POST /v1/machines` | Déclare une machine, avec son **nom** et ses **capacités** (`annonce`, `lecture`). **Rend un code d'enrôlement** — dix symboles, à usage unique, valable dix minutes. La machine n'a **pas encore de clé**. |
 | `PATCH /v1/machines/{m}` | Change le nom ou les capacités. |
-| `POST /v1/machines/{m}/enrolement` | Émet un nouveau code, pour ré-enrôler une machine dont la clé a été révoquée ou perdue. |
+| `POST /v1/machines/{m}/enrolement` | Émet un nouveau code, pour ré-enrôler une machine dont la clé a été révoquée ou perdue. **Le code précédent meurt à l'émission du suivant.** |
 | `DELETE /v1/machines/{m}/cle` | Révoque la clé. Effet immédiat : connexions fermées, baux tombés. |
 | `PUT /v1/alias` | Enregistre ou change l'alias public. **La seule donnée que l'utilisateur nous confie.** |
 | `DELETE /v1/alias` | Le retire. |

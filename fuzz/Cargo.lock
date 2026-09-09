@@ -144,7 +144,7 @@ name = "asl-auth"
 version = "0.1.0"
 dependencies = [
  "asl-id",
- "subtle",
+ "sha2",
 ]
 
 [[package]]
@@ -184,6 +184,7 @@ dependencies = [
  "asl-auth",
  "asl-cle",
  "asl-id",
+ "asl-proto",
  "asl-registre",
 ]
 

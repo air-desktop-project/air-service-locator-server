@@ -110,26 +110,49 @@ impl Default for Tampons {
 // ── Le lecteur ──────────────────────────────────────────────────────────────
 
 /// Un curseur sur les octets du message.
-struct Lecteur<'a> {
+///
+/// # POURQUOI IL EST PUBLIC
+///
+/// `asl-api` porte les corps de l'API mobile — créer un compte, déclarer une
+/// machine, accorder une autorisation — et ce sont des messages du même
+/// dialecte : mêmes blancs, mêmes refus, mêmes fautes.
+///
+/// **Un deuxième analyseur JSON serait la vraie faute.** Deux analyseurs finissent
+/// par diverger, et c'est celui qu'on oublie de corriger qui accepte ce que
+/// l'autre refuse — la moitié des failles historiques des analyseurs tient dans
+/// cette phrase. Il est donc écrit ICI, une fois, et prêté.
+pub struct Lecteur<'a> {
     octets: &'a [u8],
     position: usize,
 }
 
 impl<'a> Lecteur<'a> {
-    const fn nouveau(octets: &'a [u8]) -> Self {
+    /// Un curseur au début de ces octets.
+    #[must_use]
+    pub const fn nouveau(octets: &'a [u8]) -> Self {
         Self {
             octets,
             position: 0,
         }
     }
 
+    /// Où l'on en est.
+    ///
+    /// Sert à situer une faute, et rien d'autre : une position n'est pas un
+    /// curseur qu'on repose.
+    #[must_use]
+    pub const fn position(&self) -> usize {
+        self.position
+    }
+
     /// L'octet courant, sans avancer.
-    fn regarder(&self) -> Option<u8> {
+    #[must_use]
+    pub fn regarder(&self) -> Option<u8> {
         self.octets.get(self.position).copied()
     }
 
     /// Avance d'un octet.
-    fn avancer(&mut self) {
+    pub fn avancer(&mut self) {
         self.position = self.position.saturating_add(1);
     }
 
@@ -138,14 +161,18 @@ impl<'a> Lecteur<'a> {
     /// Ni tabulation verticale, ni page suivante, ni espace insécable : RFC 8259
     /// §2 en nomme quatre, et en accepter un cinquième ferait diverger ce lecteur
     /// de tout autre.
-    fn sauter_blancs(&mut self) {
+    pub fn sauter_blancs(&mut self) {
         while matches!(self.regarder(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
             self.avancer();
         }
     }
 
     /// Exige un octet précis, blancs sautés d'abord.
-    fn attendre(&mut self, octet: u8, attendu: &'static str) -> Result<(), Erreur> {
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::JsonAttendu`] si ce n'est pas cet octet-là.
+    pub fn attendre(&mut self, octet: u8, attendu: &'static str) -> Result<(), Erreur> {
         self.sauter_blancs();
         if self.regarder() == Some(octet) {
             self.avancer();
@@ -164,7 +191,12 @@ impl<'a> Lecteur<'a> {
     /// raisons sont en tête de ce module ; ce qui compte ici est que le résultat
     /// emprunte au tampon d'entrée, sans copie ni transformation — donc ce qu'on
     /// rend est littéralement ce qui a été reçu.
-    fn chaine(&mut self) -> Result<&'a str, Erreur> {
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::JsonAttendu`], [`Erreur::EchappementRefuse`],
+    /// [`Erreur::CaractereBrutRefuse`].
+    pub fn chaine(&mut self) -> Result<&'a str, Erreur> {
         self.attendre(b'"', "une chaîne")?;
         let debut = self.position;
 
@@ -216,6 +248,91 @@ impl<'a> Lecteur<'a> {
         Ok(core::str::from_utf8(tranche).unwrap_or(""))
     }
 
+    /// Lit une chaîne qui porte du **texte destiné à être lu par un humain**.
+    ///
+    /// # C'EST LA DÉCISION QUE L'EN-TÊTE DE CE MODULE AVAIT ANNONCÉE
+    ///
+    /// « Le jour où un champ portera du texte libre — le nom d'affichage d'une
+    /// machine, par exemple — ce décodeur devra apprendre les échappements. Ce
+    /// sera une décision, pas un oubli. » Le jour est venu, et **la décision est
+    /// de ne PAS les apprendre**.
+    ///
+    /// Le refus du non-ASCII, lui, tombe. Sa raison était l'ÉQUIVALENCE : `é`
+    /// s'écrit de deux façons en Unicode, et deux écritures d'une même valeur
+    /// ouvrent la porte à ce que deux lecteurs n'en voient pas le même nombre.
+    /// **Cette raison ne vaut que pour ce qui se COMPARE** — un identifiant, un
+    /// alias, un nom de service, qui sont des clés. Un nom d'affichage n'est
+    /// comparé à rien : la clé est l'identifiant, à côté. Refuser les accents
+    /// d'un nom de machine n'achèterait donc rien, et coûterait à tout
+    /// utilisateur dont la langue en porte.
+    ///
+    /// # CE QUI RESTE REFUSÉ, ET POURQUOI CHAQUE REFUS
+    ///
+    /// — **Les échappements.** Les apprendre, c'est apprendre `\uD83D\uDE00`,
+    ///   c'est-à-dire l'UTF-16, ses paires de substitution et ses moitiés
+    ///   orphelines. Le prix est ici : un nom ne peut porter ni `"` ni `\`.
+    ///   C'est peu, et cela se dit à l'utilisateur.
+    /// — **Les contrôles C0 et DEL.** JSON les interdit crus de toute façon, et
+    ///   un nom qui porterait `\x1b` piloterait le terminal qui l'affiche.
+    /// — **Les contrôles C1, les forceurs de sens d'écriture et la marque
+    ///   d'ordre des octets.** Ceux-là ne s'affichent pas eux-mêmes : ils
+    ///   changent la façon dont le TEXTE AUTOUR s'affiche. Un nom de machine se
+    ///   lit dans une liste, à côté d'autres noms ; l'un d'eux ne doit pas
+    ///   pouvoir retourner ses voisins.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::JsonAttendu`], [`Erreur::EchappementRefuse`],
+    /// [`Erreur::CaractereBrutRefuse`], [`Erreur::TexteMalEncode`],
+    /// [`Erreur::CaractereInvisibleRefuse`].
+    pub fn texte_libre(&mut self) -> Result<&'a str, Erreur> {
+        self.attendre(b'"', "une chaîne")?;
+        let debut = self.position;
+
+        loop {
+            let Some(octet) = self.regarder() else {
+                return Err(Erreur::JsonAttendu {
+                    position: self.position,
+                    attendu: "la fin d'une chaîne",
+                });
+            };
+            match octet {
+                // **CHERCHER CES DEUX OCTETS-LÀ EST SÛR EN UTF-8** : tout octet
+                // d'une suite multi-octets vaut au moins 0x80, donc ni le
+                // guillemet ni la barre oblique ne peuvent apparaître au milieu
+                // d'un caractère.
+                b'"' => break,
+                b'\\' => {
+                    return Err(Erreur::EchappementRefuse {
+                        position: self.position,
+                    });
+                }
+                0x00..=0x1F | 0x7F => {
+                    return Err(Erreur::CaractereBrutRefuse {
+                        position: self.position,
+                    });
+                }
+                _ => self.avancer(),
+            }
+        }
+
+        let fin = self.position;
+        self.avancer();
+
+        let tranche = self.octets.get(debut..fin).unwrap_or(&[]);
+        let texte = core::str::from_utf8(tranche)
+            .map_err(|_| Erreur::TexteMalEncode { position: debut })?;
+
+        for (decalage, caractere) in texte.char_indices() {
+            if invisible(caractere) {
+                return Err(Erreur::CaractereInvisibleRefuse {
+                    position: debut.saturating_add(decalage),
+                });
+            }
+        }
+        Ok(texte)
+    }
+
     /// Lit un entier non signé.
     ///
     /// **Une seule écriture par nombre** : pas de signe, pas de zéro en tête,
@@ -226,7 +343,12 @@ impl<'a> Lecteur<'a> {
     /// horodatage d'époque en millisecondes dépasse largement un `u32` ; un port
     /// n'en occupe que seize bits. Un lecteur unique qui rendrait la borne la
     /// plus étroite obligerait à contourner ailleurs.
-    fn entier(&mut self) -> Result<u64, Erreur> {
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::JsonAttendu`], [`Erreur::NombreNonCanonique`],
+    /// [`Erreur::NombreNonEntier`], [`Erreur::NombreHorsBornes`].
+    pub fn entier(&mut self) -> Result<u64, Erreur> {
         self.sauter_blancs();
         let debut = self.position;
 
@@ -267,7 +389,11 @@ impl<'a> Lecteur<'a> {
     ///
     /// **Des octets en trop ne sont jamais anodins** : deux messages collés dans
     /// un tampon, c'est un lecteur qui en voit un et un autre qui en voit deux.
-    fn fin(&mut self) -> Result<(), Erreur> {
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::DonneesEnTrop`].
+    pub fn fin(&mut self) -> Result<(), Erreur> {
         self.sauter_blancs();
         if self.position < self.octets.len() {
             return Err(Erreur::DonneesEnTrop {
@@ -278,6 +404,20 @@ impl<'a> Lecteur<'a> {
     }
 }
 
+/// Ce caractère change-t-il l'affichage de ce qui l'entoure ?
+///
+/// Les contrôles C1 (`U+0080`–`U+009F`), les huit caractères de forçage
+/// bidirectionnel, et la marque d'ordre des octets. **La liste est courte et
+/// close**, et elle ne prétend pas épuiser ce qu'Unicode permet de faire à un
+/// œil : elle ferme ce qui change le rendu du VOISINAGE, ce dont un nom affiché
+/// dans une liste n'a aucun besoin.
+const fn invisible(caractere: char) -> bool {
+    matches!(
+        caractere,
+        '\u{0080}'..='\u{009F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+    )
+}
+
 // ── L'écrivain ──────────────────────────────────────────────────────────────
 
 /// Une tranche où l'on écrit, qui compte ce qu'elle refuse.
@@ -285,14 +425,16 @@ impl<'a> Lecteur<'a> {
 /// `fmt::Write` ne sait rendre qu'une erreur sans détail ; on garde donc le
 /// débordement à part, pour distinguer « le tampon est trop petit » de tout le
 /// reste.
-struct Ecrivain<'a> {
+pub struct Ecrivain<'a> {
     sortie: &'a mut [u8],
     ecrits: usize,
     deborde: bool,
 }
 
 impl<'a> Ecrivain<'a> {
-    fn nouveau(sortie: &'a mut [u8]) -> Self {
+    /// Un écrivain sur cette tranche.
+    #[must_use]
+    pub fn nouveau(sortie: &'a mut [u8]) -> Self {
         Self {
             sortie,
             ecrits: 0,
@@ -300,7 +442,8 @@ impl<'a> Ecrivain<'a> {
         }
     }
 
-    fn pousser(&mut self, octets: &[u8]) {
+    /// Écrit ces octets, ou retient qu'ils n'ont pas tenu.
+    pub fn pousser(&mut self, octets: &[u8]) {
         let fin = self.ecrits.saturating_add(octets.len());
         match self.sortie.get_mut(self.ecrits..fin) {
             Some(place) => {
@@ -311,7 +454,12 @@ impl<'a> Ecrivain<'a> {
         }
     }
 
-    fn achever(self) -> Result<usize, Erreur> {
+    /// Rend le nombre d'octets écrits, ou la faute qu'on retenait.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`] si quelque chose n'a pas tenu.
+    pub fn achever(self) -> Result<usize, Erreur> {
         if self.deborde {
             Err(Erreur::TamponTropPetit)
         } else {

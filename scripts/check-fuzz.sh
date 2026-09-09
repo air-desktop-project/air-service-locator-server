@@ -94,6 +94,7 @@ fuzz_asl_proto_poussee poussee
 fuzz_asl_annuaire_session session
 fuzz_asl_auth_decisions decisions
 fuzz_asl_api_routage routage
+fuzz_asl_api_corps corps
 fuzz_asl_cle_signature signature
 fuzz_asl_session_reponse session-reponse
 fuzz_asl_registre_aller_retour registre

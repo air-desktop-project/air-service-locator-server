@@ -63,6 +63,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Annonce => "/v1/annonce".to_owned(),
         Ressource::Defi => "/v1/defi".to_owned(),
         Ressource::Comptes => "/v1/comptes".to_owned(),
+        Ressource::Enrolement => "/v1/enrolement".to_owned(),
         Ressource::Utilisateur { compte } => format!("/v1/utilisateurs/{compte}"),
         Ressource::Appareils => "/v1/appareils".to_owned(),
         Ressource::Appareil { appareil } => format!("/v1/appareils/{appareil}"),
@@ -158,14 +159,20 @@ fuzz_target!(|entree: Entree| {
     // Réécrire deux fois ne change plus rien.
     assert_eq!(chemin_de(&relu.ressource), refait);
 
-    // Une exigence `Aucune` ne concerne que trois ressources, et elles sont
-    // nommées : rien d'autre ne doit pouvoir s'y glisser.
+    // ── LA LISTE CLOSE DE CE QUI N'EXIGE RIEN ───────────────────────────────
+    //
+    // Cinq ressources, et chacune a sa raison écrite sur `Ressource::exigence`.
+    // **CETTE ASSERTION A DÉJÀ SERVI** : elle a arrêté `/v1/enrolement` le jour
+    // de son ajout. Le verbe était légitime et sa liberté délibérée — mais
+    // c'est précisément le point : une ressource ne devient publique que si
+    // quelqu'un l'écrit ICI, jamais parce qu'un `_ =>` l'a laissée passer.
     if resolu.exigence == Exigence::Aucune {
         assert!(
             matches!(
                 ressource,
                 Ressource::Defi
                     | Ressource::Comptes
+                    | Ressource::Enrolement
                     | Ressource::AliasResolu { .. }
                     | Ressource::Utilisateur { .. }
             ),

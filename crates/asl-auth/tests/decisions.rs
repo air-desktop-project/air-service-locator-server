@@ -8,8 +8,9 @@
 //! renseignent pas par leur durée.
 
 use asl_auth::{
-    Autorisation, Capacites, Cible, CodeEnrolement, Decision, EtatCode, Faute, Machine, Portee,
-    decider_annonce, decider_enrolement, decider_resolution, egal_en_temps_constant,
+    Autorisation, Capacites, Cible, CodeEnrolement, Decision, EtatCode, Faute, Machine, Politique,
+    Portee, decider_annonce, decider_attestation, decider_enrolement, decider_gestion,
+    decider_resolution,
 };
 use asl_id::{Genre, Identifiant};
 
@@ -326,8 +327,41 @@ fn un_code_se_fabrique_se_lit_et_se_relit() {
     assert!(texte.bytes().all(|o| asl_id::base32::valeur(o).is_some()));
 
     let relu = CodeEnrolement::analyser(texte).expect("un code canonique se relit");
-    assert!(egal_en_temps_constant(&code, &relu));
     assert_eq!(relu.texte(), texte);
+    // **C'EST L'EMPREINTE QUI IDENTIFIE**, puisque c'est elle qu'on range.
+    assert_eq!(relu.empreinte(), code.empreinte());
+}
+
+#[test]
+fn la_forme_groupee_s_affiche_et_se_retape() {
+    let code = CodeEnrolement::analyser("4K9M2P7R1T").unwrap();
+    let groupe = code.texte_groupe();
+    assert_eq!(groupe.as_str(), "4K9M2-P7R1T");
+
+    // Ce qu'on AFFICHE se retape tel quel, et vaut ce qu'on a affiché.
+    let retape = CodeEnrolement::analyser(groupe.as_str()).expect("la forme groupée se relit");
+    assert_eq!(retape.empreinte(), code.empreinte());
+    assert_eq!(retape.texte(), "4K9M2P7R1T");
+}
+
+#[test]
+fn un_tiret_egare_ne_passe_pas() {
+    // La bonne longueur, mais le tiret ailleurs qu'à sa place.
+    assert_eq!(
+        CodeEnrolement::analyser("4K9M2P-7R1T").map(|_| ()),
+        Err(Faute::CodeLongueur {
+            attendue: 10,
+            obtenue: 11
+        })
+    );
+}
+
+#[test]
+fn deux_codes_differents_ont_deux_empreintes() {
+    let un = CodeEnrolement::analyser("0123456789").unwrap();
+    let autre = CodeEnrolement::analyser("9876543210").unwrap();
+    assert_ne!(un.empreinte(), autre.empreinte());
+    assert_eq!(un.empreinte().len(), 32);
 }
 
 #[test]
@@ -336,8 +370,9 @@ fn le_rattrapage_de_crockford_vaut_aussi_pour_un_code() {
     let reference = CodeEnrolement::analyser("0123456789").unwrap();
     for variante in ["O123456789", "o123456789", "0I23456789", "0L23456789"] {
         let lu = CodeEnrolement::analyser(variante).unwrap();
-        assert!(
-            egal_en_temps_constant(&reference, &lu),
+        assert_eq!(
+            lu.empreinte(),
+            reference.empreinte(),
             "{variante} devrait valoir la référence"
         );
         // Et ce qu'on range est la forme CANONIQUE.
@@ -375,54 +410,58 @@ fn les_cinquante_bits_de_poids_fort_sont_employes() {
     let poids_fort = CodeEnrolement::depuis_entropie([0x80, 0, 0, 0, 0, 0, 0, 0]);
     let poids_faible = CodeEnrolement::depuis_entropie([0, 0, 0, 0, 0, 0, 0x3F, 0xFF]);
 
-    assert!(!egal_en_temps_constant(&base, &poids_fort));
-    assert!(egal_en_temps_constant(&base, &poids_faible));
+    assert_ne!(base.empreinte(), poids_fort.empreinte());
+    assert_eq!(base.empreinte(), poids_faible.empreinte());
 }
 
 #[test]
-fn seul_un_code_juste_et_utilisable_lie_une_cle() {
-    let bon = CodeEnrolement::analyser("0123456789").unwrap();
-    let autre = CodeEnrolement::analyser("9876543210").unwrap();
+fn seul_un_code_utilisable_lie_une_cle() {
+    assert_eq!(decider_enrolement(EtatCode::Utilisable), Decision::Servir);
 
+    // **LES DEUX REFUS SONT LE MÊME REFUS** : un code qu'on ne trouve pas et un
+    // code périmé. Rien dans la réponse ne les distingue, et il n'y a plus de
+    // comparaison à écourter — l'annuaire cherche par empreinte, il ne compare
+    // plus rien (C9).
+    for etat in [EtatCode::Inconnu, EtatCode::Expire] {
+        assert_eq!(decider_enrolement(etat), Decision::Refuser, "{etat:?}");
+    }
+}
+
+// ── L'administration, et l'attestation ──────────────────────────────────────
+
+#[test]
+fn un_compte_n_administre_que_ce_qu_il_possede() {
+    let moi = alice();
+    let toi = bob();
+
+    assert_eq!(decider_gestion(moi, moi), Decision::Servir);
+    assert_eq!(decider_gestion(moi, toi), Decision::Refuser);
+    assert_eq!(decider_gestion(toi, moi), Decision::Refuser);
+}
+
+#[test]
+fn l_attestation_exigee_refuse_ce_qui_n_est_pas_atteste() {
+    // C'est la posture de `protocole.md` §2.1, et elle refuse TOUT aujourd'hui :
+    // rien ne sait encore établir `atteste`.
     assert_eq!(
-        decider_enrolement(&bon, &bon, EtatCode::Utilisable),
+        decider_attestation(false, Politique::AttestationExigee),
+        Decision::Refuser
+    );
+    assert_eq!(
+        decider_attestation(true, Politique::AttestationExigee),
         Decision::Servir
     );
-
-    // Les trois refus sont le MÊME refus : mauvais code, code consommé, code
-    // expiré. Un inconnu qui mesure les temps n'apprend rien de plus.
-    for (presente, etat) in [
-        (autre, EtatCode::Utilisable),
-        (bon, EtatCode::Consomme),
-        (bon, EtatCode::Expire),
-        (autre, EtatCode::Consomme),
-        (autre, EtatCode::Expire),
-    ] {
-        assert_eq!(
-            decider_enrolement(&presente, &bon, etat),
-            Decision::Refuser,
-            "{etat:?}"
-        );
-    }
 }
 
 #[test]
-fn la_comparaison_parcourt_toujours_les_dix_symboles() {
-    // On ne peut pas mesurer le temps dans un essai — mais on peut vérifier que
-    // la fonction rend la bonne réponse quel que soit l'endroit de l'écart, ce
-    // qui est la propriété fonctionnelle sous-jacente.
-    let reference = CodeEnrolement::analyser("0000000000").unwrap();
-    for position in 0..10 {
-        let mut symboles = [b'0'; 10];
-        symboles[position] = b'1';
-        let texte: String = symboles.iter().map(|o| char::from(*o)).collect();
-        let different = CodeEnrolement::analyser(&texte).unwrap();
-        assert!(
-            !egal_en_temps_constant(&reference, &different),
-            "écart en position {position}"
+fn l_attestation_facultative_laisse_passer_les_deux() {
+    for atteste in [false, true] {
+        assert_eq!(
+            decider_attestation(atteste, Politique::AttestationFacultative),
+            Decision::Servir,
+            "{atteste}"
         );
     }
-    assert!(egal_en_temps_constant(&reference, &reference));
 }
 
 // ── Les accesseurs ──────────────────────────────────────────────────────────
@@ -445,4 +484,11 @@ fn les_enregistrements_rendent_ce_qu_on_leur_a_donne() {
     assert_eq!(cible.service(), ident(Genre::Service, 0x51));
     assert_eq!(cible.machine(), ident(Genre::Machine, 0x11));
     assert_eq!(cible.proprietaire(), alice());
+}
+
+#[test]
+fn le_texte_groupe_s_affiche() {
+    // Il se recopie d'un écran vers un terminal : il doit s'écrire.
+    let code = CodeEnrolement::analyser("4K9M2P7R1T").unwrap();
+    assert_eq!(code.texte_groupe().to_string(), "4K9M2-P7R1T");
 }

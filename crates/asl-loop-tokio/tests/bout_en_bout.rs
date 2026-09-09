@@ -115,7 +115,13 @@ async fn lever(
             let rang = compteur.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some([rang; 16])
         };
-        let mut application = Annuaire::new(&entrepot, liaison, &tirer, &nommer);
+        let mut application = Annuaire::new(
+            &entrepot,
+            liaison,
+            &tirer,
+            &nommer,
+            asl_auth::Politique::AttestationFacultative,
+        );
         let arret = async {
             let _ = entendre_stop.await;
         };
@@ -208,9 +214,15 @@ async fn une_requete_traverse_toute_la_pile_et_revient() {
     }
 
     // `17` est l'index QPACK de `:method: GET` (annexe A de RFC 9204).
-    // `/v1/expositions` SE ROUTE et sert `GET` : la réponse doit donc être le
-    // `501` d'une ressource qui n'a pas encore d'entrepôt — et non un `404`,
-    // qui dirait que la cible n'existe pas.
+    //
+    // `/v1/expositions` SE ROUTE et sert `GET`, et la réponse est `401` — et
+    // non `404`, qui dirait que la cible n'existe pas, ni `501`, qui dirait
+    // qu'elle existe et n'est pas écrite.
+    //
+    // **L'EXIGENCE EST EXAMINÉE AVANT L'IMPLÉMENTATION, ET C'EST L'ORDRE
+    // JUSTE.** Un inconnu qui reçoit `501` apprend quels verbes cet annuaire ne
+    // sait pas encore servir, donc lesquels il saura servir demain. Il n'a
+    // aucun besoin de le savoir : il n'a pas prouvé de clé.
     ams_quic_client::envoyer_une_requete(&mut client, 0, 17, b"/v1/expositions", None, b"").await;
     // **ELLE NE REND QUE LE CORPS** : le harnais jette les en-têtes après les
     // avoir validés. Elle sert donc à ATTENDRE, et le flux brut se lit à côté.
@@ -220,7 +232,7 @@ async fn une_requete_traverse_toute_la_pile_et_revient() {
     let champs = champs(&brut);
     assert_eq!(
         champ(&champs, b":status"),
-        Some(&b"501"[..]),
+        Some(&b"401"[..]),
         "la réponse n'est pas celle qu'`asl-session` décide : {champs:?}"
     );
     assert_eq!(
@@ -249,7 +261,7 @@ async fn une_requete_traverse_toute_la_pile_et_revient() {
         .expect("un nombre");
     assert_eq!(corps.len(), annoncee, "le corps ne fait pas sa longueur");
     assert!(
-        corps.windows(3).any(|f| f == b"501"),
+        corps.windows(3).any(|f| f == b"401"),
         "le corps d'un problème porte son propre code : {:?}",
         String::from_utf8_lossy(&corps)
     );
@@ -408,9 +420,10 @@ async fn une_machine_s_authentifie_de_bout_en_bout() {
         &asl_registre::Machine {
             provenance: Provenance::Ici,
             proprietaire,
-            cle: secrete.publique().octets(),
+            cle: Some(secrete.publique().octets()),
             annonce: true,
             lecture: true,
+            nom: nom_de_machine("grenier"),
         },
     )
     .expect("la machine est écrite");
@@ -560,9 +573,10 @@ async fn une_autorisation_ouvre_le_service_d_un_autre_compte() {
             &asl_registre::Machine {
                 provenance: Provenance::Ici,
                 proprietaire,
-                cle: cle_publique,
+                cle: Some(cle_publique),
                 annonce: true,
                 lecture: true,
+                nom: nom_de_machine("grenier"),
             },
         )
         .expect("la machine est écrite");
@@ -624,9 +638,10 @@ async fn avec_l_autorisation_le_meme_service_cesse_d_etre_introuvable() {
             &asl_registre::Machine {
                 provenance: Provenance::Ici,
                 proprietaire,
-                cle: cle_publique,
+                cle: Some(cle_publique),
                 annonce: true,
                 lecture: true,
+                nom: nom_de_machine("grenier"),
             },
         )
         .expect("écrite");
@@ -698,9 +713,10 @@ async fn un_daemon_annonce_et_son_service_devient_trouvable() {
         &asl_registre::Machine {
             provenance: Provenance::Ici,
             proprietaire: compte,
-            cle: secrete.publique().octets(),
+            cle: Some(secrete.publique().octets()),
             annonce: true,
             lecture: true,
+            nom: nom_de_machine("grenier"),
         },
     )
     .expect("la machine est écrite");
@@ -800,9 +816,10 @@ async fn une_machine_sans_capacite_d_annonce_est_refusee() {
         &asl_registre::Machine {
             provenance: Provenance::Ici,
             proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [0xE1; 16]),
-            cle: secrete.publique().octets(),
+            cle: Some(secrete.publique().octets()),
             annonce: false,
             lecture: true,
+            nom: nom_de_machine("grenier"),
         },
     )
     .expect("écrite");
@@ -870,9 +887,10 @@ async fn un_service_annonce_par_a_se_retrouve_chez_b_qui_y_a_droit() {
             &asl_registre::Machine {
                 provenance: Provenance::Ici,
                 proprietaire,
-                cle: secrete.publique().octets(),
+                cle: Some(secrete.publique().octets()),
                 annonce: true,
                 lecture: true,
+                nom: nom_de_machine("grenier"),
             },
         )
         .expect("écrite");
@@ -975,9 +993,10 @@ async fn la_sonde_mesure_la_joignabilite_et_le_verdict_bascule() {
         &asl_registre::Machine {
             provenance: Provenance::Ici,
             proprietaire: compte,
-            cle: secrete.publique().octets(),
+            cle: Some(secrete.publique().octets()),
             annonce: true,
             lecture: true,
+            nom: nom_de_machine("grenier"),
         },
     )
     .expect("écrite");
@@ -1081,9 +1100,10 @@ async fn un_port_ou_rien_n_ecoute_reste_injoignable() {
         &asl_registre::Machine {
             provenance: Provenance::Ici,
             proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [0xF2; 16]),
-            cle: secrete.publique().octets(),
+            cle: Some(secrete.publique().octets()),
             annonce: true,
             lecture: true,
+            nom: nom_de_machine("grenier"),
         },
     )
     .expect("écrite");
@@ -1147,4 +1167,288 @@ async fn un_port_ou_rien_n_ecoute_reste_injoignable() {
     let _ = tache.await;
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
+}
+
+/// Un nom de machine, pour les essais.
+fn nom_de_machine(texte: &str) -> asl_registre::NomRange {
+    asl_registre::NomRange::nouveau(texte).expect("un nom court se range")
+}
+
+/// Monte une connexion cliente et achève sa poignée de main.
+async fn connecter(racine: &[u8], adresse: SocketAddr) -> ams_quic_client::Client {
+    let mut client =
+        ams_quic_client::Client::new(ams_quic_client::config_client(racine), adresse).await;
+    for _ in 0..64_u32 {
+        client.parler().await;
+        if !client.ecouter().await {
+            break;
+        }
+    }
+    client
+}
+
+/// Tire le défi de cette connexion.
+async fn tirer_le_defi(client: &mut ams_quic_client::Client, flux: u64) -> asl_cle::Defi {
+    ams_quic_client::envoyer_une_requete(client, flux, 17, b"/v1/defi", None, b"").await;
+    let octets = ams_quic_client::attendre_la_reponse(client, flux).await;
+    let mut brut = [0_u8; asl_cle::DEFI_OCTETS];
+    brut.copy_from_slice(&octets);
+    asl_cle::Defi::depuis_octets(brut)
+}
+
+/// Poste ce corps d'octets bruts, et rend le statut et le corps de la réponse.
+async fn poster(
+    client: &mut ams_quic_client::Client,
+    flux: u64,
+    cible: &[u8],
+    corps: &[u8],
+    media: &[u8],
+) -> (Vec<u8>, Vec<u8>) {
+    // `20` est l'index QPACK de `:method: POST`.
+    ams_quic_client::envoyer_avec_media(client, flux, 20, cible, None, corps, media).await;
+    let rendu = ams_quic_client::attendre_la_reponse(client, flux).await;
+    let statut = champ(&champs(client.recu(flux)), b":status")
+        .expect("un statut")
+        .to_vec();
+    (statut, rendu)
+}
+
+/// La valeur d'un champ JSON plat, sans analyseur.
+///
+/// Ces corps sont écrits par `asl-session`, à champs fixes et sans échappement :
+/// une recherche de `"nom":"` suffit, et évite de tirer un analyseur JSON dans
+/// un essai pour vérifier ce qu'un encodeur vient d'écrire.
+fn valeur_json(corps: &[u8], nom: &str) -> String {
+    let texte = String::from_utf8_lossy(corps).into_owned();
+    let marque = alloc_format(nom);
+    let debut = texte
+        .find(&marque)
+        .unwrap_or_else(|| panic!("`{nom}` absent de {texte}"))
+        .saturating_add(marque.len());
+    let reste = &texte[debut..];
+    let fin = reste
+        .find(['"', ',', '}'])
+        .expect("une valeur se termine toujours");
+    reste[..fin].to_owned()
+}
+
+/// `"<nom>":` suivi du guillemet ouvrant, s'il y en a un.
+fn alloc_format(nom: &str) -> String {
+    format!("\"{nom}\":\"")
+}
+
+/// La valeur d'un champ JSON numérique.
+fn nombre_json(corps: &[u8], nom: &str) -> u64 {
+    let texte = String::from_utf8_lossy(corps).into_owned();
+    let marque = format!("\"{nom}\":");
+    let debut = texte
+        .find(&marque)
+        .expect("le champ existe")
+        .saturating_add(marque.len());
+    let reste = &texte[debut..];
+    let fin = reste.find([',', '}']).expect("une valeur se termine");
+    reste[..fin].parse().expect("un nombre")
+}
+
+/// Crée un compte : une clé d'appareil, sa preuve de possession, et le tour.
+///
+/// Rend le compte, l'appareil, et la clé secrète de l'appareil.
+async fn creer_un_compte(
+    client: &mut ams_quic_client::Client,
+    chaine: &[u8],
+    flux: u64,
+    graine: u8,
+) -> (Identifiant, Identifiant, asl_cle::CleSecrete) {
+    let secrete = asl_cle::CleSecrete::depuis_entropie([graine; 32]);
+    let defi = tirer_le_defi(client, flux).await;
+    let liaison = asl_loop_tokio::liaison_du_certificat(chaine).expect("un certificat de tête");
+    let preuve = secrete.prouver_la_possession(&defi, &liaison);
+
+    let mut corps = Vec::with_capacity(96);
+    corps.extend_from_slice(&secrete.publique().octets());
+    corps.extend_from_slice(preuve.octets());
+
+    let (statut, rendu) = poster(
+        client,
+        flux.saturating_add(4),
+        b"/v1/comptes",
+        &corps,
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+
+    let compte = Identifiant::analyser(&valeur_json(&rendu, "compte")).expect("un identifiant");
+    let appareil = Identifiant::analyser(&valeur_json(&rendu, "appareil")).expect("un identifiant");
+    assert_eq!(compte.genre(), Genre::Utilisateur);
+    assert_eq!(appareil.genre(), Genre::Appareil);
+    (compte, appareil, secrete)
+}
+
+#[tokio::test]
+async fn le_produit_entier_se_monte_par_l_api_et_rien_d_autre() {
+    // ── CE QUE CET ESSAI PROUVE, ET QU'AUCUN AUTRE NE PROUVAIT ──────────────
+    //
+    // Jusqu'ici, tous les essais de résolution ÉCRIVAIENT L'ENTREPÔT À LA MAIN :
+    // comptes, machines, clés et autorisations étaient posés par le harnais,
+    // parce qu'aucun verbe ne savait les créer. L'annuaire était donc éprouvé
+    // sur un état que personne n'aurait pu produire en s'en servant.
+    //
+    // Ici, **rien n'est écrit à la main**. Tout passe par l'API :
+    //
+    //   A crée son compte, déclare une machine, l'enrôle avec le code reçu ;
+    //   B fait de même ; A autorise B ; le daemon d'A annonce son port ;
+    //   la machine de B demande où il est, et l'obtient.
+    //
+    // C'est l'énoncé du produit, du premier geste au dernier, sans qu'aucun
+    // numéro de port n'ait été convenu ni aucune ligne posée sous la table.
+    let (autorite, racine, chaine, cle) = materiel("api");
+    let (base, fichier) = entrepot("api");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    // ── A : COMPTE, MACHINE, ENRÔLEMENT ─────────────────────────────────────
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte_a, _appareil_a, _cle_a) = creer_un_compte(&mut alice, &chaine, 0, 0xA1).await;
+
+    // La connexion est désormais celle de cet appareil : `POST /v1/comptes`
+    // portait déjà sa preuve, et la refaire par `/v1/defi` serait la même
+    // démonstration deux fois.
+    let (statut, rendu) = poster(
+        &mut alice,
+        8,
+        b"/v1/machines",
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let machine_a = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let code_a = valeur_json(&rendu, "code");
+    assert_eq!(code_a.len(), 11, "le code s'affiche groupé : {code_a}");
+    assert!(nombre_json(&rendu, "expire_a") > 0, "le code expire");
+
+    // **LA MACHINE PARLE SUR SA PROPRE CONNEXION**, et elle ne connaît que le
+    // code — pas le compte, pas l'appareil, rien d'autre.
+    let mut daemon = connecter(&racine, adresse).await;
+    let secrete_a = asl_cle::CleSecrete::depuis_entropie([0xD1; 32]);
+    let enrolee = enroler(&mut daemon, &chaine, 0, &code_a, &secrete_a).await;
+    assert_eq!(enrolee, machine_a, "le code désigne la machine d'A");
+
+    // ── B : COMPTE ET MACHINE DE LECTURE ────────────────────────────────────
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, _appareil_b, _cle_b) = creer_un_compte(&mut bob, &chaine, 0, 0xB1).await;
+    let (statut, rendu) = poster(
+        &mut bob,
+        8,
+        b"/v1/machines",
+        br#"{"nom":"portable","capacites":["lecture"]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let machine_b = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let code_b = valeur_json(&rendu, "code");
+
+    let mut chercheur = connecter(&racine, adresse).await;
+    let secrete_b = asl_cle::CleSecrete::depuis_entropie([0xD2; 32]);
+    assert_eq!(
+        enroler(&mut chercheur, &chaine, 0, &code_b, &secrete_b).await,
+        machine_b
+    );
+
+    // ── B CHERCHE AVANT D'ÊTRE AUTORISÉ, ET NE TROUVE RIEN ──────────────────
+    authentifier(&mut chercheur, &chaine, machine_b, &secrete_b, 12, 16).await;
+
+    // ── LE DAEMON D'A ANNONCE ───────────────────────────────────────────────
+    authentifier(&mut daemon, &chaine, machine_a, &secrete_a, 12, 16).await;
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}]}}"#,
+        machine_a.texte()
+    );
+    let (statut, _) = poster(
+        &mut daemon,
+        20,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"200", "l'annonce est prise");
+
+    let cible = format!("/v1/ou/{}/depot", machine_a.texte());
+    ams_quic_client::envoyer_une_requete(&mut chercheur, 20, 17, cible.as_bytes(), None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut chercheur, 20).await;
+    assert_eq!(
+        champ(&champs(chercheur.recu(20)), b":status"),
+        Some(&b"404"[..]),
+        "sans autorisation, B ne trouve rien — et n'apprend pas que ça existe"
+    );
+
+    // ── A AUTORISE B ────────────────────────────────────────────────────────
+    let demande = format!(r#"{{"a":"{}","portee":"tout"}}"#, compte_b.texte());
+    let (statut, rendu) = poster(
+        &mut alice,
+        12,
+        b"/v1/autorisations",
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let accordee =
+        Identifiant::analyser(&valeur_json(&rendu, "autorisation")).expect("une autorisation");
+    assert_eq!(accordee.genre(), Genre::Autorisation);
+
+    // ── ET B TROUVE LE PORT ─────────────────────────────────────────────────
+    ams_quic_client::envoyer_une_requete(&mut chercheur, 24, 17, cible.as_bytes(), None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut chercheur, 24).await;
+    assert_eq!(
+        champ(&champs(chercheur.recu(24)), b":status"),
+        Some(&b"200"[..]),
+        "l'autorisation ouvre le service"
+    );
+    let texte = String::from_utf8_lossy(&rendu);
+    assert!(
+        texte.contains("49152"),
+        "B doit obtenir le port qu'A a annoncé : {texte}"
+    );
+    assert_ne!(compte_a, compte_b, "deux comptes distincts");
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+/// Présente un code et une clé neuve, et rend la machine que le code désignait.
+async fn enroler(
+    client: &mut ams_quic_client::Client,
+    chaine: &[u8],
+    flux: u64,
+    code: &str,
+    secrete: &asl_cle::CleSecrete,
+) -> Identifiant {
+    let defi = tirer_le_defi(client, flux).await;
+    let liaison = asl_loop_tokio::liaison_du_certificat(chaine).expect("un certificat de tête");
+    let preuve = secrete.prouver_la_possession(&defi, &liaison);
+
+    // **DIX SYMBOLES, ET NON ONZE** : le corps porte la forme canonique, sans le
+    // tiret d'affichage. C'est un champ de longueur fixe, comme la clé et la
+    // signature qui le suivent.
+    let sans_tiret: String = code.chars().filter(|c| *c != '-').collect();
+    let mut corps = Vec::with_capacity(106);
+    corps.extend_from_slice(sans_tiret.as_bytes());
+    corps.extend_from_slice(&secrete.publique().octets());
+    corps.extend_from_slice(preuve.octets());
+
+    let (statut, rendu) = poster(
+        client,
+        flux.saturating_add(4),
+        b"/v1/enrolement",
+        &corps,
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"200", "{}", String::from_utf8_lossy(&rendu));
+    Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine")
 }

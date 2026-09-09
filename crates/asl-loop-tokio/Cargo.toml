@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 asl-annuaire.workspace = true
+asl-api.workspace = true
 asl-auth.workspace = true
 asl-cle.workspace = true
 asl-id.workspace = true
@@ -51,6 +52,7 @@ asl-cle.workspace = true
 # no-store` est une entrée de la table statique de QPACK, et ne voyage donc pas
 # en clair sur le fil.
 ams-proto-h3.workspace = true
+asl-auth.workspace = true
 asl-id.workspace = true
 asl-registre.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

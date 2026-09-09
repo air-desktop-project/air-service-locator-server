@@ -109,7 +109,22 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         // qui dit la vérité — la panne est de notre côté.
         let tirer = || entropie::un_defi().ok();
         let nommer = || entropie::un_identifiant().ok();
-        let mut application = Annuaire::new(&entrepot, liaison, &tirer, &nommer);
+        // **LA POSTURE SE DIT AU DÉMARRAGE, ET FORT.** Un annuaire qui laisse
+        // n'importe qui créer un compte doit l'annoncer dans son journal
+        // d'exploitation : c'est là qu'on relit ce qu'on croyait avoir réglé.
+        if reglages.politique == asl_auth::Politique::AttestationFacultative {
+            eprintln!(
+                "asl-server : ATTENTION — l'attestation de plate-forme n'est pas exigée. \
+                 N'IMPORTE QUI peut créer un compte sur cet annuaire."
+            );
+        } else {
+            eprintln!(
+                "asl-server : l'attestation de plate-forme est exigée, et sa vérification \
+                 n'est pas écrite : AUCUN appareil ne pourra s'enrôler."
+            );
+        }
+        let mut application =
+            Annuaire::new(&entrepot, liaison, &tirer, &nommer, reglages.politique);
         let comptes = servir_quic(
             socket,
             tls,

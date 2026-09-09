@@ -31,8 +31,9 @@ use std::path::Path;
 
 use asl_id::Identifiant;
 use asl_registre::{
-    AUTORISATION_OCTETS, Autorisation, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte, ENTREE_OCTETS,
-    EntreeJournal, IDENTIFIANT_OCTETS, MACHINE_OCTETS, Machine, SERVICE_OCTETS, Service,
+    APPAREIL_OCTETS, AUTORISATION_OCTETS, Appareil, Autorisation, CLEF_JOURNAL_OCTETS,
+    COMPTE_OCTETS, Compte, ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement, EntreeJournal,
+    IDENTIFIANT_OCTETS, MACHINE_OCTETS, Machine, SERVICE_OCTETS, Service,
 };
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
@@ -57,6 +58,30 @@ const MACHINES: TableDefinition<'_, &[u8], &[u8; MACHINE_OCTETS]> =
 /// désigne un compte dont l'alias a changé rendrait un identifiant à qui
 /// demanderait l'ancien nom.
 const ALIAS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("alias");
+
+/// Les appareils, par identifiant.
+const APPAREILS: TableDefinition<'_, &[u8], &[u8; APPAREIL_OCTETS]> =
+    TableDefinition::new("appareils");
+
+/// Les codes d'enrôlement en attente, **par empreinte du code**.
+///
+/// # LA CLÉ EST L'EMPREINTE, ET C'EST TOUT LE DISPOSITIF
+///
+/// `POST /v1/enrolement` ne nomme pas la machine : il présente un code. Chercher
+/// par l'empreinte de ce code est donc la seule façon de trouver — et cela
+/// tombe bien, puisque c'est aussi la seule façon de ne pas garder de secret en
+/// clair sur le disque.
+const ENROLEMENTS: TableDefinition<'_, &[u8], &[u8; ENROLEMENT_OCTETS]> =
+    TableDefinition::new("enrolements");
+
+/// L'empreinte du code en cours pour une machine, s'il y en a un.
+///
+/// **AU PLUS UN CODE VIVANT PAR MACHINE.** En émettre un second sans retirer le
+/// premier laisserait deux secrets ouvrir la même porte, dont un que personne
+/// n'attend plus. Cet index est ce qui permet de retrouver le précédent pour
+/// l'effacer — sans lui, il faudrait balayer toute la table.
+const ENROLEMENTS_PAR_MACHINE: TableDefinition<'_, &[u8], &[u8]> =
+    TableDefinition::new("enrolements-par-machine");
 
 /// Les services, par identifiant.
 const SERVICES: TableDefinition<'_, &[u8], &[u8; SERVICE_OCTETS]> =
@@ -229,6 +254,9 @@ impl Entrepot {
             let ecriture = base.begin_write()?;
             ecriture.open_table(COMPTES)?;
             ecriture.open_table(MACHINES)?;
+            ecriture.open_table(APPAREILS)?;
+            ecriture.open_table(ENROLEMENTS)?;
+            ecriture.open_table(ENROLEMENTS_PAR_MACHINE)?;
             ecriture.open_table(ALIAS)?;
             ecriture.open_table(SERVICES)?;
             ecriture.open_table(SERVICES_PAR_NOM)?;
@@ -496,6 +524,139 @@ impl Entrepot {
         Ok(trouvees)
     }
 
+    // ── Les appareils ───────────────────────────────────────────────────────
+
+    /// Écrit cet appareil.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] si la base refuse.
+    pub fn poser_appareil(&self, quel: Identifiant, appareil: &Appareil) -> Result<(), Faute> {
+        let mut octets = [0_u8; APPAREIL_OCTETS];
+        appareil.ecrire(&mut octets);
+        let ecriture = self.base.begin_write()?;
+        {
+            let mut table = ecriture.open_table(APPAREILS)?;
+            table.insert(clef(quel).as_slice(), &octets)?;
+        }
+        ecriture.commit()?;
+        Ok(())
+    }
+
+    /// Cet appareil, s'il existe.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn appareil(&self, quel: Identifiant) -> Result<Option<Appareil>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let table = lecture.open_table(APPAREILS)?;
+        match table.get(clef(quel).as_slice())? {
+            Some(brut) => Ok(Some(
+                Appareil::lire(brut.value()).map_err(Faute::Enregistrement)?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    // ── Les codes d'enrôlement ──────────────────────────────────────────────
+
+    /// Émet un code pour cette machine, **et retire celui qu'elle avait**.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] si la base refuse.
+    pub fn poser_enrolement(&self, empreinte: &[u8], enrolement: &Enrolement) -> Result<(), Faute> {
+        let mut octets = [0_u8; ENROLEMENT_OCTETS];
+        enrolement.ecrire(&mut octets);
+        let clef_machine = clef(enrolement.machine);
+        let ecriture = self.base.begin_write()?;
+        {
+            let mut codes = ecriture.open_table(ENROLEMENTS)?;
+            let mut index = ecriture.open_table(ENROLEMENTS_PAR_MACHINE)?;
+
+            // **LE PRÉCÉDENT MEURT AVEC L'ÉMISSION DU SUIVANT**, et dans la même
+            // transaction : un administrateur qui redemande un code parce qu'il
+            // a perdu le premier ne doit pas laisser derrière lui un secret
+            // vivant que plus personne ne surveille.
+            if let Some(ancienne) = index.get(clef_machine.as_slice())? {
+                codes.remove(ancienne.value())?;
+            }
+            codes.insert(empreinte, &octets)?;
+            index.insert(clef_machine.as_slice(), empreinte)?;
+        }
+        ecriture.commit()?;
+        Ok(())
+    }
+
+    /// Consomme le code de cette empreinte, et rend ce qu'il désignait.
+    ///
+    /// # LIRE ET EFFACER SONT UNE SEULE TRANSACTION
+    ///
+    /// « À usage unique » ne se tient pas en deux temps : deux enrôlements
+    /// simultanés avec le même code liraient tous deux un code vivant, et le
+    /// second effacerait ce que le premier avait déjà consommé. Ils lieraient
+    /// alors DEUX clés à la même machine, dont une que son propriétaire ignore.
+    ///
+    /// Rend `None` si rien ne répond à cette empreinte — un code inconnu et un
+    /// code déjà consommé sont **le même fait**, puisqu'un code consommé est
+    /// supprimé.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn consommer_enrolement(&self, empreinte: &[u8]) -> Result<Option<Enrolement>, Faute> {
+        let ecriture = self.base.begin_write()?;
+        let trouve;
+        {
+            let mut codes = ecriture.open_table(ENROLEMENTS)?;
+            let mut index = ecriture.open_table(ENROLEMENTS_PAR_MACHINE)?;
+            trouve = match codes.remove(empreinte)? {
+                Some(brut) => Some(Enrolement::lire(brut.value()).map_err(Faute::Enregistrement)?),
+                None => None,
+            };
+            if let Some(enrolement) = &trouve {
+                index.remove(clef(enrolement.machine).as_slice())?;
+            }
+        }
+        ecriture.commit()?;
+        Ok(trouve)
+    }
+
+    /// Efface les codes dont la date est passée, et rend combien.
+    ///
+    /// **Un code expiré est refusé de toute façon** — c'est
+    /// `asl_auth::decider_enrolement` qui le dit. Ce balayage ne change donc
+    /// aucune décision : il empêche seulement une table de secrets morts de
+    /// grandir sans fin.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn expirer_les_enrolements(&self, avant: u64) -> Result<usize, Faute> {
+        let ecriture = self.base.begin_write()?;
+        let combien;
+        {
+            let mut codes = ecriture.open_table(ENROLEMENTS)?;
+            let mut index = ecriture.open_table(ENROLEMENTS_PAR_MACHINE)?;
+            let mut condamnes = Vec::new();
+            for entree in codes.iter()? {
+                let (empreinte, valeur) = entree?;
+                let enrolement = Enrolement::lire(valeur.value()).map_err(Faute::Enregistrement)?;
+                if enrolement.expire_a < avant {
+                    condamnes.push((empreinte.value().to_vec(), enrolement.machine));
+                }
+            }
+            for (empreinte, machine) in &condamnes {
+                codes.remove(empreinte.as_slice())?;
+                index.remove(clef(*machine).as_slice())?;
+            }
+            combien = condamnes.len();
+        }
+        ecriture.commit()?;
+        Ok(combien)
+    }
+
     // ── Le journal (C18) ────────────────────────────────────────────────────
 
     /// Journalise cette requête.
@@ -628,6 +789,92 @@ impl Entrepot {
                 machines.remove(clef.as_slice())?;
             }
             combien = combien.saturating_add(condamnees.len());
+
+            // ── LES SERVICES, ET LEUR INDEX PAR NOM ─────────────────────────
+            //
+            // **Ils manquaient**, et C17 dit exactement comment cette contrainte
+            // tombe : « par un `INSERT` ajouté à la hâte, jamais par une
+            // décision ». C'était le cas — un service porte sa provenance depuis
+            // le premier jour, et la rupture ne l'atteignait pas.
+            let mut services = ecriture.open_table(SERVICES)?;
+            let mut par_nom = ecriture.open_table(SERVICES_PAR_NOM)?;
+            let mut condamnes_services = Vec::new();
+            for entree in services.iter()? {
+                let (clef, valeur) = entree?;
+                let service = Service::lire(valeur.value()).map_err(Faute::Enregistrement)?;
+                if service.provenance.vient_de(annuaire) {
+                    condamnes_services.push((
+                        clef.value().to_vec(),
+                        clef_de_nom(service.machine, service.nom.octets()),
+                    ));
+                }
+            }
+            for (clef_service, clef_nom) in &condamnes_services {
+                services.remove(clef_service.as_slice())?;
+                par_nom.remove(clef_nom.as_slice())?;
+            }
+            combien = combien.saturating_add(condamnes_services.len());
+
+            // ── LES AUTORISATIONS, ET L'INDEX DES REÇUES ────────────────────
+            let mut autorisations = ecriture.open_table(AUTORISATIONS)?;
+            let mut recues = ecriture.open_table(AUTORISATIONS_RECUES)?;
+            let mut condamnees_aretes = Vec::new();
+            for entree in autorisations.iter()? {
+                let (clef_brute, valeur) = entree?;
+                let autorisation =
+                    Autorisation::lire(valeur.value()).map_err(Faute::Enregistrement)?;
+                if autorisation.provenance.vient_de(annuaire) {
+                    let quelle = depuis_clef(clef_brute.value())?;
+                    condamnees_aretes.push((
+                        clef_brute.value().to_vec(),
+                        clef_recue(autorisation.a, quelle),
+                    ));
+                }
+            }
+            for (clef_autorisation, clef_index) in &condamnees_aretes {
+                autorisations.remove(clef_autorisation.as_slice())?;
+                recues.remove(clef_index.as_slice())?;
+            }
+            combien = combien.saturating_add(condamnees_aretes.len());
+
+            // ── LES APPAREILS ───────────────────────────────────────────────
+            //
+            // Un appareil ne vient jamais d'ailleurs aujourd'hui — il n'y a rien
+            // à fédérer dans un téléphone. **Il porte sa provenance quand même**,
+            // parce que C17 ne dit pas « tout enregistrement susceptible de
+            // venir d'ailleurs » : un champ qu'on omet parce qu'on croit savoir
+            // qu'il vaudra toujours la même chose est un champ qu'on ajoutera
+            // trop tard.
+            let mut appareils = ecriture.open_table(APPAREILS)?;
+            let mut condamnes_appareils = Vec::new();
+            for entree in appareils.iter()? {
+                let (clef, valeur) = entree?;
+                let appareil = Appareil::lire(valeur.value()).map_err(Faute::Enregistrement)?;
+                if appareil.provenance.vient_de(annuaire) {
+                    condamnes_appareils.push(clef.value().to_vec());
+                }
+            }
+            for clef in &condamnes_appareils {
+                appareils.remove(clef.as_slice())?;
+            }
+            combien = combien.saturating_add(condamnes_appareils.len());
+
+            // ── LES CODES D'ENRÔLEMENT EN ATTENTE ───────────────────────────
+            let mut codes = ecriture.open_table(ENROLEMENTS)?;
+            let mut index = ecriture.open_table(ENROLEMENTS_PAR_MACHINE)?;
+            let mut condamnes_codes = Vec::new();
+            for entree in codes.iter()? {
+                let (empreinte, valeur) = entree?;
+                let enrolement = Enrolement::lire(valeur.value()).map_err(Faute::Enregistrement)?;
+                if enrolement.provenance.vient_de(annuaire) {
+                    condamnes_codes.push((empreinte.value().to_vec(), enrolement.machine));
+                }
+            }
+            for (empreinte, machine) in &condamnes_codes {
+                codes.remove(empreinte.as_slice())?;
+                index.remove(clef(*machine).as_slice())?;
+            }
+            combien = combien.saturating_add(condamnes_codes.len());
         }
         ecriture.commit()?;
         Ok(combien)

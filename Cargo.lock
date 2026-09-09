@@ -166,7 +166,7 @@ name = "asl-auth"
 version = "0.1.0"
 dependencies = [
  "asl-id",
- "subtle",
+ "sha2",
 ]
 
 [[package]]
@@ -195,6 +195,7 @@ dependencies = [
  "ams-quic-tls",
  "ams-tls",
  "asl-annuaire",
+ "asl-api",
  "asl-auth",
  "asl-cle",
  "asl-id",
@@ -226,6 +227,7 @@ name = "asl-server"
 version = "0.1.0"
 dependencies = [
  "ams-quic-client",
+ "asl-auth",
  "asl-cle",
  "asl-id",
  "asl-loop-tokio",
@@ -246,6 +248,7 @@ dependencies = [
  "asl-auth",
  "asl-cle",
  "asl-id",
+ "asl-proto",
  "asl-registre",
 ]
 
@@ -253,6 +256,7 @@ dependencies = [
 name = "asl-store"
 version = "0.1.0"
 dependencies = [
+ "asl-auth",
  "asl-id",
  "asl-registre",
  "redb",

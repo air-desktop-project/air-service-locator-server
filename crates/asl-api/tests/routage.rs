@@ -579,3 +579,35 @@ fn l_annonce_exige_la_capacite_d_annoncer_et_non_celle_de_lire() {
     let lecture = resoudre(Methode::Get, b"/v1/ou?service=imap").expect("la cible se route");
     assert_eq!(lecture.exigence, Exigence::MachineLecture);
 }
+
+// ── La route qui manquait ───────────────────────────────────────────────────
+
+#[test]
+fn l_enrolement_d_une_machine_se_route_et_n_exige_rien() {
+    // **ELLE EST PARLÉE PAR LA MACHINE**, à qui l'annuaire ne connaît encore
+    // rien : c'est le code d'enrôlement qui fait justificatif, et lui seul.
+    let resolu = resoudre(Methode::Post, b"/v1/enrolement").expect("elle se route");
+    assert_eq!(resolu.ressource, Ressource::Enrolement);
+    assert!(resolu.sert);
+    assert_eq!(resolu.exigence, Exigence::Aucune);
+}
+
+#[test]
+fn l_enrolement_ne_sert_que_le_post() {
+    for methode in [Methode::Get, Methode::Put, Methode::Patch, Methode::Delete] {
+        let resolu = resoudre(methode, b"/v1/enrolement").expect("elle se route");
+        assert!(!resolu.sert, "{methode:?}");
+    }
+}
+
+#[test]
+fn l_enrolement_d_une_machine_ne_se_confond_pas_avec_l_emission_d_un_code() {
+    // Les deux verbes sont aux deux bouts du même geste, et n'ont ni le même
+    // public ni la même exigence : celui-ci nomme la machine et exige un
+    // appareil, celui-là ne nomme personne et n'exige rien.
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [3; 16]);
+    let cible = format!("/v1/machines/{}/enrolement", machine.texte());
+    let resolu = resoudre(Methode::Post, cible.as_bytes()).expect("elle se route");
+    assert_eq!(resolu.ressource, Ressource::EnrolementMachine { machine });
+    assert_eq!(resolu.exigence, Exigence::Appareil);
+}

@@ -93,6 +93,25 @@ pub const SIGNATURE_OCTETS: usize = 64;
 /// La taille du message signé.
 pub const MESSAGE_OCTETS: usize = DOMAINE.len() + 1 + 16 + DEFI_OCTETS + LIAISON_OCTETS;
 
+/// Le séparateur de domaine d'une **preuve de possession**.
+///
+/// # POURQUOI UN SECOND DOMAINE PLUTÔT QU'UN CHAMP DE PLUS
+///
+/// Les deux messages ne prouvent pas la même chose. [`DOMAINE`] prouve « je suis
+/// CETTE machine, déjà connue de toi » ; celui-ci prouve « je détiens la clé que
+/// je te présente », et il sert précisément là où l'identifiant N'EXISTE PAS
+/// ENCORE.
+///
+/// **Les séparer empêche qu'une signature de l'un vaille pour l'autre.** Sans
+/// cela, une preuve d'authentification captée sur une connexion vaudrait preuve
+/// de possession sur une autre — et il suffirait d'écouter une machine
+/// s'authentifier pour enrôler sa clé ailleurs.
+pub const DOMAINE_POSSESSION: &[u8] = b"air-service-locator/v1/possession-de-cle\x00";
+
+/// La taille du message d'une preuve de possession.
+pub const MESSAGE_POSSESSION_OCTETS: usize =
+    DOMAINE_POSSESSION.len() + CLE_PUBLIQUE_OCTETS + DEFI_OCTETS + LIAISON_OCTETS;
+
 // ── Les valeurs ─────────────────────────────────────────────────────────────
 
 /// Un défi, tiré par l'annuaire.
@@ -266,6 +285,49 @@ pub fn message_a_signer(
     message
 }
 
+/// Compose le message que signe celui qui prouve détenir une clé.
+///
+/// # C'EST LA CLÉ QUI EST SIGNÉE, ET NON UN IDENTIFIANT
+///
+/// [`message_a_signer`] nomme la machine ; celui-ci ne le peut pas, parce qu'il
+/// sert **avant qu'il y ait un nom** :
+///
+/// — à la création d'un compte, l'identifiant de l'appareil est tiré par
+///   l'annuaire, donc l'appareil ne peut pas le signer ;
+/// — à l'enrôlement d'une machine, la clé est justement ce qu'on vient lier.
+///
+/// Signer la clé qu'on présente prouve exactement ce qu'il faut prouver : que
+/// celui qui parle en détient la partie privée. **Le défi et la liaison de canal
+/// y sont, pour les mêmes raisons qu'ailleurs** — sans le premier la preuve se
+/// rejoue, sans la seconde elle se relaie.
+#[must_use]
+pub fn message_de_possession(
+    cle: &ClePublique,
+    defi: &Defi,
+    liaison: &LiaisonDeCanal,
+) -> [u8; MESSAGE_POSSESSION_OCTETS] {
+    // Même garde qu'au-dessus, et pour la même raison : un champ qui change de
+    // taille sans que la constante suive doit casser la COMPILATION.
+    const _: () = assert!(
+        MESSAGE_POSSESSION_OCTETS
+            == DOMAINE_POSSESSION.len() + CLE_PUBLIQUE_OCTETS + DEFI_OCTETS + LIAISON_OCTETS,
+        "la taille du message de possession ne correspond plus à la somme de ses champs"
+    );
+
+    let publique = cle.octets();
+    let source = DOMAINE_POSSESSION
+        .iter()
+        .chain(publique.iter())
+        .chain(defi.octets().iter())
+        .chain(liaison.octets().iter());
+
+    let mut message = [0_u8; MESSAGE_POSSESSION_OCTETS];
+    for (place, octet) in message.iter_mut().zip(source) {
+        *place = *octet;
+    }
+    message
+}
+
 // ── Les clés ────────────────────────────────────────────────────────────────
 
 /// Ce qui peut clocher.
@@ -273,8 +335,12 @@ pub fn message_a_signer(
 pub enum Faute {
     /// Les octets ne forment pas un point valide de la courbe.
     ClePubliqueInvalide,
-    /// Un identifiant de machine était attendu.
-    PasUneMachine {
+    /// Un identifiant de machine ou d'appareil était attendu.
+    ///
+    /// **Ce sont les deux seuls genres qui SIGNENT.** Un compte ne signe pas —
+    /// il n'a pas de clé, il n'est qu'un jeu d'appareils enrôlés ; un service
+    /// n'en a pas davantage — c'est la machine qui le porte qui signe pour lui.
+    PasUnPair {
         /// Le genre fourni.
         obtenu: Genre,
     },
@@ -321,21 +387,47 @@ impl ClePublique {
     #[must_use]
     pub fn verifie(
         &self,
-        machine: Identifiant,
+        pair: Identifiant,
         defi: &Defi,
         liaison: &LiaisonDeCanal,
         signature: &Signature,
     ) -> bool {
-        // Un identifiant qui n'est pas une machine ne peut pas vérifier : le
-        // genre entre dans le message signé, donc il ne s'agirait pas du même
-        // message. On le refuse ici quand même, pour que la faute se voie.
-        if machine.genre() != Genre::Machine {
+        // Un identifiant qui n'est ni une machine ni un appareil ne peut pas
+        // vérifier : le genre entre dans le message signé, donc il ne s'agirait
+        // pas du même message. On le refuse ici quand même, pour que la faute se
+        // voie.
+        if !est_un_pair(pair.genre()) {
             return false;
         }
-        let message = message_a_signer(machine, defi, liaison);
+        let message = message_a_signer(pair, defi, liaison);
         let signature = SignatureDalek::from_bytes(signature.octets());
         self.0.verify(&message, &signature).is_ok()
     }
+
+    /// Cette signature prouve-t-elle que celui qui parle détient CETTE clé ?
+    ///
+    /// C'est [`message_de_possession`] qui est vérifié, et son en-tête dit
+    /// quand cette preuve-ci sert plutôt que l'autre.
+    ///
+    /// **Aucun genre n'est exigé, parce qu'aucun identifiant n'entre dans le
+    /// message.** C'est tout l'objet : prouver la détention d'une clé qui n'a
+    /// pas encore de nom.
+    #[must_use]
+    pub fn prouve_sa_possession(
+        &self,
+        defi: &Defi,
+        liaison: &LiaisonDeCanal,
+        signature: &Signature,
+    ) -> bool {
+        let message = message_de_possession(self, defi, liaison);
+        let signature = SignatureDalek::from_bytes(signature.octets());
+        self.0.verify(&message, &signature).is_ok()
+    }
+}
+
+/// Ce genre signe-t-il ?
+const fn est_un_pair(genre: Genre) -> bool {
+    matches!(genre, Genre::Machine | Genre::Appareil)
 }
 
 /// La clé secrète d'une machine.
@@ -372,22 +464,33 @@ impl CleSecrete {
     ///
     /// # Erreurs
     ///
-    /// [`Faute::PasUneMachine`]. **Signer avec un identifiant d'un autre genre
-    /// est refusé ici**, et non plus tard : la signature serait valide, mais
-    /// pour un message que l'annuaire ne composera jamais — et le daemon
-    /// chercherait la panne du côté de sa clé.
+    /// [`Faute::PasUnPair`]. **Signer avec un identifiant d'un autre genre est
+    /// refusé ici**, et non plus tard : la signature serait valide, mais pour un
+    /// message que l'annuaire ne composera jamais — et le daemon chercherait la
+    /// panne du côté de sa clé.
     pub fn signer(
         &self,
-        machine: Identifiant,
+        pair: Identifiant,
         defi: &Defi,
         liaison: &LiaisonDeCanal,
     ) -> Result<Signature, Faute> {
-        if machine.genre() != Genre::Machine {
-            return Err(Faute::PasUneMachine {
-                obtenu: machine.genre(),
+        if !est_un_pair(pair.genre()) {
+            return Err(Faute::PasUnPair {
+                obtenu: pair.genre(),
             });
         }
-        let message = message_a_signer(machine, defi, liaison);
+        let message = message_a_signer(pair, defi, liaison);
         Ok(Signature(self.0.sign(&message).to_bytes()))
+    }
+
+    /// Signe la preuve qu'on détient cette clé — celle de [`message_de_possession`].
+    ///
+    /// **Elle ne peut pas échouer**, et c'est la conséquence directe de ce qui
+    /// est signé : il n'y a pas d'identifiant dans ce message, donc pas de genre
+    /// à refuser.
+    #[must_use]
+    pub fn prouver_la_possession(&self, defi: &Defi, liaison: &LiaisonDeCanal) -> Signature {
+        let message = message_de_possession(&self.publique(), defi, liaison);
+        Signature(self.0.sign(&message).to_bytes())
     }
 }
