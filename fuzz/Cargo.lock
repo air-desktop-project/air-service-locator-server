@@ -8,6 +8,7 @@ version = "0.0.0"
 dependencies = [
  "arbitrary",
  "asl-annuaire",
+ "asl-auth",
  "asl-id",
  "asl-proto",
  "libfuzzer-sys",
@@ -28,6 +29,13 @@ version = "0.1.0"
 dependencies = [
  "asl-id",
  "asl-proto",
+]
+
+[[package]]
+name = "asl-auth"
+version = "0.1.0"
+dependencies = [
+ "asl-id",
 ]
 
 [[package]]

@@ -15,8 +15,8 @@ encore ».
 | C6 | L'annuaire n'affirme jamais ce qu'il n'a pas mesuré | Revue, et les noms de l'API |
 | C7 | Aucune donnée biométrique ne traverse le réseau | Revue |
 | C8 | Refus de démarrer en root | Essai |
-| C9 | Réponses en temps constant sur les chemins d'autorisation | Essai — **à écrire** |
-| C10 | Rien ne se lit sans autorisation nominative | Essai — **à écrire** |
+| C9 | Réponses en temps constant sur les chemins d'autorisation | `asl-auth` : le type, et un essai |
+| C10 | Rien ne se lit sans autorisation nominative | `asl-auth` : la forme de la fonction, un essai et une cible de fuzz |
 | C11 | Un annuaire n'accepte d'un pair que ce dont ce pair est l'autorité | Essai — **à écrire** |
 | C12 | La surface publique d'`asl-client` traverse une ABI C, et elle est stable | `check-abi.sh` (dépôt client) |
 | C13 | Aucune donnée personnelle hébergée, hors l'alias public choisi | Revue, et le schéma du magasin |
@@ -216,8 +216,28 @@ construction, ne publient pas leur port : **c'est une cible de reconnaissance**,
 et le seul endroit de ce produit où une fuite d'information est aussi utile à un
 attaquant que le contenu lui-même.
 
-Cela vaut aussi pour la comparaison des secrets de machine : une comparaison qui
+Cela vaut aussi pour la comparaison des codes d'enrôlement : une comparaison qui
 s'arrête au premier octet différent est une fuite.
+
+**DEUX MORCEAUX EXISTENT DANS `asl-auth`, ET UN TROISIÈME MANQUE.**
+
+Le premier est dans le TYPE : `Decision::Refuser` **ne porte aucune raison**. Ce
+n'est pas un oubli — une raison finirait, un jour de hâte, dans une réponse, et
+« vous n'avez pas le droit » distingué de « ce service n'existe pas » est
+exactement la fuite qu'on ferme.
+
+Le second est dans `decider_enrolement` : **la comparaison a lieu même quand
+l'état la rend inutile**. Un `return` anticipé sur un code déjà consommé rendrait
+la réponse plus rapide dans ce cas, et un inconnu qui mesure les temps
+apprendrait si le code qu'il présente existe.
+
+**CE QUI MANQUE, ET QUI EST DIT PLUTÔT QUE TU : Rust ne garantit pas le temps
+constant.** Un compilateur a le droit de remplacer la boucle de comparaison par
+une version qui s'arrête tôt ; `black_box` le lui rend difficile, pas impossible.
+La garantie réelle demande une bibliothèque écrite pour cela — `subtle` — et
+c'est une décision de la tranche de crypto. Écrire « comparaison en temps
+constant » sans cette réserve aurait affirmé une propriété que ce code n'a
+pas.
 
 ## C10 — Rien ne se lit sans autorisation nominative
 
@@ -234,7 +254,17 @@ la faille entière de ce produit, et elle passerait tous les essais qui ne la
 cherchent pas.
 
 Un essai par chemin de lecture, avec un compte tiers non autorisé, est le seul
-contrôle qui vaille. **À écrire avec le premier chemin de lecture.**
+contrôle qui vaille.
+
+**IL EXISTE.** `decider_resolution` prend la machine QUI DEMANDE et la cible
+**déjà résolue** ; elle ne prend jamais ce que la requête désigne. Sa forme rend
+donc la faute difficile à écrire, et un essai la cherche explicitement — un compte
+tiers, une cible qui existe, aucune arête.
+
+**Et une cible de fuzz recalcule la règle depuis les spécifications** plutôt que
+d'appeler la fonction qu'elle éprouve : un harnais qui réutiliserait la même
+logique ne vérifierait que sa propre cohérence, et passerait le jour où les deux
+seraient fausses de la même manière.
 
 ## C11 — Un annuaire n'accepte d'un pair que ce dont ce pair est l'autorité
 

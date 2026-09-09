@@ -92,6 +92,7 @@ fuzz_asl_proto_cadrage cadrage
 fuzz_asl_proto_reponse reponse
 fuzz_asl_proto_poussee poussee
 fuzz_asl_annuaire_session session
+fuzz_asl_auth_decisions decisions
 TABLE
 )
 

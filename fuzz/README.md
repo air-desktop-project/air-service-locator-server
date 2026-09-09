@@ -11,6 +11,7 @@ cran sur une entrée que personne n'a imaginée. C'est la contrainte C3.
 |---|---|---|
 | `fuzz_asl_id_analyser` | `identifiant` | La LECTURE : des octets quelconques vers un identifiant, ou vers un refus. Aller-retour, canonicité, casse, rattrapage de Crockford, accord de `analyser_genre`. |
 | `fuzz_asl_id_aller_retour` | `identifiant` | L'ÉCRITURE : seize octets quelconques vers un texte, et retour. C'est le sens qui compte en production — un identifiant naît d'un tirage. |
+| `fuzz_asl_auth_decisions` | `decisions` | **La propriété dont la chute serait la faille entière du produit** : un service ne se rend qu'à qui y a droit. Le harnais RECALCULE la règle depuis les specs et la compare à la décision — appeler la même logique n'aurait vérifié que sa propre cohérence. |
 | `fuzz_asl_annuaire_session` | `session` | **La seule qui n'éprouve pas un codec** : une MACHINE À ÉTATS, donc des invariants qui doivent tenir après n'importe quelle suite d'événements. Une session close reste close, l'expiration est monotone, et C6 tient quoi qu'il arrive. |
 | `fuzz_asl_proto_valeurs` | `valeurs` | Les trois décodeurs du protocole : protocole, port, nom de service. Le port est celui où une faute coûte le plus cher — un `65536` tronqué vaudrait `0`. |
 | `fuzz_asl_proto_cadrage` | `cadrage` | **La cible qui vaut le plus cher** : des octets ENTIÈREMENT contrôlés par un inconnu vers une annonce, et retour. Aller-retour, idempotence de l'écriture, bornes du tampon de sortie, et le refus des échappements vérifié sur l'entrée. |

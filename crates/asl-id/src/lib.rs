@@ -186,58 +186,76 @@ pub const SYMBOLES: usize = 26;
 /// La longueur totale du texte, en octets : préfixe, tiret, corps.
 pub const LONGUEUR: usize = 2 + SYMBOLES;
 
-/// L'alphabet de Crockford, dans l'ordre des valeurs 0 à 31.
-///
-/// Ni `I`, ni `L`, ni `O` — l'œil les confond avec `1` et `0`. Ni `U`, que
-/// Crockford retire pour qu'aucun tirage ne compose de mot fâcheux.
-const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+pub mod base32 {
+    //! L'alphabet de Crockford, **partagé**.
+    //!
+    //! # Pourquoi il est public
+    //!
+    //! Les identifiants ne sont pas la seule chose de ce produit qu'un humain
+    //! recopie à la main : le **code d'enrôlement** d'une machine se tape sur un
+    //! terminal (`asl-auth`), et il a besoin du même alphabet et du même
+    //! rattrapage.
+    //!
+    //! **Deux copies de cette table finiraient par diverger**, et c'est celle
+    //! qu'on oublie de corriger qui accepterait un caractère que l'autre refuse.
+    //! Elle est donc écrite ICI, une fois.
 
-/// La valeur d'un octet, ou `None` s'il n'appartient pas à l'alphabet.
-///
-/// **C'est ici que le rattrapage de Crockford a lieu** : `I` et `L` valent `1`,
-/// `O` vaut `0`. Une faute de transcription ne coûte donc pas une machine
-/// perdue — c'est la raison d'être de cet alphabet.
-///
-/// `U` est REFUSÉ, et non rattrapé : Crockford l'exclut de l'alphabet, et rien
-/// ne dit vers quoi il faudrait le corriger.
-///
-/// # Pourquoi `wrapping_sub` sur un chemin qui ne peut pas déborder
-///
-/// Le bras du `match` borne déjà l'octet : `octet - b'0'` est exact pour
-/// `b'0'..=b'9'`. Mais `arithmetic_side_effects` est `deny` dans ce workspace, et
-/// **c'est voulu** — les octets viennent du réseau, et la règle ne souffre pas
-/// d'exception « celle-ci est sûre », parce que la suivante ne le sera pas.
-/// `wrapping_sub` dit explicitement qu'aucun débordement n'est attendu ici, et le
-/// bras du `match` en est la preuve.
-const fn valeur(octet: u8) -> Option<u8> {
-    match octet {
-        b'0'..=b'9' => Some(octet.wrapping_sub(b'0')),
-        b'A'..=b'H' | b'a'..=b'h' => Some(
-            octet
-                .to_ascii_uppercase()
-                .wrapping_sub(b'A')
-                .wrapping_add(10),
-        ),
-        b'J' | b'j' => Some(18),
-        b'K' | b'k' => Some(19),
-        b'M' | b'm' => Some(20),
-        b'N' | b'n' => Some(21),
-        b'P' | b'p' => Some(22),
-        b'Q' | b'q' => Some(23),
-        b'R' | b'r' => Some(24),
-        b'S' | b's' => Some(25),
-        b'T' | b't' => Some(26),
-        b'V' | b'v' => Some(27),
-        b'W' | b'w' => Some(28),
-        b'X' | b'x' => Some(29),
-        b'Y' | b'y' => Some(30),
-        b'Z' | b'z' => Some(31),
-        // Le rattrapage de Crockford.
-        b'I' | b'i' | b'L' | b'l' => Some(1),
-        b'O' | b'o' => Some(0),
-        _ => None,
+    /// L'alphabet de Crockford, dans l'ordre des valeurs 0 à 31.
+    ///
+    /// Ni `I`, ni `L`, ni `O` — l'œil les confond avec `1` et `0`. Ni `U`, que
+    /// Crockford retire pour qu'aucun tirage ne compose de mot fâcheux.
+    pub const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+    /// La valeur d'un octet, ou `None` s'il n'appartient pas à l'alphabet.
+    ///
+    /// **C'est ici que le rattrapage de Crockford a lieu** : `I` et `L` valent `1`,
+    /// `O` vaut `0`. Une faute de transcription ne coûte donc pas une machine
+    /// perdue — c'est la raison d'être de cet alphabet.
+    ///
+    /// `U` est REFUSÉ, et non rattrapé : Crockford l'exclut de l'alphabet, et rien
+    /// ne dit vers quoi il faudrait le corriger.
+    ///
+    /// # Pourquoi `wrapping_sub` sur un chemin qui ne peut pas déborder
+    ///
+    /// Le bras du `match` borne déjà l'octet : `octet - b'0'` est exact pour
+    /// `b'0'..=b'9'`. Mais `arithmetic_side_effects` est `deny` dans ce workspace, et
+    /// **c'est voulu** — les octets viennent du réseau, et la règle ne souffre pas
+    /// d'exception « celle-ci est sûre », parce que la suivante ne le sera pas.
+    /// `wrapping_sub` dit explicitement qu'aucun débordement n'est attendu ici, et le
+    /// bras du `match` en est la preuve.
+    #[must_use]
+    pub const fn valeur(octet: u8) -> Option<u8> {
+        match octet {
+            b'0'..=b'9' => Some(octet.wrapping_sub(b'0')),
+            b'A'..=b'H' | b'a'..=b'h' => Some(
+                octet
+                    .to_ascii_uppercase()
+                    .wrapping_sub(b'A')
+                    .wrapping_add(10),
+            ),
+            b'J' | b'j' => Some(18),
+            b'K' | b'k' => Some(19),
+            b'M' | b'm' => Some(20),
+            b'N' | b'n' => Some(21),
+            b'P' | b'p' => Some(22),
+            b'Q' | b'q' => Some(23),
+            b'R' | b'r' => Some(24),
+            b'S' | b's' => Some(25),
+            b'T' | b't' => Some(26),
+            b'V' | b'v' => Some(27),
+            b'W' | b'w' => Some(28),
+            b'X' | b'x' => Some(29),
+            b'Y' | b'y' => Some(30),
+            b'Z' | b'z' => Some(31),
+            // Le rattrapage de Crockford.
+            b'I' | b'i' | b'L' | b'l' => Some(1),
+            b'O' | b'o' => Some(0),
+            _ => None,
+        }
     }
 }
+
+use base32::{ALPHABET, valeur};
 
 /// Le texte canonique d'un identifiant, sans allocation.
 ///
