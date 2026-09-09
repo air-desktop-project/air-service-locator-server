@@ -293,3 +293,136 @@ fn chaque_element_se_decode_comme_une_reponse_seule() {
     assert_eq!(seconde.service, autre);
     assert_eq!(seconde.joignabilite.len(), 1);
 }
+
+// ── Le flux : des objets collés, et un dernier à moitié là ──────────────────
+
+use asl_proto::cadrage::objets;
+
+/// Découpe, et rend les tranches avec le nombre d'octets consommés.
+fn au_fil(octets: &[u8]) -> Result<(Vec<Vec<u8>>, usize), Erreur> {
+    let (trouves, consommes) = objets(octets)?;
+    Ok((trouves.map(<[u8]>::to_vec).collect(), consommes))
+}
+
+#[test]
+fn des_objets_colles_se_decoupent_un_par_un() {
+    // **PAS D'ENVELOPPE** : un tableau attendrait un crochet fermant qui ne
+    // viendra jamais, et un lecteur qui l'attendrait n'afficherait rien.
+    let flux = br#"{"a":1}{"b":2}{"c":3}"#;
+    let (trouves, consommes) = au_fil(flux).expect("ils se lisent");
+    assert_eq!(trouves.len(), 3);
+    assert_eq!(trouves[0].as_slice(), br#"{"a":1}"#);
+    assert_eq!(trouves[2].as_slice(), br#"{"c":3}"#);
+    assert_eq!(consommes, flux.len(), "tout a été consommé");
+}
+
+#[test]
+fn un_dernier_objet_incomplet_n_est_pas_une_faute() {
+    // **C'EST LE CAS ORDINAIRE D'UN FLUX** : un datagramme coupe où il veut.
+    // Le refuser ferait rejeter une poussée parfaitement valide parce que la
+    // suite n'est pas encore arrivée.
+    let flux = br#"{"a":1}{"b":2"#;
+    let (trouves, consommes) = au_fil(flux).expect("le premier se lit");
+    assert_eq!(trouves.len(), 1);
+    assert_eq!(trouves[0].as_slice(), br#"{"a":1}"#);
+    assert_eq!(consommes, 7, "le reste doit être gardé par l'appelant");
+
+    // Et l'appelant qui garde le reste, puis reçoit la suite, obtient l'objet.
+    let mut tampon = flux[consommes..].to_vec();
+    tampon.extend_from_slice(b"}");
+    let (trouves, consommes) = au_fil(&tampon).expect("il se lit maintenant");
+    assert_eq!(trouves.len(), 1);
+    assert_eq!(trouves[0].as_slice(), br#"{"b":2}"#);
+    assert_eq!(consommes, tampon.len());
+}
+
+#[test]
+fn un_tampon_sans_objet_complet_rend_le_vide_et_zero() {
+    // Ce n'est pas une faute, c'est « pas encore ».
+    for partiel in [b"".as_slice(), b"{", br#"{"a""#, br#"{"a":"tex"#] {
+        let (trouves, consommes) = au_fil(partiel).expect("pas de faute");
+        assert!(trouves.is_empty(), "{partiel:?}");
+        assert_eq!(consommes, 0, "{partiel:?}");
+    }
+}
+
+#[test]
+fn les_blancs_qui_suivent_sont_consommes_avec_le_dernier() {
+    // Les garder ferait grandir le tampon d'un octet par poussée, pour rien.
+    let flux = b"{\"a\":1}\n {\"b\":2}\n";
+    let (trouves, consommes) = au_fil(flux).expect("ils se lisent");
+    assert_eq!(trouves.len(), 2);
+    assert_eq!(consommes, flux.len());
+}
+
+#[test]
+fn une_accolade_dans_une_chaine_ne_coupe_pas_un_objet_du_flux() {
+    // Même piège que pour un tableau, et il compte davantage ici : un flux se
+    // relit indéfiniment, et une coupure au mauvais endroit décale tout ce qui
+    // suit.
+    let flux = br#"{"nom":"}{"}{"apres":1}"#;
+    let (trouves, consommes) = au_fil(flux).expect("ils se lisent");
+    assert_eq!(trouves.len(), 2, "l'accolade de la chaîne a coupé");
+    assert_eq!(trouves[0].as_slice(), br#"{"nom":"}{"}"#);
+    assert_eq!(consommes, flux.len());
+}
+
+#[test]
+fn une_chaine_jamais_close_attend_au_lieu_de_refuser() {
+    let (trouves, consommes) = au_fil(br#"{"a":"sans fin"#).expect("pas de faute");
+    assert!(trouves.is_empty());
+    assert_eq!(consommes, 0);
+
+    // Un échappement en dernière position, aussi : `\` attend son caractère.
+    let (trouves, consommes) = au_fil(br#"{"a":"x\"#).expect("pas de faute");
+    assert!(trouves.is_empty());
+    assert_eq!(consommes, 0);
+}
+
+#[test]
+fn ce_qui_ne_commence_pas_une_valeur_est_refuse() {
+    // **ICI, C'EST BIEN UNE FAUTE** : un flux qui commence par une virgule ne
+    // deviendra pas valide en attendant.
+    assert!(matches!(au_fil(b","), Err(Erreur::ListeMalFormee { .. })));
+    assert!(matches!(
+        au_fil(br#"{"a":1},{"b":2}"#),
+        Err(Erreur::ListeMalFormee { .. })
+    ));
+}
+
+#[test]
+fn au_dela_de_la_borne_il_s_arrete_et_l_appelant_revient() {
+    // **ON S'ARRÊTE AU LIEU DE TRONQUER** : celui qui draine ce qu'on lui rend
+    // reviendra chercher la suite, et rien n'est perdu.
+    let un = br#"{"a":1}"#;
+    let mut flux = Vec::new();
+    for _ in 0..(LISTE_MAX + 5) {
+        flux.extend_from_slice(un);
+    }
+    let (trouves, consommes) = au_fil(&flux).expect("il s'arrête sans se plaindre");
+    assert_eq!(trouves.len(), LISTE_MAX);
+    assert_eq!(consommes, LISTE_MAX * un.len());
+
+    let (suite, _) = au_fil(&flux[consommes..]).expect("et la suite vient");
+    assert_eq!(suite.len(), 5);
+}
+
+#[test]
+fn un_flux_plus_long_que_le_message_maximal_est_refuse() {
+    let brut = vec![b'x'; asl_proto::cadrage::MESSAGE_MAX + 1];
+    assert!(matches!(au_fil(&brut), Err(Erreur::MessageTropLong { .. })));
+}
+
+#[test]
+fn un_tableau_tronque_reste_une_faute() {
+    // La tolérance est celle du FLUX, et elle ne déteint pas sur `elements` :
+    // dans un tableau, un élément est arrivé entier ou il ne vaut rien.
+    assert!(matches!(
+        decouper(br#"[{"a":1},{"b":2"#),
+        Err(Erreur::ListeMalFormee { .. })
+    ));
+    assert!(matches!(
+        decouper(br#"[{"a":"sans fin"#),
+        Err(Erreur::ListeMalFormee { .. })
+    ));
+}

@@ -22,10 +22,22 @@
 //!    l'identique — et se redécoupe en les mêmes tranches. Sans cela, le serveur
 //!    et le client ne parleraient pas de la même liste.
 //! 4. **LA BORNE TIENT** : jamais plus de `LISTE_MAX` tranches.
+//!
+//! # ET LE FLUX, QUI TOLÈRE L'INCOMPLET
+//!
+//! `objets` lit le même genre d'octets, avec une règle en moins : le dernier
+//! objet peut être à moitié là. **C'est là que se cache la faute qui coûterait
+//! cher** — un flux se relit indéfiniment, et une coupure au mauvais endroit
+//! décale tout ce qui suit, pour toujours.
+//!
+//! 5. **CE QUI EST CONSOMMÉ EST EXACTEMENT CE QU'ON A RENDU.** Les tranches
+//!    tiennent dans le préfixe consommé, et relire ce préfixe seul rend les
+//!    mêmes tranches, et le consomme entier. Sans cela, l'appelant qui draine
+//!    perdrait un octet à chaque fois — ou en garderait un de trop.
 
 #![no_main]
 
-use asl_proto::cadrage::{Liste, elements};
+use asl_proto::cadrage::{Liste, elements, objets};
 use asl_proto::{LISTE_MAX, cadrage::MESSAGE_MAX};
 use libfuzzer_sys::fuzz_target;
 
@@ -74,6 +86,39 @@ fuzz_target!(|donnees: &[u8]| {
         }
     };
     sortie.truncate(combien);
+
+    // ── 5. LE FLUX ─────────────────────────────────────────────────────────
+    if let Ok((au_fil, consommes)) = objets(donnees) {
+        let au_fil: Vec<&[u8]> = au_fil.collect();
+        assert!(consommes <= donnees.len(), "consommé au-delà du tampon");
+        assert!(au_fil.len() <= LISTE_MAX);
+
+        let mut precedente = debut;
+        for tranche in &au_fil {
+            let ou = tranche.as_ptr() as usize;
+            assert!(!tranche.is_empty(), "une tranche vide n'est pas un objet");
+            assert!(ou >= precedente, "les objets se chevauchent ou reculent");
+            assert!(
+                ou.saturating_add(tranche.len()) <= debut.saturating_add(consommes),
+                "un objet rendu déborde de ce qui est consommé"
+            );
+            precedente = ou.saturating_add(tranche.len());
+        }
+
+        // **RELIRE LE PRÉFIXE CONSOMMÉ REND LA MÊME CHOSE, ENTIÈREMENT.**
+        let prefixe = donnees.get(..consommes).unwrap_or_default();
+        let (encore, tout) = objets(prefixe).expect("un préfixe complet se relit");
+        let encore: Vec<&[u8]> = encore.collect();
+        assert_eq!(
+            encore.len(),
+            au_fil.len(),
+            "le préfixe rend un autre compte"
+        );
+        assert_eq!(tout, consommes, "le préfixe n'est pas consommé entier");
+        for (avant, apres) in au_fil.iter().zip(encore.iter()) {
+            assert_eq!(avant, apres, "un objet a changé à la relecture");
+        }
+    }
 
     let redecoupees: Vec<&[u8]> = elements(&sortie)
         .expect("ce qu'on vient de composer se relit")

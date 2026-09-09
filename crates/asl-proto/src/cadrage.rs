@@ -1575,7 +1575,13 @@ pub fn elements(octets: &[u8]) -> Result<impl Iterator<Item = &[u8]>, Erreur> {
     loop {
         lecteur.sauter_blancs();
         let debut = lecteur.position();
-        sauter_une_valeur(&mut lecteur)?;
+        // **DANS UN TABLEAU, UN ÉLÉMENT TRONQUÉ EST UNE FAUTE** : il est arrivé
+        // entier ou il ne vaut rien. C'est le flux qui tolère l'incomplet.
+        if !sauter_une_valeur(&mut lecteur)? {
+            return Err(Erreur::ListeMalFormee {
+                position: lecteur.position(),
+            });
+        }
         let fin = lecteur.position();
 
         // **CE CHEMIN NE PEUT PAS ÉCHOUER** : `debut` et `fin` viennent du même
@@ -1615,13 +1621,23 @@ pub fn elements(octets: &[u8]) -> Result<impl Iterator<Item = &[u8]>, Erreur> {
 
 /// Avance le lecteur au-delà d'une valeur, sans l'interpréter.
 ///
+/// Rend `Ok(false)` quand les octets s'arrêtent AU MILIEU d'une valeur.
+///
+/// # POURQUOI « INCOMPLET » N'EST PAS UNE FAUTE
+///
+/// Dans un tableau, ç'en est une : il est arrivé entier ou il ne vaut rien.
+/// **Dans un flux, non** — [`objets`] lit ce qui est arrivé jusqu'ici, et le
+/// dernier objet est presque toujours à moitié là. Les confondre ferait refuser
+/// une poussée parfaitement valide parce qu'un datagramme n'est pas encore
+/// arrivé.
+///
 /// # LES CHAÎNES SONT SUIVIES, ET C'EST TOUT L'ENJEU
 ///
 /// Un `}` à l'intérieur d'une chaîne ne ferme rien. Un découpage qui compterait
 /// naïvement les accolades couperait un élément en deux au premier nom de
 /// service qui en contient une — et rendrait deux moitiés qui ne se décodent
 /// pas, ou pire, qui se décodent en autre chose.
-fn sauter_une_valeur(lecteur: &mut Lecteur<'_>) -> Result<(), Erreur> {
+fn sauter_une_valeur(lecteur: &mut Lecteur<'_>) -> Result<bool, Erreur> {
     let mal_formee = |lecteur: &Lecteur<'_>| Erreur::ListeMalFormee {
         position: lecteur.position(),
     };
@@ -1631,11 +1647,15 @@ fn sauter_une_valeur(lecteur: &mut Lecteur<'_>) -> Result<(), Erreur> {
 
     loop {
         let Some(octet) = lecteur.regarder() else {
-            return Err(mal_formee(lecteur));
+            return Ok(false);
         };
 
         match octet {
-            b'"' => sauter_une_chaine(lecteur)?,
+            b'"' => {
+                if !sauter_une_chaine(lecteur) {
+                    return Ok(false);
+                }
+            }
             b'{' | b'[' => {
                 profondeur = profondeur.saturating_add(1);
                 lecteur.avancer();
@@ -1649,7 +1669,7 @@ fn sauter_une_valeur(lecteur: &mut Lecteur<'_>) -> Result<(), Erreur> {
                 profondeur = profondeur.saturating_sub(1);
                 lecteur.avancer();
                 if profondeur == 0 {
-                    return Ok(());
+                    return Ok(true);
                 }
             }
             b',' if profondeur == 0 => {
@@ -1657,44 +1677,124 @@ fn sauter_une_valeur(lecteur: &mut Lecteur<'_>) -> Result<(), Erreur> {
                 return if lecteur.position() == debut {
                     Err(mal_formee(lecteur))
                 } else {
-                    Ok(())
+                    Ok(true)
                 };
             }
             _ => lecteur.avancer(),
         }
 
         if profondeur == 0 && lecteur.position() > debut && lecteur.regarder() == Some(b']') {
-            return Ok(());
+            return Ok(true);
         }
     }
 }
 
 /// Avance au-delà d'une chaîne, échappements compris.
-fn sauter_une_chaine(lecteur: &mut Lecteur<'_>) -> Result<(), Erreur> {
+///
+/// Rend `false` quand les octets s'arrêtent au milieu — voir
+/// [`sauter_une_valeur`].
+///
+/// # ELLE NE RATE PAS, ELLE S'ARRÊTE
+///
+/// Une chaîne qu'on parcourt sans l'interpréter n'a rien à refuser : ce qui n'est
+/// pas un guillemet fermant est un caractère de plus. **Le seul cas hors du
+/// commun est de manquer d'octets**, et c'en est un du flux, pas une faute. Un
+/// `Result` aurait posé une branche que rien ne peut atteindre.
+fn sauter_une_chaine(lecteur: &mut Lecteur<'_>) -> bool {
     lecteur.avancer();
     loop {
         match lecteur.regarder() {
-            None => {
-                return Err(Erreur::ListeMalFormee {
-                    position: lecteur.position(),
-                });
-            }
+            None => return false,
             // **UN `\"` NE FERME PAS LA CHAÎNE**, et un `\\` juste avant le
             // guillemet, si. C'est la seule subtilité de ce parcours.
             Some(b'\\') => {
                 lecteur.avancer();
                 if lecteur.regarder().is_none() {
-                    return Err(Erreur::ListeMalFormee {
-                        position: lecteur.position(),
-                    });
+                    return false;
                 }
                 lecteur.avancer();
             }
             Some(b'"') => {
                 lecteur.avancer();
-                return Ok(());
+                return true;
             }
             Some(_) => lecteur.avancer(),
         }
     }
+}
+
+/// Découpe les objets COMPLETS d'un flux, et dit combien d'octets ils occupent.
+///
+/// # POURQUOI CE N'EST PAS [`elements`]
+///
+/// `elements` lit un tableau : des crochets, des virgules, et tout est arrivé.
+/// C'est la forme des verbes de liste, qui rendent tout d'un coup.
+///
+/// **Le flux des poussées n'a pas de fin** (`protocole.md` §1.4). Un tableau y
+/// attendrait un crochet fermant qui ne viendra jamais, et un lecteur qui
+/// l'attendrait n'afficherait rien. Les objets s'y suivent donc SANS ENVELOPPE,
+/// et il faut savoir lire un préfixe dont le dernier est à moitié là.
+///
+/// # CE QU'IL REND, ET COMMENT ON S'EN SERT
+///
+/// Les objets complets, et le nombre d'octets qu'ils occupent. **L'appelant
+/// garde le reste** et le remet devant les octets suivants :
+///
+/// ```text
+/// let (objets, consommes) = cadrage::objets(&tampon)?;
+/// for objet in objets { … }
+/// tampon.drain(..consommes);
+/// ```
+///
+/// Un tampon qui ne porte aucun objet complet rend une suite vide et zéro : ce
+/// n'est pas une faute, c'est « pas encore ».
+///
+/// # Erreurs
+///
+/// [`Erreur::MessageTropLong`], [`Erreur::ListeMalFormee`] si ce qui commence
+/// n'est pas une valeur, [`Erreur::TropDElements`].
+pub fn objets(octets: &[u8]) -> Result<(impl Iterator<Item = &[u8]>, usize), Erreur> {
+    if octets.len() > MESSAGE_MAX {
+        return Err(Erreur::MessageTropLong {
+            obtenue: octets.len(),
+        });
+    }
+
+    let mut tranches: [&[u8]; crate::LISTE_MAX] = [&[]; crate::LISTE_MAX];
+    let mut combien = 0_usize;
+    let mut consommes = 0_usize;
+
+    let mut lecteur = Lecteur::nouveau(octets);
+    loop {
+        lecteur.sauter_blancs();
+        if lecteur.regarder().is_none() {
+            // Les blancs qui suivent le dernier objet sont consommés avec lui :
+            // les garder ferait grandir le tampon d'un octet par poussée.
+            consommes = lecteur.position();
+            break;
+        }
+
+        let debut = lecteur.position();
+        if !sauter_une_valeur(&mut lecteur)? {
+            // **INCOMPLET, ET CE N'EST PAS UNE FAUTE** : ce qui manque arrivera.
+            break;
+        }
+        let fin = lecteur.position();
+
+        // **CE CHEMIN NE PEUT PAS ÉCHOUER** : `debut` et `fin` viennent du même
+        // lecteur, sur les mêmes octets. Le repli est le vide, et un objet vide
+        // ne se décode pas.
+        let tranche = octets.get(debut..fin).unwrap_or(&[]);
+
+        match tranches.get_mut(combien) {
+            Some(place) => *place = tranche,
+            // **ON S'ARRÊTE AU LIEU DE TRONQUER**, comme pour un tableau. Un
+            // appelant qui draine ce qu'on lui rend reviendra chercher la suite.
+            None => break,
+        }
+        combien = combien.saturating_add(1);
+        consommes = fin;
+    }
+
+    Ok((tranches.into_iter().take(combien), consommes))
 }
