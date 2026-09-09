@@ -17,8 +17,27 @@ ams-proto-quic.workspace = true
 ams-quic.workspace = true
 ams-quic-tls.workspace = true
 
-[dev-dependencies]
+# `ams-tls` EST UNE VRAIE DÉPENDANCE, ET NON UNE DÉPENDANCE D'ESSAI. Elle
+# monte la configuration TLS, et surtout elle porte l'ALPN `h3` : voir
+# `configuration_tls`, qui existe pour qu'on ne puisse pas l'oublier.
 ams-tls.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+# LE HARNAIS D'ESSAI D'`air-mail-server`, ET ICI C'EST SA PLACE EXACTE.
+#
+# Cette crate n'est pas une bibliothèque cliente — c'est le constat de la tranche
+# précédente, et c'est pour cela qu'elle n'est pas dans `[dependencies]`. Mais
+# **c'est un vrai client QUIC**, qui parle sur une vraie socket : rien d'autre ne
+# peut éprouver cette boucle de bout en bout.
+ams-quic-client.workspace = true
+
+# Pour DÉCODER la réponse plutôt que d'y chercher des octets : `cache-control:
+# no-store` est une entrée de la table statique de QPACK, et ne voyage donc pas
+# en clair sur le fil.
+ams-proto-h3.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true

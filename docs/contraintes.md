@@ -154,7 +154,12 @@ nous ne savons rien.
   aucune implémentation, donc elle n'entre en conflit avec rien.
 
 - **La borne chiffrée est fixée : 120 unités construites**, et le graphe en
-  compte **99** au 2026-09-09, dont 89 tierces.
+  compte **107** au 2026-09-09, dont 97 tierces.
+
+  Le relevé se lit ainsi : **30 avant la greffe QUIC, 99 après, 107 une fois la
+  boucle UDP posée** — `tokio` et ses dépendances. Il reste treize unités avant
+  la borne, et **c'est l'entrepôt qui les demandera**. La conversation aura donc
+  lieu au bon moment, ce qui est exactement ce qu'un nombre sert à provoquer.
 
   Elle porte sur ce qui est **construit**, jamais sur ce qui est résolu — voir
   ci-dessous pourquoi la distinction n'est pas une subtilité. Elle laisse une

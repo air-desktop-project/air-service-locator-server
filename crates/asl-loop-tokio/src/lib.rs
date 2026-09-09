@@ -28,64 +28,58 @@
 //! cliente : elle expose un `atelier()` qui crée un répertoire temporaire, un
 //! `materiel()` qui fabrique des certificats, des identifiants de connexion
 //! fixes, et une constante qui annonce qu'elle EXIGE openssl. C'est un harnais
-//! d'essai, et rien de cela n'a sa place dans un produit.
+//! d'essai — et c'est comme tel qu'on l'emploie, en dépendance de
+//! développement, pour éprouver cette boucle de bout en bout.
 //!
-//! # ÉTAT : LE PONT, ET RIEN D'AUTRE ENCORE
+//! # LES TROIS PIÈCES
 //!
-//! Ce qui manque pour qu'un serveur tourne est nommé, pour qu'on ne le
-//! redécouvre pas : la socket UDP et le routage des paquets vers les connexions,
-//! l'horloge des délais de renvoi, et **la question qui n'est pas tranchée — d'où
-//! viennent les certificats.** Un serveur QUIC en présente un ; le produit n'a
-//! pas encore dit s'il est auto-signé, obtenu par ACME, ou fourni par
-//! l'administrateur de l'annuaire.
+//! | Module | Ce qu'il fait |
+//! |---|---|
+//! | [`quic`] | La socket, la carte des connexions, la boucle, l'extinction. |
+//! | [`pont`] | Marie `ams_h3::Transport` et `ams_quic_tls::Connection`. |
+//! | [`h3`] | Présente `asl-session` à `ams-h3`, connexion par connexion. |
+//!
+//! # CE QUI MANQUE ENCORE
+//!
+//! L'entrepôt. `asl-session` route et refuse correctement ; tout ce qui se route
+//! rend `501`, parce qu'aucune ressource de cette API ne se sert sans état.
 
-use ams_h3::Transport;
-use ams_proto_quic::{Directional, StreamId};
-use ams_quic::RecvState;
-use ams_quic_tls::Connection;
+pub mod h3;
+pub mod pont;
+pub mod quic;
 
-/// Le pont entre HTTP/3 et une connexion QUIC.
+pub use h3::Annuaire;
+pub use pont::Pont;
+pub use quic::{
+    Application, Comptes, GRACE_EXTINCTION_US, SansApplication, maintenant, servir_quic,
+};
+
+/// Monte la configuration TLS d'un annuaire, ALPN comprise.
 ///
-/// # POURQUOI UN TYPE À NOUS PLUTÔT QU'UNE IMPLÉMENTATION DIRECTE
+/// # POURQUOI CETTE FONCTION EXISTE, ALORS QU'`ams-tls` FAIT DÉJÀ LE GROS
 ///
-/// [`ams_h3::Transport`] appartient à `ams-h3`, [`Connection`] à `ams-quic-tls` :
-/// aucun des deux n'est à nous, et la règle de l'orphelin interdit de les marier
-/// ailleurs que chez l'un d'eux. **Ce n'est pas une gêne, c'est le bon endroit** :
-/// l'assemblage demande une vraie connexion pour être éprouvé, et sa place est
-/// donc à l'étage qui en tient une.
+/// `ams_tls::quic_server_config` monte tout **sauf l'ALPN**, et le dit : « le
+/// protocole applicatif est une décision de la couche du dessus ». Pour ce
+/// produit, cette décision est déjà prise et il n'y en a qu'une — **nous ne
+/// parlons que HTTP/3**.
 ///
-/// Il ne décide de rien : chaque méthode transmet, et traduit l'erreur du
-/// transport en l'erreur qu'`ams-h3` sait lire.
-pub struct Pont<'a>(pub &'a mut Connection);
-
-impl Transport for Pont<'_> {
-    fn open_uni(&mut self) -> Result<StreamId, ams_h3::Error> {
-        self.0
-            .open_stream(Directional::Unidirectional)
-            .map_err(|_| ams_h3::Error::transport())
-    }
-
-    fn read(&mut self, flux: StreamId, vers: &mut [u8]) -> usize {
-        self.0.read(flux, vers)
-    }
-
-    fn write(&mut self, flux: StreamId, octets: &[u8]) -> Result<usize, ams_h3::Error> {
-        self.0
-            .write(flux, octets)
-            .map_err(|_| ams_h3::Error::transport())
-    }
-
-    fn reset(&mut self, flux: StreamId, code: u64) -> Result<(), ams_h3::Error> {
-        self.0
-            .reset(flux, code)
-            .map_err(|_| ams_h3::Error::transport())
-    }
-
-    fn finish(&mut self, flux: StreamId) -> Result<(), ams_h3::Error> {
-        self.0.finish(flux).map_err(|_| ams_h3::Error::transport())
-    }
-
-    fn recv_state(&self, flux: StreamId) -> Option<RecvState> {
-        self.0.recv_state(flux)
-    }
+/// Une configuration sans ALPN se construit, démarre, et échoue à la première
+/// poignée de main : le client propose `h3`, le serveur n'offre rien, et §3.1 de
+/// RFC 9114 impose l'échec. L'erreur arrive alors loin du fichier où l'oubli a
+/// eu lieu.
+///
+/// **Ce qu'on ne peut pas exprimer ne peut pas être faux** : il n'y a pas de
+/// paramètre, donc pas d'oubli possible.
+///
+/// # Errors
+///
+/// Chaîne illisible ou vide, clé illisible, ou clé qui ne correspond pas au
+/// certificat de tête.
+pub fn configuration_tls(
+    chaine_pem: &[u8],
+    cle_pem: &[u8],
+) -> Result<rustls::ServerConfig, ams_tls::MaterialError> {
+    let mut configuration = ams_tls::quic_server_config(chaine_pem, cle_pem)?;
+    configuration.alpn_protocols = ams_tls::alpn_h3();
+    Ok(configuration)
 }

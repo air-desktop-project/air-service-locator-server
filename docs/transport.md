@@ -105,12 +105,15 @@ demande une vraie connexion pour être éprouvé.
 
 ## 5. Ce que la greffe coûte, mesuré
 
-|  | Avant | Après |
-|---|---|---|
-| Paquets **résolus** | 32 | **120** |
-| Unités **construites** | 30 | **99** |
-| dont tierces | 21 | **89** |
-| Objets C produits | 0 | **0** |
+|  | Avant | Après la greffe | Avec la boucle |
+|---|---|---|---|
+| Paquets **résolus** | 32 | 120 | **130** |
+| Unités **construites** | 30 | 99 | **107** |
+| dont tierces | 21 | 89 | **97** |
+| Objets C produits | 0 | 0 | **0** |
+
+La boucle UDP a coûté huit unités — `tokio` et ses dépendances. La borne de C4
+est à 120 : il en reste treize, et **c'est l'entrepôt qui les demandera**.
 
 Le graphe est donc multiplié par quatre. C'est le prix d'une pile QUIC et
 HTTP/3 complète en Rust pur, et il faut le mettre en regard de ce qu'il évite :
@@ -172,9 +175,9 @@ panne.
 
 Nommé ici pour ne pas être redécouvert :
 
-- **La socket UDP et le routage des paquets vers les connexions** — c'est le
-  gros de `asl-loop-tokio`, et il n'existe pas encore.
-- **L'horloge des délais de renvoi**, et l'expiration des connexions.
+- ~~La socket UDP et le routage des paquets vers les connexions.~~ **Fait** :
+  `asl-loop-tokio::quic`, et §9 ci-dessous.
+- ~~L'horloge des délais de renvoi.~~ **Faite**, dans la même boucle.
 - ~~D'où viennent les certificats.~~ **Tranché le 2026-09-09 — voir §8.**
 - **L'entrepôt.** `asl-session` route et refuse correctement ; tout ce qui se
   route rend `501`, parce qu'aucune ressource de cette API ne se sert sans état.
@@ -263,3 +266,79 @@ Ils n'ouvrent jamais la racine réelle : `ASL_CA` déplace la cérémonie, et
   est une racine de développement. Le certificat de la vraie racine sera à
   épingler dans `asl-client`, et sa clé privée relève d'une cérémonie hors ligne
   qui reste à écrire.
+
+---
+
+## 9. La boucle UDP : ce qui a été écrit, et ce qui ne l'a pas été
+
+Écrite le **2026-09-09**, dans `asl-loop-tokio`.
+
+### Trois modules, et aucun ne décide
+
+| Module | Ce qu'il fait |
+|---|---|
+| `quic` | La socket, la carte des connexions, la boucle, l'extinction en deux temps. |
+| `pont` | Marie `ams_h3::Transport` et `ams_quic_tls::Connection`. |
+| `h3` | Présente `asl-session` à `ams-h3`, connexion par connexion. |
+
+### Une seule tâche, et non une par connexion
+
+TCP donne une socket par connexion ; UDP n'en donne qu'une pour tout le monde.
+Une tâche par connexion demanderait de recopier chaque datagramme vers une file
+et de partager la socket d'émission — **deux synchronisations pour un travail
+qui tient dans une boucle**.
+
+La contrepartie est réelle : une connexion coûteuse retarde les autres. Elle est
+tenable parce qu'aucune ne fait d'entrée-sortie — l'étage 2 ne peut pas, par
+construction.
+
+### Ce qui diffère d'`air-mail-server`, et pourquoi
+
+**Pas de garde anti-abus.** `ams-loop-tokio` consulte `ams-guard` avant
+d'accepter un `Initial`, et passe une `Source` à chaque rendez-vous de son
+`Application`. Nous n'avons pas ce garde, et le trait porte donc une
+`SocketAddr` — **pour une raison qui n'est pas la sienne** : l'adresse d'où un
+daemon parle est de la DONNÉE pour l'annuaire (`Origine`, `VuDepuis` dans
+`asl-proto`), la seule qu'on ait constatée plutôt qu'entendue.
+
+**Une session par connexion.** `asl_session::Session` portera la machine
+authentifiée, et la connexion QUIC **est** le bail : une session partagée entre
+connexions ferait hériter une requête des droits d'une autre.
+
+### `configuration_tls`, pour qu'un ALPN ne s'oublie pas
+
+`ams_tls::quic_server_config` monte tout sauf l'ALPN, et le dit. Une
+configuration qui l'oublie se construit, démarre, et échoue à la première
+poignée de main — loin du fichier où l'oubli a eu lieu. Notre fonction n'a pas
+de paramètre : **ce qu'on ne peut pas exprimer ne peut pas être faux.**
+
+### CE QUI EST ÉPROUVÉ, ET COMMENT
+
+Quatre essais d'intégration, dont deux qui font tourner **la chaîne entière** :
+la cérémonie frappe un certificat, `configuration_tls` le monte, `servir_quic`
+écoute sur une vraie socket UDP, et un vrai client QUIC — `ams-quic-client`,
+employé ici comme ce qu'il est — monte la poignée de main et envoie une requête.
+
+Ils affirment sur les champs **décodés**, jamais sur des octets. La première
+version cherchait `no-store` dans la charge du flux et échouait : `cache-control:
+no-store` est une entrée de la table statique de QPACK, donc il voyage sur un
+seul octet d'index et la chaîne n'apparaît jamais sur le fil. **Un essai qui
+cherche des octets ne distingue pas « absent » de « mieux encodé que je ne
+croyais ».**
+
+Ils vérifient aussi que le corps fait exactement la longueur annoncée — ce qui
+éprouve, sur le fil, la réservation que le fuzz avait imposée à
+`asl_session::composer`.
+
+### Ce que la boucle ne fait pas, et qu'il ne faut pas croire
+
+- **Elle ne suit pas les migrations** (§9 de RFC 9000). Une connexion qui change
+  d'adresse cesse d'être servie : les suivre demande de valider le nouveau
+  chemin, faute de quoi un paquet rejoué ferait rediriger le trafic vers une
+  victime. Ici s'ajoute une raison de produit — une adresse qui change en
+  silence ferait annoncer un service à une adresse que personne n'a vérifiée.
+- **Elle ne négocie pas de version** (§6.1). Elle n'en sert qu'une, et jette ce
+  qui demande autre chose ; §6.2 prévoit que le client abandonne.
+- **Elle n'a aucune défense par source.** La seule borne est le nombre de
+  connexions vivantes, qui vient de l'appelant. C'est une borne de MÉMOIRE, pas
+  une protection contre un pair hostile qui ouvrirait des connexions valides.

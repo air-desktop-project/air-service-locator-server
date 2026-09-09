@@ -6,7 +6,7 @@
 #
 # Elle n'avait rien à examiner tant que le graphe ne contenait que nos crates.
 # `ed25519-dalek` y est entrée d'abord, puis **la pile QUIC et HTTP/3** : le
-# graphe compte aujourd'hui 99 unités construites, dont 89 tierces. C4 fixe la
+# graphe compte aujourd'hui 107 unités construites, dont 97 tierces. C4 fixe la
 # borne à 120, et `docs/contraintes.md` dit pourquoi un nombre plutôt qu'une
 # règle qualitative.
 #
