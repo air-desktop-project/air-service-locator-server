@@ -503,6 +503,236 @@ impl Machine {
     }
 }
 
+// ── Le service ──────────────────────────────────────────────────────────────
+
+/// Ce qu'un service occupe.
+pub const SERVICE_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + 1 + NOM_OCTETS_MAX;
+
+/// Un service DÉCLARÉ sur une machine.
+///
+/// # CE QU'IL PORTE, ET CE QU'IL NE PORTE SURTOUT PAS
+///
+/// **Ni port, ni adresse, ni état.** Un service durable est une DÉCLARATION :
+/// « cette machine sert quelque chose qui s'appelle ainsi ». Ce qu'il écoute et
+/// s'il répond sont de l'état VIVANT, tenu par `asl-annuaire` et reconstruit à
+/// chaque connexion — `modele.md` le décide, et le schéma est ce qui l'exécute.
+///
+/// Ranger un port ici ferait de l'annuaire un menteur au premier redémarrage
+/// d'un daemon : il annoncerait un port que plus personne n'écoute, sans même
+/// savoir qu'il l'annonce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Service {
+    /// D'où vient cet enregistrement.
+    pub provenance: Provenance,
+    /// La machine qui le sert.
+    pub machine: Identifiant,
+    /// Son nom, tel que ses clients le demandent.
+    pub nom: NomRange,
+}
+
+impl Service {
+    /// Écrit ce service.
+    pub fn ecrire(&self, sortie: &mut [u8; SERVICE_OCTETS]) {
+        self.provenance
+            .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
+        let apres_machine = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+        ecrire_identifiant(
+            self.machine,
+            sortie
+                .get_mut(PROVENANCE_OCTETS..apres_machine)
+                .unwrap_or_default(),
+        );
+        self.nom
+            .ecrire(sortie.get_mut(apres_machine..).unwrap_or_default());
+    }
+
+    /// Relit un service.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un service.
+    pub fn lire(octets: &[u8; SERVICE_OCTETS]) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        let apres_machine = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+        let machine = lire_identifiant(
+            octets
+                .get(PROVENANCE_OCTETS..apres_machine)
+                .unwrap_or_default(),
+            Genre::Machine,
+        )?;
+        let nom = NomRange::lire(octets.get(apres_machine..).unwrap_or_default())?;
+        Ok(Self {
+            provenance,
+            machine,
+            nom,
+        })
+    }
+}
+
+// ── L'autorisation ──────────────────────────────────────────────────────────
+
+/// Ce qu'une portée occupe.
+pub const PORTEE_OCTETS: usize = 1 + IDENTIFIANT_OCTETS;
+
+/// Jusqu'où une autorisation porte.
+///
+/// **C'est le miroir d'`asl_auth::Portee`**, et il faut dire pourquoi il y en a
+/// deux. Celui-là DÉCIDE et vit à l'étage 2 ; celui-ci RANGE et vit à l'étage 1.
+/// Les fondre renverserait la dépendance — une grammaire qui tirerait une
+/// machine à états.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Portee {
+    /// Tout ce que le compte possède, présent et à venir.
+    ToutLeCompte,
+    /// Cette machine, et tous ses services.
+    UneMachine(Identifiant),
+    /// Ce service, et lui seul.
+    UnService(Identifiant),
+}
+
+impl Portee {
+    /// Les étiquettes, sur le disque.
+    const TOUT: u8 = 0;
+    /// Une machine.
+    const MACHINE: u8 = 1;
+    /// Un service.
+    const SERVICE: u8 = 2;
+
+    /// Écrit cette portée. Occupe [`PORTEE_OCTETS`].
+    fn ecrire(self, sortie: &mut [u8]) {
+        let (etiquette, quoi) = match self {
+            Self::ToutLeCompte => (Self::TOUT, None),
+            Self::UneMachine(machine) => (Self::MACHINE, Some(machine)),
+            Self::UnService(service) => (Self::SERVICE, Some(service)),
+        };
+        poser_un(sortie, etiquette);
+        let corps = sortie.get_mut(1..).unwrap_or_default();
+        match quoi {
+            Some(designe) => ecrire_identifiant(designe, corps),
+            // Le bourrage à zéro, pour la raison écrite sur `bourrage_nul`.
+            None => corps.fill(0),
+        }
+    }
+
+    /// Relit une portée.
+    fn lire(octets: &[u8]) -> Result<Self, Faute> {
+        let corps = octets.get(1..).unwrap_or_default();
+        match octets.first().copied().unwrap_or(0) {
+            Self::TOUT => {
+                if bourrage_nul(corps) {
+                    Ok(Self::ToutLeCompte)
+                } else {
+                    Err(Faute::Bourrage)
+                }
+            }
+            Self::MACHINE => Ok(Self::UneMachine(lire_identifiant(corps, Genre::Machine)?)),
+            Self::SERVICE => Ok(Self::UnService(lire_identifiant(corps, Genre::Service)?)),
+            lue => Err(Faute::Etiquette { lue }),
+        }
+    }
+}
+
+/// Ce qu'une autorisation occupe.
+pub const AUTORISATION_OCTETS: usize =
+    PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS + PORTEE_OCTETS + 1;
+
+/// Une arête entre deux comptes.
+///
+/// # ELLE EST RÉVOQUÉE, JAMAIS EFFACÉE
+///
+/// **C'est une décision, pas une commodité.** Une autorisation effacée ne laisse
+/// aucune trace : on ne peut plus dire si elle a existé, ni quand elle a cessé.
+/// Un drapeau garde l'arête et son histoire, et `asl_auth::Autorisation::couvre`
+/// refuse tout ce qui est révoqué.
+///
+/// C'est aussi ce qui permet à l'utilisateur de VOIR ce qu'il a retiré, plutôt
+/// que de constater une absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Autorisation {
+    /// D'où vient cet enregistrement.
+    pub provenance: Provenance,
+    /// Le compte qui accorde.
+    pub par: Identifiant,
+    /// Le compte qui reçoit.
+    pub a: Identifiant,
+    /// Jusqu'où elle porte.
+    pub portee: Portee,
+    /// A-t-elle été retirée ?
+    pub revoquee: bool,
+}
+
+impl Autorisation {
+    /// Écrit cette autorisation.
+    pub fn ecrire(&self, sortie: &mut [u8; AUTORISATION_OCTETS]) {
+        let mut curseur = 0_usize;
+        let mut tranche = |combien: usize| {
+            let debut = curseur;
+            curseur = curseur.saturating_add(combien);
+            debut..curseur
+        };
+        let provenance = tranche(PROVENANCE_OCTETS);
+        self.provenance
+            .ecrire(sortie.get_mut(provenance).unwrap_or_default());
+        let par = tranche(IDENTIFIANT_OCTETS);
+        ecrire_identifiant(self.par, sortie.get_mut(par).unwrap_or_default());
+        let a = tranche(IDENTIFIANT_OCTETS);
+        ecrire_identifiant(self.a, sortie.get_mut(a).unwrap_or_default());
+        let portee = tranche(PORTEE_OCTETS);
+        self.portee
+            .ecrire(sortie.get_mut(portee).unwrap_or_default());
+        let revoquee = tranche(1);
+        poser_un(
+            sortie.get_mut(revoquee).unwrap_or_default(),
+            u8::from(self.revoquee),
+        );
+    }
+
+    /// Relit une autorisation.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas une autorisation.
+    pub fn lire(octets: &[u8; AUTORISATION_OCTETS]) -> Result<Self, Faute> {
+        let mut curseur = 0_usize;
+        let mut prendre = |combien: usize| {
+            let debut = curseur;
+            curseur = curseur.saturating_add(combien);
+            debut..curseur
+        };
+        let provenance =
+            Provenance::lire(octets.get(prendre(PROVENANCE_OCTETS)).unwrap_or_default())?;
+        let par = lire_identifiant(
+            octets.get(prendre(IDENTIFIANT_OCTETS)).unwrap_or_default(),
+            Genre::Utilisateur,
+        )?;
+        let a = lire_identifiant(
+            octets.get(prendre(IDENTIFIANT_OCTETS)).unwrap_or_default(),
+            Genre::Utilisateur,
+        )?;
+        let portee = Portee::lire(octets.get(prendre(PORTEE_OCTETS)).unwrap_or_default())?;
+        // **NI 0 NI 1 EST UNE CORRUPTION**, et non « vrai par défaut ». Un
+        // booléen relu de travers sur une décision d'autorisation est
+        // exactement ce qu'on ne veut pas deviner.
+        let revoquee = match octets
+            .get(prendre(1))
+            .and_then(<[u8]>::first)
+            .copied()
+            .unwrap_or(0)
+        {
+            0 => false,
+            1 => true,
+            lue => return Err(Faute::Etiquette { lue }),
+        };
+        Ok(Self {
+            provenance,
+            par,
+            a,
+            portee,
+            revoquee,
+        })
+    }
+}
+
 // ── Le journal (C18) ────────────────────────────────────────────────────────
 
 /// Ce qu'une requête a obtenu.
@@ -693,9 +923,10 @@ mod tests {
     use asl_id::{Genre, Identifiant};
 
     use super::{
-        ALIAS_OCTETS_MAX, AliasRange, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte, Court,
-        ENTREE_OCTETS, EntreeJournal, Faute, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange,
-        PROVENANCE_OCTETS, Provenance, Verdict,
+        ALIAS_OCTETS_MAX, AUTORISATION_OCTETS, AliasRange, Autorisation, CLEF_JOURNAL_OCTETS,
+        COMPTE_OCTETS, Compte, Court, ENTREE_OCTETS, EntreeJournal, Faute, IDENTIFIANT_OCTETS,
+        MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, PROVENANCE_OCTETS, Portee, Provenance,
+        SERVICE_OCTETS, Service, Verdict,
     };
 
     /// Un identifiant de ce genre, reproductible.
@@ -742,6 +973,20 @@ mod tests {
                 maximum: ALIAS_OCTETS_MAX,
             })
         );
+    }
+
+    #[test]
+    fn le_bourrage_vaut_aussi_pour_un_nom_de_service() {
+        // **DEUX INSTANCIATIONS, DEUX FONCTIONS** : éprouver le bourrage sur la
+        // taille d'un alias ne dit rien de celle d'un nom de service.
+        let mut octets = [0_u8; 1 + NOM_OCTETS_MAX];
+        octets[0] = 4;
+        octets[1] = b'i';
+        octets[2] = b'm';
+        octets[3] = b'a';
+        octets[4] = b'p';
+        octets[40] = 0xFF;
+        assert_eq!(NomRange::lire(&octets), Err(Faute::Bourrage));
     }
 
     #[test]
@@ -1021,6 +1266,197 @@ mod tests {
         let mut octets = [0_u8; MACHINE_OCTETS];
         octets[0] = 9;
         assert_eq!(Machine::lire(&octets), Err(Faute::Etiquette { lue: 9 }));
+    }
+
+    // ── Service ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn un_service_se_relit_entier() {
+        let service = Service {
+            provenance: Provenance::Ici,
+            machine: un(Genre::Machine, 4),
+            nom: NomRange::nouveau("depot-de-messages").expect("il tient"),
+        };
+        let mut sortie = [0_u8; SERVICE_OCTETS];
+        service.ecrire(&mut sortie);
+        assert_eq!(Service::lire(&sortie), Ok(service));
+    }
+
+    #[test]
+    fn un_service_dont_la_machine_n_en_est_pas_une_est_refuse() {
+        let mut octets = [0_u8; SERVICE_OCTETS];
+        octets[PROVENANCE_OCTETS] = Genre::Utilisateur.prefixe();
+        assert_eq!(
+            Service::lire(&octets),
+            Err(Faute::Genre {
+                attendu: Genre::Machine
+            })
+        );
+    }
+
+    #[test]
+    fn un_service_au_nom_corrompu_est_refuse() {
+        let mut octets = [0_u8; SERVICE_OCTETS];
+        octets[PROVENANCE_OCTETS] = Genre::Machine.prefixe();
+        octets[PROVENANCE_OCTETS + IDENTIFIANT_OCTETS] = 250;
+        assert_eq!(
+            Service::lire(&octets),
+            Err(Faute::Longueur {
+                annoncee: 250,
+                maximum: NOM_OCTETS_MAX,
+            })
+        );
+    }
+
+    #[test]
+    fn une_provenance_corrompue_refuse_le_service_entier() {
+        let mut octets = [0_u8; SERVICE_OCTETS];
+        octets[0] = 9;
+        assert_eq!(Service::lire(&octets), Err(Faute::Etiquette { lue: 9 }));
+    }
+
+    // ── Portée et autorisation ──────────────────────────────────────────────
+
+    /// Une autorisation, reproductible.
+    fn une_autorisation(portee: Portee) -> Autorisation {
+        Autorisation {
+            provenance: Provenance::Ici,
+            par: un(Genre::Utilisateur, 1),
+            a: un(Genre::Utilisateur, 2),
+            portee,
+            revoquee: false,
+        }
+    }
+
+    #[test]
+    fn les_trois_portees_se_relisent() {
+        for portee in [
+            Portee::ToutLeCompte,
+            Portee::UneMachine(un(Genre::Machine, 5)),
+            Portee::UnService(un(Genre::Service, 6)),
+        ] {
+            let autorisation = une_autorisation(portee);
+            let mut sortie = [0_u8; AUTORISATION_OCTETS];
+            autorisation.ecrire(&mut sortie);
+            assert_eq!(Autorisation::lire(&sortie), Ok(autorisation), "{portee:?}");
+        }
+    }
+
+    #[test]
+    fn une_autorisation_revoquee_se_relit_revoquee() {
+        // **ELLE EST RÉVOQUÉE, JAMAIS EFFACÉE** : sans ce drapeau, on ne
+        // pourrait plus dire qu'elle a existé.
+        let mut autorisation = une_autorisation(Portee::ToutLeCompte);
+        autorisation.revoquee = true;
+        let mut sortie = [0_u8; AUTORISATION_OCTETS];
+        autorisation.ecrire(&mut sortie);
+        assert_eq!(Autorisation::lire(&sortie), Ok(autorisation));
+    }
+
+    #[test]
+    fn une_portee_de_tout_le_compte_ne_garde_aucun_reste() {
+        // Sinon l'identifiant d'une portée précédente resterait sur le disque.
+        let large = une_autorisation(Portee::UneMachine(un(Genre::Machine, 5)));
+        let mut sortie = [0_u8; AUTORISATION_OCTETS];
+        large.ecrire(&mut sortie);
+        let tout = une_autorisation(Portee::ToutLeCompte);
+        tout.ecrire(&mut sortie);
+        assert_eq!(Autorisation::lire(&sortie), Ok(tout));
+    }
+
+    #[test]
+    fn une_etiquette_de_portee_inconnue_est_refusee() {
+        let autorisation = une_autorisation(Portee::ToutLeCompte);
+        let mut octets = [0_u8; AUTORISATION_OCTETS];
+        autorisation.ecrire(&mut octets);
+        let place = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS;
+        octets[place] = 7;
+        assert_eq!(
+            Autorisation::lire(&octets),
+            Err(Faute::Etiquette { lue: 7 })
+        );
+    }
+
+    #[test]
+    fn une_portee_de_tout_le_compte_au_bourrage_sale_est_refusee() {
+        let autorisation = une_autorisation(Portee::ToutLeCompte);
+        let mut octets = [0_u8; AUTORISATION_OCTETS];
+        autorisation.ecrire(&mut octets);
+        let place = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS + 3;
+        octets[place] = 0xAA;
+        assert_eq!(Autorisation::lire(&octets), Err(Faute::Bourrage));
+    }
+
+    #[test]
+    fn une_portee_de_machine_exige_un_genre_machine() {
+        let autorisation = une_autorisation(Portee::UnService(un(Genre::Service, 1)));
+        let mut octets = [0_u8; AUTORISATION_OCTETS];
+        autorisation.ecrire(&mut octets);
+        let place = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS;
+        octets[place] = Portee::MACHINE;
+        assert_eq!(
+            Autorisation::lire(&octets),
+            Err(Faute::Genre {
+                attendu: Genre::Machine
+            })
+        );
+    }
+
+    #[test]
+    fn une_portee_de_service_exige_un_genre_service() {
+        let autorisation = une_autorisation(Portee::UneMachine(un(Genre::Machine, 1)));
+        let mut octets = [0_u8; AUTORISATION_OCTETS];
+        autorisation.ecrire(&mut octets);
+        let place = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS;
+        octets[place] = Portee::SERVICE;
+        assert_eq!(
+            Autorisation::lire(&octets),
+            Err(Faute::Genre {
+                attendu: Genre::Service
+            })
+        );
+    }
+
+    #[test]
+    fn un_drapeau_de_revocation_qui_n_est_ni_0_ni_1_est_refuse() {
+        // **PAS DE « VRAI PAR DÉFAUT ».** Un booléen relu de travers sur une
+        // décision d'autorisation est exactement ce qu'on ne veut pas deviner.
+        let autorisation = une_autorisation(Portee::ToutLeCompte);
+        let mut octets = [0_u8; AUTORISATION_OCTETS];
+        autorisation.ecrire(&mut octets);
+        let dernier = AUTORISATION_OCTETS - 1;
+        octets[dernier] = 2;
+        assert_eq!(
+            Autorisation::lire(&octets),
+            Err(Faute::Etiquette { lue: 2 })
+        );
+    }
+
+    #[test]
+    fn les_deux_comptes_d_une_autorisation_doivent_etre_des_utilisateurs() {
+        for place in [PROVENANCE_OCTETS, PROVENANCE_OCTETS + IDENTIFIANT_OCTETS] {
+            let autorisation = une_autorisation(Portee::ToutLeCompte);
+            let mut octets = [0_u8; AUTORISATION_OCTETS];
+            autorisation.ecrire(&mut octets);
+            octets[place] = Genre::Machine.prefixe();
+            assert_eq!(
+                Autorisation::lire(&octets),
+                Err(Faute::Genre {
+                    attendu: Genre::Utilisateur
+                }),
+                "à l'octet {place}"
+            );
+        }
+    }
+
+    #[test]
+    fn une_provenance_corrompue_refuse_l_autorisation_entiere() {
+        let mut octets = [0_u8; AUTORISATION_OCTETS];
+        octets[0] = 9;
+        assert_eq!(
+            Autorisation::lire(&octets),
+            Err(Faute::Etiquette { lue: 9 })
+        );
     }
 
     // ── Journal ─────────────────────────────────────────────────────────────

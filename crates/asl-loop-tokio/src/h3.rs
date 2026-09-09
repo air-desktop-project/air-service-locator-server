@@ -37,7 +37,8 @@ use ams_proto_http::RequestHead;
 use ams_proto_quic::StreamId;
 use ams_quic_tls::Connection;
 use asl_cle::{ClePublique, Defi, LiaisonDeCanal};
-use asl_session::{Besoin, Session, Trouvaille};
+use asl_id::Identifiant;
+use asl_session::{Besoin, Resolution, Session, Trouvaille};
 use asl_store::Entrepot;
 
 use crate::pont::Pont;
@@ -123,6 +124,16 @@ impl Service<'_> {
                 },
                 Ok(None) | Err(_) => Trouvaille::Rien,
             },
+            // ── LA RÉSOLUTION : QUATRE LECTURES, ET TOUTES OU AUCUNE ──────
+            //
+            // Décider avec trois sur quatre n'aurait pas de sens : si l'une
+            // manque, on rend `Rien`, et `asl-session` répond `404` — le même
+            // `404` qu'un refus, pour que rien ne dise à qui essaie ce qui
+            // existe.
+            Besoin::Ou { machine, service } => self
+                .rassembler(*machine, service)
+                .map_or(Trouvaille::Rien, Trouvaille::Resolution),
+
             Besoin::CompteParAlias(alias) => match self.entrepot.compte_par_alias(alias) {
                 Ok(Some(qui)) => match self.entrepot.compte(qui) {
                     Ok(Some(compte)) => Trouvaille::Compte {
@@ -137,6 +148,66 @@ impl Service<'_> {
                 Ok(None) | Err(_) => Trouvaille::Rien,
             },
         }
+    }
+}
+
+impl Service<'_> {
+    /// Rassemble ce qu'il faut pour décider d'une résolution.
+    ///
+    /// # POURQUOI TANT DE LECTURES POUR UNE QUESTION SI SIMPLE
+    ///
+    /// « Où est ce service ? » se décide sur quatre faits : ce que le demandeur
+    /// a le DROIT de faire (ses capacités), à QUI il appartient, à qui appartient
+    /// ce qu'il vise, et ce qu'on lui a accordé. Aucun ne se déduit des autres.
+    ///
+    /// **Un seul manquant, et l'on ne décide pas** : rendre `None` fait répondre
+    /// `404`, exactement comme un refus.
+    fn rassembler(&self, machine: Identifiant, nom: &str) -> Option<Resolution> {
+        // Le demandeur : c'est la machine qui a prouvé sa clé sur CETTE
+        // connexion, jamais une machine qu'une requête nommerait.
+        let qui = self.session.machine()?;
+        let demandeur = self.entrepot.machine(qui).ok().flatten()?;
+        let demandeur = asl_auth::Machine::nouvelle(
+            qui,
+            demandeur.proprietaire,
+            asl_auth::Capacites {
+                annonce: demandeur.annonce,
+                lecture: demandeur.lecture,
+            },
+        )
+        .ok()?;
+
+        let service = self.entrepot.service_par_nom(machine, nom).ok().flatten()?;
+        let visee = self.entrepot.machine(machine).ok().flatten()?;
+        let cible = asl_auth::Cible::nouvelle(service, machine, visee.proprietaire).ok()?;
+
+        let autorisations = self
+            .entrepot
+            .autorisations_recues(demandeur.proprietaire())
+            .ok()?
+            .into_iter()
+            .filter_map(|quoi| {
+                asl_auth::Autorisation::nouvelle(
+                    quoi.par,
+                    quoi.a,
+                    match quoi.portee {
+                        asl_registre::Portee::ToutLeCompte => asl_auth::Portee::ToutLeCompte,
+                        asl_registre::Portee::UneMachine(quelle) => {
+                            asl_auth::Portee::UneMachine(quelle)
+                        }
+                        asl_registre::Portee::UnService(quel) => asl_auth::Portee::UnService(quel),
+                    },
+                    quoi.revoquee,
+                )
+                .ok()
+            })
+            .collect();
+
+        Some(Resolution {
+            demandeur,
+            cible,
+            autorisations,
+        })
     }
 }
 

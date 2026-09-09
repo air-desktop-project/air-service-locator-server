@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 asl-api.workspace = true
+asl-auth.workspace = true
 asl-cle.workspace = true
 asl-id.workspace = true
 asl-registre.workspace = true

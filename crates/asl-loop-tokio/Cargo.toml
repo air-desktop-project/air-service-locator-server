@@ -8,7 +8,10 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+asl-auth.workspace = true
 asl-cle.workspace = true
+asl-id.workspace = true
+asl-registre.workspace = true
 asl-session.workspace = true
 asl-store.workspace = true
 ams-proto-http.workspace = true

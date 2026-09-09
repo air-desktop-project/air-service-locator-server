@@ -344,3 +344,190 @@ fn rompre_ne_touche_jamais_au_journal() {
     );
     let _ = std::fs::remove_file(&chemin);
 }
+
+// ── Les services ────────────────────────────────────────────────────────────
+
+/// Un service de cette machine, sous ce nom.
+fn service(machine: Identifiant, nom: &str) -> asl_registre::Service {
+    asl_registre::Service {
+        provenance: Provenance::Ici,
+        machine,
+        nom: NomRange::nouveau(nom).expect("il tient"),
+    }
+}
+
+#[test]
+fn un_service_se_relit_par_son_identifiant_et_par_son_nom() {
+    let (base, chemin) = entrepot("service");
+    let machine = un(Genre::Machine, 1);
+    let quel = un(Genre::Service, 1);
+    base.poser_service(quel, &service(machine, "imap"))
+        .expect("écrit");
+
+    assert_eq!(
+        base.service(quel).expect("lisible"),
+        Some(service(machine, "imap"))
+    );
+    assert_eq!(
+        base.service_par_nom(machine, "imap").expect("lisible"),
+        Some(quel)
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn deux_machines_peuvent_servir_le_meme_nom() {
+    // **C'EST LA RAISON DE LA CLÉ COMPOSÉE.** Un nom de service n'est unique que
+    // sur SA machine ; deux machines qui servent toutes deux `imap` est le cas
+    // ordinaire, pas une collision.
+    let (base, chemin) = entrepot("homonymes");
+    let une = un(Genre::Machine, 1);
+    let autre = un(Genre::Machine, 2);
+    base.poser_service(un(Genre::Service, 1), &service(une, "imap"))
+        .expect("écrit");
+    base.poser_service(un(Genre::Service, 2), &service(autre, "imap"))
+        .expect("écrit");
+
+    assert_eq!(
+        base.service_par_nom(une, "imap").expect("lisible"),
+        Some(un(Genre::Service, 1))
+    );
+    assert_eq!(
+        base.service_par_nom(autre, "imap").expect("lisible"),
+        Some(un(Genre::Service, 2))
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn renommer_un_service_retire_l_ancien_nom_de_l_index() {
+    let (base, chemin) = entrepot("renomme");
+    let machine = un(Genre::Machine, 1);
+    let quel = un(Genre::Service, 1);
+    base.poser_service(quel, &service(machine, "avant"))
+        .expect("écrit");
+    base.poser_service(quel, &service(machine, "apres"))
+        .expect("réécrit");
+
+    assert_eq!(
+        base.service_par_nom(machine, "apres").expect("lisible"),
+        Some(quel)
+    );
+    assert_eq!(
+        base.service_par_nom(machine, "avant").expect("lisible"),
+        None,
+        "l'ancien nom rend encore un identifiant"
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn un_service_qu_aucune_machine_ne_sert_est_introuvable() {
+    let (base, chemin) = entrepot("service-absent");
+    assert_eq!(base.service(un(Genre::Service, 9)).expect("lisible"), None);
+    assert_eq!(
+        base.service_par_nom(un(Genre::Machine, 9), "rien")
+            .expect("lisible"),
+        None
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+// ── Les autorisations ───────────────────────────────────────────────────────
+
+/// Une autorisation de `par` à `a`, de cette portée.
+fn autorisation(
+    par: Identifiant,
+    a: Identifiant,
+    portee: asl_registre::Portee,
+) -> asl_registre::Autorisation {
+    asl_registre::Autorisation {
+        provenance: Provenance::Ici,
+        par,
+        a,
+        portee,
+        revoquee: false,
+    }
+}
+
+#[test]
+fn les_autorisations_recues_sont_celles_du_beneficiaire_et_pas_d_un_autre() {
+    let (base, chemin) = entrepot("recues");
+    let donneur = un(Genre::Utilisateur, 1);
+    let beneficiaire = un(Genre::Utilisateur, 2);
+    let etranger = un(Genre::Utilisateur, 3);
+
+    base.poser_autorisation(
+        un(Genre::Autorisation, 1),
+        &autorisation(donneur, beneficiaire, asl_registre::Portee::ToutLeCompte),
+    )
+    .expect("écrit");
+    base.poser_autorisation(
+        un(Genre::Autorisation, 2),
+        &autorisation(donneur, etranger, asl_registre::Portee::ToutLeCompte),
+    )
+    .expect("écrit");
+
+    let siennes = base.autorisations_recues(beneficiaire).expect("lisible");
+    assert_eq!(siennes.len(), 1, "{siennes:?}");
+    assert_eq!(siennes.first().map(|quoi| quoi.a), Some(beneficiaire));
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn un_meme_beneficiaire_peut_en_recevoir_plusieurs() {
+    // **SANS L'AUTORISATION EN QUEUE DE CLÉ**, la seconde écraserait la
+    // première — et l'on n'en verrait qu'une, celle qui par malchance
+    // n'accorderait pas ce qu'il fallait.
+    let (base, chemin) = entrepot("plusieurs");
+    let beneficiaire = un(Genre::Utilisateur, 2);
+    for (rang, portee) in [
+        (1_u8, asl_registre::Portee::ToutLeCompte),
+        (2, asl_registre::Portee::UneMachine(un(Genre::Machine, 1))),
+        (3, asl_registre::Portee::UnService(un(Genre::Service, 1))),
+    ] {
+        base.poser_autorisation(
+            un(Genre::Autorisation, rang),
+            &autorisation(un(Genre::Utilisateur, 1), beneficiaire, portee),
+        )
+        .expect("écrit");
+    }
+    assert_eq!(
+        base.autorisations_recues(beneficiaire)
+            .expect("lisible")
+            .len(),
+        3
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn une_autorisation_revoquee_reste_visible() {
+    // Elle est révoquée, jamais effacée : c'est `asl-auth` qui l'écarte, et la
+    // cacher ici priverait l'utilisateur de voir ce qu'il a retiré.
+    let (base, chemin) = entrepot("revoquee");
+    let beneficiaire = un(Genre::Utilisateur, 2);
+    let mut retiree = autorisation(
+        un(Genre::Utilisateur, 1),
+        beneficiaire,
+        asl_registre::Portee::ToutLeCompte,
+    );
+    retiree.revoquee = true;
+    base.poser_autorisation(un(Genre::Autorisation, 1), &retiree)
+        .expect("écrit");
+
+    let siennes = base.autorisations_recues(beneficiaire).expect("lisible");
+    assert_eq!(siennes.first().map(|quoi| quoi.revoquee), Some(true));
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn un_compte_sans_autorisation_en_recoit_une_liste_vide() {
+    let (base, chemin) = entrepot("aucune");
+    assert!(
+        base.autorisations_recues(un(Genre::Utilisateur, 7))
+            .expect("lisible")
+            .is_empty()
+    );
+    let _ = std::fs::remove_file(&chemin);
+}

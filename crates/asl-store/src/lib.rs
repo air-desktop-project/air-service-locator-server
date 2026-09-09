@@ -31,8 +31,8 @@ use std::path::Path;
 
 use asl_id::Identifiant;
 use asl_registre::{
-    CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte, ENTREE_OCTETS, EntreeJournal, IDENTIFIANT_OCTETS,
-    MACHINE_OCTETS, Machine,
+    AUTORISATION_OCTETS, Autorisation, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte, ENTREE_OCTETS,
+    EntreeJournal, IDENTIFIANT_OCTETS, MACHINE_OCTETS, Machine, SERVICE_OCTETS, Service,
 };
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
@@ -57,6 +57,37 @@ const MACHINES: TableDefinition<'_, &[u8], &[u8; MACHINE_OCTETS]> =
 /// désigne un compte dont l'alias a changé rendrait un identifiant à qui
 /// demanderait l'ancien nom.
 const ALIAS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("alias");
+
+/// Les services, par identifiant.
+const SERVICES: TableDefinition<'_, &[u8], &[u8; SERVICE_OCTETS]> =
+    TableDefinition::new("services");
+
+/// L'index des services d'une machine : `machine ‖ nom` vers l'identifiant.
+///
+/// # POURQUOI CETTE CLÉ COMPOSÉE, ET NON DEUX TABLES
+///
+/// `/v1/ou/{machine}/{service}` demande un service PAR SON NOM sur une machine
+/// donnée. Sans cet index, il faudrait balayer tous les services pour trouver
+/// celui-là — et le balayage grandit avec l'annuaire entier, quand la réponse ne
+/// dépend que d'une machine.
+///
+/// **La machine en tête n'est pas un détail** : elle fait que les services d'une
+/// même machine se suivent, donc que « tous les services de cette machine » est
+/// un intervalle et non un balayage.
+const SERVICES_PAR_NOM: TableDefinition<'_, &[u8], &[u8]> =
+    TableDefinition::new("services-par-nom");
+
+/// Les autorisations, par identifiant.
+const AUTORISATIONS: TableDefinition<'_, &[u8], &[u8; AUTORISATION_OCTETS]> =
+    TableDefinition::new("autorisations");
+
+/// L'index des autorisations reçues : `bénéficiaire ‖ autorisation`.
+///
+/// **C'EST LE SENS DANS LEQUEL ON INTERROGE.** Une résolution demande « ce
+/// compte-ci a-t-il le droit ? », donc on cherche par BÉNÉFICIAIRE. Indexer par
+/// donneur obligerait à tout balayer pour répondre à la question qu'on pose.
+const AUTORISATIONS_RECUES: TableDefinition<'_, &[u8], &[u8]> =
+    TableDefinition::new("autorisations-recues");
 
 /// Le journal des requêtes (C18).
 const JOURNAL: TableDefinition<'_, &[u8], &[u8; ENTREE_OCTETS]> = TableDefinition::new("journal");
@@ -151,6 +182,28 @@ fn depuis_clef(octets: &[u8]) -> Result<Identifiant, Faute> {
     Ok(Identifiant::depuis_entropie(genre, entropie))
 }
 
+/// La clé d'un service dans l'index par nom : la machine, puis le nom.
+///
+/// **LA MACHINE EN TÊTE**, pour que ses services se suivent — voir
+/// [`SERVICES_PAR_NOM`].
+fn clef_de_nom(machine: Identifiant, nom: &[u8]) -> Vec<u8> {
+    let mut composee = clef(machine).to_vec();
+    composee.extend_from_slice(nom);
+    composee
+}
+
+/// La clé d'une autorisation dans l'index des reçues : le bénéficiaire, puis
+/// l'autorisation.
+///
+/// **L'AUTORISATION EN QUEUE EST CE QUI PERMET D'EN AVOIR PLUSIEURS.** Sans
+/// elle, deux autorisations au même compte s'écraseraient, et l'on n'en verrait
+/// qu'une — celle qui, par malchance, n'accorderait pas ce qu'il fallait.
+fn clef_recue(beneficiaire: Identifiant, autorisation: Identifiant) -> Vec<u8> {
+    let mut composee = clef(beneficiaire).to_vec();
+    composee.extend_from_slice(&clef(autorisation));
+    composee
+}
+
 // ── L'entrepôt ──────────────────────────────────────────────────────────────
 
 /// L'entrepôt durable d'un annuaire.
@@ -177,6 +230,10 @@ impl Entrepot {
             ecriture.open_table(COMPTES)?;
             ecriture.open_table(MACHINES)?;
             ecriture.open_table(ALIAS)?;
+            ecriture.open_table(SERVICES)?;
+            ecriture.open_table(SERVICES_PAR_NOM)?;
+            ecriture.open_table(AUTORISATIONS)?;
+            ecriture.open_table(AUTORISATIONS_RECUES)?;
             ecriture.open_table(JOURNAL)?;
             ecriture.open_table(RANG)?;
             ecriture.commit()?;
@@ -304,6 +361,139 @@ impl Entrepot {
                 .map_err(Faute::Enregistrement),
             None => Ok(None),
         }
+    }
+
+    // ── Les services ────────────────────────────────────────────────────────
+
+    /// Écrit ce service, et met son index de nom d'accord avec lui.
+    ///
+    /// # L'INDEX SUIT LE SERVICE, COMME L'ALIAS SUIT LE COMPTE
+    ///
+    /// Renommer un service doit retirer l'ancien nom : sans cela, l'ancien
+    /// rendrait encore un identifiant, et deux noms désigneraient un service qui
+    /// n'en revendique qu'un.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] si la base refuse, [`Faute::Enregistrement`] si l'ancien
+    /// enregistrement est corrompu.
+    pub fn poser_service(&self, quel: Identifiant, service: &Service) -> Result<(), Faute> {
+        let clef_service = clef(quel);
+        let ecriture = self.base.begin_write()?;
+        {
+            let mut services = ecriture.open_table(SERVICES)?;
+            let mut par_nom = ecriture.open_table(SERVICES_PAR_NOM)?;
+
+            if let Some(ancien) = services.get(clef_service.as_slice())? {
+                let ancien = Service::lire(ancien.value()).map_err(Faute::Enregistrement)?;
+                par_nom.remove(clef_de_nom(ancien.machine, ancien.nom.octets()).as_slice())?;
+            }
+
+            let mut octets = [0_u8; SERVICE_OCTETS];
+            service.ecrire(&mut octets);
+            services.insert(clef_service.as_slice(), &octets)?;
+            par_nom.insert(
+                clef_de_nom(service.machine, service.nom.octets()).as_slice(),
+                clef_service.as_slice(),
+            )?;
+        }
+        ecriture.commit()?;
+        Ok(())
+    }
+
+    /// Rend ce service, s'il existe.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn service(&self, quel: Identifiant) -> Result<Option<Service>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let services = lecture.open_table(SERVICES)?;
+        match services.get(clef(quel).as_slice())? {
+            Some(trouve) => Service::lire(trouve.value())
+                .map(Some)
+                .map_err(Faute::Enregistrement),
+            None => Ok(None),
+        }
+    }
+
+    /// Quel service cette machine sert-elle sous ce nom ?
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Longueur`] si l'index est corrompu.
+    pub fn service_par_nom(
+        &self,
+        machine: Identifiant,
+        nom: &str,
+    ) -> Result<Option<Identifiant>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let table = lecture.open_table(SERVICES_PAR_NOM)?;
+        match table.get(clef_de_nom(machine, nom.as_bytes()).as_slice())? {
+            Some(trouve) => depuis_clef(trouve.value()).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    // ── Les autorisations ───────────────────────────────────────────────────
+
+    /// Écrit cette autorisation, et l'indexe par son bénéficiaire.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] si la base refuse.
+    pub fn poser_autorisation(
+        &self,
+        quelle: Identifiant,
+        autorisation: &Autorisation,
+    ) -> Result<(), Faute> {
+        let mut octets = [0_u8; AUTORISATION_OCTETS];
+        autorisation.ecrire(&mut octets);
+        let clef_autorisation = clef(quelle);
+        let ecriture = self.base.begin_write()?;
+        {
+            let mut table = ecriture.open_table(AUTORISATIONS)?;
+            table.insert(clef_autorisation.as_slice(), &octets)?;
+            let mut recues = ecriture.open_table(AUTORISATIONS_RECUES)?;
+            // **LE BÉNÉFICIAIRE NE CHANGE JAMAIS** : une autorisation qu'on
+            // réécrirait pour un autre compte serait une autre autorisation. Il
+            // n'y a donc pas d'ancienne entrée d'index à retirer, contrairement
+            // à l'alias d'un compte ou au nom d'un service.
+            recues.insert(
+                clef_recue(autorisation.a, quelle).as_slice(),
+                clef_autorisation.as_slice(),
+            )?;
+        }
+        ecriture.commit()?;
+        Ok(())
+    }
+
+    /// Toutes les autorisations reçues par ce compte.
+    ///
+    /// **RÉVOQUÉES COMPRISES** : c'est `asl_auth::Autorisation::couvre` qui les
+    /// écarte, et le faire ici cacherait à l'utilisateur ce qu'il a retiré.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn autorisations_recues(&self, par: Identifiant) -> Result<Vec<Autorisation>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let recues = lecture.open_table(AUTORISATIONS_RECUES)?;
+        let table = lecture.open_table(AUTORISATIONS)?;
+
+        // **UN INTERVALLE, ET NON UN BALAYAGE** : le bénéficiaire est en tête de
+        // la clé, donc ses autorisations se suivent.
+        let debut = clef(par);
+        let mut fin = clef(par).to_vec();
+        fin.push(0xFF);
+        let mut trouvees = Vec::new();
+        for entree in recues.range(debut.as_slice()..fin.as_slice())? {
+            let (_, valeur) = entree?;
+            if let Some(brute) = table.get(valeur.value())? {
+                trouvees.push(Autorisation::lire(brute.value()).map_err(Faute::Enregistrement)?);
+            }
+        }
+        Ok(trouvees)
     }
 
     // ── Le journal (C18) ────────────────────────────────────────────────────

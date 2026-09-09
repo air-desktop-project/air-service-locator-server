@@ -74,6 +74,8 @@
 
 #![no_std]
 
+extern crate alloc;
+
 use ams_h3::Reponse;
 use ams_proto_http::{Method, RequestHead, StatusCode};
 use asl_api::{Exigence, Ressource};
@@ -138,10 +140,46 @@ pub enum Besoin<'a> {
     Compte(Identifiant),
     /// Le compte qui porte cet alias.
     CompteParAlias(&'a str),
+    /// Où se trouve ce service, sur cette machine.
+    ///
+    /// **CE BESOIN EN CACHE QUATRE** : le demandeur (pour ses capacités et son
+    /// propriétaire), le service (par son nom sur cette machine), la machine
+    /// visée (pour SON propriétaire), et les autorisations reçues par le
+    /// demandeur. C'est l'étage 3 qui les rassemble — voir [`Resolution`].
+    Ou {
+        /// La machine qui porte le service.
+        machine: Identifiant,
+        /// Le nom du service.
+        service: &'a str,
+    },
+}
+
+/// Ce qu'il faut savoir pour décider d'une résolution.
+///
+/// # POURQUOI UN TYPE, ET NON QUATRE CHAMPS DANS `Trouvaille`
+///
+/// Ces quatre lectures ne valent que réunies : décider avec trois sur quatre
+/// n'aurait pas de sens, et laisser l'étage 2 les recevoir séparément
+/// l'obligerait à vérifier qu'elles vont ensemble. Le type dit qu'elles y vont.
+#[derive(Debug, Clone)]
+pub struct Resolution {
+    /// La machine qui demande, telle qu'`asl-auth` la veut.
+    pub demandeur: asl_auth::Machine,
+    /// Ce qui est visé.
+    pub cible: asl_auth::Cible,
+    /// Les autorisations reçues par le propriétaire du demandeur.
+    ///
+    /// **RÉVOQUÉES COMPRISES** : c'est `asl_auth::Autorisation::couvre` qui les
+    /// écarte, et les filtrer ici mettrait cette règle à deux endroits.
+    pub autorisations: alloc::vec::Vec<asl_auth::Autorisation>,
 }
 
 /// Ce que l'étage 3 a trouvé.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// **ELLE N'EST PLUS `Copy`**, et c'est la résolution qui l'en a privée : ses
+/// autorisations sont une liste, dont la longueur ne se connaît qu'à
+/// l'exécution. Le reste du produit ne copie jamais une trouvaille — il la passe
+/// par référence —, donc cela ne coûte rien.
+#[derive(Debug, Clone, Default)]
 pub enum Trouvaille {
     /// Rien ne correspond.
     #[default]
@@ -158,6 +196,8 @@ pub enum Trouvaille {
     },
     /// La clé publique de la machine demandée.
     Cle(ClePublique),
+    /// De quoi décider d'une résolution.
+    Resolution(Resolution),
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -278,6 +318,10 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &[u8]) -> Be
     match resolu.ressource {
         Ressource::AliasResolu { alias } => Besoin::CompteParAlias(alias.as_str()),
         Ressource::Utilisateur { compte } => Besoin::Compte(compte),
+        Ressource::Ou { machine, service } => Besoin::Ou {
+            machine,
+            service: service.as_str(),
+        },
         // `Comptes` est un `POST` qui CRÉE : il ne se sert pas d'une lecture, et
         // il demande de l'entropie que cette crate n'a pas.
         _ => Besoin::Deja(StatusCode::NOT_IMPLEMENTED),
@@ -368,6 +412,47 @@ pub fn repondre<'o>(
             };
             composer(statut, media, corps, sortie)
         }
+        // **C'EST `asl-auth` QUI DÉCIDE, ET RIEN D'AUTRE ICI.** Cette crate
+        // rassemble et compose ; la règle « un service ne se rend qu'à qui y a
+        // droit » vit à un seul endroit, et c'est là-bas.
+        Besoin::Ou { .. } => match trouvaille {
+            Trouvaille::Resolution(quoi) => {
+                match asl_auth::decider_resolution(
+                    &quoi.demandeur,
+                    &quoi.cible,
+                    &quoi.autorisations,
+                ) {
+                    // **UN REFUS REND `404`, ET NON `403`.** C10 : rien ne se
+                    // lit sans autorisation nominative, et un `403` dirait à qui
+                    // essaie que ce service EXISTE. « Introuvable » est vrai du
+                    // point de vue du demandeur — pour lui, il n'existe pas.
+                    asl_auth::Decision::Refuser => composer(
+                        StatusCode::NOT_FOUND,
+                        PROBLEME_MEDIA,
+                        probleme(StatusCode::NOT_FOUND),
+                        sortie,
+                    ),
+                    // Servi — mais il n'y a rien à servir tant que les
+                    // annonces ne sont pas rangées : l'état vivant d'un service
+                    // n'existe pas encore.
+                    asl_auth::Decision::Servir => composer(
+                        StatusCode::NOT_IMPLEMENTED,
+                        PROBLEME_MEDIA,
+                        probleme(StatusCode::NOT_IMPLEMENTED),
+                        sortie,
+                    ),
+                }
+            }
+            // Le service, la machine ou le demandeur manquent : `404`, du même
+            // `404` qu'un refus. Voir ci-dessus.
+            _ => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+        },
+
         Besoin::Compte(_) | Besoin::CompteParAlias(_) => match trouvaille {
             // **UN COMPTE QU'ON NE TROUVE PAS EST UN `404`**, et jamais un
             // corps vide avec un `200` : le client doit pouvoir distinguer
@@ -379,7 +464,7 @@ pub fn repondre<'o>(
                 sortie,
             ),
             Trouvaille::Compte { qui, alias } => rendre_un_compte(*qui, alias.as_ref(), sortie),
-            Trouvaille::Cle(_) => composer(
+            Trouvaille::Cle(_) | Trouvaille::Resolution(_) => composer(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 PROBLEME_MEDIA,
                 probleme(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1417,5 +1502,257 @@ mod authentification {
             &mut sortie,
         );
         assert_eq!(reponse.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
+mod resolution {
+    extern crate alloc;
+
+    use alloc::vec;
+    use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
+    use asl_cle::LiaisonDeCanal;
+    use asl_id::{Genre, Identifiant};
+
+    use super::{Besoin, Resolution, Session, Trouvaille, besoin, repondre};
+
+    fn liaison() -> LiaisonDeCanal {
+        asl_cle::liaison_depuis_certificat(b"le certificat du banc")
+    }
+
+    fn tete<'a>(cible: &'a [u8]) -> RequestHead<'a> {
+        tete_de(b"GET", cible)
+    }
+
+    fn tete_de<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
+        let limites = Limits::default();
+        let mut constructeur = HeadBuilder::new(&limites);
+        constructeur.field(b":method", verbe).expect("le verbe");
+        constructeur.field(b":scheme", b"https").expect("le schéma");
+        constructeur
+            .field(b":authority", b"annuaire.example")
+            .expect("l'autorité");
+        constructeur.field(b":path", cible).expect("la cible");
+        constructeur.finish().expect("une tête complète")
+    }
+
+    fn un(genre: Genre, graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(genre, [graine; 16])
+    }
+
+    /// De quoi décider, avec ces deux propriétaires et ces autorisations.
+    fn de_quoi_decider(
+        proprietaire_du_demandeur: Identifiant,
+        proprietaire_de_la_cible: Identifiant,
+        autorisations: alloc::vec::Vec<asl_auth::Autorisation>,
+    ) -> Resolution {
+        Resolution {
+            demandeur: asl_auth::Machine::nouvelle(
+                un(Genre::Machine, 1),
+                proprietaire_du_demandeur,
+                asl_auth::Capacites::LECTURE,
+            )
+            .expect("une machine"),
+            cible: asl_auth::Cible::nouvelle(
+                un(Genre::Service, 1),
+                un(Genre::Machine, 2),
+                proprietaire_de_la_cible,
+            )
+            .expect("une cible"),
+            autorisations,
+        }
+    }
+
+    /// Le statut que rend une résolution.
+    fn statut(quoi: Resolution) -> StatusCode {
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 256];
+        repondre(
+            &mut session,
+            &Besoin::Ou {
+                machine: un(Genre::Machine, 2),
+                service: "imap",
+            },
+            &Trouvaille::Resolution(quoi),
+            None,
+            &mut sortie,
+        )
+        .status()
+    }
+
+    /// Une session sur laquelle une machine a prouvé sa clé.
+    fn session_authentifiee() -> Session {
+        let secrete = asl_cle::CleSecrete::depuis_entropie([7; 32]);
+        let machine = un(Genre::Machine, 1);
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 256];
+
+        let quoi = besoin(&session, &tete_de(b"GET", b"/v1/defi"), b"");
+        let voulu = asl_cle::Defi::depuis_octets([9; 32]);
+        let _ = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Rien,
+            Some(voulu),
+            &mut sortie,
+        );
+
+        let signature = secrete
+            .signer(machine, &voulu, &liaison())
+            .expect("elle signe");
+        let mut corps = alloc::vec::Vec::new();
+        corps.push(Genre::Machine.prefixe());
+        corps.extend_from_slice(machine.octets());
+        corps.extend_from_slice(signature.octets());
+
+        let quoi = besoin(&session, &tete_de(b"POST", b"/v1/defi"), &corps);
+        let reponse = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Cle(secrete.publique()),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::NO_CONTENT);
+        session
+    }
+
+    #[test]
+    fn sans_preuve_la_cible_ou_est_refusee_avant_meme_d_etre_routee() {
+        let machine = un(Genre::Machine, 2);
+        let chemin = alloc::format!("/v1/ou/{}/imap", machine.texte());
+        assert_eq!(
+            besoin(&Session::new(liaison()), &tete(chemin.as_bytes()), b""),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn avec_une_preuve_la_cible_ou_se_route_avec_sa_machine_et_son_nom() {
+        let machine = un(Genre::Machine, 2);
+        let chemin = alloc::format!("/v1/ou/{}/imap", machine.texte());
+        assert_eq!(
+            besoin(&session_authentifiee(), &tete(chemin.as_bytes()), b""),
+            Besoin::Ou {
+                machine,
+                service: "imap",
+            }
+        );
+    }
+
+    #[test]
+    fn son_propre_service_se_sert_sans_autorisation() {
+        // Le propriétaire n'a besoin de l'autorisation de personne pour ses
+        // propres machines.
+        let moi = un(Genre::Utilisateur, 1);
+        assert_eq!(
+            statut(de_quoi_decider(moi, moi, vec![])),
+            StatusCode::NOT_IMPLEMENTED,
+            "servi — il n'y a simplement rien à servir encore"
+        );
+    }
+
+    #[test]
+    fn le_service_d_un_autre_sans_autorisation_est_introuvable() {
+        // **C10 : UN REFUS REND `404`, ET NON `403`.** Un `403` dirait à qui
+        // essaie que ce service EXISTE — et l'annuaire aurait alors un oracle
+        // d'existence que rien n'autorise.
+        assert_eq!(
+            statut(de_quoi_decider(
+                un(Genre::Utilisateur, 1),
+                un(Genre::Utilisateur, 2),
+                vec![]
+            )),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn une_autorisation_de_tout_le_compte_ouvre_le_service() {
+        let moi = un(Genre::Utilisateur, 1);
+        let lui = un(Genre::Utilisateur, 2);
+        let accord =
+            asl_auth::Autorisation::nouvelle(lui, moi, asl_auth::Portee::ToutLeCompte, false)
+                .expect("une autorisation");
+        assert_eq!(
+            statut(de_quoi_decider(moi, lui, vec![accord])),
+            StatusCode::NOT_IMPLEMENTED,
+            "servi"
+        );
+    }
+
+    #[test]
+    fn une_autorisation_revoquee_n_ouvre_plus_rien() {
+        let moi = un(Genre::Utilisateur, 1);
+        let lui = un(Genre::Utilisateur, 2);
+        let retiree =
+            asl_auth::Autorisation::nouvelle(lui, moi, asl_auth::Portee::ToutLeCompte, true)
+                .expect("une autorisation");
+        assert_eq!(
+            statut(de_quoi_decider(moi, lui, vec![retiree])),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn une_autorisation_donnee_a_quelqu_un_d_autre_n_ouvre_rien() {
+        // Elle est bien dans la liste — c'est l'entrepôt qui l'a rendue —, et
+        // c'est `couvre` qui doit l'écarter.
+        let moi = un(Genre::Utilisateur, 1);
+        let lui = un(Genre::Utilisateur, 2);
+        let tiers = un(Genre::Utilisateur, 3);
+        let pour_un_autre =
+            asl_auth::Autorisation::nouvelle(lui, tiers, asl_auth::Portee::ToutLeCompte, false)
+                .expect("une autorisation");
+        assert_eq!(
+            statut(de_quoi_decider(moi, lui, vec![pour_un_autre])),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn une_machine_sans_capacite_de_lecture_ne_lit_rien() {
+        // Même chez son propre propriétaire : la capacité est une décision de
+        // l'utilisateur sur SA machine, et elle prime.
+        let moi = un(Genre::Utilisateur, 1);
+        let mut quoi = de_quoi_decider(moi, moi, vec![]);
+        quoi.demandeur =
+            asl_auth::Machine::nouvelle(un(Genre::Machine, 1), moi, asl_auth::Capacites::ANNONCE)
+                .expect("une machine qui annonce seulement");
+        assert_eq!(statut(quoi), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn sans_de_quoi_decider_c_est_le_meme_404() {
+        // Un service absent, une machine absente, un demandeur introuvable : le
+        // même refus, pour que rien ne dise à qui essaie ce qui existe.
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 256];
+        let reponse = repondre(
+            &mut session,
+            &Besoin::Ou {
+                machine: un(Genre::Machine, 2),
+                service: "imap",
+            },
+            &Trouvaille::Rien,
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn une_resolution_rendue_a_un_besoin_de_compte_est_une_panne_de_serveur() {
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 256];
+        let moi = un(Genre::Utilisateur, 1);
+        let reponse = repondre(
+            &mut session,
+            &Besoin::Compte(moi),
+            &Trouvaille::Resolution(de_quoi_decider(moi, moi, vec![])),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

@@ -486,3 +486,191 @@ async fn une_machine_s_authentifie_de_bout_en_bout() {
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
+
+/// Authentifie ce client comme cette machine, sur cette connexion.
+async fn authentifier(
+    client: &mut ams_quic_client::Client,
+    chaine: &[u8],
+    machine: Identifiant,
+    secrete: &asl_cle::CleSecrete,
+    flux_defi: u64,
+    flux_preuve: u64,
+) {
+    ams_quic_client::envoyer_une_requete(client, flux_defi, 17, b"/v1/defi", None, b"").await;
+    let octets = ams_quic_client::attendre_la_reponse(client, flux_defi).await;
+    let mut brut = [0_u8; asl_cle::DEFI_OCTETS];
+    brut.copy_from_slice(&octets);
+    let defi = asl_cle::Defi::depuis_octets(brut);
+
+    let liaison = asl_loop_tokio::liaison_du_certificat(chaine).expect("un certificat de tête");
+    let signature = secrete
+        .signer(machine, &defi, &liaison)
+        .expect("elle signe");
+    let mut preuve = Vec::with_capacity(81);
+    preuve.push(Genre::Machine.prefixe());
+    preuve.extend_from_slice(machine.octets());
+    preuve.extend_from_slice(signature.octets());
+
+    ams_quic_client::envoyer_avec_media(
+        client,
+        flux_preuve,
+        20,
+        b"/v1/defi",
+        None,
+        &preuve,
+        b"application/octet-stream",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(client, flux_preuve).await;
+    assert_eq!(
+        champ(&champs(client.recu(flux_preuve)), b":status"),
+        Some(&b"204"[..]),
+        "l'authentification a échoué"
+    );
+}
+
+#[tokio::test]
+async fn une_autorisation_ouvre_le_service_d_un_autre_compte() {
+    // **C'EST LE PRODUIT ENTIER, EN UN ESSAI.** A possède une machine qui sert
+    // `imap`. B possède une machine qui cherche. Sans autorisation, B ne
+    // trouve rien — et il ne peut même pas savoir que ça existe. Avec, il
+    // trouve.
+    let (autorite, racine, chaine, cle) = materiel("autorise");
+    let (base, fichier) = entrepot("autorise");
+
+    let compte_a = Identifiant::depuis_entropie(Genre::Utilisateur, [0xA1; 16]);
+    let compte_b = Identifiant::depuis_entropie(Genre::Utilisateur, [0xB2; 16]);
+    let machine_a = Identifiant::depuis_entropie(Genre::Machine, [0xA1; 16]);
+    let machine_b = Identifiant::depuis_entropie(Genre::Machine, [0xB2; 16]);
+    let secrete_b = asl_cle::CleSecrete::depuis_entropie([0xB2; 32]);
+
+    for (quelle, proprietaire, cle_publique) in [
+        (machine_a, compte_a, [0_u8; 32]),
+        (machine_b, compte_b, secrete_b.publique().octets()),
+    ] {
+        base.poser_machine(
+            quelle,
+            &asl_registre::Machine {
+                provenance: Provenance::Ici,
+                proprietaire,
+                cle: cle_publique,
+                annonce: true,
+                lecture: true,
+            },
+        )
+        .expect("la machine est écrite");
+    }
+    base.poser_service(
+        Identifiant::depuis_entropie(Genre::Service, [0xA1; 16]),
+        &asl_registre::Service {
+            provenance: Provenance::Ici,
+            machine: machine_a,
+            nom: asl_registre::NomRange::nouveau("imap").expect("il tient"),
+        },
+    )
+    .expect("le service est écrit");
+
+    let cible = format!("/v1/ou/{}/imap", machine_a.texte());
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let mut client =
+        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    for _ in 0..64_u32 {
+        client.parler().await;
+        if !client.ecouter().await {
+            break;
+        }
+    }
+    authentifier(&mut client, &chaine, machine_b, &secrete_b, 0, 4).await;
+
+    // ── SANS AUTORISATION : INTROUVABLE, ET NON « INTERDIT » ─────────────────
+    ams_quic_client::envoyer_une_requete(&mut client, 8, 17, cible.as_bytes(), None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut client, 8).await;
+    assert_eq!(
+        champ(&champs(client.recu(8)), b":status"),
+        Some(&b"404"[..]),
+        "un `403` dirait à B que ce service existe (C10)"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn avec_l_autorisation_le_meme_service_cesse_d_etre_introuvable() {
+    let (autorite, racine, chaine, cle) = materiel("ouvert");
+    let (base, fichier) = entrepot("ouvert");
+
+    let compte_a = Identifiant::depuis_entropie(Genre::Utilisateur, [0xA1; 16]);
+    let compte_b = Identifiant::depuis_entropie(Genre::Utilisateur, [0xB2; 16]);
+    let machine_a = Identifiant::depuis_entropie(Genre::Machine, [0xA1; 16]);
+    let machine_b = Identifiant::depuis_entropie(Genre::Machine, [0xB2; 16]);
+    let secrete_b = asl_cle::CleSecrete::depuis_entropie([0xB2; 32]);
+
+    for (quelle, proprietaire, cle_publique) in [
+        (machine_a, compte_a, [0_u8; 32]),
+        (machine_b, compte_b, secrete_b.publique().octets()),
+    ] {
+        base.poser_machine(
+            quelle,
+            &asl_registre::Machine {
+                provenance: Provenance::Ici,
+                proprietaire,
+                cle: cle_publique,
+                annonce: true,
+                lecture: true,
+            },
+        )
+        .expect("écrite");
+    }
+    base.poser_service(
+        Identifiant::depuis_entropie(Genre::Service, [0xA1; 16]),
+        &asl_registre::Service {
+            provenance: Provenance::Ici,
+            machine: machine_a,
+            nom: asl_registre::NomRange::nouveau("imap").expect("il tient"),
+        },
+    )
+    .expect("écrit");
+
+    // **L'ARÊTE ENTRE LES DEUX COMPTES** : A autorise B, sur tout son compte.
+    base.poser_autorisation(
+        Identifiant::depuis_entropie(Genre::Autorisation, [0x01; 16]),
+        &asl_registre::Autorisation {
+            provenance: Provenance::Ici,
+            par: compte_a,
+            a: compte_b,
+            portee: asl_registre::Portee::ToutLeCompte,
+            revoquee: false,
+        },
+    )
+    .expect("écrite");
+
+    let cible = format!("/v1/ou/{}/imap", machine_a.texte());
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let mut client =
+        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    for _ in 0..64_u32 {
+        client.parler().await;
+        if !client.ecouter().await {
+            break;
+        }
+    }
+    authentifier(&mut client, &chaine, machine_b, &secrete_b, 0, 4).await;
+
+    ams_quic_client::envoyer_une_requete(&mut client, 8, 17, cible.as_bytes(), None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut client, 8).await;
+    let apres = champs(client.recu(8));
+    assert_eq!(
+        champ(&apres, b":status"),
+        Some(&b"501"[..]),
+        "l'autorisation ouvre l'accès ; il n'y a simplement rien à servir tant \
+         qu'aucune annonce n'est rangée : {apres:?}"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}

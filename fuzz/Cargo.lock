@@ -181,6 +181,7 @@ dependencies = [
  "ams-h3",
  "ams-proto-http",
  "asl-api",
+ "asl-auth",
  "asl-cle",
  "asl-id",
  "asl-registre",

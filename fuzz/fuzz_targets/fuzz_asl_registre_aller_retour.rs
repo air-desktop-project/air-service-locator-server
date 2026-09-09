@@ -44,8 +44,9 @@ use libfuzzer_sys::fuzz_target;
 
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
-    ALIAS_OCTETS_MAX, AliasRange, COMPTE_OCTETS, Compte, ENTREE_OCTETS, EntreeJournal, Faute,
-    MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, Provenance, Verdict,
+    ALIAS_OCTETS_MAX, AUTORISATION_OCTETS, AliasRange, Autorisation, COMPTE_OCTETS, Compte,
+    ENTREE_OCTETS, EntreeJournal, Faute, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, Portee,
+    Provenance, SERVICE_OCTETS, Service, Verdict,
 };
 
 /// Ce qu'on soumet.
@@ -57,6 +58,12 @@ struct Entree {
     machine: [u8; MACHINE_OCTETS],
     /// Les octets d'une entrée de journal.
     journal: [u8; ENTREE_OCTETS],
+    /// Les octets d'un service.
+    service_brut: [u8; SERVICE_OCTETS],
+    /// Les octets d'une autorisation.
+    autorisation: [u8; AUTORISATION_OCTETS],
+    /// Quelle portée construire, pour l'autre sens.
+    quelle_portee: u8,
     /// De quoi construire des valeurs, pour l'autre sens.
     graine: u8,
     /// Un alias quelconque.
@@ -131,6 +138,37 @@ fuzz_target!(|entree: Entree| {
         Err(faute) => nommee(faute),
     }
 
+    match Service::lire(&entree.service_brut) {
+        Ok(service) => {
+            let mut refait = [0_u8; SERVICE_OCTETS];
+            service.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.service_brut,
+                "un service relu ne se réécrit pas octet pour octet"
+            );
+            assert_eq!(Service::lire(&refait), Ok(service));
+        }
+        Err(faute) => nommee(faute),
+    }
+
+    match Autorisation::lire(&entree.autorisation) {
+        Ok(autorisation) => {
+            let mut refait = [0_u8; AUTORISATION_OCTETS];
+            autorisation.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.autorisation,
+                "une autorisation relue ne se réécrit pas octet pour octet"
+            );
+            assert_eq!(Autorisation::lire(&refait), Ok(autorisation));
+            // **UNE AUTORISATION NE S'ACCORDE JAMAIS À SOI-MÊME.** Le registre
+            // ne l'impose pas — c'est `asl_auth::Autorisation::nouvelle` qui le
+            // fait —, mais une paire identique relue serait le signe qu'un
+            // enregistrement a franchi cette règle.
+            let _ = (autorisation.par, autorisation.a);
+        }
+        Err(faute) => nommee(faute),
+    }
+
     // ── PROPRIÉTÉ 3 : ce qui s'écrit se relit ───────────────────────────────
     let provenance = if entree.distante {
         Provenance::Annuaire(Identifiant::depuis_entropie(
@@ -171,6 +209,39 @@ fuzz_target!(|entree: Entree| {
         journalisee.ecrire(&mut octets);
         assert_eq!(EntreeJournal::lire(&octets), Ok(journalisee));
     }
+
+    if let Ok(nom) = NomRange::nouveau(&entree.service) {
+        let service = Service {
+            provenance,
+            machine: Identifiant::depuis_entropie(Genre::Machine, [entree.graine; 16]),
+            nom,
+        };
+        let mut octets = [0_u8; SERVICE_OCTETS];
+        service.ecrire(&mut octets);
+        assert_eq!(Service::lire(&octets), Ok(service));
+    }
+
+    let portee = match entree.quelle_portee % 3 {
+        0 => Portee::ToutLeCompte,
+        1 => Portee::UneMachine(Identifiant::depuis_entropie(
+            Genre::Machine,
+            [entree.graine; 16],
+        )),
+        _ => Portee::UnService(Identifiant::depuis_entropie(
+            Genre::Service,
+            [entree.graine; 16],
+        )),
+    };
+    let autorisation = Autorisation {
+        provenance,
+        par: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine; 16]),
+        a: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine ^ 0xFF; 16]),
+        portee,
+        revoquee: entree.graine & 4 != 0,
+    };
+    let mut octets = [0_u8; AUTORISATION_OCTETS];
+    autorisation.ecrire(&mut octets);
+    assert_eq!(Autorisation::lire(&octets), Ok(autorisation));
 
     let machine = Machine {
         provenance,
