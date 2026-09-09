@@ -6,6 +6,7 @@
 | [`protocole.md`](protocole.md) | Les trois conversations : le daemon, les applications mobiles, et le client qui cherche un port. |
 | [`annuaires.md`](annuaires.md) | Réplication entre les racines, fédération avec les annuaires rattachés, et ce qui ne se synchronise surtout pas. |
 | [`journal.md`](journal.md) | Ce qui est journalisé, ce qu'on en garde, et pourquoi c'est un actif à part. |
+| [`transport.md`](transport.md) | La greffe de la pile QUIC et HTTP/3 : ce qui est repris, ce qui ne pouvait pas l'être, et ce qu'elle coûte. |
 | [`contraintes.md`](contraintes.md) | Les dix-huit règles que le code doit tenir, et ce qui les fait respecter. |
 
 **Ils sont dans CE dépôt, et pas dans les trois.** Le modèle et le protocole

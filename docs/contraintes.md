@@ -10,7 +10,7 @@ encore ».
 | C1 | Étages 1 et 2 sans entrée-sortie | `check-etages.sh` |
 | C2 | 100 % de couverture aux étages 1 et 2 | `check-couverture.sh` |
 | C3 | Tout décodeur est fuzzé | `check-fuzz.sh` |
-| C4 | `asl-client` n'embarque pas une ligne de C | `check-sans-c.sh` ; la borne chiffrée reste **à écrire** |
+| C4 | `asl-client` n'embarque pas une ligne de C | `check-sans-c.sh`, sur le graphe **construit** ; borne à 120 unités |
 | C5 | Aucune abstraction d'exécution | Revue |
 | C6 | L'annuaire n'affirme jamais ce qu'il n'a pas mesuré | Revue, et les noms de l'API |
 | C7 | Aucune donnée biométrique ne traverse le réseau | Revue |
@@ -21,7 +21,7 @@ encore ».
 | C12 | La surface publique d'`asl-client` traverse une ABI C, et elle est stable | `check-abi.sh` (dépôt client) |
 | C13 | Aucune donnée personnelle hébergée, hors l'alias public choisi | Revue, et le schéma du magasin |
 | C14 | Aucune authentification par secret partagé — des clés, et rien d'autre | `asl-cle`, une cible de fuzz, et la revue |
-| C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` |
+| C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` : aucune pile tierce, et la greffe épinglée sur UN commit |
 | C16 | Une seule toolchain, celle d'Air, datée | `check-toolchain.sh` |
 | C17 | Tout enregistrement porte son origine, et rompre une relation efface ce qui en vient — **sauf le journal** | Essai — **à écrire** |
 | C18 | Le journal expire à 90 jours, et n'ouvre aucun canal temporel | Essai de temporisation, et supervision de l'âge — **à écrire** |
@@ -153,11 +153,30 @@ nous ne savons rien.
   de C, ce sont des DÉCLARATIONS de l'ABI de la libc du système. Elle n'embarque
   aucune implémentation, donc elle n'entre en conflit avec rien.
 
-- **Une borne chiffrée reste à fixer** sur le nombre de crates transitives.
-  Le graphe en compte **vingt-quatre** depuis l'entrée de la crypto, et il
-  grossira encore avec QUIC. **Une borne haute et tenue vaut mieux qu'une règle
-  qualitative** : sans nombre, elle se relâche d'une dépendance à la fois, et
-  chaque pas paraît raisonnable.
+- **La borne chiffrée est fixée : 120 unités construites**, et le graphe en
+  compte **99** au 2026-09-09, dont 89 tierces.
+
+  Elle porte sur ce qui est **construit**, jamais sur ce qui est résolu — voir
+  ci-dessous pourquoi la distinction n'est pas une subtilité. Elle laisse une
+  marge d'un cinquième : de quoi accueillir l'entrepôt et la boucle, et pas de
+  quoi accueillir une bibliothèque de plus « puisqu'il reste de la place ».
+
+  **Le nombre est là pour être discuté quand on le franchira, pas pour être
+  relevé quand il gêne.** Sans lui, la règle se relâche d'une dépendance à la
+  fois, et chaque pas paraît raisonnable.
+
+  Le saut de 24 à 99 est celui de la greffe QUIC (`docs/transport.md`), et il
+  était prévu par C15. Il ne se reproduira pas : il n'y a qu'une pile réseau.
+
+- **`check-sans-c.sh` lit le graphe CONSTRUIT, pas le graphe résolu.** La
+  distinction a failli lui coûter sa crédibilité le jour de la greffe : `rustls`
+  déclare `ring` en dépendance optionnelle, nous ne l'activons pas, mais `ring`
+  reste dans `Cargo.lock` et **il amène `cc` avec lui**. Le script aurait annoncé
+  « VIOLATION cc » sur une crate que le compilateur ne touche jamais, et
+  « VIOLATION windows-sys » sur une plateforme qui n'est pas la nôtre.
+
+  `cargo build --unit-graph` rend exactement ce que cargo compilera. C'est une
+  option `-Z`, donc nightly — et C16 en épingle une.
 
 ## C5 — Aucune abstraction d'exécution
 

@@ -33,10 +33,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Les mêmes listes que `check-etages.sh`. Elles sont dupliquées, et c'est un
-# défaut connu : le jour où elles divergeront, `check-etages` classera une crate
-# que celui-ci ignorera. À fusionner dès qu'un troisième script en aura besoin.
-sous_mesure=(asl-id asl-proto asl-api asl-annuaire asl-auth asl-cle)
+# LA CLASSIFICATION VIENT D'AILLEURS, ET C'EST TOUT L'INTÉRÊT.
+#
+# Ces listes étaient dupliquées ici, avec un commentaire qui annonçait le défaut.
+# Il s'est produit : `asl-session` est entrée à l'étage 2, `check-etages` l'a
+# réclamée, et ce script-ci n'a rien dit — il mesurait sa liste, et une crate
+# absente d'une liste ne manque à personne.
+. "$(dirname "$0")/etages.sh"
+sous_mesure=("${etage1[@]}" "${etage2[@]}")
 
 echo 'check-couverture — 100 % aux étages 1 et 2 (C2)'
 echo

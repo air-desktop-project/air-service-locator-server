@@ -1,0 +1,20 @@
+[package]
+name = "asl-session"
+description = "Ce qui décide d'une réponse HTTP : le routage, le verbe, les bornes. Aucune entrée-sortie."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+asl-api.workspace = true
+# `ams-h3` et `ams-proto-http` SONT DES DÉPENDANCES D'ÉTAGE 2, ET C'EST LICITE :
+# toutes deux portent en tête de leur manifeste « sans entrée-sortie ». Ce sont
+# des grammaires, pas des boucles. Ce qui est interdit ici, c'est `tokio` et une
+# socket — pas un type qui décrit une réponse.
+ams-h3.workspace = true
+ams-proto-http.workspace = true
+
+[lints]
+workspace = true

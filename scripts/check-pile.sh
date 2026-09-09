@@ -102,6 +102,69 @@ for paquet in $paquets; do
     fi
 done
 
+# ── L'ÉPINGLAGE DE LA GREFFE ─────────────────────────────────────────────────
+#
+# Interdire une pile tierce ne suffit plus depuis que la nôtre vient d'un autre
+# dépôt. Deux fautes passeraient sans bruit sous le contrôle ci-dessus, et
+# toutes deux changent le code compilé sans qu'une ligne d'ici ait bougé :
+#
+#   — UNE DÉPENDANCE SUR UNE BRANCHE. `branch = "main"` recompile autre chose à
+#     chaque `cargo update`, et un échec de CI ne dirait plus lequel des deux
+#     dépôts a changé.
+#   — DEUX RÉVISIONS DIFFÉRENTES. `ams-quic` sur un commit et `ams-h3` sur un
+#     autre donneraient deux moitiés d'une pile qui n'ont jamais été éprouvées
+#     ensemble. Cargo ne s'en plaindrait pas : ce sont deux sources distinctes.
+if ! epinglage=$(printf '%s' "$metadata" | python3 -c '
+import json, sys
+donnees = json.load(sys.stdin)
+# On groupe par DEPOT, jamais globalement : `rustls-rustcrypto` vient du depot
+# de RustCrypto, et sa revision propre est legitime. Ce qui ne le serait pas,
+# c est deux revisions du MEME depot.
+depots = {}
+branches = []
+for paquet in donnees["packages"]:
+    source = paquet.get("source") or ""
+    if not source.startswith("git+"):
+        continue
+    depot = source.split("?")[0].split("#")[0]
+    if "?rev=" in source:
+        revision = source.split("?rev=")[1].split("#")[0]
+        depots.setdefault(depot, {}).setdefault(revision, []).append(paquet["name"])
+    else:
+        branches.append(paquet["name"] + " <- " + source)
+for nom in sorted(branches):
+    print("BRANCHE " + nom)
+for depot in sorted(depots):
+    revisions = depots[depot]
+    court = depot.rstrip("/").split("/")[-1].removesuffix(".git")
+    if len(revisions) > 1:
+        print("ECLATE " + court + " " + " ".join(sorted(revisions)))
+    for revision in sorted(revisions):
+        print("REV " + court + " " + revision + " " + " ".join(sorted(revisions[revision])))
+'); then
+    echo "ÉCHEC : l'épinglage des dépendances git n'a pas pu être lu."
+    exit 1
+fi
+
+flottantes=$(printf '%s\n' "$epinglage" | grep '^BRANCHE ' || true)
+if [ -n "$flottantes" ]; then
+    echo "VIOLATION  des dépendances git ne sont pas épinglées sur un commit :"
+    printf '%s\n' "$flottantes" | sed 's/^BRANCHE /           /'
+    violations=$((violations + 1))
+fi
+
+eclates=$(printf '%s\n' "$epinglage" | grep '^ECLATE ' || true)
+if [ -n "$eclates" ]; then
+    echo "VIOLATION  un même dépôt est tiré sur plusieurs révisions :"
+    printf '%s\n' "$eclates" | sed 's/^ECLATE /           /'
+    violations=$((violations + 1))
+fi
+
+printf '%s\n' "$epinglage" | grep '^REV ' | while read -r _ depot revision reste; do
+    echo "git $depot épinglé sur ${revision:0:7} : $(printf '%s' "$reste" | wc -w) crate(s)"
+done
+echo
+
 if [ "$nombre_tierces" -eq 0 ]; then
     echo "Aucune crate tierce dans le graphe — RIEN n'a été examiné."
     echo "(c'est vrai tant que le produit n'est pas écrit ; ce ne le restera pas)"

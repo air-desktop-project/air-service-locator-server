@@ -50,6 +50,7 @@ members = [
     "crates/asl-annuaire",
     "crates/asl-auth",
     "crates/asl-cle",
+    "crates/asl-session",
     # Étage 3 — exécution
     "crates/asl-store",
     "crates/asl-loop-tokio",
@@ -95,10 +96,6 @@ edition = "2024"
 #
 # Il redeviendra utile le jour où ces crates seront publiées sur crates.io — un
 # consommateur, lui, a bien une toolchain à lui.
-# Égale au `channel` de `rust-toolchain.toml`. Les deux bougent ensemble : ce
-# champ fait échouer le build avec un message clair si quelqu'un compile avec une
-# toolchain plus ancienne que celle sur laquelle le projet est vérifié.
-rust-version = "1.90.0"
 license = "MPL-2.0"
 authors = ["air-service-locator contributors"]
 repository = "https://github.com/air-desktop-project/air-service-locator-server"
@@ -115,6 +112,7 @@ asl-id = { path = "crates/asl-id", version = "0.1.0" }
 asl-loop-tokio = { path = "crates/asl-loop-tokio", version = "0.1.0" }
 asl-proto = { path = "crates/asl-proto", version = "0.1.0" }
 asl-server = { path = "crates/asl-server", version = "0.1.0" }
+asl-session = { path = "crates/asl-session", version = "0.1.0" }
 asl-store = { path = "crates/asl-store", version = "0.1.0" }
 
 # LES DÉPENDANCES EXTERNES n'entrent qu'au moment où une crate les consomme. Le
@@ -159,8 +157,73 @@ asl-store = { path = "crates/asl-store", version = "0.1.0" }
 # `black_box`, en disant honnêtement que Rust ne garantit rien. `subtle` est
 # écrite pour cela.
 
-ed25519-dalek = { version = "2", default-features = false, features = ["zeroize"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }
 subtle = { version = "2", default-features = false }
+
+# ── LA PILE QUIC ET HTTP/3, GREFFÉE DEPUIS `air-mail-server` (C15) ─────────
+#
+# Elles sont tirées par une dépendance `git` ÉPINGLÉE SUR UN COMMIT, jamais sur
+# une branche. Une branche qui avance changerait le code compilé ici sans qu'une
+# ligne de ce dépôt ait bougé, et un échec de CI ne dirait plus lequel des deux
+# a changé.
+#
+# **Épinglage posé le 2026-09-09 sur `3f18333`.** Le relever est une décision, et
+# elle se prend en relisant ce qui a bougé en amont — pas en laissant cargo le
+# faire.
+#
+# CE QUI EST REPRIS, ET CE QUI NE L'EST PAS
+#
+# `ams-loop-tokio` N'EST PAS REPRISE, et c'est la découverte de cette tranche.
+# Elle porte la boucle du serveur de COURRIER : son `serve_quic` est générique,
+# mais il est tissé avec `ams-guard`, son garde anti-abus, et avec sa notion de
+# source. Nous écrivons donc NOTRE boucle, ici, dans `asl-loop-tokio`.
+#
+# `ams-quic-client` non plus, et pour une raison plus nette : **ce n'est pas une
+# bibliothèque cliente, c'est un harnais d'essai.** Elle expose un `atelier()`
+# qui crée un répertoire temporaire, un `materiel()` qui fabrique des
+# certificats, des identifiants de connexion fixes, et une constante qui annonce
+# qu'elle EXIGE openssl. Rien de cela n'a sa place dans un produit.
+#
+# Tout le reste est repris tel quel, et c'est possible parce que **rien de tout
+# cela ne fait d'entrée-sortie** : `ams-quic` porte en tête de son manifeste
+# « La machine de connexion QUIC, sans entrée-sortie ». C'est exactement ce qui
+# rend une pile transplantable d'un dépôt à l'autre.
+#
+# CE QUE LA GREFFE COÛTE, MESURÉ ET NON ESTIMÉ (sonde du 2026-09-09)
+#
+# Dix crates `ams-*`, et le graphe passe de 30 à quelque 90 unités construites.
+# Deux choses à savoir, parce qu'elles ne se voient pas dans cette liste :
+#
+#   — **Le fournisseur cryptographique de TLS est `rustls-rustcrypto 0.0.2-alpha`,
+#     épinglé sur un rev git de RustCrypto.** C'est une dépendance `git` DANS une
+#     dépendance `git` : `cargo audit` ne la voit pas, et c'est un pré-livrable
+#     sous la couche TLS. `air-mail-server` l'a accepté ; nous en héritons. C'est
+#     le prix du « aucune ligne de C » — les fournisseurs mûrs de `rustls` sont
+#     `ring` et `aws-lc-rs`, et tous deux compilent du C.
+#
+#   — **`ring` est dans le RÉSOLU sans être construit.** `rustls` le déclare en
+#     dépendance optionnelle ; nous ne l'activons pas. Il amène `cc` avec lui, et
+#     c'est ce qui a obligé `check-sans-c.sh` à cesser de lire le résolu pour
+#     lire le construit.
+#
+# `ed25519-dalek` EST PASSÉE EN 3 À CAUSE DE CETTE GREFFE, et il faut le dire :
+# `rustls-rustcrypto` en tire la 3. Rester en 2 aurait mis DEUX implémentations
+# d'Ed25519 dans le même binaire — celui-là même qu'un daemon tiers lie. Le
+# passage n'a coûté aucune ligne de code : `asl-cle` n'emploie que
+# `VerifyingKey`, `SigningKey`, `Signature`, `Signer` et `Verifier`.
+
+ams-h3 = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
+ams-proto-h3 = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
+ams-proto-http = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
+ams-proto-quic = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
+ams-quic = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
+ams-quic-tls = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "3f18333547311c5a3d6361a731ebc3526af74bd5" }
+
+# `default-features = false` et la liste exacte d'`air-mail-server` : deux
+# fournisseurs cryptographiques activés en même temps, c'est `rustls` qui refuse
+# de choisir au démarrage.
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "forbid"

@@ -34,9 +34,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # ── La classification ────────────────────────────────────────────────────────
-etage1=(asl-id asl-proto asl-api)
-etage2=(asl-annuaire asl-auth asl-cle)
-hors=(asl-store asl-loop-tokio asl-server)
+#
+# Elle vit dans `etages.sh`, et elle y vit SEULE : voir l'en-tête de ce
+# fichier pour ce que la duplication avait coûté.
+. "$(dirname "$0")/etages.sh"
 
 # ── Ce qui est interdit aux étages 1 et 2 ────────────────────────────────────
 #

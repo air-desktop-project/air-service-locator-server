@@ -19,6 +19,7 @@ cran sur une entrée que personne n'a imaginée. C'est la contrainte C3.
 | `fuzz_asl_proto_cadrage` | `cadrage` | **La cible qui vaut le plus cher** : des octets ENTIÈREMENT contrôlés par un inconnu vers une annonce, et retour. Aller-retour, idempotence de l'écriture, bornes du tampon de sortie, et le refus des échappements vérifié sur l'entrée. |
 | `fuzz_asl_proto_reponse` | `reponse` | Le message de réponse, et **C6 dans un type** : un point UDP n'est jamais dit joignable, un `joignable` porte toujours sa date, un bail tolère toujours un keepalive manqué. |
 | `fuzz_asl_proto_poussee` | `poussee` | La poussée de verdict. Elle éprouve les MÊMES invariants que la réponse — et c'est le but : la validation est écrite une fois pour les deux, et une cible par message attrape le jour où quelqu'un en recopierait une version affaiblie. |
+| `fuzz_asl_session_reponse` | `session-reponse` | **La seule qui compose au lieu de décoder** : une requête quelconque vers une réponse HTTP, dans un tampon dont la taille n'est pas garantie. Elle a trouvé sa première faute en vingt secondes — le corps mangeait la place du `content-length`, et un `GET` perdait un champ que le `HEAD` de la même ressource gardait (§9.3.2 de RFC 9110). |
 | `fuzz_asl_proto_annonce` | `valeurs` | La VALIDATION d'une annonce. `Annonce::nouvelle` est le seul constructeur : une annonce qui existe est valide, et une seule brèche suffirait pour que les couches au-dessus héritent d'un invariant qu'elles croient tenu. |
 
 **Deux cibles par crate, et ce n'est pas une redondance.**

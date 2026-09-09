@@ -8,6 +8,14 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+asl-session.workspace = true
+
+# La pile QUIC et HTTP/3 d'`air-mail-server` (C15). Voir le manifeste du
+# workspace pour ce qui est repris et ce qui ne l'est pas.
+ams-h3.workspace = true
+ams-proto-quic.workspace = true
+ams-quic.workspace = true
+ams-quic-tls.workspace = true
 
 [lints]
 workspace = true

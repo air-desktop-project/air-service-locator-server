@@ -1,13 +1,26 @@
 # CI d'air-service-locator-server — vérification et gate DCO, sur runner
 # GitHub-hosted.
 #
-# POURQUOI GITHUB-HOSTED : stable épinglée, zéro dépendance externe, aucune cible
-# exotique. La contrainte la plus faible qui suffit.
+# POURQUOI GITHUB-HOSTED : une toolchain épinglée par `rust-toolchain.toml`,
+# aucune cible exotique, et un dépôt PUBLIC — donc des runners non facturés.
 #
-# PAS DE CACHE CARGO, et ici la raison tient encore : le graphe ne compte AUCUNE
-# crate tierce. Il n'y a rien à mettre en cache que la compilation de nos neuf
-# crates, qui dure quelques secondes. À reconsidérer le jour où la première crate
-# tierce entrera — et ce commentaire doit alors être corrigé, pas contourné.
+# UN CACHE CARGO, DEPUIS LE 2026-09-09, et le commentaire qu'il remplace avait
+# posé lui-même la condition : « à reconsidérer le jour où la première crate
+# tierce entrera — et ce commentaire doit alors être corrigé, pas contourné ».
+#
+# La greffe de la pile QUIC et HTTP/3 (`docs/transport.md`) a fait passer le
+# graphe de zéro à **89 crates tierces**, et TROIS jobs les recompilent chacun.
+# `rustls`, `ml-kem`, `rsa` et `curve25519-dalek` ne sont pas des crates qu'on
+# recompile pour rien.
+#
+# LE CACHE EST PAR JOB, ET C'EST NÉCESSAIRE : la vérification compile en dev, la
+# couverture sous instrumentation LLVM, le fuzz sous sanitizer. Un `target/`
+# partagé entre les trois serait invalidé à chaque bascule, et coûterait le
+# téléversement en plus de la compilation.
+#
+# L'action est `actions/cache`, DE GITHUB. Le dépôt tire déjà
+# `taiki-e/install-action`, mais un cache touche à ce qui entre dans le build :
+# à service égal, on préfère ici la première partie.
 
 name: ci
 
@@ -98,6 +111,19 @@ jobs:
           cargo --version
           rustc --version
 
+      # Le cache : voir l'en-tête du fichier pour la raison et pour le choix de
+      # l'action. La clé porte le hachage des DEUX verrous — celui du workspace
+      # et celui de `fuzz/` —, donc toute dépendance qui bouge la renouvelle.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-verification-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-verification-
+
       # ── EN PREMIER, ET INSTANTANÉ ────────────────────────────────────────
       #
       # Un verdict rendu par la mauvaise toolchain ne vaut rien. L'apprendre
@@ -131,9 +157,11 @@ jobs:
 
       # ── AUCUNE LIGNE DE C (C4) ───────────────────────────────────────────
       #
-      # Elle n'avait rien à examiner tant que le graphe ne contenait que nos
-      # crates. `ed25519-dalek` y est entré avec vingt-trois dépendances : c'est
-      # le moment où la règle cesse d'être une intention.
+      # Elle lit le graphe CONSTRUIT (`cargo build --unit-graph`), et non le
+      # résolu. `rustls` déclare `ring` en dépendance optionnelle que nous
+      # n'activons pas ; `ring` reste pourtant dans `Cargo.lock`, et il amène
+      # `cc`. Lire le résolu ferait donc échouer cette étape sur une crate que
+      # le compilateur ne touche jamais.
       - name: check-sans-c
         run: ./scripts/check-sans-c.sh
 
@@ -173,6 +201,19 @@ jobs:
 
       - name: Toolchain épinglée
         run: rustup show active-toolchain
+
+      # Le cache : voir l'en-tête du fichier pour la raison et pour le choix de
+      # l'action. La clé porte le hachage des DEUX verrous — celui du workspace
+      # et celui de `fuzz/` —, donc toute dépendance qui bouge la renouvelle.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-couverture-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-couverture-
 
       # Binaire pré-construit plutôt que `cargo install` : ce dernier compile
       # plusieurs centaines de crates à chaque exécution, pour un outil dont la
@@ -214,6 +255,19 @@ jobs:
 
       - name: Toolchain épinglée
         run: rustup show active-toolchain
+
+      # Le cache : voir l'en-tête du fichier pour la raison et pour le choix de
+      # l'action. La clé porte le hachage des DEUX verrous — celui du workspace
+      # et celui de `fuzz/` —, donc toute dépendance qui bouge la renouvelle.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            fuzz/target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-fuzz-
 
       - uses: taiki-e/install-action@v2
         with:
