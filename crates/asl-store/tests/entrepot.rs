@@ -801,7 +801,11 @@ fn une_base_neuve_rend_des_listes_vides_et_non_des_fautes() {
     // coup manquaient à `ouvrir`, et lister les machines d'un compte neuf
     // échouait donc, ce que l'étage 3 traduisait en `404` là où le protocole
     // promet `200` et un tableau vide.
-    let (base, fichier) = entrepot("neuve");
+    // **LE NOM DU FICHIER EST LA CLÉ D'UNICITÉ**, et non le nom de l'essai :
+    // `cargo test` les fait tourner en parallèle, et deux essais qui ouvriraient
+    // le même fichier se verraient refuser par redb. Un « neuve » était déjà
+    // pris — localement, l'ordonnancement l'a caché ; la CI, non.
+    let (base, fichier) = entrepot("neuve-listes");
     let compte = un(Genre::Utilisateur, 1);
     let appareil = un(Genre::Appareil, 2);
 

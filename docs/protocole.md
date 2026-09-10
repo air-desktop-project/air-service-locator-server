@@ -627,6 +627,14 @@ obligé l'application à savoir dans lequel chercher. Taire les révoquées fera
 douter d'avoir cliqué — même raison qu'un appareil révoqué, qui est marqué et non
 effacé.
 
+**Les deux verbes d'exposition rendent `501`, et c'est exact.** Ils supposent ce
+qui n'est pas écrit : la table des relations avec les pairs, et la trace de ce qui
+a été répliqué vers chacun. `annuaires.md` est le moins avancé des quatre
+documents, et ces deux verbes en dépendent entièrement — les écrire aujourd'hui
+demanderait d'inventer un modèle de relation que la fédération devrait ensuite
+défaire. Rendre un tableau vide serait pire que `501` : il dirait « rien de vous
+n'est exposé » là où la vérité est « l'annuaire ne sait pas encore le dire ».
+
 Les verbes d'administration d'une exposition — ce que l'annuaire expose à un pair,
 et ce qu'il en prend — sont réservés à l'administrateur de l'annuaire et ne
 figurent pas ici : ils relèvent de son exploitation, pas de l'application mobile.
