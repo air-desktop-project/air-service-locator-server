@@ -214,6 +214,23 @@ pub trait Application {
     /// les avoir demandés.
     fn a_l_etablissement(&mut self, _connexion: &mut Connection, _pair: SocketAddr) {}
 
+    /// Un datagramme de ce pair vient d'être lu et déchiffré.
+    ///
+    /// # C'EST LE SEUL RENDEZ-VOUS QU'UN `PING` ATTEIGNE
+    ///
+    /// §10.1.2 de RFC 9000 : un pair maintient une connexion ouverte en émettant
+    /// des trames `PING`. **Un `PING` n'ouvre aucun flux et n'en rend aucun
+    /// lisible** : `a_la_lecture` ne le voit donc jamais.
+    ///
+    /// Une application qui compterait les signes de vie sur les flux seuls
+    /// ferait expirer ce qu'un pair parfaitement vivant maintient — il tient sa
+    /// connexion, et c'est ce qu'on lui demande.
+    ///
+    /// **DÉCHIFFRÉ VEUT DIRE AUTHENTIFIÉ** : ce rendez-vous n'est atteint que par
+    /// un datagramme dont les clés de cette connexion ont ouvert le contenu. Un
+    /// tiers qui écrirait à la même adresse ne le déclenche pas.
+    fn a_la_reception(&mut self, _connexion: &Connection, _pair: SocketAddr) {}
+
     /// Voici la connexion qu'une consigne désignait, et ce qu'il fallait y
     /// écrire.
     ///
@@ -442,7 +459,7 @@ impl Ecoute {
         match arrivee {
             Some(Ok((combien, pair))) => {
                 let datagramme = recu.get_mut(..combien).unwrap_or_default();
-                self.un_datagramme(datagramme, pair, maintenant);
+                self.un_datagramme(datagramme, pair, application, maintenant);
                 self.servir(application);
             }
             // **UNE LECTURE QUI ÉCHOUE N'EST PAS UNE ÉCOUTE QUI S'ARRÊTE.** Sur
@@ -456,7 +473,13 @@ impl Ecoute {
     }
 
     /// Un datagramme est arrivé.
-    fn un_datagramme(&mut self, datagramme: &mut [u8], pair: SocketAddr, maintenant: u64) {
+    fn un_datagramme<App: Application>(
+        &mut self,
+        datagramme: &mut [u8],
+        pair: SocketAddr,
+        application: &mut App,
+        maintenant: u64,
+    ) {
         let Ok(arrivee) = Incoming::read(datagramme, LOCAL_CONNECTION_ID_OCTETS) else {
             self.comptes.jetes = self.comptes.jetes.saturating_add(1);
             return;
@@ -471,7 +494,9 @@ impl Ecoute {
             .filter(|rang| self.connexions.get(*rang).is_some_and(|v| v.pair == pair));
 
         match arrivee.route(connu) {
-            Route::Connection(rang) => self.a_une_connexion(rang, datagramme, maintenant),
+            Route::Connection(rang) => {
+                self.a_une_connexion(rang, datagramme, application, maintenant);
+            }
             Route::New if self.ferme_aux_neufs => {
                 self.comptes.jetes = self.comptes.jetes.saturating_add(1);
             }
@@ -486,7 +511,13 @@ impl Ecoute {
     }
 
     /// Ce datagramme appartient à une connexion en cours.
-    fn a_une_connexion(&mut self, rang: usize, datagramme: &mut [u8], maintenant: u64) {
+    fn a_une_connexion<App: Application>(
+        &mut self,
+        rang: usize,
+        datagramme: &mut [u8],
+        application: &mut App,
+        maintenant: u64,
+    ) {
         let Some(vivante) = self.connexions.get_mut(rang) else {
             self.comptes.jetes = self.comptes.jetes.saturating_add(1);
             return;
@@ -494,8 +525,11 @@ impl Ecoute {
         // **UNE FAUTE FERME CETTE CONNEXION, ET ELLE SEULE.** Le code de §20.1
         // part au pair pour qu'il sache pourquoi ; sans lui, il attendrait son
         // délai d'inactivité.
-        if let Err(issue) = vivante.conduite.on_datagram(datagramme, maintenant) {
-            vivante.conduite.close_with(issue.close_code(), maintenant);
+        match vivante.conduite.on_datagram(datagramme, maintenant) {
+            // **UN DATAGRAMME DÉCHIFFRÉ EST UN SIGNE DE VIE**, et c'est le seul
+            // que reçoive un `PING` de maintien — voir `a_la_reception`.
+            Ok(()) => application.a_la_reception(&vivante.conduite, vivante.pair),
+            Err(issue) => vivante.conduite.close_with(issue.close_code(), maintenant),
         }
     }
 

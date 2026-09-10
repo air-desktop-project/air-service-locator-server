@@ -68,6 +68,8 @@ struct Service<'a> {
     session: &'a mut Session,
     /// Ce que l'annuaire exige d'un appareil qui s'enrôle.
     politique: asl_auth::Politique,
+    /// Le bail qu'on accorde à une annonce servie sur cette requête.
+    bail: asl_proto::Bail,
     /// Les pairs qu'une révocation vient de condamner, sur CETTE requête.
     ///
     /// **Ce sont des pairs, pas des connexions** : la requête qui révoque ne
@@ -869,14 +871,9 @@ impl Service<'_> {
         };
 
         // ── LA SESSION VIVANTE ──────────────────────────────────────────────
-        let (vivante, _ordres) = asl_annuaire::Session::ouvrir(
-            service,
-            BAIL_PAR_DEFAUT,
-            &annonce,
-            self.vu_depuis,
-            instant(),
-        )
-        .ok()?;
+        let (vivante, _ordres) =
+            asl_annuaire::Session::ouvrir(service, self.bail, &annonce, self.vu_depuis, instant())
+                .ok()?;
 
         // ── LES SONDES PARTENT, ET LA RÉPONSE N'ATTEND PAS ──────────────────
         //
@@ -1163,43 +1160,6 @@ fn instant() -> asl_annuaire::Instant {
     asl_annuaire::Instant::depuis_millisecondes(maintenant().saturating_div(1_000))
 }
 
-/// Le bail qu'on accorde.
-///
-/// **DIX SECONDES DE KEEPALIVE, QUARANTE-CINQ D'INACTIVITÉ.**
-///
-/// # LE DIX VIENT D'UNE MESURE, ET NON D'UN CHOIX PRUDENT
-///
-/// `modele.md` §4.1 proposait quinze secondes en disant que ce n'était pas une
-/// conclusion. `bancs/nat/` a fait la mesure le 2026-09-10 : sur un lien
-/// résidentiel, **vingt-huit secondes de silence tiennent, trente non** — et le
-/// chiffre est le MÊME en IPv4 et en IPv6, ce qui dit que la borne n'est pas la
-/// traduction d'adresses mais le pare-feu à état de la box.
-///
-/// À quinze, **un seul keepalive perdu fait trente secondes de silence**,
-/// c'est-à-dire exactement la borne : sur un lien qui perd un paquet de temps en
-/// temps, l'annonce tombait sans que rien n'ait mal tourné. À dix, il en faut
-/// deux d'affilée.
-///
-/// # ET TRENTE D'INACTIVITÉ, PARCE QUE LE CHEMIN NE VIT PAS PLUS LONGTEMPS
-///
-/// Quarante-cinq secondes promettaient une tolérance que le réseau ne rend pas :
-/// le chemin meurt à trente, donc une connexion ne pouvait de toute façon jamais
-/// rester inactive quarante-cinq secondes puis reprendre. Le rapport redevient
-/// de trois pour un, qui est la politique écrite dans `modele.md` §4.1.
-///
-/// **CETTE VALEUR-CI DOIT S'ACCORDER AVEC `--inactivite`**, l'inactivité que le
-/// transport annonce. Celle-là ferme la CONNEXION, celle-ci fait tomber le BAIL,
-/// et `protocole.md` §1.2 promet que les deux sont la même chose. Les laisser
-/// diverger ouvrirait une fenêtre où un daemon est désannoncé sans être
-/// déconnecté — donc sans rien apprendre.
-const BAIL_PAR_DEFAUT: asl_proto::Bail = match asl_proto::Bail::nouveau(10, 30) {
-    Ok(bail) => bail,
-    // Ces deux constantes sont valides, et le compilateur le vérifie : cette
-    // branche ne compile que parce qu'elle doit exister, jamais parce qu'elle
-    // sert.
-    Err(_) => panic!("dix et trente forment un bail valide"),
-};
-
 /// Combien de temps entre deux balayages des codes périmés, en millisecondes.
 ///
 /// Cinq minutes. Un code vaut dix minutes ; il ne survit donc jamais plus de
@@ -1248,6 +1208,20 @@ pub struct Annuaire<'a> {
     /// **Il n'y a pas de défaut** — voir `asl_auth::Politique`. L'exploitant
     /// dit laquelle il tient, et `asl-server` refuse de démarrer sans.
     politique: asl_auth::Politique,
+    /// Le bail qu'on accorde : la cadence attendue et le délai d'inactivité.
+    ///
+    /// # POURQUOI IL VIENT DE L'ASSEMBLEUR, ET N'EST PLUS UNE CONSTANTE
+    ///
+    /// C'était la SEULE politique codée en dur dans cette boucle, alors que
+    /// toutes les autres — l'attestation, l'inactivité du transport, le nombre
+    /// de connexions — viennent du binaire. Une politique qu'on ne peut pas
+    /// choisir est une politique qu'on ne peut pas éprouver : il fallait
+    /// attendre trente secondes pour voir un bail expirer.
+    ///
+    /// **ET SURTOUT, IL DOIT S'ACCORDER AVEC L'INACTIVITÉ DU TRANSPORT.** Deux
+    /// constantes dans deux fichiers finissent par diverger ; un paramètre
+    /// laisse `asl-server` les dériver l'une de l'autre.
+    bail: asl_proto::Bail,
     /// Quand les codes expirés ont été balayés pour la dernière fois.
     dernier_balayage: u64,
     /// Les pairs révoqués dont il reste des connexions à fermer.
@@ -1269,6 +1243,7 @@ impl<'a> Annuaire<'a> {
         tirer_un_defi: &'a (dyn Fn() -> Option<Defi> + Send + Sync),
         tirer_un_identifiant: &'a (dyn Fn() -> Option<[u8; 16]> + Send + Sync),
         politique: asl_auth::Politique,
+        bail: asl_proto::Bail,
     ) -> Self {
         let (rapports, verdicts) = tokio::sync::mpsc::unbounded_channel();
         Self {
@@ -1282,6 +1257,7 @@ impl<'a> Annuaire<'a> {
             tirer_un_defi,
             servies: 0,
             politique,
+            bail,
             dernier_balayage: 0,
             revoques: Vec::new(),
         }
@@ -1457,15 +1433,25 @@ impl Application for Annuaire<'_> {
         }
     }
 
+    /// Un datagramme déchiffré de ce pair : son bail repart.
+    ///
+    /// # C'EST ICI, ET PLUS DANS `a_la_lecture`
+    ///
+    /// **LA CONNEXION VIVANTE EST LE KEEPALIVE.** `protocole.md` §1.2 : il n'y a
+    /// pas de verbe pour rafraîchir, et cette ligne est ce qui le rend vrai.
+    ///
+    /// Elle était dans `a_la_lecture`, c'est-à-dire dans « un flux est
+    /// lisible ». **Un `PING` de maintien n'ouvre aucun flux** (§10.1.2 de
+    /// RFC 9000) : un daemon qui tient sa connexion sans rien demander voyait
+    /// donc son annonce expirer sous lui, alors qu'il faisait exactement ce
+    /// qu'on lui demande. Le rendez-vous du datagramme, lui, les voit tous.
+    fn a_la_reception(&mut self, connexion: &Connection, _pair: SocketAddr) {
+        self.vivier
+            .keepalive(connexion.local_id().as_bytes(), instant());
+    }
+
     fn a_la_lecture(&mut self, connexion: &mut Connection, flux: StreamId, pair: SocketAddr) {
         let clef = connexion.local_id().as_bytes().to_vec();
-
-        // **LA CONNEXION VIVANTE EST LE KEEPALIVE.** `protocole.md` §1.2 : il
-        // n'y a pas de verbe pour rafraîchir, et cette ligne est ce qui le
-        // rend vrai. Sans elle, une annonce expirerait sous un daemon qui n'a
-        // rien fait de mal — il tient sa connexion, et c'est ce qu'on lui
-        // demande.
-        self.vivier.keepalive(&clef, instant());
         let Some(etat) = self.connexions.get_mut(&clef) else {
             return;
         };
@@ -1486,6 +1472,7 @@ impl Application for Annuaire<'_> {
             en_vol: &mut self.en_vol,
             connexion: clef.clone(),
             tirer_un_identifiant: self.tirer_un_identifiant,
+            bail: self.bail,
             corps: Vec::new(),
             vu_depuis: asl_proto::VuDepuis {
                 adresse: pair.ip(),

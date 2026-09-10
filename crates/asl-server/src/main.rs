@@ -69,6 +69,17 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
     }
     let reglages = Reglages::depuis(&arguments).inspect_err(|_| eprint!("{USAGE}"))?;
 
+    // **LE BAIL SE VALIDE AVANT D'OUVRIR QUOI QUE CE SOIT.** Un `--keepalive`
+    // absurde doit se dire tout de suite, et non après avoir verrouillé une
+    // base et lu une clé privée : ce qui est refusé doit l'être avant d'avoir
+    // ouvert quelque chose.
+    // `asl_proto::Erreur` ne porte pas `std::error::Error` — c'est une crate
+    // `no_std`, et l'y ajouter pour un seul appelant serait faire porter à
+    // trente daemons ce dont un binaire a besoin. On la met en mots ici.
+    let bail = reglages
+        .bail()
+        .map_err(|quoi| format!("--keepalive et --inactivite ne forment pas un bail : {quoi}"))?;
+
     let entrepot = Arc::new(Entrepot::ouvrir(&reglages.entrepot)?);
     let chaine = std::fs::read(&reglages.certificat)?;
     let cle = std::fs::read(&reglages.cle)?;
@@ -84,8 +95,10 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         let socket = tokio::net::UdpSocket::from_std(socket)?;
         eprintln!(
             "asl-server : écoute sur {ou} (double pile), entrepôt {}, \
-             rétention {} jours",
+             bail {} s / {} s, rétention {} jours",
             reglages.entrepot.display(),
+            bail.keepalive_secondes(),
+            bail.inactivite_secondes(),
             reglages.retention_jours,
         );
 
@@ -115,7 +128,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                  n'est pas écrite : AUCUN appareil ne pourra s'enrôler."
             );
         }
-        let mut application = Annuaire::new(&entrepot, &tirer, &nommer, reglages.politique);
+        let mut application = Annuaire::new(&entrepot, &tirer, &nommer, reglages.politique, bail);
         let comptes = servir_quic(
             socket,
             tls,

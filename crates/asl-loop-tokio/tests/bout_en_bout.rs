@@ -96,6 +96,31 @@ async fn lever(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<Comptes>,
 ) {
+    // Le bail du produit : dix secondes de cadence, trente d'inactivité.
+    lever_avec_bail(
+        chaine,
+        cle,
+        entrepot,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+    )
+    .await
+}
+
+/// La même, en choisissant le bail qu'on accorde.
+///
+/// **C'EST CE QUI REND LE MAINTIEN ÉPROUVABLE EN QUELQUES SECONDES.** Avec le
+/// bail du produit, voir une annonce expirer demanderait d'attendre trente
+/// secondes par essai.
+async fn lever_avec_bail(
+    chaine: &[u8],
+    cle: &[u8],
+    entrepot: Entrepot,
+    bail: asl_proto::Bail,
+) -> (
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Comptes>,
+) {
     let tls = Arc::new(configuration_tls(chaine, cle).expect("une configuration TLS"));
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
@@ -119,6 +144,7 @@ async fn lever(
             &tirer,
             &nommer,
             asl_auth::Politique::AttestationFacultative,
+            bail,
         );
         let arret = async {
             let _ = entendre_stop.await;
@@ -126,7 +152,11 @@ async fn lever(
         // Trente secondes d'inactivité : bien plus que ce que l'essai prend, et
         // assez pour qu'un délai ne vienne pas fermer la connexion en cours de
         // route sur une machine chargée.
-        servir_quic(socket, tls, 16, 30_000_000, &mut application, arret)
+        // **L'INACTIVITÉ DU TRANSPORT SUIT CELLE DU BAIL**, comme dans le
+        // binaire : `protocole.md` §1.2 promet que la connexion EST le bail, et
+        // un essai qui les laisserait diverger n'éprouverait pas le produit.
+        let inactivite = u64::from(bail.inactivite_secondes()).saturating_mul(1_000_000);
+        servir_quic(socket, tls, 16, inactivite, &mut application, arret)
             .await
             .expect("l'écoute rend ses comptes")
     });
@@ -2119,6 +2149,113 @@ async fn le_bail_accorde_est_celui_que_la_mesure_a_choisi() {
             >= u32::from(lue.bail.keepalive_secondes()).saturating_mul(2),
         "l'invariant du type : l'inactivité vaut au moins deux keepalives"
     );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn un_daemon_qui_ne_fait_que_maintenir_garde_son_annonce() {
+    // ── CE QUE CET ESSAI PROUVE, ET CE QU'IL A FALLU CORRIGER POUR LUI ──────
+    //
+    // `modele.md` §4.1 promet que « le mapping NAT reste ouvert par le keepalive
+    // lui-même ». Deux choses manquaient pour que ce soit vrai :
+    //
+    //   1. **rien n'émettait de keepalive** — corrigé dans `ams-quic-tls` ;
+    //   2. **l'annuaire ne le comptait pas comme un signe de vie.** Le bail se
+    //      rafraîchissait dans `a_la_lecture`, c'est-à-dire « un flux est
+    //      lisible ». **Un `PING` n'ouvre aucun flux** (§10.1.2 de RFC 9000) :
+    //      un daemon qui tenait sa connexion voyait donc son annonce expirer
+    //      sous lui, alors qu'il faisait exactement ce qu'on lui demande.
+    //
+    // Le bail de cet essai vaut une seconde de cadence pour deux d'inactivité :
+    // avec celui du produit — dix et trente —, il faudrait attendre trente
+    // secondes pour voir quoi que ce soit.
+    let (autorite, racine, chaine, cle) = materiel("maintien");
+    let (base, fichier) = entrepot("maintien");
+    let bail = asl_proto::Bail::nouveau(1, 2).expect("un bail court");
+    let (adresse, dire_stop, tache) = lever_avec_bail(&chaine, &cle, base, bail).await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte, _appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA1).await;
+    let (statut, rendu) = poster(
+        &mut alice,
+        8,
+        b"/v1/machines",
+        br#"{"nom":"grenier","capacites":["annonce","lecture"]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let machine = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let code = valeur_json(&rendu, "code");
+
+    let mut daemon = connecter(&racine, adresse).await;
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xD4; 32]);
+    assert_eq!(enroler(&mut daemon, 0, &code, &secrete).await, machine);
+    authentifier(&mut daemon, machine, &secrete, 12, 16).await;
+
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}]}}"#,
+        machine.texte()
+    );
+    let (statut, _) = poster(
+        &mut daemon,
+        20,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"200", "l'annonce est prise");
+
+    // ── LE DAEMON SE TAIT, ET NE FAIT QUE MAINTENIR ─────────────────────────
+    //
+    // **AUCUNE REQUÊTE**, donc aucun flux lisible côté annuaire : c'est tout
+    // l'objet. Cinq secondes, soit plus du double de l'inactivité du bail.
+    //
+    // **`0x01` EST UNE TRAME `PING`** (§19.2 de RFC 9000), et `dire` pose des
+    // trames applicatives brutes. C'est le maintien le plus dépouillé qui
+    // soit : un octet, aucun flux, rien à lire pour l'application d'en face.
+    //
+    // Le client d'essai n'a pas d'émetteur de maintien — c'est `ams-quic-tls`
+    // qui en porte un, et ses propres essais l'éprouvent. Ce qui est éprouvé
+    // ICI est l'autre moitié : que l'annuaire COMPTE ce datagramme.
+    let jusqu_a = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < jusqu_a {
+        daemon.dire(&[0x01]);
+        daemon.parler().await;
+        daemon.ecouter().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+    assert!(
+        daemon.ferme().is_none(),
+        "la connexion du daemon doit tenir : il la maintient"
+    );
+
+    // ── ET L'ANNONCE EST TOUJOURS LÀ ────────────────────────────────────────
+    //
+    // **C'EST LE DAEMON QUI DEMANDE, ET APRÈS LA FENÊTRE DE SILENCE.** La
+    // résolution exige une machine porteuse de `lecture` (`protocole.md` §3) :
+    // `alice` est un APPAREIL, et l'annuaire lui rend `401`. C'est la bonne
+    // règle — une autorisation de lecture accordée pour joindre un service ne
+    // doit pas ouvrir l'administration d'un compte.
+    let cible = format!("/v1/ou/{}/depot", machine.texte());
+    ams_quic_client::envoyer_une_requete(&mut daemon, 28, 17, cible.as_bytes(), None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut daemon, 28).await;
+    assert_eq!(
+        champ(&champs(daemon.recu(28)), b":status"),
+        Some(&b"200"[..]),
+        "après cinq secondes de maintien seul, l'annonce doit tenir"
+    );
+    let texte = String::from_utf8_lossy(&rendu);
+    assert!(
+        texte.contains("49152"),
+        "et porter le port annoncé : {texte}"
+    );
+    assert_ne!(compte, machine, "deux identifiants distincts");
 
     let _ = dire_stop.send(());
     let _ = tache.await;

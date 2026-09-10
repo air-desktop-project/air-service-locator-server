@@ -41,6 +41,8 @@ pub struct Reglages {
     pub connexions_max: usize,
     /// L'inactivité annoncée aux pairs, en secondes.
     pub inactivite_s: u64,
+    /// La cadence de maintien qu'on demande aux daemons, en secondes.
+    pub keepalive_s: u64,
     /// La rétention du journal, en jours (C18).
     pub retention_jours: u64,
     /// Ce que l'annuaire exige d'un appareil qui s'enrôle.
@@ -114,6 +116,7 @@ asl-server — un annuaire de services air-service-locator.
   --port       <nombre>   le port d'écoute                  (défaut : 6630)
   --connexions <nombre>   connexions simultanées au plus    (défaut : 1024)
   --inactivite <secondes> l'inactivité annoncée aux pairs   (défaut : 30)
+  --keepalive  <secondes> la cadence de maintien demandée   (défaut : 10)
   --retention  <jours>    la rétention du journal           (défaut : 90)
   --attestation <exigee|facultative>                        (obligatoire)
 
@@ -150,7 +153,10 @@ impl Reglages {
         let mut connexions_max = 1024_usize;
         // Trente secondes, soit trois keepalives de dix manqués — et c'est
         // aussi ce que le chemin tolère : `bancs/nat/README.md` a mesuré 28 s
-        // tenus, 30 s perdus.
+        // tenus, 30 s perdus, LE MÊME CHIFFRE en IPv4 et en IPv6. La borne
+        // n'est donc pas la traduction d'adresses, c'est le pare-feu à état de
+        // la box — et quarante-cinq secondes promettaient une tolérance que le
+        // réseau ne rend pas.
         //
         // **ELLE DOIT S'ACCORDER AVEC LE BAIL QUE L'ANNUAIRE ACCORDE**
         // (`asl_loop_tokio::h3::BAIL_PAR_DEFAUT`) : celle-ci ferme la CONNEXION,
@@ -160,6 +166,13 @@ impl Reglages {
         // apprendre.
         let mut inactivite_s = 30_u64;
         let mut retention_jours = 90_u64;
+        // Dix secondes, mesurées : `bancs/nat/README.md` a trouvé qu'un chemin
+        // résidentiel meurt entre 28 et 30 s de silence. À quinze, **un SEUL
+        // maintien perdu faisait trente secondes de silence**, c'est-à-dire
+        // exactement la borne : sur un lien qui perd un paquet de temps en
+        // temps, l'annonce tombait sans que rien n'ait mal tourné. À dix, il en
+        // faut deux d'affilée.
+        let mut keepalive_s = 10_u64;
         let mut politique = None;
 
         let mut arguments = arguments.into_iter();
@@ -179,6 +192,7 @@ impl Reglages {
                 "--port" => port = nombre(drapeau, valeur()?.as_ref())?,
                 "--connexions" => connexions_max = nombre(drapeau, valeur()?.as_ref())?,
                 "--inactivite" => inactivite_s = nombre(drapeau, valeur()?.as_ref())?,
+                "--keepalive" => keepalive_s = nombre(drapeau, valeur()?.as_ref())?,
                 "--retention" => retention_jours = nombre(drapeau, valeur()?.as_ref())?,
                 "--attestation" => {
                     let donnee = valeur()?;
@@ -199,6 +213,7 @@ impl Reglages {
             port,
             connexions_max,
             inactivite_s,
+            keepalive_s,
             retention_jours,
             politique: politique.ok_or(Faute::Manque("--attestation"))?,
         })
@@ -208,6 +223,28 @@ impl Reglages {
     #[must_use]
     pub const fn inactivite_us(&self) -> u64 {
         self.inactivite_s.saturating_mul(1_000_000)
+    }
+
+    /// Le bail qu'on accordera aux annonces.
+    ///
+    /// # LES DEUX INACTIVITÉS NE PEUVENT PLUS DIVERGER
+    ///
+    /// Il y en a deux dans ce produit : `--inactivite` ferme la CONNEXION, et le
+    /// bail fait tomber l'ANNONCE. `protocole.md` §1.2 promet que les deux sont
+    /// la même chose — « la connexion EST le bail ». Les laisser se régler
+    /// séparément ouvrirait une fenêtre où un daemon est désannoncé sans être
+    /// déconnecté, donc sans rien apprendre.
+    ///
+    /// **Ici, le bail est DÉRIVÉ de l'inactivité**, et non posé à côté d'elle.
+    ///
+    /// # Erreurs
+    ///
+    /// [`asl_proto::Erreur`] si la cadence est nulle, trop longue, ou si
+    /// l'inactivité vaut moins de deux cadences — auquel cas la première perte
+    /// de paquet tuerait un daemon parfaitement sain.
+    pub fn bail(&self) -> Result<asl_proto::Bail, asl_proto::Erreur> {
+        let borne = |secondes: u64| u16::try_from(secondes).unwrap_or(u16::MAX);
+        asl_proto::Bail::nouveau(borne(self.keepalive_s), borne(self.inactivite_s))
     }
 
     /// La rétention en millisecondes, comme le journal la compte.
@@ -295,6 +332,10 @@ mod tests {
         assert_eq!(lus.port, asl_proto::PORT_PAR_DEFAUT);
         assert_eq!(lus.connexions_max, 1024);
         assert_eq!(lus.inactivite_s, 30);
+        assert_eq!(lus.keepalive_s, 10);
+        let bail = lus.bail().expect("dix et trente forment un bail");
+        assert_eq!(bail.keepalive_secondes(), 10);
+        assert_eq!(bail.inactivite_secondes(), 30);
         assert_eq!(lus.retention_jours, 90);
     }
 
