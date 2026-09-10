@@ -239,25 +239,25 @@ sha2 = { version = "0.11", default-features = false }
 # passage n'a coûté aucune ligne de code : `asl-cle` n'emploie que
 # `VerifyingKey`, `SigningKey`, `Signature`, `Signer` et `Verifier`.
 
-ams-h3 = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "86ccad044" }
-ams-proto-h3 = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "86ccad044" }
-ams-proto-http = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "86ccad044" }
-ams-proto-quic = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "86ccad044" }
-ams-quic = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "86ccad044" }
-ams-quic-tls = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "86ccad044" }
+ams-h3 = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "932ce354d" }
+ams-proto-h3 = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "932ce354d" }
+ams-proto-http = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "932ce354d" }
+ams-proto-quic = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "932ce354d" }
+ams-quic = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "932ce354d" }
+ams-quic-tls = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "932ce354d" }
 
 # `ams-tls` N'ENTRE QUE COMME DÉPENDANCE DE DÉVELOPPEMENT, et la nuance compte.
 # Elle est DÉJÀ dans le graphe construit, tirée par `ams-quic-tls` ; ce qu'on
 # déclare ici, c'est le droit de l'appeler NOUS-MÊMES depuis un essai — pour
 # faire charger par notre propre pile le certificat que `scripts/ca.sh` frappe.
 # Un certificat qu'openssl valide n'est qu'un certificat qu'openssl valide.
-ams-tls = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "86ccad044" }
+ams-tls = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "932ce354d" }
 
 # `ams-quic-client` EST UN HARNAIS D'ESSAI, PAS UNE BIBLIOTHÈQUE CLIENTE — voir
 # `docs/transport.md` §3. Elle n'entre donc qu'en dépendance de DÉVELOPPEMENT,
 # et c'est là qu'elle est irremplaçable : c'est un vrai client QUIC sur une
 # vraie socket, et rien d'autre ne peut éprouver notre boucle de bout en bout.
-ams-quic-client = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "86ccad044" }
+ams-quic-client = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "932ce354d" }
 
 # `default-features = false` et la liste exacte d'`air-mail-server` : deux
 # fournisseurs cryptographiques activés en même temps, c'est `rustls` qui refuse
