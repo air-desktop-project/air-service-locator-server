@@ -157,6 +157,25 @@ grep -q '^Environment=ASL_ATTESTATION' "$essai/unite-nue" \
 # Le fragment d'exemple est dans la DOCUMENTATION, d'où rien ne le charge.
 grep -q './usr/share/doc/asl-server/attestation.conf.exemple' "$essai/contenu" \
     || rate "le fragment d'exemple n'est pas expédié"
+
+# **ET LA TABLE DU PARE-FEU NON PLUS N'EST PAS CHARGÉE.** Un paquet qui la
+# poserait sous `/etc/nftables.conf` fermerait des ports sur une machine qu'il ne
+# connaît pas — à commencer, si elle est mal relue, par celui du `ssh`.
+grep -q './usr/share/doc/asl-server/nftables-asl.conf' "$essai/contenu" \
+    || rate "la table d'exemple n'est pas expédiée"
+grep -qE './etc/(nftables|nftables.d)' "$essai/contenu" \
+    && rate "une table posée sous /etc serait CHARGÉE au démarrage"
+# Elle doit ouvrir le 22 : une table qui ne le ferait pas est une machine perdue.
+grep -q 'tcp dport 22 accept' paquet/nftables-asl.conf \
+    || rate "la table n'ouvre pas le port du ssh"
+grep -q 'udp dport 6630 accept' paquet/nftables-asl.conf \
+    || rate "la table n'ouvre pas le port de l'annuaire"
+# **ICMPv6 EST OBLIGATOIRE** : le bloquer casse la découverte de voisins et la
+# découverte de MTU, c'est-à-dire IPv6.
+grep -q 'nd-neighbor-solicit' paquet/nftables-asl.conf \
+    || rate "la table ne laisse pas passer la découverte de voisins"
+grep -q 'packet-too-big' paquet/nftables-asl.conf \
+    || rate "la table ne laisse pas passer « paquet trop gros » — trou noir de MTU"
 grep -q './etc/systemd/system/asl-server.service.d/' "$essai/contenu" \
     && rate "un fragment posé sous /etc serait CHARGÉ"
 conclure "la posture reste à décider, et le modèle est dans la documentation"

@@ -175,6 +175,14 @@ une valeur` — un message qui nomme exactement ce qu'il reste à décider. Un p
 qui démarrerait un service voué à échouer apprendrait à l'exploitant que les
 échecs de ce service sont normaux.
 
+**Le pare-feu est expédié comme un EXEMPLE**, sous
+`/usr/share/doc/asl-server/nftables-asl.conf`, et le paquet ne le charge pas : il
+déciderait de ce qui entre sur une machine qu'il ne connaît pas, et la première
+chose qu'il fermerait est la porte par laquelle on vient le corriger. La table
+porte sa propre marche à suivre, **filet de sécurité compris** — un retour en
+arrière armé avant le chargement, qu'on n'annule qu'une fois une NOUVELLE session
+`ssh` passée. L'ancienne survit par `ct state established` et ne prouve rien.
+
 **`dpkg --purge` n'efface ni l'annuaire ni la clé.** `/var/lib/asl-server` porte
 les comptes, les machines et les autorisations que des humains se sont
 accordées ; `/etc/asl-server` porte un secret. Le `postrm` dit ce qu'il laisse en

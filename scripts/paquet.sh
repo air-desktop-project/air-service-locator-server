@@ -101,6 +101,14 @@ install -d -m 0750 "$arbre/etc/asl-server"
 install -d -m 0755 "$arbre/usr/share/doc/asl-server"
 install -m 0644 LICENSE "$arbre/usr/share/doc/asl-server/copyright"
 
+# **LA TABLE DU PARE-FEU VA DANS LA DOCUMENTATION, ET N'EST PAS CHARGÉE.**
+# Un paquet qui poserait un pare-feu déciderait de ce qui entre sur une machine
+# qu'il ne connaît pas — et la première chose qu'il fermerait, c'est la porte par
+# laquelle on vient le corriger. Elle porte sa propre marche à suivre, filet de
+# sécurité compris.
+install -m 0644 paquet/nftables-asl.conf \
+    "$arbre/usr/share/doc/asl-server/nftables-asl.conf"
+
 # **LE FRAGMENT D'EXEMPLE VA DANS LA DOCUMENTATION, ET NON DANS `/etc`.**
 # Posé sous `/etc/systemd/system/asl-server.service.d/`, il serait CHARGÉ — et
 # le paquet aurait choisi la posture d'attestation à la place de l'exploitant,
@@ -120,7 +128,7 @@ cat > "$arbre/usr/share/doc/asl-server/attestation.conf.exemple" <<'EXEMPLE'
 Environment=ASL_ATTESTATION=facultative
 EXEMPLE
 chmod 0644 "$arbre/usr/share/doc/asl-server/attestation.conf.exemple"
-dit "binaire, unité, /etc/asl-server, documentation"
+dit "binaire, unité, /etc/asl-server, table d'exemple, documentation"
 
 titre "dépendances, calculées et non devinées"
 # **`dpkg-shlibdeps` LIT LE BINAIRE.** Écrire `libc6 (>= 2.34)` à la main serait
@@ -215,7 +223,11 @@ qu'un paquet ne peut pas décider.
          /etc/asl-server/certificat.pem   (chaîne, en PEM)
          /etc/asl-server/cle.pem          (clé privée, 0640 root:asl-server)
 
-  3. puis :
+  3. le pare-feu, APRÈS l'avoir relu — il porte son propre filet de sécurité :
+
+         /usr/share/doc/asl-server/nftables-asl.conf
+
+  4. puis :
 
          systemctl enable --now asl-server
 
