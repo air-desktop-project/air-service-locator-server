@@ -217,6 +217,11 @@ fn trois_ressources_seulement_n_exigent_rien() {
     for cible in [
         "/v1/comptes".to_owned(),
         "/v1/alias/thierry".to_owned(),
+        // **`/v1/vu` NE PARLE QUE DE LA CONNEXION QUI DEMANDE**, et ne rend rien
+        // qu'un serveur STUN public ne rendrait. Exiger une clé aurait exclu le
+        // cas le plus utile : la machine qu'on installe, qui veut savoir si elle
+        // atteint l'annuaire avant même d'avoir un code d'enrôlement.
+        "/v1/vu".to_owned(),
         format!("/v1/utilisateurs/{u}"),
     ] {
         assert_eq!(

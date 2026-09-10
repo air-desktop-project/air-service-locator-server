@@ -326,6 +326,11 @@ pub enum Besoin<'a> {
         /// Jusqu'où elle porte.
         portee: Portee,
     },
+    /// Savoir d'où l'annuaire voit cette connexion.
+    ///
+    /// **AUCUN ARGUMENT** : le fait demandé est celui de la connexion elle-même,
+    /// et le nommer laisserait croire qu'on peut demander celui d'un autre.
+    OuSuisJeVu,
     /// Déposer ou renouveler le jeton de poussée d'un appareil.
     ///
     /// # UN APPAREIL NE DÉPOSE QUE POUR LUI-MÊME
@@ -432,6 +437,11 @@ pub enum Trouvaille {
     },
     /// La clé publique de la machine demandée.
     Cle(ClePublique),
+    /// D'où l'annuaire voit la connexion qui demande.
+    ///
+    /// **C'EST LE SEUL FAIT QUE L'ANNUAIRE CONSTATE PLUTÔT QU'IL N'ENTENDE**, et
+    /// il ne peut venir que de l'étage 3 : c'est lui qui tient la socket.
+    VuDepuis(asl_proto::VuDepuis),
     /// De quoi décider d'une résolution.
     Resolution(Resolution),
     /// De quoi décider d'une LISTE de résolutions.
@@ -720,6 +730,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
             service: service.as_str(),
         },
         Ressource::Poussees => Besoin::EcouterLesPoussees,
+        Ressource::Vu => Besoin::OuSuisJeVu,
         Ressource::OuParNom { service } => Besoin::OuParNom {
             service: service.as_str(),
         },
@@ -1233,6 +1244,32 @@ pub fn repondre<'o>(
             ),
         },
 
+        Besoin::OuSuisJeVu => match trouvaille {
+            Trouvaille::VuDepuis(vu) => rendre_ou_l_on_est_vu(*vu, sortie),
+            // **`Rien` REND `404`, ET NON `500`**, comme partout ailleurs dans
+            // ce module. La tentation était forte de dire `500` : la connexion
+            // existe forcément, puisqu'elle vient de poser la question, et ne
+            // pas savoir d'où elle vient serait bien une faute de l'annuaire.
+            //
+            // Mais cette ressource n'exige aucune preuve. Un `500` atteignable
+            // par un inconnu est un `500` qu'un inconnu peut FABRIQUER, et un
+            // journal où les `500` sont fabriqués à volonté ne sert plus à
+            // repérer les vraies pannes. `fuzz_asl_session_reponse` tient cette
+            // règle, et c'est elle qui a arrêté la première version d'ici.
+            Trouvaille::Rien => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+            _ => composer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::INTERNAL_SERVER_ERROR),
+                sortie,
+            ),
+        },
+
         Besoin::Compte(_) | Besoin::CompteParAlias(_) => match trouvaille {
             // **UN COMPTE QU'ON NE TROUVE PAS EST UN `404`**, et jamais un
             // corps vide avec un `200` : le client doit pouvoir distinguer
@@ -1252,6 +1289,49 @@ pub fn repondre<'o>(
             ),
         },
     }
+}
+
+/// Ce qu'un corps de `/v1/vu` peut faire, en octets.
+///
+/// Une adresse IPv6 pleine fait 45 caractères, un port cinq, et le reste est du
+/// balisage : soixante-quatre suffisent avec de la marge.
+const VU_CORPS_MAX: usize = 96;
+
+/// Rend d'où l'annuaire voit cette connexion.
+///
+/// # LA FAMILLE EST ÉCRITE, ALORS QU'ELLE SE DÉDUIT DE L'ADRESSE
+///
+/// Un client qui reçoit `"2001:db8::1"` sait déjà qu'il est en IPv6. Mais le
+/// déduire demande d'analyser l'adresse, et **c'est exactement ce qu'on ne veut
+/// pas faire écrire cinq fois** dans cinq liaisons : chercher un `:` marche
+/// jusqu'au jour où quelqu'un rencontre `::ffff:203.0.113.7`.
+fn rendre_ou_l_on_est_vu(vu: asl_proto::VuDepuis, sortie: &mut [u8]) -> Reponse<'_> {
+    let mut corps = Corps::<VU_CORPS_MAX>::neuf();
+    corps.pousser(br#"{"adresse":""#);
+    // **AUCUN ÉCHAPPEMENT N'EST NÉCESSAIRE** : une adresse s'écrit avec des
+    // chiffres, des lettres, des points et des deux-points, et rien de tout cela
+    // n'a de sens particulier en JSON.
+    let mut texte = [0_u8; 64];
+    let combien = ecrire_une_adresse(vu.adresse, &mut texte);
+    corps.pousser(texte.get(..combien).unwrap_or_default());
+    corps.pousser(br#"","port":"#);
+    corps.pousser_un_nombre(u64::from(vu.port.valeur()));
+    corps.pousser(br#","famille":"#);
+    corps.pousser_un_nombre(if vu.est_ipv6() { 6 } else { 4 });
+    corps.pousser(b"}");
+    composer(StatusCode::OK, JSON_MEDIA, corps.rendu(), sortie)
+}
+
+/// Écrit une adresse en texte, sans allouer, et rend combien d'octets.
+///
+/// `core::fmt::Write` sur une tranche demanderait un adaptateur ; `IpAddr` sait
+/// s'écrire, et `write!` dans un tampon borné est exactement ce que fait
+/// `asl_proto::cadrage::Ecrivain`. On l'emploie plutôt que d'en écrire un second.
+fn ecrire_une_adresse(adresse: core::net::IpAddr, sortie: &mut [u8]) -> usize {
+    use core::fmt::Write as _;
+    let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
+    let _ = write!(ecrivain, "{adresse}");
+    ecrivain.achever().unwrap_or(0)
 }
 
 /// Ce qu'un corps de compte peut faire, en octets.
@@ -3663,6 +3743,69 @@ mod creations {
         assert_eq!(
             besoin(&session_d_appareil(), &tete(b"POST", b"/v1/machines"), b"{"),
             Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    // ── D'où l'on est vu ────────────────────────────────────────────────────
+
+    #[test]
+    fn ou_l_on_est_vu_ne_demande_aucune_preuve() {
+        // **UNE SESSION NUE SUFFIT** : la question ne porte que sur la connexion
+        // qui la pose, et exiger une clé aurait exclu la machine qu'on installe.
+        assert_eq!(
+            besoin(&Session::new(liaison()), &tete(b"GET", b"/v1/vu"), b""),
+            Besoin::OuSuisJeVu
+        );
+    }
+
+    #[test]
+    fn une_adresse_v6_et_son_port_se_rendent_avec_leur_famille() {
+        let vu = asl_proto::VuDepuis {
+            adresse: core::net::IpAddr::V6(core::net::Ipv6Addr::new(
+                0x2001, 0x0db8, 0, 0, 0, 0, 0, 1,
+            )),
+            port: asl_proto::Port::depuis_u16(49152).expect("un port"),
+        };
+        let mut session = Session::new(liaison());
+        let (statut, rendu) = rendre(&mut session, &Besoin::OuSuisJeVu, &Trouvaille::VuDepuis(vu));
+        assert_eq!(statut, StatusCode::OK);
+        let texte = alloc::string::String::from_utf8_lossy(&rendu).into_owned();
+        assert!(texte.contains(r#""adresse":"2001:db8::1""#), "{texte}");
+        assert!(texte.contains(r#""port":49152"#), "{texte}");
+        // **LA FAMILLE EST ÉCRITE**, pour qu'aucune des cinq liaisons n'ait à la
+        // déduire en cherchant un `:` — ce qui marche jusqu'à `::ffff:203.0.113.7`.
+        assert!(texte.contains(r#""famille":6"#), "{texte}");
+    }
+
+    #[test]
+    fn une_adresse_v4_se_rend_aussi() {
+        let vu = asl_proto::VuDepuis {
+            adresse: core::net::IpAddr::V4(core::net::Ipv4Addr::new(203, 0, 113, 7)),
+            port: asl_proto::Port::depuis_u16(1).expect("un port"),
+        };
+        let mut session = Session::new(liaison());
+        let (statut, rendu) = rendre(&mut session, &Besoin::OuSuisJeVu, &Trouvaille::VuDepuis(vu));
+        assert_eq!(statut, StatusCode::OK);
+        let texte = alloc::string::String::from_utf8_lossy(&rendu).into_owned();
+        assert!(texte.contains(r#""adresse":"203.0.113.7""#), "{texte}");
+        assert!(texte.contains(r#""famille":4"#), "{texte}");
+    }
+
+    #[test]
+    fn ne_pas_savoir_d_ou_l_on_voit_rend_404_et_non_500() {
+        // **UN `500` ATTEIGNABLE PAR UN INCONNU EST UN `500` QU'UN INCONNU PEUT
+        // FABRIQUER**, et cette ressource n'exige aucune preuve. Un journal où
+        // les `500` se fabriquent à volonté ne sert plus à repérer les pannes.
+        let mut session = Session::new(liaison());
+        assert_eq!(
+            rendre(&mut session, &Besoin::OuSuisJeVu, &Trouvaille::Rien).0,
+            StatusCode::NOT_FOUND
+        );
+        // Une trouvaille d'un AUTRE genre, elle, reste un `500` : celle-là ne
+        // peut venir que de l'étage 3, jamais du réseau.
+        assert_eq!(
+            rendre(&mut session, &Besoin::OuSuisJeVu, &Trouvaille::Fait).0,
+            StatusCode::INTERNAL_SERVER_ERROR
         );
     }
 

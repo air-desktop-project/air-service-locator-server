@@ -497,12 +497,44 @@ l'empêcherait de comprendre.
 | `DELETE /v1/alias` | Le retire. |
 | `GET /v1/alias/{alias}` | Rend l'identifiant, **et rien d'autre**. Public — c'est l'emploi de l'alias, et son coût (`modele.md` §2.1). |
 | `GET /v1/machines/{m}/services` | Les services, leurs candidats, leur état et la date de la dernière sonde. |
+| `GET /v1/vu` | **D'où l'annuaire voit cette connexion**, sans rien annoncer ni prouver. Voir ci-dessous. |
 | `GET /v1/utilisateurs/{u}` | **Confirme qu'un identifiant existe**, et rien d'autre : ni nom, ni machines, ni services. Sert à ce qu'une faute de frappe ne produise pas une autorisation muette. |
 | `POST /v1/autorisations` | Accorde. Bénéficiaire `u-…`, portée, étiquette. Déclenche la notification. |
 | `GET /v1/autorisations` | Les deux sens : ce que j'ai accordé, ce qu'on m'a accordé. |
 | `DELETE /v1/autorisations/{g}` | Révoque. Effet immédiat. |
 | `GET /v1/expositions` | **Ce qui est exposé de MOI**, relation par relation. Tout utilisateur, pas seulement l'administrateur. |
 | `DELETE /v1/expositions/{relation}` | **Retire mes enregistrements** de cette exposition. Portée : tout mon compte, ou telle machine. |
+
+### `GET /v1/vu` — d'où l'annuaire voit cette connexion
+
+```jsonc
+{"adresse": "2001:db8::1c2d", "port": 49152, "famille": 6}
+```
+
+**Elle n'exige rien**, et c'est la cinquième et dernière ressource dans ce cas.
+Elle ne parle QUE de la connexion qui la pose : rien d'un compte, d'une machine
+ou d'un service, et rien qu'un serveur STUN public ne rendrait. Il n'y a pas
+d'amplification à craindre — la poignée de main QUIC a déjà prouvé un aller-retour
+vers cette adresse, et la réponse est plus courte que la requête.
+
+**Pourquoi elle existe, alors que l'annonce rend déjà cette adresse.** La réponse
+à `POST /v1/annonce` porte le candidat réflexif, mais il faut avoir annoncé pour
+l'obtenir : avoir la capacité d'annonce, et un service à publier. Une machine de
+lecture seule, ou un daemon dont le port n'est pas encore ouvert, n'ont donc aucun
+moyen de savoir sous quelle adresse ils sortent — et c'est la première chose qu'on
+veut regarder quand personne n'arrive à joindre un port.
+
+Exiger une clé aurait exclu le cas le plus utile : la machine qu'on est en train
+d'installer, qui veut savoir si elle atteint l'annuaire et comment il la voit,
+avant même d'avoir un code d'enrôlement.
+
+**`famille` est écrite alors qu'elle se déduit de l'adresse**, pour qu'aucune des
+cinq liaisons n'ait à la déduire : chercher un `:` marche jusqu'au jour où
+quelqu'un rencontre `::ffff:203.0.113.7`.
+
+**Elle ne dit rien du NAT.** Le verdict de NAT se tranche en comparant cette
+adresse à celles qu'un daemon ANNONCE, et un appelant qui n'a rien annoncé n'a
+rien à comparer. Répondre ici serait affirmer ce qui n'a pas été mesuré.
 
 ### Ce qu'un jeton de poussée exige, et ce qu'il ne promet pas
 

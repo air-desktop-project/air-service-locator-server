@@ -137,6 +137,11 @@ impl Service<'_> {
             Besoin::Deja(_) | Besoin::DefiATirer => Trouvaille::Rien,
 
             // **C'EST ICI QUE L'ANNONCE VIT.** Voir `annoncer`.
+            // **C'EST LE SEUL BESOIN QUE L'ÉTAGE 3 SATISFAIT SANS RIEN LIRE.**
+            // Le fait demandé n'est ni dans l'entrepôt ni dans la requête : il
+            // est dans la socket, et seul cet étage la tient.
+            Besoin::OuSuisJeVu => Trouvaille::VuDepuis(self.vu_depuis),
+
             Besoin::Annoncer => self
                 .annoncer()
                 .map_or(Trouvaille::Rien, Trouvaille::Annoncee),

@@ -1564,6 +1564,69 @@ async fn revoquer_la_cle_d_une_machine_ferme_sa_connexion_et_fait_tomber_son_bai
 }
 
 #[tokio::test]
+async fn on_apprend_d_ou_l_on_est_vu_sans_rien_annoncer_ni_prouver() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // La réponse à une annonce porte le candidat réflexif — mais il faut avoir
+    // annoncé pour l'obtenir. Une machine de lecture seule, ou un daemon qu'on
+    // est en train d'installer, n'avaient donc aucun moyen de savoir sous quelle
+    // adresse ils sortent : c'est précisément ce qu'on veut regarder en premier
+    // quand personne n'arrive à joindre un port.
+    //
+    // **AUCUNE PREUVE N'EST PRÉSENTÉE ICI** : la connexion vient d'être ouverte,
+    // et rien n'a été signé.
+    let (autorite, racine, chaine, cle) = materiel("vu");
+    let (base, fichier) = entrepot("vu");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    let mut client = connecter(&racine, adresse).await;
+    // `17` est l'index QPACK de `:method: GET`.
+    ams_quic_client::envoyer_une_requete(&mut client, 0, 17, b"/v1/vu", None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut client, 0).await;
+    assert_eq!(
+        champ(&champs(client.recu(0)), b":status"),
+        Some(&b"200"[..]),
+        "elle n'exige rien"
+    );
+
+    // L'essai tourne sur la boucle locale : ce qu'on doit y lire est l'adresse
+    // de bouclage, et le port éphémère que le noyau a donné au client.
+    let texte = String::from_utf8_lossy(&rendu).into_owned();
+    let vue = valeur_json(&rendu, "adresse");
+    assert!(
+        vue == "::1" || vue == "127.0.0.1",
+        "l'annuaire doit nous voir sur la boucle locale, pas sur {vue}"
+    );
+    assert!(
+        texte.contains(r#""famille":6"#) || texte.contains(r#""famille":4"#),
+        "{texte}"
+    );
+    // **LE PORT N'EST PAS ZÉRO** : c'est celui de la socket, pas un champ oublié.
+    // `valeur_json` ne sait lire que des chaînes ; celui-ci est un nombre, et
+    // c'est bien ainsi qu'on veut le rendre.
+    let port: u32 = texte
+        .split(r#""port":"#)
+        .nth(1)
+        .and_then(|reste| reste.split(',').next())
+        .and_then(|chiffres| chiffres.parse().ok())
+        .unwrap_or_else(|| panic!("pas de port dans {texte}"));
+    assert!(port > 0, "{texte}");
+
+    // ── ET DEUX APPELS SUR LA MÊME CONNEXION DISENT LA MÊME CHOSE ───────────
+    //
+    // Ce n'est pas une évidence : le port source d'une connexion QUIC peut
+    // changer si le client migre. Sur la même socket, il ne doit pas.
+    ams_quic_client::envoyer_une_requete(&mut client, 4, 17, b"/v1/vu", None, b"").await;
+    let encore = ams_quic_client::attendre_la_reponse(&mut client, 4).await;
+    assert_eq!(encore, rendu, "la même connexion est vue du même endroit");
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
 async fn un_jeton_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
     // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
     //

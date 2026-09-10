@@ -151,6 +151,35 @@ pub enum Ressource<'a> {
     /// seule n'en a aucun, et lui ouvrir ce flux lui donnerait un flux qui ne
     /// dira jamais rien — en tenant une ressource des deux côtés.
     Poussees,
+    /// `/v1/vu` — **d'où l'annuaire voit cette connexion**, sans rien annoncer.
+    ///
+    /// # POURQUOI UNE ROUTE, ALORS QUE L'ANNONCE REND DÉJÀ CETTE ADRESSE
+    ///
+    /// La réponse à `POST /v1/annonce` porte le candidat réflexif — mais il
+    /// faut avoir annoncé pour l'obtenir, c'est-à-dire avoir la capacité
+    /// d'annonce et un service à publier. **Une machine de lecture seule, ou un
+    /// daemon qui n'a pas encore ouvert son port, ne peuvent donc pas savoir
+    /// comment on les voit.**
+    ///
+    /// C'est ce qu'il faut pour diagnostiquer : un daemon dont personne
+    /// n'arrive à joindre le port veut d'abord savoir sous quelle adresse il
+    /// sort, et il n'a aucun moyen de l'apprendre autrement.
+    ///
+    /// # ELLE N'EXIGE RIEN, ET C'EST DÉLIBÉRÉ
+    ///
+    /// Elle ne parle QUE de la connexion qui demande. Elle ne dit rien d'un
+    /// compte, d'une machine ou d'un service — rien qu'un tiers puisse
+    /// apprendre en la posant, sinon sa propre adresse, qu'il obtiendrait de
+    /// n'importe quel serveur STUN public.
+    ///
+    /// **Il n'y a pas non plus d'amplification à craindre** : la poignée de main
+    /// QUIC a déjà prouvé un aller-retour vers cette adresse, et la réponse est
+    /// plus courte que la requête qui la demande.
+    ///
+    /// Exiger une clé aurait exclu le cas le plus utile — la machine qu'on est
+    /// en train d'installer, qui veut savoir si elle atteint l'annuaire et
+    /// comment il la voit, avant même d'avoir un code d'enrôlement.
+    Vu,
     /// `/v1/defi` — le défi d'authentification de CETTE connexion.
     ///
     /// # POURQUOI UNE RESSOURCE, ET NON UNE POIGNÉE DE MAIN À PART
@@ -270,6 +299,7 @@ impl Ressource<'_> {
             Self::Defi => &[Methode::Get, Methode::Post],
             Self::Comptes | Self::Appareils | Self::Machines | Self::Enrolement => &[Methode::Post],
             Self::Utilisateur { .. }
+            | Self::Vu
             | Self::Poussees
             | Self::ServicesMachine { .. }
             | Self::Expositions
@@ -296,7 +326,7 @@ impl Ressource<'_> {
 
     /// Ce qu'il faut prouver pour l'atteindre.
     ///
-    /// # LES QUATRE RESSOURCES SANS EXIGENCE, ET POURQUOI CHACUNE
+    /// # LES CINQ RESSOURCES SANS EXIGENCE, ET POURQUOI CHACUNE
     ///
     /// - **`/v1/comptes`** : on n'a pas encore de compte. C'est l'attestation de
     ///   la plate-forme qui protège ce chemin, pas une signature de compte.
@@ -309,6 +339,8 @@ impl Ressource<'_> {
     ///   l'espace des alias énumérable, contrairement à tout le reste.
     /// - **`/v1/utilisateurs/{u}`** : il ne rend qu'un booléen, à qui détient
     ///   déjà 128 bits qu'il ne peut pas deviner et qu'il tient de son porteur.
+    /// - **`/v1/vu`** : elle ne parle que de la connexion qui demande, et ne
+    ///   rend rien qu'un serveur STUN public ne rendrait. Voir [`Ressource::Vu`].
     #[must_use]
     pub const fn exigence(&self) -> Exigence {
         match self {
@@ -316,6 +348,7 @@ impl Ressource<'_> {
             | Self::Comptes
             | Self::Enrolement
             | Self::AliasResolu { .. }
+            | Self::Vu
             | Self::Utilisateur { .. } => Exigence::Aucune,
             Self::Annonce | Self::Poussees => Exigence::MachineAnnonce,
             Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
@@ -590,6 +623,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
             machine: identifiant(machine, Genre::Machine)?,
         }),
         ["v1", "poussees"] => Ok(Ressource::Poussees),
+        ["v1", "vu"] => Ok(Ressource::Vu),
         ["v1", "autorisations"] => Ok(Ressource::Autorisations),
         ["v1", "autorisations", autorisation] => Ok(Ressource::Autorisation {
             autorisation: identifiant(autorisation, Genre::Autorisation)?,
