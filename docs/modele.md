@@ -525,25 +525,35 @@ Ce que cela apporte, et qui ne s'obtient pas autrement :
   déjà en ligne au même instant. Sans connexion tenue, cette route serait
   fermée d'avance.
 
-#### Le delta — proposé, à MESURER
+#### Le delta — MESURÉ une fois, et il reste des liens à éprouver
 
-| | Valeur de départ | D'où elle vient |
+| | Valeur accordée | D'où elle vient |
 |---|---|---|
-| Keepalive | **15 s** | La RFC 4787 recommande qu'un mapping UDP vive au moins deux minutes. **Le parc réel ne la respecte pas** : beaucoup d'équipements grand public expirent en 30 s, certains en 20. WireGuard et WebRTC se sont arrêtés autour de 15-25 s pour la même raison. |
-| Délai d'inactivité QUIC | **45 s** | **Trois keepalives manqués avant de conclure.** Une perte de paquet ou une seconde de latence ne doit pas faire basculer un daemon sain hors ligne : une fausse alerte coûte plus cher qu'une détection tardive. |
+| Keepalive | **10 s** | **Mesuré** (`bancs/nat/README.md`, 2026-09-10) : sur un lien résidentiel, 28 s de silence tiennent et 30 s non. À 15 s, **un seul keepalive perdu faisait 30 s de silence** — exactement la borne. À 10 s, il en faut deux d'affilée. |
+| Délai d'inactivité QUIC | **45 s** | **Quatre keepalives et demi**, depuis que le keepalive est passé à 10 s. Une perte de paquet ou une seconde de latence ne doit pas faire basculer un daemon sain hors ligne : une fausse alerte coûte plus cher qu'une détection tardive. |
 
-**Ces valeurs sont un point de départ, pas une conclusion, et la différence
-compte.** Le bon delta ne se déduit pas — il se mesure, sur des NAT réels, avec
-des daemons réels. La campagne à mener : tenir une connexion, allonger
-progressivement l'intervalle, et noter à partir de quand le mapping meurt, par
-type d'équipement. Tant qu'elle n'a pas eu lieu, 15 s est un choix prudent et
-c'est tout ce qu'on peut en dire.
+**Le keepalive n'est plus une proposition ; l'inactivité l'est encore.** Le
+rapport était de trois pour un et il est maintenant de quatre et demi — le dire
+vaut mieux que de laisser lire l'ancien. Et la mesure suggère de la BAISSER : le
+chemin meurt à 30 s, donc une connexion ne peut de toute façon jamais rester
+inactive 45 s puis reprendre. Ce nombre-là promet une tolérance que le réseau ne
+rend pas. La décision n'est pas prise.
 
-**Sur IPv6, la question ne se pose pas de la même façon** : il n'y a pas de
-mapping à maintenir, seulement un état de pare-feu, généralement plus généreux.
-Le keepalive y sert à détecter une coupure, pas à tenir une porte ouverte — et
-pourrait donc être plus lent. La v1 ne fait pas cette distinction ; elle est
-notée parce qu'elle sera la première optimisation qui vaille.
+**Un échantillon de un ne fait pas une campagne.** Ce qui est mesuré, c'est une
+box, un soir. Ce qu'il reste : un autre opérateur, un partage de connexion mobile
+— les NAT des opérateurs y sont les plus courts —, un réseau d'entreprise. Le
+banc est écrit pour qu'on les ajoute, et son tableau pour qu'on les compare.
+
+**Sur IPv6, on croyait que la question ne se posait pas de la même façon**, au
+motif qu'il n'y a pas de mapping à maintenir, seulement un état de pare-feu
+« généralement plus généreux ». **La mesure dit le contraire, et c'est son
+résultat le plus instructif** : sur le lien éprouvé, la borne est la MÊME en IPv4
+et en IPv6 — 28 s tenus, 30 s perdus, des deux côtés. Ce n'est donc pas la
+traduction d'adresses qui borne, c'est le pare-feu à état de la box, et passer en
+IPv6 ne dispense de rien.
+
+L'optimisation qu'on notait ici — un keepalive plus lent en IPv6 — **n'a donc pas
+lieu d'être**, du moins pas sur ce lien-là.
 
 #### Les valeurs viennent du serveur
 

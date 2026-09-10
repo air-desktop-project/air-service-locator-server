@@ -1165,16 +1165,34 @@ fn instant() -> asl_annuaire::Instant {
 
 /// Le bail qu'on accorde.
 ///
-/// **QUINZE SECONDES DE KEEPALIVE, QUARANTE-CINQ D'INACTIVITÉ**, soit trois
-/// keepalives manqués. `modele.md` le propose et demande de le MESURER sur de
-/// vrais NAT : ce n'est pas une conclusion, et le jour où la mesure sera faite,
-/// c'est ici qu'elle atterrira.
-const BAIL_PAR_DEFAUT: asl_proto::Bail = match asl_proto::Bail::nouveau(15, 45) {
+/// **DIX SECONDES DE KEEPALIVE, QUARANTE-CINQ D'INACTIVITÉ.**
+///
+/// # LE DIX VIENT D'UNE MESURE, ET NON D'UN CHOIX PRUDENT
+///
+/// `modele.md` §4.1 proposait quinze secondes en disant que ce n'était pas une
+/// conclusion. `bancs/nat/` a fait la mesure le 2026-09-10 : sur un lien
+/// résidentiel, **vingt-huit secondes de silence tiennent, trente non** — et le
+/// chiffre est le MÊME en IPv4 et en IPv6, ce qui dit que la borne n'est pas la
+/// traduction d'adresses mais le pare-feu à état de la box.
+///
+/// À quinze, **un seul keepalive perdu fait trente secondes de silence**,
+/// c'est-à-dire exactement la borne : sur un lien qui perd un paquet de temps en
+/// temps, l'annonce tombait sans que rien n'ait mal tourné. À dix, il en faut
+/// deux d'affilée.
+///
+/// # ET L'INACTIVITÉ RESTE À QUARANTE-CINQ, CE QUI N'EST PLUS TROIS POUR UN
+///
+/// C'est quatre keepalives et demi, et il faut le dire plutôt que de laisser
+/// croire au rapport d'avant. La mesure suggère de la baisser — le chemin meurt
+/// à trente secondes, donc une connexion ne peut de toute façon jamais rester
+/// inactive quarante-cinq secondes puis reprendre —, mais c'est une seconde
+/// décision, et elle n'est pas prise ici.
+const BAIL_PAR_DEFAUT: asl_proto::Bail = match asl_proto::Bail::nouveau(10, 45) {
     Ok(bail) => bail,
     // Ces deux constantes sont valides, et le compilateur le vérifie : cette
     // branche ne compile que parce qu'elle doit exister, jamais parce qu'elle
     // sert.
-    Err(_) => panic!("quinze et quarante-cinq forment un bail valide"),
+    Err(_) => panic!("dix et quarante-cinq forment un bail valide"),
 };
 
 /// Combien de temps entre deux balayages des codes périmés, en millisecondes.

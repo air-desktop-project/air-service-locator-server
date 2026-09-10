@@ -2039,3 +2039,84 @@ async fn un_client_hello_en_deux_paquets_monte_une_seule_connexion() {
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
+
+// ── LE BAIL QU'ON ACCORDE ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn le_bail_accorde_est_celui_que_la_mesure_a_choisi() {
+    // ── CE QUE CET ESSAI ÉPINGLE, ET POURQUOI IL MANQUAIT ───────────────────
+    //
+    // **RIEN NE VÉRIFIAIT LE BAIL QUE L'ANNUAIRE ACCORDE.** C'est pourtant une
+    // décision de produit, et la seule que tous les daemons du monde appliquent
+    // sans pouvoir la discuter : `modele.md` §4.1 dit que les deux valeurs
+    // viennent du serveur, précisément pour qu'on puisse les changer sans mettre
+    // à jour ce qui est installé chez des tiers.
+    //
+    // Une décision que personne ne vérifie se perd à la première réécriture.
+    //
+    // Le DIX vient d'une mesure — `bancs/nat/README.md`, 2026-09-10 : sur un
+    // lien résidentiel, vingt-huit secondes de silence tiennent et trente non.
+    // À quinze, un SEUL keepalive perdu atteignait la borne.
+    let (autorite, racine, chaine, cle) = materiel("bail");
+    let (base, fichier) = entrepot("bail");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let (_compte, _appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA1).await;
+    let (statut, rendu) = poster(
+        &mut alice,
+        8,
+        b"/v1/machines",
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let machine = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let code = valeur_json(&rendu, "code");
+
+    let mut daemon = connecter(&racine, adresse).await;
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xD3; 32]);
+    assert_eq!(enroler(&mut daemon, 0, &code, &secrete).await, machine);
+    authentifier(&mut daemon, machine, &secrete, 12, 16).await;
+
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}]}}"#,
+        machine.texte()
+    );
+    let (statut, rendu) = poster(
+        &mut daemon,
+        20,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"200", "l'annonce est prise");
+
+    // **LE BAIL VOYAGE DANS LA RÉPONSE**, et c'est là qu'un daemon le lit.
+    let mut tampons = asl_proto::cadrage::TamponsReponse::nouveaux();
+    let lue = asl_proto::Reponse::decoder(&rendu, &mut tampons).expect("une réponse lisible");
+    assert_eq!(
+        lue.bail.keepalive_secondes(),
+        10,
+        "le keepalive accordé n'est plus celui que la mesure a choisi"
+    );
+    assert_eq!(
+        lue.bail.inactivite_secondes(),
+        45,
+        "l'inactivité accordée a changé sans que personne le dise"
+    );
+    // **QUATRE KEEPALIVES ET DEMI, ET NON TROIS.** Le rapport a changé avec le
+    // keepalive ; l'essai le NOMME plutôt que de le laisser se découvrir.
+    assert!(
+        u32::from(lue.bail.inactivite_secondes())
+            >= u32::from(lue.bail.keepalive_secondes()).saturating_mul(2),
+        "l'invariant du type : l'inactivité vaut au moins deux keepalives"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
