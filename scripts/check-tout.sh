@@ -33,18 +33,24 @@
 #      Elle passe donc APRÈS les essais ordinaires, qui disent la même chose en
 #      quelques secondes quand quelque chose est cassé. Il n'y a aucune raison
 #      d'attendre une recompilation complète pour apprendre qu'un essai échoue.
-#   9. `check-format`    — EN DERNIER (voir ci-dessus).
+#   9. `check-paquet`    — LENTE aussi : elle construit en `release`, ce que rien
+#      d'autre ne fait. Elle passe donc après tout ce qui juge le code, et avant
+#      le formatage — c'est la dernière chose qui puisse dire « non » sur le
+#      fond.
+#  10. `check-format`    — EN DERNIER (voir ci-dessus).
 #
 # # CE QUI MANQUE ENCORE, ET QUI EST DIT PLUTÔT QUE TU
 #
-# `air-mail-server` en porte dix. Ce dépôt en porte HUIT. Celles qui manquent
-# encore attendent le code qu'elles jugent : le paquet `.deb` et l'installateur
-# n'existent pas.
+# `air-mail-server` en porte dix. Ce dépôt en porte NEUF.
 #
 # `check-couverture` est ENTRÉE avec `asl-id`, la première crate à porter du
 # code. Elle serait arrivée trop tard si on l'avait attendue davantage : c'est
 # en écrivant la crate qu'on écrit les essais qui la couvrent, pas six mois
 # après.
+#
+# **`check-paquet` est entrée le 2026-09-10**, avec le paquet qu'elle juge. Il
+# reste l'installateur, que ce dépôt n'aura peut-être jamais : la cible de
+# déploiement est Ubuntu, et un `.deb` y suffit.
 #
 # **Et deux de celles qui EXISTENT le disent d'elles-mêmes aujourd'hui** :
 # `check-pile` annonce qu'aucune crate tierce n'est dans le graphe, donc qu'il
@@ -61,7 +67,6 @@ barrieres=(
     scripts/check-pile.sh
     scripts/check-sans-c.sh
     scripts/check-clippy.sh
-    scripts/check-format.sh
 )
 
 # `check-couverture` n'est PAS dans la liste ci-dessus : elle tourne après les
@@ -107,13 +112,35 @@ else
 fi
 echo
 
+# **APRÈS TOUT CE QUI JUGE LE CODE, ET AVANT LE FORMATAGE.** Elle construit en
+# `release`, ce que rien d'autre ne fait ici : apprendre par elle qu'un essai
+# échoue coûterait deux minutes de plus qu'il ne faut.
+echo "═══ scripts/check-paquet.sh"
+if ./scripts/check-paquet.sh; then
+    echo "─── scripts/check-paquet.sh : OK"
+else
+    echo "─── scripts/check-paquet.sh : ÉCHEC"
+    echecs+=("scripts/check-paquet.sh")
+fi
+echo
+
+# LE FORMATAGE EST EN DERNIER — voir l'en-tête.
+echo "═══ scripts/check-format.sh"
+if ./scripts/check-format.sh; then
+    echo "─── scripts/check-format.sh : OK"
+else
+    echo "─── scripts/check-format.sh : ÉCHEC"
+    echecs+=("scripts/check-format.sh")
+fi
+echo
+
 if [ "${#echecs[@]}" -gt 0 ]; then
     echo "ÉCHEC : ${#echecs[@]} barrière(s) refusent :"
     printf '  %s\n' "${echecs[@]}"
     exit 1
 fi
 
-echo "OK : les ${#barrieres[@]} barrières, le fuzz, la couverture et les essais passent."
+echo "OK : les $(( ${#barrieres[@]} + 3 )) barrières, le fuzz, la couverture et les essais passent."
 echo
 echo "Le DCO ne fait PAS partie de ce lot : il juge des messages de commit, donc"
 echo "il se lance APRÈS avoir committé — scripts/check-dco.sh."

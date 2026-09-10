@@ -1,0 +1,111 @@
+# L'unité systemd de l'annuaire.
+#
+# ── ELLE EST LA SEULE COPIE, ET C'EST DÉLIBÉRÉ ──────────────────────────────
+#
+# `scripts/paquet.sh` l'installe telle quelle ; il ne la réécrit pas. Deux
+# textes qui disent la même chose divergent — la leçon est fraîche sur
+# `air-mail-server`, où une table `nftables` recopiée dans un document avait
+# cessé de correspondre à celle du script.
+#
+# ── ELLE PORTE LA LIGNE DE COMMANDE, PARCE QU'IL N'Y A PAS DE FICHIER DE
+#    CONFIGURATION ────────────────────────────────────────────────────────────
+#
+# `asl-server::reglages` le dit : un fichier de configuration serait un second
+# endroit où mettre la vérité, alors qu'un service lancé par systemd a déjà une
+# unité qui porte sa ligne de commande. Pour changer un réglage, on passe
+# par-dessus cette unité :
+#
+#     systemctl edit asl-server
+#
+# ── `--attestation` N'A PAS DE VALEUR ICI, ET LE SERVICE NE DÉMARRE PAS SANS ─
+#
+# `protocole.md` §2.1 : la v1 refuse un enrôlement sans attestation de
+# plate-forme, mais la vérification n'est pas écrite. `exigee` refuse donc TOUS
+# les enrôlements, et `facultative` laisse n'importe qui créer un compte.
+#
+# **Aucune des deux ne peut être choisie par un paquet.** `$ASL_ATTESTATION`
+# n'est défini nulle part : systemd retire l'argument, `asl-server` dit qu'il
+# manque une valeur à `--attestation`, et le service échoue avec un message qui
+# nomme exactement ce qu'il faut décider.
+#
+# Les accolades sont ABSENTES à dessein : `${ASL_ATTESTATION}` non défini
+# donnerait un argument VIDE, et l'annuaire dirait « attend `exigee` ou
+# `facultative`, et non «  » ». Sans accolades, l'argument disparaît, et le
+# message est celui qu'on veut lire.
+
+[Unit]
+Description=air-service-locator — annuaire de services
+Documentation=https://github.com/air-desktop-project/air-service-locator-server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=asl-server
+Group=asl-server
+
+# **L'ANNUAIRE REFUSE DE TOURNER EN ROOT** (C8), et le vérifie lui-même avant
+# de lire quoi que ce soit. Ces deux lignes sont la ceinture ; son refus est
+# les bretelles.
+ExecStart=/usr/bin/asl-server \
+    --entrepot /var/lib/asl-server/annuaire.redb \
+    --certificat /etc/asl-server/certificat.pem \
+    --cle /etc/asl-server/cle.pem \
+    --attestation $ASL_ATTESTATION
+
+# **PAS DE `Restart=always`.** Les fautes qui empêchent cet annuaire de démarrer
+# sont des fautes de configuration — un certificat absent, une posture non
+# choisie, une base verrouillée —, et redémarrer sans fin les répéterait dans le
+# journal jusqu'à le rendre illisible. `on-failure` avec un intervalle de dix
+# secondes couvre la panne passagère sans masquer la panne durable.
+Restart=on-failure
+RestartSec=10s
+
+# L'extinction est en deux temps côté protocole ; deux secondes suffisent
+# largement, et `asl-server` ferme proprement sur SIGTERM.
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+
+# ── CE QUE LE SERVICE N'A PAS LE DROIT DE FAIRE ─────────────────────────────
+#
+# **AUCUNE CAPACITÉ.** Le port par défaut est 6630, donc au-dessus de 1024 :
+# `CAP_NET_BIND_SERVICE` n'est pas nécessaire. Un exploitant qui déplacerait
+# l'annuaire sous 1024 devrait l'ajouter lui-même, et ce serait une décision.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+
+# L'entrepôt, créé par systemd en 0700 au nom du service.
+StateDirectory=asl-server
+StateDirectoryMode=0700
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+
+# **QUIC, DONC UDP, DONC CES DEUX FAMILLES ET RIEN D'AUTRE.** Pas d'AF_UNIX :
+# cet annuaire ne parle à aucun démon local.
+RestrictAddressFamilies=AF_INET AF_INET6
+
+# `@system-service` moins ce qu'un service réseau n'a aucune raison de faire.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @swap @reboot @raw-io
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

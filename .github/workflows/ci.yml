@@ -187,6 +187,29 @@ jobs:
       - name: check-format
         run: ./scripts/check-format.sh
 
+  # ── Ce qui s'exécutera en root chez quelqu'un d'autre ──────────────────────
+  #
+  # JOB SÉPARÉ : il construit en `release`, ce qu'aucun autre ne fait, et
+  # `dpkg-dev` n'est utile qu'à lui. Le noyer dans la vérification ordinaire
+  # rendrait cette dernière deux minutes plus lente pour tout le monde.
+  paquet:
+    name: le paquet Debian
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: la toolchain du dépôt
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # `dpkg-shlibdeps` LIT LE BINAIRE pour en calculer les dépendances : sans
+      # `dpkg-dev`, `check-paquet.sh` s'abstient au lieu d'échouer, et son
+      # verdict ne vaudrait rien. C'est ICI qu'il compte.
+      - name: dpkg-dev
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev
+
+      - name: check-paquet
+        run: ./scripts/check-paquet.sh
+
   # ── Le 100 % de couverture sur ce qui ne fait pas d'entrée-sortie (C2) ─────
   #
   # JOB SÉPARÉ, et pour une raison de temps : il installe un outil, recompile

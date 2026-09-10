@@ -110,7 +110,7 @@ la règle qui n'était qu'un conseil.
 
 ## Les barrières
 
-Sept, plus la couverture et le fuzz. Elles n'étaient que quatre tant que le
+Neuf, plus la couverture et le fuzz. Elles n'étaient que quatre tant que le
 graphe était vide : les autres n'avaient rien à mesurer, et un rapport vert qui
 n'a rien examiné est un mensonge poli.
 
@@ -149,6 +149,39 @@ cargo run -p asl-server -- \
 Il s'éteint sur `SIGTERM` ou `SIGINT`, en deux temps (§5.2 de RFC 9114) : il dit
 d'abord « n'ouvre plus rien » sans rien condamner de ce qui est en vol, puis
 ferme.
+
+## Installer un annuaire
+
+La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
+
+```sh
+scripts/paquet.sh                    # asl-server_0.1.0_amd64.deb
+sudo dpkg -i asl-server_0.1.0_amd64.deb
+```
+
+**Le paquet n'active ni ne démarre le service**, et il lui manque exprès deux
+choses qu'un paquet ne peut pas décider :
+
+1. **La posture d'attestation**, qui n'a pas de défaut (`protocole.md` §2.1).
+   `exigee` refuse TOUS les enrôlements tant que la vérification n'est pas
+   écrite ; `facultative` laisse n'importe qui créer un compte. Elle se pose par
+   `systemctl edit asl-server`, et le modèle est expédié sous
+   `/usr/share/doc/asl-server/attestation.conf.exemple`.
+2. **Le certificat**, émis pour le nom sous lequel cet annuaire répond, à poser
+   en `/etc/asl-server/certificat.pem` et `/etc/asl-server/cle.pem`.
+
+Tant que la première manque, le service échoue en disant `--attestation attend
+une valeur` — un message qui nomme exactement ce qu'il reste à décider. Un paquet
+qui démarrerait un service voué à échouer apprendrait à l'exploitant que les
+échecs de ce service sont normaux.
+
+**`dpkg --purge` n'efface ni l'annuaire ni la clé.** `/var/lib/asl-server` porte
+les comptes, les machines et les autorisations que des humains se sont
+accordées ; `/etc/asl-server` porte un secret. Le `postrm` dit ce qu'il laisse en
+place et comment l'effacer soi-même, plutôt que de le faire à votre place.
+
+`scripts/check-paquet.sh` est la barrière qui juge tout cela — y compris que le
+paquet ne choisisse pas la posture, et que le `purge` ne dépossède personne.
 
 ## L'autorité de certification
 
