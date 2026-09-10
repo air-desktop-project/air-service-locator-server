@@ -108,6 +108,29 @@ struct Vivante {
     etablie_dite: bool,
     /// D'où le pair écrit.
     pair: SocketAddr,
+    /// L'identifiant que le CLIENT avait inventé pour nous joindre.
+    ///
+    /// # SANS LUI, UN `ClientHello` EN DEUX PAQUETS NE PASSE PAS
+    ///
+    /// §7.2 : un client invente un identifiant de destination et le garde
+    /// **jusqu'à ce qu'il ait vu le nôtre**. Tant qu'il ne l'a pas vu, tous ses
+    /// paquets portent celui-là — et un `ClientHello` qui ne tient pas dans un
+    /// datagramme en occupe deux, envoyés d'affilée, avant toute réponse.
+    ///
+    /// Une carte qui ne connaîtrait que les identifiants QU'ON A DISTRIBUÉS
+    /// prendrait donc le second paquet pour une connexion neuve. Chaque moitié
+    /// du `ClientHello` atterrirait dans une connexion différente, et les deux
+    /// attendraient l'autre moitié pour toujours — sans faute, sans message, et
+    /// sans qu'aucun essai en boucle locale ne le voie, parce qu'un banc qui ne
+    /// tient qu'une connexion route tout vers elle.
+    ///
+    /// **C'EST LE CAS ORDINAIRE, PAS UN CAS LIMITE** : un `ClientHello` dépasse
+    /// 1200 octets dès qu'il porte un échange de clés post-quantique, ce que les
+    /// navigateurs font par défaut depuis 2024.
+    ///
+    /// Il est oublié dès que la poignée de main aboutit : le client a vu le
+    /// nôtre, et il n'emploiera plus jamais celui-ci.
+    origine: Option<Vec<u8>>,
 }
 
 /// Ce qu'un tour demande à l'écoute.
@@ -509,10 +532,18 @@ impl Ecoute {
         }
         let rang = self.connexions.len();
         self.carte.insert(local.as_bytes().to_vec(), rang);
+        // **LES DEUX CLÉS DÉSIGNENT LA MÊME CONNEXION**, voir `Vivante::origine`.
+        //
+        // Deux clients qui inventeraient le même identifiant se marcheraient
+        // dessus ; c'est huit octets tirés au hasard, donc un événement qu'on
+        // n'observera pas, et le perdant réessaierait de toute façon.
+        let origine = arrivee.destination().as_bytes().to_vec();
+        self.carte.insert(origine.clone(), rang);
         self.connexions.push(Vivante {
             conduite,
             pair,
             etablie_dite: false,
+            origine: Some(origine),
         });
         self.comptes.acceptees = self.comptes.acceptees.saturating_add(1);
     }
@@ -634,6 +665,14 @@ impl Ecoute {
             let pair = vivante.pair;
             if !vivante.etablie_dite {
                 vivante.etablie_dite = true;
+                // **L'IDENTIFIANT D'ORIGINE A FINI SON OFFICE.** Le client a vu
+                // le nôtre — c'est ce qu'« établie » veut dire — et il ne
+                // réemploiera plus celui qu'il avait inventé. Le garder
+                // laisserait une seconde porte vers cette connexion, ouverte à
+                // qui a vu passer le premier paquet en clair.
+                if let Some(origine) = vivante.origine.take() {
+                    self.carte.remove(&origine);
+                }
                 application.a_l_etablissement(&mut vivante.conduite, pair);
             }
             let flux: Vec<StreamId> = vivante.conduite.streams_alive().collect();
@@ -731,6 +770,12 @@ impl Ecoute {
                 vivante.conduite.local_id().as_bytes().to_vec(),
                 restantes.len(),
             );
+            // **L'IDENTIFIANT D'ORIGINE SURVIT À LA RECONSTRUCTION**, sans quoi
+            // une connexion en cours de poignée de main perdrait la moitié de
+            // son `ClientHello` au premier ménage.
+            if let Some(origine) = &vivante.origine {
+                carte.insert(origine.clone(), restantes.len());
+            }
             restantes.push(vivante);
         }
         self.connexions = restantes;

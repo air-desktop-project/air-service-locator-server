@@ -1912,3 +1912,130 @@ fn liaison_du_client(client: &ams_quic_client::Client) -> asl_cle::LiaisonDeCana
             .expect("la poignée de main est terminée"),
     )
 }
+
+// ── UN `ClientHello` QUI NE TIENT PAS DANS UN DATAGRAMME ────────────────────
+
+/// Monte une configuration cliente dont le `ClientHello` dépasse 1200 octets.
+///
+/// **L'ALPN SERT DE LEST**, et n'importe quoi d'autre ferait l'affaire : ce
+/// qu'on veut est un `ClientHello` que §14.1 oblige à répartir sur DEUX paquets
+/// `Initial`. Dans la vraie vie, c'est un échange de clés post-quantique qui le
+/// produit — les navigateurs en proposent un par défaut depuis 2024, et leur
+/// `ClientHello` fait environ 1600 octets.
+fn config_cliente_bavarde(autorite: &[u8]) -> std::sync::Arc<rustls::ClientConfig> {
+    use rustls::pki_types::pem::PemObject as _;
+
+    let mut racines = rustls::RootCertStore::empty();
+    for der in rustls::pki_types::CertificateDer::pem_slice_iter(autorite) {
+        racines
+            .add(der.expect("certificat lisible"))
+            .expect("racine");
+    }
+    let mut config =
+        rustls::ClientConfig::builder_with_provider(Arc::new(ams_tls::provider_quic()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .expect("TLS 1.3")
+            .with_root_certificates(racines)
+            .with_no_client_auth();
+
+    // `h3` d'abord — c'est celui que l'annuaire offre —, puis du lest.
+    let mut alpn = ams_tls::alpn_h3();
+    for rang in 0..24_u8 {
+        alpn.push(format!("lest-{rang:02}-{}", "x".repeat(48)).into_bytes());
+    }
+    config.alpn_protocols = alpn;
+    Arc::new(config)
+}
+
+#[tokio::test]
+async fn un_client_hello_en_deux_paquets_monte_une_seule_connexion() {
+    // ── CE QUE CET ESSAI PROUVE, ET CE QU'IL A ATTRAPÉ ──────────────────────
+    //
+    // §7.2 : un client invente un identifiant de destination et le garde
+    // **jusqu'à ce qu'il ait vu le nôtre**. Un `ClientHello` qui ne tient pas
+    // dans un datagramme part donc en DEUX paquets `Initial` portant le MÊME
+    // identifiant, d'affilée, avant toute réponse de notre part.
+    //
+    // L'annuaire ne connaissait que les identifiants QU'IL AVAIT DISTRIBUÉS. Il
+    // prenait le second paquet pour une connexion neuve, chaque moitié du
+    // `ClientHello` atterrissait dans une connexion différente, et les deux
+    // attendaient l'autre moitié pour toujours. **Sans faute, sans message, et
+    // sans qu'aucun essai ne le voie** — les deux bancs de ce produit ne
+    // tiennent qu'une connexion et routent tout vers elle.
+    //
+    // Ce n'est pas un cas limite : un `ClientHello` dépasse 1200 octets dès
+    // qu'il porte un échange de clés post-quantique.
+    let (autorite, racine, chaine, cle) = materiel("hello-long");
+    let (base, fichier) = entrepot("hello-long");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("une socket");
+    socket.connect(adresse).await.expect("la cible");
+
+    let horloge = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |ecoule| u64::try_from(ecoule.as_micros()).unwrap_or(0))
+    };
+    let mut client = ams_quic_tls::Connection::connect(
+        config_cliente_bavarde(&racine),
+        rustls::pki_types::ServerName::try_from("localhost").expect("un nom"),
+        ams_quic_client::identifiant(&[0x11; 8]),
+        ams_quic_client::identifiant(&[0x22; 8]),
+        ams_quic_tls::INACTIVITE_US,
+        horloge(),
+    )
+    .expect("le client se monte");
+
+    // **LA PREMIÈRE VOLÉE FAIT PLUS D'UN DATAGRAMME**, et c'est la prémisse de
+    // l'essai : s'il n'en faisait qu'un, l'essai ne prouverait rien.
+    let mut place = vec![0_u8; 1_500];
+    let mut premiers = 0_u32;
+    while let Ok(ecrit) = client.poll_transmit(&mut place, horloge()) {
+        if ecrit == 0 {
+            break;
+        }
+        socket.send(&place[..ecrit]).await.expect("l'envoi");
+        premiers = premiers.saturating_add(1);
+    }
+    assert!(
+        premiers >= 2,
+        "le `ClientHello` tient dans un seul paquet : cet essai n'éprouve rien"
+    );
+
+    // ── ET LA POIGNÉE DE MAIN ABOUTIT ───────────────────────────────────────
+    let mut recu = vec![0_u8; 1_500];
+    let echeance = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    while !client.is_established() && tokio::time::Instant::now() < echeance {
+        let attente = tokio::time::Duration::from_millis(200);
+        if let Ok(Ok(lus)) = tokio::time::timeout(attente, socket.recv(&mut recu)).await {
+            let mut datagramme = recu[..lus].to_vec();
+            let _ = client.on_datagram(&mut datagramme, horloge());
+        } else {
+            client.on_timeout(horloge());
+        }
+        while let Ok(ecrit) = client.poll_transmit(&mut place, horloge()) {
+            if ecrit == 0 {
+                break;
+            }
+            let _ = socket.send(&place[..ecrit]).await;
+        }
+    }
+    assert!(
+        client.is_established(),
+        "un `ClientHello` en deux paquets doit monter une connexion"
+    );
+
+    let _ = dire_stop.send(());
+    let comptes = tache.await.expect("la tâche finit");
+    // **UNE SEULE**, et non deux : c'est tout le défaut, et il se compte.
+    assert_eq!(
+        comptes.acceptees, 1,
+        "deux paquets d'un même client ont monté deux connexions"
+    );
+
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
