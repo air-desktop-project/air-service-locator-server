@@ -98,7 +98,7 @@ La réponse :
 {
   "service": "s-4k9m2p7r1t6v3x8z5b0d2f4h6j",
   "keepalive_secondes": 10,
-  "inactivite_secondes": 45,
+  "inactivite_secondes": 30,
   "vu_depuis": { "adresse": "2001:db8::1c2d", "port": 51840 },
   "derriere_nat": "non",
   "joignabilite": [

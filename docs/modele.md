@@ -530,14 +530,18 @@ Ce que cela apporte, et qui ne s'obtient pas autrement :
 | | Valeur accordée | D'où elle vient |
 |---|---|---|
 | Keepalive | **10 s** | **Mesuré** (`bancs/nat/README.md`, 2026-09-10) : sur un lien résidentiel, 28 s de silence tiennent et 30 s non. À 15 s, **un seul keepalive perdu faisait 30 s de silence** — exactement la borne. À 10 s, il en faut deux d'affilée. |
-| Délai d'inactivité QUIC | **45 s** | **Quatre keepalives et demi**, depuis que le keepalive est passé à 10 s. Une perte de paquet ou une seconde de latence ne doit pas faire basculer un daemon sain hors ligne : une fausse alerte coûte plus cher qu'une détection tardive. |
+| Délai d'inactivité QUIC | **30 s** | **Trois keepalives manqués avant de conclure** — et c'est aussi ce que le chemin tolère. Une perte de paquet ou une seconde de latence ne doit pas faire basculer un daemon sain hors ligne : une fausse alerte coûte plus cher qu'une détection tardive. |
 
-**Le keepalive n'est plus une proposition ; l'inactivité l'est encore.** Le
-rapport était de trois pour un et il est maintenant de quatre et demi — le dire
-vaut mieux que de laisser lire l'ancien. Et la mesure suggère de la BAISSER : le
-chemin meurt à 30 s, donc une connexion ne peut de toute façon jamais rester
-inactive 45 s puis reprendre. Ce nombre-là promet une tolérance que le réseau ne
-rend pas. La décision n'est pas prise.
+**Les deux valeurs viennent maintenant de la mesure.** 45 s promettait une
+tolérance que le réseau ne rend pas : le chemin meurt à 30 s, donc une connexion
+ne pouvait de toute façon jamais rester inactive 45 s puis reprendre. Le rapport
+de trois pour un est celui de la politique, et il est retrouvé.
+
+**Les DEUX inactivités doivent s'accorder.** Celle du transport (`--inactivite`)
+ferme la CONNEXION ; celle du bail fait tomber l'ANNONCE. §1.2 de
+`protocole.md` promet que les deux sont la même chose : les laisser diverger
+ouvrirait une fenêtre où un daemon est désannoncé sans être déconnecté, donc sans
+rien apprendre. Elles valent 30 s toutes les deux.
 
 **Un échantillon de un ne fait pas une campagne.** Ce qui est mesuré, c'est une
 box, un soir. Ce qu'il reste : un autre opérateur, un partage de connexion mobile

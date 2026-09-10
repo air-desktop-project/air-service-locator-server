@@ -113,7 +113,7 @@ asl-server — un annuaire de services air-service-locator.
   --cle        <chemin>   la clé privée, en PEM             (obligatoire)
   --port       <nombre>   le port d'écoute                  (défaut : 6630)
   --connexions <nombre>   connexions simultanées au plus    (défaut : 1024)
-  --inactivite <secondes> l'inactivité annoncée aux pairs   (défaut : 45)
+  --inactivite <secondes> l'inactivité annoncée aux pairs   (défaut : 30)
   --retention  <jours>    la rétention du journal           (défaut : 90)
   --attestation <exigee|facultative>                        (obligatoire)
 
@@ -148,10 +148,17 @@ impl Reglages {
         // Mille vingt-quatre connexions : quelques dizaines de mébioctets de
         // fenêtres de réassemblage. C'est une borne de MÉMOIRE, et elle se règle.
         let mut connexions_max = 1024_usize;
-        // Quarante-cinq secondes, soit trois keepalives de quinze manqués.
-        // **CE N'EST PAS UNE CONCLUSION** : `modele.md` demande de la mesurer
-        // sur de vrais NAT.
-        let mut inactivite_s = 45_u64;
+        // Trente secondes, soit trois keepalives de dix manqués — et c'est
+        // aussi ce que le chemin tolère : `bancs/nat/README.md` a mesuré 28 s
+        // tenus, 30 s perdus.
+        //
+        // **ELLE DOIT S'ACCORDER AVEC LE BAIL QUE L'ANNUAIRE ACCORDE**
+        // (`asl_loop_tokio::h3::BAIL_PAR_DEFAUT`) : celle-ci ferme la CONNEXION,
+        // celle-là fait tomber le BAIL, et `protocole.md` §1.2 promet que les
+        // deux sont la même chose. Les laisser diverger ouvrirait une fenêtre où
+        // un daemon est désannoncé sans être déconnecté, donc sans rien
+        // apprendre.
+        let mut inactivite_s = 30_u64;
         let mut retention_jours = 90_u64;
         let mut politique = None;
 
@@ -287,7 +294,7 @@ mod tests {
         let lus = Reglages::depuis(minimum()).expect("le minimum suffit");
         assert_eq!(lus.port, asl_proto::PORT_PAR_DEFAUT);
         assert_eq!(lus.connexions_max, 1024);
-        assert_eq!(lus.inactivite_s, 45);
+        assert_eq!(lus.inactivite_s, 30);
         assert_eq!(lus.retention_jours, 90);
     }
 

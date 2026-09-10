@@ -1180,19 +1180,24 @@ fn instant() -> asl_annuaire::Instant {
 /// temps, l'annonce tombait sans que rien n'ait mal tourné. À dix, il en faut
 /// deux d'affilée.
 ///
-/// # ET L'INACTIVITÉ RESTE À QUARANTE-CINQ, CE QUI N'EST PLUS TROIS POUR UN
+/// # ET TRENTE D'INACTIVITÉ, PARCE QUE LE CHEMIN NE VIT PAS PLUS LONGTEMPS
 ///
-/// C'est quatre keepalives et demi, et il faut le dire plutôt que de laisser
-/// croire au rapport d'avant. La mesure suggère de la baisser — le chemin meurt
-/// à trente secondes, donc une connexion ne peut de toute façon jamais rester
-/// inactive quarante-cinq secondes puis reprendre —, mais c'est une seconde
-/// décision, et elle n'est pas prise ici.
-const BAIL_PAR_DEFAUT: asl_proto::Bail = match asl_proto::Bail::nouveau(10, 45) {
+/// Quarante-cinq secondes promettaient une tolérance que le réseau ne rend pas :
+/// le chemin meurt à trente, donc une connexion ne pouvait de toute façon jamais
+/// rester inactive quarante-cinq secondes puis reprendre. Le rapport redevient
+/// de trois pour un, qui est la politique écrite dans `modele.md` §4.1.
+///
+/// **CETTE VALEUR-CI DOIT S'ACCORDER AVEC `--inactivite`**, l'inactivité que le
+/// transport annonce. Celle-là ferme la CONNEXION, celle-ci fait tomber le BAIL,
+/// et `protocole.md` §1.2 promet que les deux sont la même chose. Les laisser
+/// diverger ouvrirait une fenêtre où un daemon est désannoncé sans être
+/// déconnecté — donc sans rien apprendre.
+const BAIL_PAR_DEFAUT: asl_proto::Bail = match asl_proto::Bail::nouveau(10, 30) {
     Ok(bail) => bail,
     // Ces deux constantes sont valides, et le compilateur le vérifie : cette
     // branche ne compile que parce qu'elle doit exister, jamais parce qu'elle
     // sert.
-    Err(_) => panic!("dix et quarante-cinq forment un bail valide"),
+    Err(_) => panic!("dix et trente forment un bail valide"),
 };
 
 /// Combien de temps entre deux balayages des codes périmés, en millisecondes.

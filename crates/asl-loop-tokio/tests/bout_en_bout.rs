@@ -2104,11 +2104,16 @@ async fn le_bail_accorde_est_celui_que_la_mesure_a_choisi() {
     );
     assert_eq!(
         lue.bail.inactivite_secondes(),
-        45,
+        30,
         "l'inactivité accordée a changé sans que personne le dise"
     );
-    // **QUATRE KEEPALIVES ET DEMI, ET NON TROIS.** Le rapport a changé avec le
-    // keepalive ; l'essai le NOMME plutôt que de le laisser se découvrir.
+    // **TROIS KEEPALIVES MANQUÉS**, qui est la politique écrite dans
+    // `modele.md` §4.1 — et aussi ce que le chemin tolère.
+    assert_eq!(
+        u32::from(lue.bail.inactivite_secondes()),
+        u32::from(lue.bail.keepalive_secondes()).saturating_mul(3),
+        "le rapport de trois pour un a changé sans que personne le dise"
+    );
     assert!(
         u32::from(lue.bail.inactivite_secondes())
             >= u32::from(lue.bail.keepalive_secondes()).saturating_mul(2),
