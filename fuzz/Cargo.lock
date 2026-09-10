@@ -58,12 +58,12 @@ dependencies = [
 [[package]]
 name = "ams-field-codec"
 version = "0.1.0"
-source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=932ce354d#932ce354d8ab70e12be1670ead42f33aa8977e35"
+source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=6f0ea51b6#6f0ea51b6920c114ec6bd3c182106662296ef9e8"
 
 [[package]]
 name = "ams-h3"
 version = "0.1.0"
-source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=932ce354d#932ce354d8ab70e12be1670ead42f33aa8977e35"
+source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=6f0ea51b6#6f0ea51b6920c114ec6bd3c182106662296ef9e8"
 dependencies = [
  "ams-proto-h3",
  "ams-proto-http",
@@ -74,7 +74,7 @@ dependencies = [
 [[package]]
 name = "ams-proto-h3"
 version = "0.1.0"
-source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=932ce354d#932ce354d8ab70e12be1670ead42f33aa8977e35"
+source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=6f0ea51b6#6f0ea51b6920c114ec6bd3c182106662296ef9e8"
 dependencies = [
  "ams-field-codec",
  "ams-proto-http",
@@ -84,17 +84,17 @@ dependencies = [
 [[package]]
 name = "ams-proto-http"
 version = "0.1.0"
-source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=932ce354d#932ce354d8ab70e12be1670ead42f33aa8977e35"
+source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=6f0ea51b6#6f0ea51b6920c114ec6bd3c182106662296ef9e8"
 
 [[package]]
 name = "ams-proto-quic"
 version = "0.1.0"
-source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=932ce354d#932ce354d8ab70e12be1670ead42f33aa8977e35"
+source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=6f0ea51b6#6f0ea51b6920c114ec6bd3c182106662296ef9e8"
 
 [[package]]
 name = "ams-quic"
 version = "0.1.0"
-source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=932ce354d#932ce354d8ab70e12be1670ead42f33aa8977e35"
+source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=6f0ea51b6#6f0ea51b6920c114ec6bd3c182106662296ef9e8"
 dependencies = [
  "ams-proto-quic",
  "ams-quic-crypto",
@@ -103,7 +103,7 @@ dependencies = [
 [[package]]
 name = "ams-quic-crypto"
 version = "0.1.0"
-source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=932ce354d#932ce354d8ab70e12be1670ead42f33aa8977e35"
+source = "git+https://github.com/air-desktop-project/air-mail-server.git?rev=6f0ea51b6#6f0ea51b6920c114ec6bd3c182106662296ef9e8"
 dependencies = [
  "aes",
  "aes-gcm",

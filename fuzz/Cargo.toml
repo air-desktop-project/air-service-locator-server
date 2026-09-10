@@ -82,11 +82,11 @@ path = "../crates/asl-session"
 # franchir pour atteindre notre code.
 [dependencies.ams-proto-http]
 git = "https://github.com/air-desktop-project/air-mail-server.git"
-rev = "932ce354d"
+rev = "6f0ea51b6"
 
 [dependencies.ams-h3]
 git = "https://github.com/air-desktop-project/air-mail-server.git"
-rev = "932ce354d"
+rev = "6f0ea51b6"
 
 # `[[bin]]` par cible, et `test = false` : ces binaires ne sont pas des essais,
 # et `cargo test` ne doit pas essayer de les lancer sans harnais libFuzzer.
