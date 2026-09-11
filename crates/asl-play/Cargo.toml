@@ -1,0 +1,23 @@
+[package]
+name = "asl-play"
+description = "Ce qu'un jeton Play Integrity PROUVE : déchiffrer, vérifier, lire le verdict. Aucune entrée-sortie."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+asl-jwt.workspace = true
+asl-proto.workspace = true
+aes.workspace = true
+aes-gcm.workspace = true
+p256.workspace = true
+
+[dev-dependencies]
+# Pour FABRIQUER un jeton dans les essais — emballer la clé, chiffrer, signer.
+# Personne, en production, n'émet un jeton : c'est l'appareil Android qui le
+# fait, et Google qui le signe. Ces outils n'ont donc leur place qu'au banc.
+aes.workspace = true
+aes-gcm = { workspace = true, features = ["alloc", "aes"] }
+p256 = { workspace = true, features = ["ecdsa", "pkcs8"] }

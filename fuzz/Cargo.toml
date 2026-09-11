@@ -82,6 +82,9 @@ path = "../crates/asl-attest"
 [dependencies.asl-jwt]
 path = "../crates/asl-jwt"
 
+[dependencies.asl-play]
+path = "../crates/asl-play"
+
 [dependencies.asl-apple]
 path = "../crates/asl-apple"
 
@@ -221,6 +224,13 @@ bench = false
 [[bin]]
 name = "fuzz_asl_jwt"
 path = "fuzz_targets/fuzz_asl_jwt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_asl_play"
+path = "fuzz_targets/fuzz_asl_play.rs"
 test = false
 doc = false
 bench = false

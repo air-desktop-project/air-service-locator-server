@@ -231,6 +231,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "asl-play"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "asl-jwt",
+ "asl-proto",
+ "p256",
+]
+
+[[package]]
 name = "asl-proto"
 version = "0.1.0"
 dependencies = [

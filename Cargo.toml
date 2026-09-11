@@ -54,6 +54,7 @@ members = [
     "crates/asl-auth",
     "crates/asl-cle",
     "crates/asl-apple",
+    "crates/asl-play",
     "crates/asl-session",
     # Étage 3 — exécution
     "crates/asl-store",
@@ -113,6 +114,7 @@ asl-api = { path = "crates/asl-api", version = "0.1.0" }
 asl-apple = { path = "crates/asl-apple", version = "0.1.0" }
 asl-attest = { path = "crates/asl-attest", version = "0.1.0" }
 asl-jwt = { path = "crates/asl-jwt", version = "0.1.0" }
+asl-play = { path = "crates/asl-play", version = "0.1.0" }
 asl-auth = { path = "crates/asl-auth", version = "0.1.0" }
 asl-cle = { path = "crates/asl-cle", version = "0.1.0" }
 asl-id = { path = "crates/asl-id", version = "0.1.0" }
@@ -195,8 +197,18 @@ sha2 = { version = "0.11", default-features = false }
 # d'Apple a besoin, sur `p256` et `p384` — trente lignes, et aucune dépendance
 # à `rustls` pour une crate qui ne parle pas TLS.
 rustls-webpki = { version = "0.103", default-features = false, features = ["alloc"] }
+
+# ── POUR VÉRIFIER UN JETON PLAY INTEGRITY (`asl-play`) ─────────────────────
+#
+# Toutes DÉJÀ au graphe, tirées par la pile TLS (`rustls-rustcrypto`) : un jeton
+# standard est un JWS chiffré en AES-256-GCM dont la clé est emballée en AES-256
+# key wrap (RFC 3394). `aes` donne le chiffrement par blocs dont le déballage a
+# besoin ; `aes-gcm` le déchiffrement authentifié. La signature ES256 se vérifie
+# avec `p256`, déjà là aussi.
+aes = { version = "0.9", default-features = false }
+aes-gcm = { version = "0.11", default-features = false, features = ["alloc", "aes"] }
 rustls-pki-types = { version = "1", default-features = false, features = ["alloc"] }
-p256 = { version = "0.14", default-features = false, features = ["ecdsa"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "pkcs8"] }
 p384 = { version = "0.14", default-features = false, features = ["ecdsa"] }
 signature = { version = "3", default-features = false }
 
