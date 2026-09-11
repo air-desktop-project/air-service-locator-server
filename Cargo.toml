@@ -48,6 +48,7 @@ members = [
     "crates/asl-api",
     "crates/asl-registre",
     "crates/asl-attest",
+    "crates/asl-jwt",
     # Étage 2 — décisions, sans entrée-sortie
     "crates/asl-annuaire",
     "crates/asl-auth",
@@ -111,6 +112,7 @@ asl-annuaire = { path = "crates/asl-annuaire", version = "0.1.0" }
 asl-api = { path = "crates/asl-api", version = "0.1.0" }
 asl-apple = { path = "crates/asl-apple", version = "0.1.0" }
 asl-attest = { path = "crates/asl-attest", version = "0.1.0" }
+asl-jwt = { path = "crates/asl-jwt", version = "0.1.0" }
 asl-auth = { path = "crates/asl-auth", version = "0.1.0" }
 asl-cle = { path = "crates/asl-cle", version = "0.1.0" }
 asl-id = { path = "crates/asl-id", version = "0.1.0" }

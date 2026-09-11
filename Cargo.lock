@@ -200,6 +200,10 @@ name = "asl-id"
 version = "0.1.0"
 
 [[package]]
+name = "asl-jwt"
+version = "0.1.0"
+
+[[package]]
 name = "asl-loop-tokio"
 version = "0.1.0"
 dependencies = [

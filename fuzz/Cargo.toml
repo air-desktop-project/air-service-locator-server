@@ -79,6 +79,9 @@ path = "../crates/asl-session"
 [dependencies.asl-attest]
 path = "../crates/asl-attest"
 
+[dependencies.asl-jwt]
+path = "../crates/asl-jwt"
+
 [dependencies.asl-apple]
 path = "../crates/asl-apple"
 
@@ -211,6 +214,13 @@ bench = false
 [[bin]]
 name = "fuzz_asl_apple_verifier"
 path = "fuzz_targets/fuzz_asl_apple_verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_asl_jwt"
+path = "fuzz_targets/fuzz_asl_jwt.rs"
 test = false
 doc = false
 bench = false

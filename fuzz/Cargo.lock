@@ -51,6 +51,7 @@ dependencies = [
  "asl-auth",
  "asl-cle",
  "asl-id",
+ "asl-jwt",
  "asl-proto",
  "asl-registre",
  "asl-session",
@@ -177,6 +178,10 @@ dependencies = [
 
 [[package]]
 name = "asl-id"
+version = "0.1.0"
+
+[[package]]
+name = "asl-jwt"
 version = "0.1.0"
 
 [[package]]
