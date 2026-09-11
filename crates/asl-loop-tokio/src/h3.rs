@@ -36,6 +36,7 @@ use ams_h3::{Http3, Reponse};
 use ams_proto_http::RequestHead;
 use ams_proto_quic::StreamId;
 use ams_quic_tls::Connection;
+use asl_api::corps::PlateformeAttestation;
 use asl_cle::{CleAppareil, ClePublique, Defi};
 use asl_id::Identifiant;
 use asl_session::{Besoin, CleTrouvee, Resolution, Session, Trouvaille};
@@ -63,11 +64,26 @@ struct ParConnexion {
 /// les tient le temps d'une requête, et **c'est lui qui fait le voyage à
 /// l'entrepôt** — entre `besoin` et `repondre`, là où l'étage 2 ne peut pas
 /// aller.
+/// De quoi vérifier une attestation Apple, tel que l'exploitant l'a fourni.
+///
+/// La racine d'Apple est la même pour tous (`asl_apple::RACINE_APPLE`) ; seuls
+/// l'identifiant de l'app et l'environnement viennent du binaire. Absent, aucune
+/// attestation Apple ne se vérifie — et un compte qui en déclare une est refusé.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigApple<'a> {
+    /// L'identifiant de l'app, `<équipe>.<bundle>`.
+    pub identifiant_app: &'a str,
+    /// L'environnement attendu.
+    pub environnement: asl_apple::Environnement,
+}
+
 struct Service<'a> {
     /// Ce qui décide.
     session: &'a mut Session,
     /// Ce que l'annuaire exige d'un appareil qui s'enrôle.
     politique: asl_auth::Politique,
+    /// De quoi vérifier une attestation Apple, si l'exploitant l'a fournie.
+    apple: Option<ConfigApple<'a>>,
     /// Le bail qu'on accorde à une annonce servie sur cette requête.
     bail: asl_proto::Bail,
     /// Les pairs qu'une révocation vient de condamner, sur CETTE requête.
@@ -222,7 +238,12 @@ impl Service<'_> {
             // `asl-session` a fait avant, elle, est ce qu'elle seule pouvait
             // faire : vérifier une preuve contre le défi de cette connexion.
             Besoin::PreuveRefusee => Trouvaille::Rien,
-            Besoin::CreerCompte { cle } => self.creer_un_compte(cle),
+            Besoin::CreerCompte {
+                cle,
+                plateforme,
+                attestation,
+                defi_attestation,
+            } => self.creer_un_compte(cle, *plateforme, attestation, defi_attestation),
             Besoin::CreerAppareil { cle } => self.creer_un_appareil(cle),
             Besoin::CreerMachine { nom, capacites } => self.creer_une_machine(nom, *capacites),
             Besoin::ModifierMachine {
@@ -294,11 +315,24 @@ impl Service<'_> {
     }
 
     /// Crée un compte et enrôle l'appareil qui vient de prouver sa clé.
-    fn creer_un_compte(&self, cle: &CleAppareil) -> Trouvaille {
-        // **L'ATTESTATION EST LA SEULE CHOSE QUI GARDE CE CHEMIN.** Il n'exige
-        // aucune signature de compte, pour la raison la plus simple : il n'y a
-        // pas encore de compte.
-        if asl_auth::decider_attestation(false, self.politique) == asl_auth::Decision::Refuser {
+    fn creer_un_compte(
+        &self,
+        cle: &CleAppareil,
+        plateforme: PlateformeAttestation,
+        attestation: &[u8],
+        defi_attestation: &[u8],
+    ) -> Trouvaille {
+        // **L'ATTESTATION, D'ABORD.** Elle est ce qui garde ce chemin : il
+        // n'exige aucune signature de compte, puisqu'il n'y a pas encore de
+        // compte. Un refus ici est `Refus` (403), pas `Rien` (500) : la règle a
+        // tranché, ce n'est pas une panne.
+        let atteste =
+            match self.verifier_l_attestation(plateforme, attestation, defi_attestation, cle) {
+                Some(atteste) => atteste,
+                None => return Trouvaille::Refus,
+            };
+        let prouvee = atteste != asl_registre::Attestation::Aucune;
+        if asl_auth::decider_attestation(prouvee, self.politique) == asl_auth::Decision::Refuser {
             return Trouvaille::Refus;
         }
         let (Some(compte), Some(appareil)) = (
@@ -329,11 +363,10 @@ impl Service<'_> {
                     provenance: asl_registre::Provenance::Ici,
                     proprietaire: compte,
                     cle: cle.octets(),
-                    // **AUCUNE**, et c'est vrai tant que le fil ne porte pas
-                    // d'attestation : `decider_attestation(false, …)` ci-dessus
-                    // refuse déjà tout compte sous `exigee`, donc un appareil
-                    // qui arrive jusqu'ici est entré sans preuve.
-                    atteste: asl_registre::Attestation::Aucune,
+                    // **CE SOUS QUOI IL EST RÉELLEMENT ENTRÉ**, pour qu'on sache
+                    // plus tard, compte par compte, qui a été attesté et qui
+                    // non — le jour où l'on resserre la posture.
+                    atteste,
                     revoque: false,
                 },
             )
@@ -342,6 +375,48 @@ impl Service<'_> {
             return Trouvaille::Rien;
         }
         Trouvaille::CompteCree { compte, appareil }
+    }
+
+    /// Vérifie l'attestation, et rend SOUS QUOI l'appareil est entré.
+    ///
+    /// `None` est un REFUS — la plate-forme est déclarée mais l'attestation ne
+    /// prouve rien : elle ne vérifie pas, ou l'annuaire n'a pas de quoi la
+    /// vérifier (pas de configuration Apple), ou c'est une plate-forme dont la
+    /// vérification n'est pas écrite (Google). `Some(Aucune)` est le cas franc
+    /// où l'application n'a rien présenté ; c'est alors à `decider_attestation`
+    /// de dire si l'annuaire l'accepte.
+    fn verifier_l_attestation(
+        &self,
+        plateforme: PlateformeAttestation,
+        attestation: &[u8],
+        defi_attestation: &[u8],
+        cle: &CleAppareil,
+    ) -> Option<asl_registre::Attestation> {
+        // La clé de l'appareil est SANS emploi dans la vérification elle-même :
+        // le défi la porte déjà (`asl_cle::message_d_attestation`), et c'est ce
+        // défi qu'`asl_apple` recompose dans le nonce. On la garde en signature
+        // pour que ce lien soit lisible ici.
+        let _ = cle;
+        match plateforme {
+            PlateformeAttestation::Aucune => Some(asl_registre::Attestation::Aucune),
+            PlateformeAttestation::Apple => {
+                let config = self.apple?;
+                let attendu = asl_apple::Attendu {
+                    racine: asl_apple::RACINE_APPLE,
+                    defi: defi_attestation,
+                    identifiant_app: config.identifiant_app,
+                    environnement: config.environnement,
+                    maintenant: maintenant().saturating_div(1_000),
+                };
+                asl_apple::verifier(attestation, &attendu)
+                    .ok()
+                    .map(|_| asl_registre::Attestation::Apple)
+            }
+            // **PLAY INTEGRITY N'EST PAS ÉCRIT.** Un jeton JWS de Google est
+            // d'une tout autre forme qu'une chaîne X.509 ; le refuser franchement
+            // vaut mieux que de le laisser entrer sans preuve.
+            PlateformeAttestation::Google => None,
+        }
     }
 
     /// Enrôle un appareil de plus sur le compte de cette connexion.
@@ -1218,6 +1293,8 @@ pub struct Annuaire<'a> {
     /// **Il n'y a pas de défaut** — voir `asl_auth::Politique`. L'exploitant
     /// dit laquelle il tient, et `asl-server` refuse de démarrer sans.
     politique: asl_auth::Politique,
+    /// De quoi vérifier une attestation Apple, si l'exploitant l'a fournie.
+    apple: Option<ConfigApple<'a>>,
     /// Le bail qu'on accorde : la cadence attendue et le délai d'inactivité.
     ///
     /// # POURQUOI IL VIENT DE L'ASSEMBLEUR, ET N'EST PLUS UNE CONSTANTE
@@ -1253,6 +1330,7 @@ impl<'a> Annuaire<'a> {
         tirer_un_defi: &'a (dyn Fn() -> Option<Defi> + Send + Sync),
         tirer_un_identifiant: &'a (dyn Fn() -> Option<[u8; 16]> + Send + Sync),
         politique: asl_auth::Politique,
+        apple: Option<ConfigApple<'a>>,
         bail: asl_proto::Bail,
     ) -> Self {
         let (rapports, verdicts) = tokio::sync::mpsc::unbounded_channel();
@@ -1267,6 +1345,7 @@ impl<'a> Annuaire<'a> {
             tirer_un_defi,
             servies: 0,
             politique,
+            apple,
             bail,
             dernier_balayage: 0,
             revoques: Vec::new(),
@@ -1475,6 +1554,7 @@ impl Application for Annuaire<'_> {
         let mut service = Service {
             session,
             politique: self.politique,
+            apple: self.apple,
             a_fermer: &mut self.revoques,
             entrepot: self.entrepot,
             vivier: &mut self.vivier,

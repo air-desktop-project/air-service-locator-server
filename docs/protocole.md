@@ -441,10 +441,30 @@ asl-server --attestation facultative  # n'importe qui crée un compte, et c'est 
                                       # au démarrage, dans le journal d'exploitation
 ```
 
-Le jour où la vérification s'écrira, elle se branchera à un seul endroit :
-`asl_auth::decider_attestation` prend déjà `atteste` en paramètre, aujourd'hui
-toujours faux — et il le restera tant que le point 2 ci-dessus ne sera pas tranché,
-puisque rien, sur le fil, ne porte encore d'attestation à lire.
+**Depuis le 2026-09-11, elle est écrite et branchée.** `POST /v1/comptes` porte
+une attestation (§2.1 bis), `asl_apple::verifier` la vérifie contre la racine
+d'Apple, et `asl_auth::decider_attestation` reçoit enfin un `atteste` qui n'est
+plus toujours faux. L'annuaire a besoin de deux réglages pour une attestation
+Apple — `--apple-app <équipe.bundle>` et `--apple-environnement
+<production|developpement>` —, parce que le `rpIdHash` se compare à l'empreinte
+de l'app et que l'environnement sépare la production du développement. La racine,
+elle, est la même pour tous et vit dans le binaire.
+
+**Le défi est partagé.** `GET /v1/defi` tire un défi ; la preuve de possession le
+signe, et l'attestation le couvre via son challenge — `asl_cle::message_d_attestation`
+compose `DOMAINE ‖ clé ‖ défi ‖ liaison`, et l'appareil en hache le condensat
+pour App Attest. Un seul aller-retour, une seule valeur à usage unique, et
+l'attestation se trouve liée À LA clé présentée : sans ce lien, App Attest
+n'atteste qu'une clé à lui, jamais celle qu'on enrôle.
+
+**Ce qui reste, et qui n'est pas Apple :** Play Integrity, d'une tout autre
+forme (un jeton JWS signé par Google) — `POST /v1/comptes` lui réserve déjà sa
+case de plate-forme, mais sa vérification n'est pas écrite, et une attestation
+Google est aujourd'hui refusée. Et toujours : **aucune capture réelle.** La
+chaîne, la forme de l'extension et l'environnement viennent de la documentation
+d'Apple ; `--attestation exigee` ne peut pas être tenue pour sûre tant qu'un vrai
+iPhone n'a pas été lu — le premier appareil légitime serait sinon le premier
+refusé.
 
 ### 2.1 bis Ce que porte chaque corps, et pourquoi ce n'est pas toujours du JSON
 

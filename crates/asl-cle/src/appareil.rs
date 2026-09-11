@@ -122,6 +122,61 @@ pub fn message_de_possession_appareil(
     message
 }
 
+/// Le séparateur de domaine du défi d'une **attestation** de plate-forme.
+///
+/// # POURQUOI ENCORE UN DOMAINE, ET CE QU'IL BORNE
+///
+/// App Attest signe un « clientDataHash » que l'application choisit. Si ce que
+/// l'application y met est libre, une attestation captée dans un autre contexte
+/// vaudrait ici. Ce message FIXE ce que l'application doit y hacher : notre
+/// domaine, la clé qu'elle enrôle, le défi de la connexion, et la liaison de
+/// canal.
+///
+/// **C'est ce qui lie l'attestation à LA clé de l'appareil.** App Attest, à lui
+/// seul, atteste une clé À LUI (celle de la Secure Enclave pour l'attestation),
+/// et non la clé que l'appareil présente pour signer ses requêtes. Sans ce
+/// champ, rien ne dirait que l'attestation concerne CETTE clé-ci — n'importe
+/// quelle attestation valide vaudrait pour n'importe quelle clé.
+pub const DOMAINE_ATTESTATION: &[u8] = b"air-service-locator/v1/attestation-d-appareil\x00";
+
+/// La taille du défi d'attestation, celui dont l'appareil hache le condensat
+/// pour App Attest.
+pub const MESSAGE_ATTESTATION_OCTETS: usize =
+    DOMAINE_ATTESTATION.len() + CLE_APPAREIL_OCTETS + DEFI_OCTETS + LIAISON_OCTETS;
+
+/// Compose le défi qu'un appareil donne à App Attest.
+///
+/// **Les deux camps le dérivent identiquement** : l'application le hache pour
+/// obtenir le `clientDataHash` qu'elle passe à App Attest, et l'annuaire le
+/// recompose pour vérifier le nonce de l'attestation. C'est la même raison qui
+/// met [`message_a_signer`] ici — un octet de divergence, et plus aucune
+/// attestation ne vérifierait.
+#[must_use]
+pub fn message_d_attestation(
+    cle: &CleAppareil,
+    defi: &Defi,
+    liaison: &LiaisonDeCanal,
+) -> [u8; MESSAGE_ATTESTATION_OCTETS] {
+    const _: () = assert!(
+        MESSAGE_ATTESTATION_OCTETS
+            == DOMAINE_ATTESTATION.len() + CLE_APPAREIL_OCTETS + DEFI_OCTETS + LIAISON_OCTETS,
+        "la taille du défi d'attestation ne correspond plus à ses champs"
+    );
+
+    let publique = cle.octets();
+    let source = DOMAINE_ATTESTATION
+        .iter()
+        .chain(publique.iter())
+        .chain(defi.octets().iter())
+        .chain(liaison.octets().iter());
+
+    let mut message = [0_u8; MESSAGE_ATTESTATION_OCTETS];
+    for (place, octet) in message.iter_mut().zip(source) {
+        *place = *octet;
+    }
+    message
+}
+
 /// La clé publique d'un appareil, telle que l'annuaire la connaît.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CleAppareil(VerifyingKey);

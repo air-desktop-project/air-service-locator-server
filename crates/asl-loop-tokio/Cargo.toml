@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 asl-annuaire.workspace = true
 asl-api.workspace = true
+asl-apple.workspace = true
 asl-auth.workspace = true
 asl-cle.workspace = true
 asl-id.workspace = true

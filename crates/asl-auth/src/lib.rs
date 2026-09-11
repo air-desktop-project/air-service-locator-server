@@ -556,8 +556,10 @@ pub fn decider_revocation_d_appareil(demandeur: Identifiant, vise: Identifiant) 
 /// de démarrer tant qu'on ne lui a pas dit laquelle il tient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Politique {
-    /// L'attestation est exigée. **Aucun appareil ne s'enrôle** tant que sa
-    /// vérification n'est pas écrite, et c'est la posture de `protocole.md`.
+    /// L'attestation est exigée. Un appareil ne s'enrôle qu'avec une
+    /// attestation Apple VALIDE (`--apple-app` / `--apple-environnement`) ;
+    /// sans configuration Apple, ou sous une attestation qui ne vérifie pas,
+    /// l'enrôlement est refusé. C'est la posture de `protocole.md`.
     AttestationExigee,
     /// L'attestation n'est pas exigée. **N'importe qui crée un compte**, et le
     /// journal d'exploitation doit le dire au démarrage.
@@ -566,10 +568,10 @@ pub enum Politique {
 
 /// Cet appareil peut-il s'enrôler ?
 ///
-/// `atteste` est un FAIT que l'étage 3 établit — aujourd'hui toujours `false`,
-/// parce que rien ne sait encore le vérifier. **Il est en paramètre plutôt
-/// qu'absent** pour que le jour où la vérification s'écrit, elle se branche ici
-/// et nulle part ailleurs.
+/// `atteste` est un FAIT que l'étage 3 établit : depuis le 2026-09-11,
+/// `asl_apple::verifier` le lui donne pour une attestation Apple valide. **Il
+/// reste en paramètre**, et c'est cette fonction-ci, et elle seule, qui traduit
+/// le fait en décision — selon la posture de l'annuaire.
 #[must_use]
 pub const fn decider_attestation(atteste: bool, politique: Politique) -> Decision {
     match politique {

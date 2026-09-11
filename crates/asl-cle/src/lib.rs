@@ -70,7 +70,8 @@ mod appareil;
 
 pub use appareil::{
     CLE_APPAREIL_OCTETS, CLE_SECRETE_APPAREIL_OCTETS, CleAppareil, CleSecreteAppareil,
-    MESSAGE_POSSESSION_APPAREIL_OCTETS, SIGNATURE_APPAREIL_OCTETS, SignatureAppareil,
+    DOMAINE_ATTESTATION, MESSAGE_ATTESTATION_OCTETS, MESSAGE_POSSESSION_APPAREIL_OCTETS,
+    SIGNATURE_APPAREIL_OCTETS, SignatureAppareil, message_d_attestation,
     message_de_possession_appareil,
 };
 

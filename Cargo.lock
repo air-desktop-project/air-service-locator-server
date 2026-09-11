@@ -213,6 +213,7 @@ dependencies = [
  "ams-tls",
  "asl-annuaire",
  "asl-api",
+ "asl-apple",
  "asl-auth",
  "asl-cle",
  "asl-id",
@@ -244,6 +245,7 @@ name = "asl-server"
 version = "0.1.0"
 dependencies = [
  "ams-quic-client",
+ "asl-apple",
  "asl-auth",
  "asl-cle",
  "asl-id",

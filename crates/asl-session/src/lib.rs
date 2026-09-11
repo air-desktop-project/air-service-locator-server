@@ -270,6 +270,18 @@ pub enum Besoin<'a> {
     CreerCompte {
         /// La clé de l'appareil, dont la possession est déjà prouvée. P-256.
         cle: CleAppareil,
+        /// Sous quelle plate-forme l'appareil s'atteste — `Aucune`, Apple,
+        /// Google.
+        plateforme: PlateformeAttestation,
+        /// L'objet d'attestation, tel quel ; vide quand la plate-forme est
+        /// `Aucune`. **Non vérifié ici** : la vérification demande la racine
+        /// d'Apple et l'horloge, qui vivent à l'étage 3.
+        attestation: &'a [u8],
+        /// Le défi que l'appareil a dû couvrir dans son attestation :
+        /// `asl_cle::message_d_attestation(cle, défi, liaison)`. Composé ici,
+        /// où le défi et la liaison vivent, pour que l'étage 3 n'ait qu'à le
+        /// passer à `asl_apple::verifier`.
+        defi_attestation: [u8; asl_cle::MESSAGE_ATTESTATION_OCTETS],
     },
     /// Enrôler un appareil de plus sur le compte de cette connexion.
     ///
@@ -694,18 +706,32 @@ impl Session {
         }
     }
 
-    /// Cette signature P-256 prouve-t-elle la possession de cette clé d'appareil ?
+    /// Prouve la possession d'une clé d'appareil, et rend le défi que son
+    /// attestation devra avoir couvert.
     ///
-    /// La jumelle de [`Self::possession`] pour les APPAREILS. Elles ne se
-    /// fondent pas : une machine signe en Ed25519, un appareil en P-256, et ce
-    /// sont deux mathématiques. Comme l'autre, elle ne consomme pas le défi —
-    /// c'est [`repondre`] qui le dépense.
+    /// La jumelle de [`Self::possession`] pour les APPAREILS — une machine signe
+    /// en Ed25519, un appareil en P-256, deux mathématiques —, mais elle fait un
+    /// pas de plus : quand la possession tient, elle compose
+    /// `message_d_attestation(cle, défi, liaison)`, le défi que l'appareil a dû
+    /// donner à App Attest. Les deux tiennent au MÊME défi, et les séparer
+    /// laisserait une garde de défi que rien ne peut atteindre dans l'une des
+    /// deux.
+    ///
+    /// `None` refuse : pas de défi en cours, ou possession non prouvée — les
+    /// deux rendent le même `PreuveRefusee`, et c'est bien : une connexion sans
+    /// défi et une preuve fausse ne se distinguent pas pour qui essaie. Comme
+    /// [`Self::possession`], elle ne consomme pas le défi ; [`repondre`] le fait.
     #[must_use]
-    fn possession_d_appareil(&self, cle: &CleAppareil, signature: &SignatureAppareil) -> bool {
-        match self.defi {
-            Some(defi) => cle.prouve_sa_possession(&defi, &self.liaison, signature),
-            None => false,
+    fn possession_et_defi_d_attestation(
+        &self,
+        cle: &CleAppareil,
+        signature: &SignatureAppareil,
+    ) -> Option<[u8; asl_cle::MESSAGE_ATTESTATION_OCTETS]> {
+        let defi = self.defi?;
+        if !cle.prouve_sa_possession(&defi, &self.liaison, signature) {
+            return None;
         }
+        Some(asl_cle::message_d_attestation(cle, &defi, &self.liaison))
     }
 
     /// Dépense le défi en cours, s'il y en a un.
@@ -856,20 +882,25 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
 /// suivante ; en attendant, une plate-forme déclarée est refusée franchement
 /// plutôt qu'acceptée sans preuve — accepter en silence une attestation qu'on
 /// ne lit pas serait pire que de la refuser.
-fn lire_creation_de_compte<'a>(session: &Session, corps: &[u8]) -> Besoin<'a> {
+fn lire_creation_de_compte<'a>(session: &Session, corps: &'a [u8]) -> Besoin<'a> {
     let Ok(compte) = CreationDeCompte::decoder(corps) else {
         return Besoin::Deja(StatusCode::BAD_REQUEST);
     };
-    if compte.plateforme != PlateformeAttestation::Aucune {
-        return Besoin::Deja(StatusCode::NOT_IMPLEMENTED);
-    }
     let Some((cle, preuve)) = cle_et_preuve_d_appareil(compte.cle, compte.preuve) else {
         return Besoin::Deja(StatusCode::BAD_REQUEST);
     };
-    if session.possession_d_appareil(&cle, &preuve) {
-        Besoin::CreerCompte { cle }
-    } else {
-        Besoin::PreuveRefusee
+    // **LA POSSESSION, ET LE DÉFI QU'ELLE FIXE.** Prouver que celui qui parle
+    // détient la clé, et composer le défi que son attestation aura dû couvrir —
+    // le même défi pour les deux. L'attestation elle-même ne se vérifie qu'à
+    // l'étage 3, avec la racine d'Apple et l'horloge.
+    let Some(defi_attestation) = session.possession_et_defi_d_attestation(&cle, &preuve) else {
+        return Besoin::PreuveRefusee;
+    };
+    Besoin::CreerCompte {
+        cle,
+        plateforme: compte.plateforme,
+        attestation: compte.attestation,
+        defi_attestation,
     }
 }
 
@@ -3674,10 +3705,16 @@ mod creations {
     fn une_preuve_juste_ouvre_la_creation_d_un_compte() {
         let (secrete, corps) = possession(0x11);
         let quoi = besoin(&session_avec_defi(), &tete(b"POST", b"/v1/comptes"), &corps);
+        // La plate-forme du banc est `Aucune`, l'attestation est vide, et le
+        // défi d'attestation est celui que l'appareil aurait dû couvrir.
+        let attendu = asl_cle::message_d_attestation(&secrete.publique(), &defi(), &liaison());
         assert_eq!(
             quoi,
             Besoin::CreerCompte {
-                cle: secrete.publique()
+                cle: secrete.publique(),
+                plateforme: PlateformeAttestation::Aucune,
+                attestation: &[],
+                defi_attestation: attendu,
             }
         );
     }
@@ -3709,33 +3746,36 @@ mod creations {
     }
 
     #[test]
-    fn une_attestation_declaree_rend_501_tant_qu_elle_n_est_pas_verifiee() {
-        // **`Apple` ou `Google` sont bien cadrés, mais pas encore vérifiés.**
-        // Les accepter en silence serait accepter sans preuve ce qui prétend en
-        // porter une ; les refuser franchement par `501` dit la vérité — la
-        // ressource existe, le verbe est servi, et cette vérification-là n'est
-        // pas écrite. Le jour où elle le sera, ce refus tombe.
+    fn une_attestation_declaree_passe_a_l_etage_3_sans_etre_verifiee_ici() {
+        // **`asl-session` NE VÉRIFIE PAS L'ATTESTATION** : cela demande la racine
+        // d'Apple et l'horloge, qui vivent à l'étage 3. Elle isole la
+        // plate-forme et l'objet, compose le défi que l'appareil a dû couvrir,
+        // et passe le tout dans le besoin. C'est `h3` qui accepte ou refuse.
         let secrete = cle_d_appareil(0x11);
         let preuve = secrete.prouver_la_possession(&defi(), &liaison());
-        for plateforme in [PlateformeAttestation::Apple, PlateformeAttestation::Google] {
-            let objet = CreationDeCompte {
-                plateforme,
-                cle: &secrete.publique().octets(),
-                preuve: preuve.octets(),
-                attestation: &[0xA5, 0x01, 0x02],
-            };
-            let mut tampon = [0_u8; 128];
-            let n = objet.encoder(&mut tampon).expect("un corps bien formé");
-            assert_eq!(
-                besoin(
-                    &session_avec_defi(),
-                    &tete(b"POST", b"/v1/comptes"),
-                    &tampon[..n]
-                ),
-                Besoin::Deja(StatusCode::NOT_IMPLEMENTED),
-                "{plateforme:?}"
-            );
-        }
+        let objet_attestation = &[0xA5, 0x01, 0x02][..];
+        let objet = CreationDeCompte {
+            plateforme: PlateformeAttestation::Apple,
+            cle: &secrete.publique().octets(),
+            preuve: preuve.octets(),
+            attestation: objet_attestation,
+        };
+        let mut tampon = [0_u8; 128];
+        let n = objet.encoder(&mut tampon).expect("un corps bien formé");
+        let attendu_defi = asl_cle::message_d_attestation(&secrete.publique(), &defi(), &liaison());
+        assert_eq!(
+            besoin(
+                &session_avec_defi(),
+                &tete(b"POST", b"/v1/comptes"),
+                &tampon[..n]
+            ),
+            Besoin::CreerCompte {
+                cle: secrete.publique(),
+                plateforme: PlateformeAttestation::Apple,
+                attestation: objet_attestation,
+                defi_attestation: attendu_defi,
+            }
+        );
     }
 
     #[test]

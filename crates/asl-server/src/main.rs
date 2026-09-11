@@ -122,13 +122,24 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                 "asl-server : ATTENTION — l'attestation de plate-forme n'est pas exigée. \
                  N'IMPORTE QUI peut créer un compte sur cet annuaire."
             );
-        } else {
+        } else if reglages.apple.is_none() {
             eprintln!(
-                "asl-server : l'attestation de plate-forme est exigée, et sa vérification \
-                 n'est pas écrite : AUCUN appareil ne pourra s'enrôler."
+                "asl-server : l'attestation est exigée, mais aucune app Apple n'est \
+                 configurée (--apple-app / --apple-environnement) : AUCUN appareil ne \
+                 pourra s'enrôler."
             );
         }
-        let mut application = Annuaire::new(&entrepot, &tirer, &nommer, reglages.politique, bail);
+        // La racine d'Apple est la même pour tous ; seuls l'app et
+        // l'environnement viennent de l'exploitant.
+        let apple = reglages
+            .apple
+            .as_ref()
+            .map(|reglage| asl_loop_tokio::h3::ConfigApple {
+                identifiant_app: reglage.identifiant_app.as_str(),
+                environnement: reglage.environnement,
+            });
+        let mut application =
+            Annuaire::new(&entrepot, &tirer, &nommer, reglages.politique, apple, bail);
         let comptes = servir_quic(
             socket,
             tls,

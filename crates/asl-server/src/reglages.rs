@@ -60,6 +60,30 @@ pub struct Reglages {
     /// livrerait en silence la posture faible. **L'exploitant dit laquelle il
     /// tient**, et l'annuaire ne démarre pas tant qu'il ne l'a pas dit.
     pub politique: asl_auth::Politique,
+    /// De quoi vérifier une attestation App Attest, si l'exploitant l'a fournie.
+    ///
+    /// # POURQUOI OPTIONNEL, ET CE QUE SON ABSENCE VEUT DIRE
+    ///
+    /// Vérifier une attestation d'Apple demande deux choses que seul
+    /// l'exploitant connaît : l'**identifiant de l'app** (`ABCDE12345.ch.narro.app`),
+    /// dont l'empreinte doit égaler le `rpIdHash`, et l'**environnement**
+    /// attendu — production, ou développement. La racine d'Apple, elle, est la
+    /// même pour tous et vit dans `asl_apple::RACINE_APPLE`.
+    ///
+    /// **Sans ces deux réglages, aucune attestation Apple ne peut être
+    /// vérifiée** : un compte qui en déclare une est alors refusé, faute de quoi
+    /// la comparer. Un annuaire `facultative` sans configuration Apple crée donc
+    /// des comptes sans attestation, et refuse ceux qui en présentent une.
+    pub apple: Option<ReglageApple>,
+}
+
+/// De quoi vérifier une attestation Apple App Attest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReglageApple {
+    /// L'identifiant de l'app : `<équipe>.<bundle>`.
+    pub identifiant_app: String,
+    /// L'environnement attendu.
+    pub environnement: asl_apple::Environnement,
 }
 
 /// Ce qui empêche de lire les réglages.
@@ -80,6 +104,11 @@ pub enum Faute {
     Manque(&'static str),
     /// `--attestation` a reçu autre chose que `exigee` ou `facultative`.
     AttestationInconnue(String),
+    /// `--apple-environnement` a reçu autre chose que `production` ou
+    /// `developpement`.
+    EnvironnementInconnu(String),
+    /// `--apple-app` et `--apple-environnement` ne vont pas l'un sans l'autre.
+    AppleIncomplet,
 }
 
 impl core::fmt::Display for Faute {
@@ -99,6 +128,13 @@ impl core::fmt::Display for Faute {
                     "{drapeau} : « {donnee} » n'est pas un nombre valide"
                 )
             }
+            Self::EnvironnementInconnu(quoi) => write!(
+                sortie,
+                "--apple-environnement attend `production` ou `developpement`, et non « {quoi} »"
+            ),
+            Self::AppleIncomplet => sortie.write_str(
+                "--apple-app et --apple-environnement se donnent ensemble, ou pas du tout",
+            ),
             Self::Manque(quoi) => write!(sortie, "il manque {quoi}"),
         }
     }
@@ -119,6 +155,8 @@ asl-server — un annuaire de services air-service-locator.
   --keepalive  <secondes> la cadence de maintien demandée   (défaut : 10)
   --retention  <jours>    la rétention du journal           (défaut : 90)
   --attestation <exigee|facultative>                        (obligatoire)
+  --apple-app  <id>       l'identifiant de l'app Apple      (avec l'env.)
+  --apple-environnement <production|developpement>          (avec l'app)
 
 `--attestation` N'A PAS DE DÉFAUT, ET C'EST DÉLIBÉRÉ. La vérification de
 l'attestation de plate-forme n'est pas écrite : `exigee` refuse donc TOUT
@@ -174,6 +212,8 @@ impl Reglages {
         // faut deux d'affilée.
         let mut keepalive_s = 10_u64;
         let mut politique = None;
+        let mut apple_app: Option<String> = None;
+        let mut apple_env: Option<asl_apple::Environnement> = None;
 
         let mut arguments = arguments.into_iter();
         while let Some(drapeau) = arguments.next() {
@@ -202,6 +242,15 @@ impl Reglages {
                         autre => return Err(Faute::AttestationInconnue(autre.to_owned())),
                     });
                 }
+                "--apple-app" => apple_app = Some(valeur()?.as_ref().to_owned()),
+                "--apple-environnement" => {
+                    let donnee = valeur()?;
+                    apple_env = Some(match donnee.as_ref() {
+                        "production" => asl_apple::Environnement::Production,
+                        "developpement" => asl_apple::Environnement::Developpement,
+                        autre => return Err(Faute::EnvironnementInconnu(autre.to_owned())),
+                    });
+                }
                 autre => return Err(Faute::Inconnu(autre.to_owned())),
             }
         }
@@ -216,6 +265,17 @@ impl Reglages {
             keepalive_s,
             retention_jours,
             politique: politique.ok_or(Faute::Manque("--attestation"))?,
+            // **LES DEUX VONT ENSEMBLE, OU PAS DU TOUT.** Une app sans
+            // environnement ne dit pas où l'attester ; un environnement sans app
+            // ne dit pas quoi comparer au `rpIdHash`.
+            apple: match (apple_app, apple_env) {
+                (Some(identifiant_app), Some(environnement)) => Some(ReglageApple {
+                    identifiant_app,
+                    environnement,
+                }),
+                (None, None) => None,
+                _ => return Err(Faute::AppleIncomplet),
+            },
         })
     }
 
@@ -264,7 +324,7 @@ fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute
 
 #[cfg(test)]
 mod tests {
-    use super::{Faute, Reglages};
+    use super::{Faute, ReglageApple, Reglages};
 
     /// Les quatre réglages obligatoires, et rien d'autre.
     fn minimum() -> Vec<String> {
@@ -281,6 +341,83 @@ mod tests {
         .iter()
         .map(|quoi| (*quoi).to_owned())
         .collect()
+    }
+
+    fn avec(ajouts: &[&str]) -> Vec<String> {
+        let mut args = minimum();
+        args.extend(ajouts.iter().map(|quoi| (*quoi).to_owned()));
+        args
+    }
+
+    #[test]
+    fn sans_reglage_apple_il_n_y_en_a_pas() {
+        let lus = Reglages::depuis(minimum()).expect("le minimum suffit");
+        assert_eq!(lus.apple, None);
+    }
+
+    #[test]
+    fn les_deux_reglages_apple_forment_une_configuration() {
+        let lus = Reglages::depuis(avec(&[
+            "--apple-app",
+            "ABCDE12345.ch.narro.essai",
+            "--apple-environnement",
+            "production",
+        ]))
+        .expect("une configuration complète");
+        assert_eq!(
+            lus.apple,
+            Some(ReglageApple {
+                identifiant_app: "ABCDE12345.ch.narro.essai".to_owned(),
+                environnement: asl_apple::Environnement::Production,
+            })
+        );
+
+        // Et `developpement` aussi.
+        let dev = Reglages::depuis(avec(&[
+            "--apple-app",
+            "ABCDE12345.ch.narro.essai",
+            "--apple-environnement",
+            "developpement",
+        ]))
+        .expect("développement est un environnement");
+        assert_eq!(
+            dev.apple.map(|a| a.environnement),
+            Some(asl_apple::Environnement::Developpement)
+        );
+    }
+
+    #[test]
+    fn une_app_sans_environnement_ou_l_inverse_est_refusee() {
+        assert_eq!(
+            Reglages::depuis(avec(&["--apple-app", "X.y"])).map(|_| ()),
+            Err(Faute::AppleIncomplet)
+        );
+        assert_eq!(
+            Reglages::depuis(avec(&["--apple-environnement", "production"])).map(|_| ()),
+            Err(Faute::AppleIncomplet)
+        );
+    }
+
+    #[test]
+    fn un_environnement_inconnu_est_refuse() {
+        let faute = Reglages::depuis(avec(&[
+            "--apple-app",
+            "X.y",
+            "--apple-environnement",
+            "bac-a-sable",
+        ]))
+        .map(|_| ());
+        assert_eq!(
+            faute,
+            Err(Faute::EnvironnementInconnu("bac-a-sable".to_owned()))
+        );
+        // Et la faute a sa phrase.
+        assert!(
+            !Faute::EnvironnementInconnu("x".to_owned())
+                .to_string()
+                .is_empty()
+        );
+        assert!(!Faute::AppleIncomplet.to_string().is_empty());
     }
 
     #[test]

@@ -268,3 +268,38 @@ fn soixante_quatre_octets_qui_ne_sont_pas_une_signature_ne_verifient_pas() {
     assert!(!publique.verifie(appareil(1), &defi(1), &liaison(1), &nulle));
     assert!(!publique.prouve_sa_possession(&defi(1), &liaison(1), &nulle));
 }
+
+// ── Le défi d'attestation ────────────────────────────────────────────────────
+
+#[test]
+fn le_defi_d_attestation_lie_la_cle_le_defi_et_la_liaison() {
+    use asl_cle::{DOMAINE_ATTESTATION, MESSAGE_ATTESTATION_OCTETS, message_d_attestation};
+    let cle = cle().publique();
+    let m = message_d_attestation(&cle, &defi(1), &liaison(1));
+    assert_eq!(m.len(), MESSAGE_ATTESTATION_OCTETS);
+    assert!(m.starts_with(DOMAINE_ATTESTATION));
+    // La clé y est, juste après le domaine.
+    let debut = DOMAINE_ATTESTATION.len();
+    assert_eq!(&m[debut..debut + CLE_APPAREIL_OCTETS], &cle.octets()[..]);
+
+    // Changer l'un des trois champs change le message — donc le nonce que
+    // l'appareil devra couvrir.
+    assert_ne!(m, message_d_attestation(&cle, &defi(2), &liaison(1)));
+    assert_ne!(m, message_d_attestation(&cle, &defi(1), &liaison(2)));
+    let autre = CleSecreteAppareil::depuis_entropie([0x43; 32])
+        .unwrap()
+        .publique();
+    assert_ne!(m, message_d_attestation(&autre, &defi(1), &liaison(1)));
+}
+
+#[test]
+fn le_defi_d_attestation_n_est_pas_celui_de_possession() {
+    // Deux domaines distincts : le défi qui sert la preuve de possession et
+    // celui qui sert l'attestation ne se confondent jamais, même à clé, défi
+    // et liaison égaux.
+    use asl_cle::{message_d_attestation, message_de_possession_appareil};
+    let cle = cle().publique();
+    let attestation = message_d_attestation(&cle, &defi(1), &liaison(1));
+    let possession = message_de_possession_appareil(&cle, &defi(1), &liaison(1));
+    assert_ne!(&attestation[..], &possession[..]);
+}

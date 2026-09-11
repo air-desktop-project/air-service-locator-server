@@ -35,7 +35,9 @@ use std::process::Command;
 use std::sync::Arc;
 
 use ams_proto_h3::{FrameHeader, FrameKind, qpack};
+use asl_api::corps::{CreationDeCompte, PlateformeAttestation};
 use asl_id::{Genre, Identifiant};
+use asl_loop_tokio::h3::ConfigApple;
 use asl_loop_tokio::{Annuaire, Comptes, configuration_tls, servir_quic};
 use asl_registre::{AliasRange, Compte, Provenance};
 use asl_store::Entrepot;
@@ -121,6 +123,30 @@ async fn lever_avec_bail(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<Comptes>,
 ) {
+    lever_complet(
+        chaine,
+        cle,
+        entrepot,
+        bail,
+        asl_auth::Politique::AttestationFacultative,
+        None,
+    )
+    .await
+}
+
+/// La plus générale : on choisit la posture et la configuration Apple.
+async fn lever_complet(
+    chaine: &[u8],
+    cle: &[u8],
+    entrepot: Entrepot,
+    bail: asl_proto::Bail,
+    politique: asl_auth::Politique,
+    apple: Option<ConfigApple<'static>>,
+) -> (
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Comptes>,
+) {
     let tls = Arc::new(configuration_tls(chaine, cle).expect("une configuration TLS"));
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
@@ -139,13 +165,7 @@ async fn lever_avec_bail(
             let rang = compteur.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some([rang; 16])
         };
-        let mut application = Annuaire::new(
-            &entrepot,
-            &tirer,
-            &nommer,
-            asl_auth::Politique::AttestationFacultative,
-            bail,
-        );
+        let mut application = Annuaire::new(&entrepot, &tirer, &nommer, politique, apple, bail);
         let arret = async {
             let _ = entendre_stop.await;
         };
@@ -1353,6 +1373,70 @@ async fn creer_un_compte(
     assert_eq!(compte.genre(), Genre::Utilisateur);
     assert_eq!(appareil.genre(), Genre::Appareil);
     (compte, appareil, secrete)
+}
+
+#[tokio::test]
+async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
+    // **CE QUE CET ESSAI PROUVE** : une attestation déclarée mais invalide ne
+    // crée pas de compte. L'annuaire est configuré avec une app Apple, donc il
+    // ESSAIE de vérifier — et échoue, parce que ces octets ne remontent pas à
+    // la racine d'Apple. Google, lui, n'est pas écrit. Les deux rendent `403` :
+    // la règle refuse, ce n'est pas une panne (`500`). La possession, elle, est
+    // bien prouvée : c'est l'attestation seule qui fait tomber la création.
+    let (autorite, racine, chaine, cle) = materiel("attest");
+    let (base, fichier) = entrepot("attest");
+    let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
+    let apple = Some(ConfigApple {
+        identifiant_app: "ABCDE12345.ch.narro.essai",
+        environnement: asl_apple::Environnement::Production,
+    });
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        bail,
+        asl_auth::Politique::AttestationFacultative,
+        apple,
+    )
+    .await;
+    let mut client = connecter(&racine, adresse).await;
+
+    for (rang, plateforme) in [PlateformeAttestation::Apple, PlateformeAttestation::Google]
+        .into_iter()
+        .enumerate()
+    {
+        let flux_defi = (rang as u64).saturating_mul(8);
+        let flux_post = flux_defi.saturating_add(4);
+        let defi = tirer_le_defi(&mut client, flux_defi).await;
+        let liaison = liaison_du_client(&client);
+        let secrete =
+            asl_cle::CleSecreteAppareil::depuis_entropie([0x5C; 32]).expect("un scalaire valide");
+        let preuve = secrete.prouver_la_possession(&defi, &liaison);
+        let objet = CreationDeCompte {
+            plateforme,
+            cle: &secrete.publique().octets(),
+            preuve: preuve.octets(),
+            // Des octets qui ne sont même pas une attestation : peu importe, la
+            // chaîne ne remonte de toute façon pas à Apple.
+            attestation: &[0xA5, 0x01, 0x02, 0x03, 0x04],
+        };
+        let mut tampon = [0_u8; 256];
+        let n = objet.encoder(&mut tampon).expect("un corps bien formé");
+        let (statut, _) = poster(
+            &mut client,
+            flux_post,
+            b"/v1/comptes",
+            &tampon[..n],
+            b"application/octet-stream",
+        )
+        .await;
+        assert_eq!(statut, b"403", "{plateforme:?} aurait dû être refusée");
+    }
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
 }
 
 #[tokio::test]
