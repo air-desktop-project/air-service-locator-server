@@ -382,13 +382,21 @@ et l'objet d'attestation lui-même (`fmt`, `attStmt.x5c`, `attStmt.receipt`,
 et elle ne vérifie RIEN : elle dit ce que les octets contiennent, pas ce qu'ils
 prouvent.
 
+**Et la VÉRIFICATION aussi** — `asl-apple`, étage 2 : la chaîne `x5c` remontée
+jusqu'à la racine d'Apple par `rustls-webpki` (avec des vérificateurs ECDSA
+écrits ici, sur `p256` et `p384`), le nonce — `SHA-256(authData ‖
+SHA-256(défi))` — comparé à l'extension `1.2.840.113635.100.8.2` de la feuille,
+l'empreinte de sa clé publique comparée à l'identifiant, le `rpIdHash` comparé à
+l'empreinte de l'identifiant d'app, l'`aaguid` à l'environnement, le compteur à
+zéro. La racine est un PARAMÈTRE : les essais signent leur propre chaîne sous
+leur propre racine, et c'est ainsi que chaque refus a pu être éprouvé — Apple ne
+signera jamais une feuille au nonce faux.
+
 Ce qui manque encore, et qui n'est pas une formalité :
 
-  1. **La chaîne jusqu'à la racine d'Apple**, le nonce — `SHA-256(authData ‖
-     SHA-256(défi))` — comparé à l'extension `1.2.840.113635.100.8.2` du
-     certificat de la clé, l'empreinte de cette clé publique comparée à
-     l'identifiant, le `rpIdHash` comparé à l'empreinte de l'identifiant d'app,
-     et le compteur à zéro.
+  1. **Le défi.** La vérification compare le nonce à un défi que le serveur a
+     émis ; rien, aujourd'hui, n'en émet ni n'en garde. C'est une décision de
+     protocole : qui le donne, combien de temps il vaut, à quoi il est lié.
   2. **Une place sur le fil.** `POST /v1/comptes` porte aujourd'hui une clé et
      une preuve, à champs de longueur fixe : **il n'y a pas d'endroit où mettre
      une attestation.**
@@ -396,8 +404,12 @@ Ce qui manque encore, et qui n'est pas une formalité :
      Google, pas une chaîne X.509 — et qui ne se décidera pas en même temps.
   4. **UNE CAPTURE RÉELLE.** Toute la disposition ci-dessus vient de la
      documentation d'Apple, et aucun iPhone n'a jamais parlé à ce dépôt. Les
-     essais éprouvent que le lecteur lit ce qu'il croit lire ; ils n'éprouvent
-     pas que c'est bien ce qu'Apple envoie. **Tant qu'une attestation réelle
+     essais éprouvent que le lecteur lit ce qu'il croit lire et que la
+     vérification refuse ce qu'elle doit refuser SUR UNE CHAÎNE FABRIQUÉE
+     D'APRÈS LA DOCUMENTATION ; ils n'éprouvent pas que c'est bien ce qu'Apple
+     envoie — ni la forme exacte de l'extension, ni la présence d'un
+     `extendedKeyUsage` (on n'en exige aucun, faute de savoir), ni l'ordre des
+     certificats dans `x5c`. **Tant qu'une attestation réelle
      n'aura pas été lue, `exigee` ne peut pas être tenue pour sûre** : le premier
      appareil légitime serait aussi le premier refusé.
 

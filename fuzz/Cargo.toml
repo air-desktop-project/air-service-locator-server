@@ -79,6 +79,9 @@ path = "../crates/asl-session"
 [dependencies.asl-attest]
 path = "../crates/asl-attest"
 
+[dependencies.asl-apple]
+path = "../crates/asl-apple"
+
 # Pour FABRIQUER une tête de requête. La cible de `asl-session` part d'octets,
 # et une tête ne se construit que par le constructeur d'`ams-proto-http` — il
 # refuse déjà ce qui n'est pas une requête, et c'est ce refus-là qu'il faut
@@ -201,6 +204,13 @@ bench = false
 [[bin]]
 name = "fuzz_asl_attest_objet"
 path = "fuzz_targets/fuzz_asl_attest_objet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_asl_apple_verifier"
+path = "fuzz_targets/fuzz_asl_apple_verifier.rs"
 test = false
 doc = false
 bench = false

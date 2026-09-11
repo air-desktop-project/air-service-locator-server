@@ -1,0 +1,22 @@
+[package]
+name = "asl-apple"
+description = "Ce qu'une attestation App Attest PROUVE : la chaîne jusqu'à la racine d'Apple, le nonce, la clé. Aucune entrée-sortie."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+asl-attest.workspace = true
+# La chaîne X.509 : construite et signée par `rustls-webpki`, avec des
+# vérificateurs ECDSA que cette crate lui fournit elle-même (voir `signature.rs`).
+rustls-webpki.workspace = true
+rustls-pki-types.workspace = true
+p256.workspace = true
+p384.workspace = true
+sha2.workspace = true
+signature.workspace = true
+
+[lints]
+workspace = true

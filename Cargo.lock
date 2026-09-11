@@ -162,6 +162,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asl-apple"
+version = "0.1.0"
+dependencies = [
+ "asl-attest",
+ "p256",
+ "p384",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "sha2",
+ "signature",
+]
+
+[[package]]
 name = "asl-attest"
 version = "0.1.0"
 

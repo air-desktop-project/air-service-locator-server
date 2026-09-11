@@ -52,6 +52,7 @@ members = [
     "crates/asl-annuaire",
     "crates/asl-auth",
     "crates/asl-cle",
+    "crates/asl-apple",
     "crates/asl-session",
     # Étage 3 — exécution
     "crates/asl-store",
@@ -108,6 +109,7 @@ repository = "https://github.com/air-desktop-project/air-service-locator-server"
 # crates sont donc listées, mais AUCUNE ne dépend encore d'une autre.
 asl-annuaire = { path = "crates/asl-annuaire", version = "0.1.0" }
 asl-api = { path = "crates/asl-api", version = "0.1.0" }
+asl-apple = { path = "crates/asl-apple", version = "0.1.0" }
 asl-attest = { path = "crates/asl-attest", version = "0.1.0" }
 asl-auth = { path = "crates/asl-auth", version = "0.1.0" }
 asl-cle = { path = "crates/asl-cle", version = "0.1.0" }
@@ -178,6 +180,23 @@ ed25519-dalek = { version = "3", default-features = false, features = ["zeroize"
 # Elle est DÉJÀ dans le graphe — `ams-quic-crypto` la tire — et elle est en Rust
 # pur.
 sha2 = { version = "0.11", default-features = false }
+
+# ── LA VÉRIFICATION D'UNE ATTESTATION APP ATTEST (`asl-apple`) ─────────────
+#
+# Toutes DÉJÀ dans le graphe, tirées par `rustls-rustcrypto` pour la pile TLS :
+# les déclarer ici n'ajoute aucun paquet, et `check-pile` le mesure.
+#
+# `rustls-webpki` construit la chaîne jusqu'à la racine d'Apple et vérifie ses
+# signatures. Il ne sait PAS signer ni vérifier lui-même : il délègue à des
+# `SignatureVerificationAlgorithm` qu'on lui passe, et `rustls-rustcrypto` garde
+# les siens privés. `asl-apple` écrit donc les quatre ECDSA dont une chaîne
+# d'Apple a besoin, sur `p256` et `p384` — trente lignes, et aucune dépendance
+# à `rustls` pour une crate qui ne parle pas TLS.
+rustls-webpki = { version = "0.103", default-features = false, features = ["alloc"] }
+rustls-pki-types = { version = "1", default-features = false, features = ["alloc"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa"] }
+p384 = { version = "0.14", default-features = false, features = ["ecdsa"] }
+signature = { version = "3", default-features = false }
 
 # ── LA PILE QUIC ET HTTP/3, GREFFÉE DEPUIS `air-mail-server` (C15) ─────────
 #

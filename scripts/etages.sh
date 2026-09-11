@@ -39,6 +39,6 @@ etage1=(asl-id asl-proto asl-api asl-registre asl-attest)
 # socket, un fichier, une horloge —, pas un type qui décrit une réponse.
 #
 # `check-etages.sh` le vérifie plutôt que de le croire : `tokio` y reste refusé.
-etage2=(asl-annuaire asl-auth asl-cle asl-session)
+etage2=(asl-annuaire asl-auth asl-cle asl-apple asl-session)
 
 hors=(asl-store asl-loop-tokio asl-server)
