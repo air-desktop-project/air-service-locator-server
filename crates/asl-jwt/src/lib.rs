@@ -39,9 +39,11 @@
 #![no_std]
 
 mod base64url;
+mod jwe;
 mod jws;
 
 pub use base64url::{decoder, longueur_decodee};
+pub use jwe::Jwe;
 pub use jws::Jws;
 
 /// Ce qui empêche de lire un jeton.
@@ -52,6 +54,11 @@ pub use jws::Jws;
 pub enum Erreur {
     /// Le jeton n'a pas exactement trois segments séparés par des points.
     PasTroisSegments {
+        /// Combien de segments ont été comptés.
+        comptes: usize,
+    },
+    /// Le jeton n'a pas exactement cinq segments séparés par des points.
+    PasCinqSegments {
         /// Combien de segments ont été comptés.
         comptes: usize,
     },
@@ -105,6 +112,9 @@ impl core::fmt::Display for Erreur {
         match self {
             Self::PasTroisSegments { comptes } => {
                 write!(f, "{comptes} segments, un JWS compact en a trois")
+            }
+            Self::PasCinqSegments { comptes } => {
+                write!(f, "{comptes} segments, un JWE compact en a cinq")
             }
             Self::SegmentVide { rang } => write!(f, "segment {rang} vide"),
             Self::SymboleInvalide { position } => {

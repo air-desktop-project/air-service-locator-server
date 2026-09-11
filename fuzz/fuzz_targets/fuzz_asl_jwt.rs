@@ -24,7 +24,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use asl_jwt::{Erreur, Jws, decoder, longueur_decodee};
+use asl_jwt::{Erreur, Jwe, Jws, decoder, longueur_decodee};
 
 fn nommee(faute: Erreur) {
     assert!(matches!(
@@ -36,6 +36,7 @@ fn nommee(faute: Erreur) {
             | Erreur::TamponTropPetit { .. }
             | Erreur::RemplissageRefuse { .. }
             | Erreur::BitsNonNuls { .. }
+            | Erreur::PasCinqSegments { .. }
     ));
 }
 
@@ -119,6 +120,28 @@ fuzz_target!(|octets: &[u8]| {
                 segment,
                 "l'aller-retour base64url a changé"
             );
+        }
+    }
+
+    // ── LE JWE, LA MÊME DISCIPLINE ──────────────────────────────────────────
+    if let Ok(jwe) = Jwe::lire(octets) {
+        assert_eq!(Jwe::lire(octets), Ok(jwe));
+        // L'en-tête est le premier segment, contigu.
+        assert!(octets.starts_with(jwe.entete_b64()));
+
+        // Chaque segment se décode sans déborder du tampon.
+        let mut tampon = vec![0_u8; octets.len() + 8];
+        for resultat in [
+            jwe.decoder_entete(&mut tampon),
+            jwe.decoder_cle(&mut tampon),
+            jwe.decoder_iv(&mut tampon),
+            jwe.decoder_chiffre(&mut tampon),
+            jwe.decoder_etiquette(&mut tampon),
+        ] {
+            match resultat {
+                Ok(ecrits) => assert!(ecrits <= tampon.len()),
+                Err(faute) => nommee(faute),
+            }
         }
     }
 });
