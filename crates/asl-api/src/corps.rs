@@ -49,6 +49,211 @@ pub const NOM_MACHINE_MAX: usize = 64;
 /// dans un décodeur. Les deux nombres sont comparés par un essai.
 pub const JETON_MAX: usize = 255;
 
+// ── Créer un compte, avec preuve et attestation ─────────────────────────────
+
+/// Ce qu'occupe une clé publique d'appareil : un point P-256, SEC1 compressé.
+///
+/// **RECOPIÉ PLUTÔT QU'IMPORTÉ**, comme [`JETON_MAX`] : `asl-api` est une
+/// grammaire, et `asl_cle` est à l'étage 2. Égal à `asl_cle::CLE_APPAREIL_OCTETS`,
+/// et `asl-session` — qui connaît les deux — tient l'égalité.
+pub const CLE_APPAREIL_OCTETS: usize = 33;
+
+/// Ce qu'occupe une preuve de possession d'appareil : `r ‖ s` d'un ECDSA P-256.
+/// Égal à `asl_cle::SIGNATURE_APPAREIL_OCTETS`.
+pub const PREUVE_APPAREIL_OCTETS: usize = 64;
+
+/// Ce que fait la partie de LONGUEUR FIXE du corps : la plate-forme, la clé,
+/// la preuve. L'attestation, variable, vient après.
+pub const COMPTE_PREFIXE_OCTETS: usize = 1 + CLE_APPAREIL_OCTETS + PREUVE_APPAREIL_OCTETS;
+
+/// Ce qu'une attestation peut faire, au plus.
+///
+/// # POURQUOI 8 Kio, ET NON LA BORNE D'`asl-attest`
+///
+/// `asl_attest::LONGUEUR_MAX` borne une CHAÎNE dans l'objet ; celle-ci borne
+/// l'objet ENTIER. Une attestation App Attest réelle tient dans un à deux Kio
+/// (deux certificats et un reçu). Huit laisse la marge d'un reçu inhabituel
+/// sans laisser un corps se déployer sans fin sur le chemin qui crée un compte,
+/// avant toute authentification.
+pub const ATTESTATION_MAX: usize = 8192;
+
+/// Le plus long corps de `POST /v1/comptes` : le préfixe, puis l'attestation.
+pub const COMPTE_CORPS_MAX: usize = COMPTE_PREFIXE_OCTETS + ATTESTATION_MAX;
+
+/// Sous quelle plate-forme un appareil s'atteste, tel que le FIL le porte.
+///
+/// # TROIS VALEURS, ET LES ÉTIQUETTES DU FIL NE SONT PAS CELLES DU STOCKAGE
+///
+/// Ici, `0` désigne « aucune » : c'est ce qu'écrit une application qui
+/// n'atteste rien, et c'est un choix explicite de sa part, pas un octet oublié.
+/// Au rangement (`asl_registre::Attestation`), zéro ne désigne personne, pour
+/// qu'un enregistrement à demi écrit ne se relise pas comme non attesté. Chaque
+/// couche tient son encodage ; c'est `asl-session` qui traduit de l'un à
+/// l'autre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlateformeAttestation {
+    /// Aucune attestation : l'application ne fournit rien à cautionner.
+    Aucune,
+    /// Apple App Attest.
+    Apple,
+    /// Google Play Integrity.
+    Google,
+}
+
+impl PlateformeAttestation {
+    /// Son étiquette sur le fil.
+    #[must_use]
+    pub const fn etiquette(self) -> u8 {
+        match self {
+            Self::Aucune => 0,
+            Self::Apple => 1,
+            Self::Google => 2,
+        }
+    }
+
+    /// Relit une étiquette du fil.
+    const fn depuis(octet: u8) -> Result<Self, Erreur> {
+        match octet {
+            0 => Ok(Self::Aucune),
+            1 => Ok(Self::Apple),
+            2 => Ok(Self::Google),
+            octet => Err(Erreur::PlateformeInconnue { octet }),
+        }
+    }
+
+    /// Une attestation doit-elle accompagner cette plate-forme ?
+    const fn attend_une_attestation(self) -> bool {
+        !matches!(self, Self::Aucune)
+    }
+}
+
+/// Le corps de `POST /v1/comptes`, tel qu'il arrive sur le fil.
+///
+/// # LA RÈGLE DES LONGUEURS FIXES PLIE ICI, ET SEULEMENT ICI
+///
+/// Partout ailleurs, un corps binaire de ce produit fait une taille connue
+/// (`protocole.md` §2.1 bis). Une chaîne de certificats n'en fait pas : c'est
+/// le seul champ variable de toute l'API. Le corps est donc un PRÉFIXE de
+/// longueur fixe — plate-forme, clé, preuve — suivi de l'attestation, qui est
+/// tout le reste.
+///
+/// **Aucune longueur n'est pour autant LUE des octets.** Il n'y a pas de champ
+/// de longueur qu'un émetteur choisirait : l'attestation finit là où le corps
+/// finit. Ce qui la délimite ensuite est sa propre grammaire CBOR
+/// (`asl-attest`), qui refuse le moindre octet en trop — mais cela se vérifie à
+/// l'étage au-dessus, sur les octets que cette grammaire-ci se contente
+/// d'isoler.
+///
+/// # CE QUE CE CODEC NE FAIT PAS
+///
+/// Il n'interprète NI la clé, NI la preuve, NI l'attestation : il rend trois
+/// tranches d'octets. `asl-api` est une grammaire sans cryptographie, et
+/// `asl_cle`/`asl_apple` (étage 2) lisent ces tranches. Ce module dit seulement
+/// OÙ commence chacune, et refuse ce qui n'a pas la forme d'un corps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreationDeCompte<'a> {
+    /// La plate-forme d'attestation déclarée.
+    pub plateforme: PlateformeAttestation,
+    /// La clé publique de l'appareil, [`CLE_APPAREIL_OCTETS`] octets, non
+    /// interprétée.
+    pub cle: &'a [u8],
+    /// La preuve de possession, [`PREUVE_APPAREIL_OCTETS`] octets, non
+    /// interprétée.
+    pub preuve: &'a [u8],
+    /// L'attestation, telle quelle : l'objet CBOR d'App Attest, ou vide quand
+    /// la plate-forme est [`PlateformeAttestation::Aucune`].
+    pub attestation: &'a [u8],
+}
+
+impl<'a> CreationDeCompte<'a> {
+    /// Décode le corps de `POST /v1/comptes`.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::CorpsTropCourt`] sous le préfixe, [`Erreur::CorpsTropLong`]
+    /// au-delà de [`COMPTE_CORPS_MAX`], [`Erreur::PlateformeInconnue`] pour un
+    /// premier octet hors de {0, 1, 2}, [`Erreur::AttestationInattendue`] si
+    /// des octets suivent une plate-forme `Aucune`, [`Erreur::AttestationManquante`]
+    /// si une plate-forme déclarée n'est suivie de rien.
+    pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
+        if octets.len() < COMPTE_PREFIXE_OCTETS {
+            return Err(Erreur::CorpsTropCourt {
+                obtenue: octets.len(),
+                attendue: COMPTE_PREFIXE_OCTETS,
+            });
+        }
+        if octets.len() > COMPTE_CORPS_MAX {
+            return Err(Erreur::CorpsTropLong {
+                obtenue: octets.len(),
+                maximum: COMPTE_CORPS_MAX,
+            });
+        }
+        // Le préfixe étant garanti présent, ces bornes tiennent : les tranches
+        // existent, et rien n'est lu d'une longueur venue des octets.
+        let apres_cle = 1 + CLE_APPAREIL_OCTETS;
+        let plateforme = PlateformeAttestation::depuis(octets[0])?;
+        let cle = &octets[1..apres_cle];
+        let preuve = &octets[apres_cle..COMPTE_PREFIXE_OCTETS];
+        let attestation = &octets[COMPTE_PREFIXE_OCTETS..];
+
+        if plateforme.attend_une_attestation() {
+            if attestation.is_empty() {
+                return Err(Erreur::AttestationManquante);
+            }
+        } else if !attestation.is_empty() {
+            return Err(Erreur::AttestationInattendue {
+                obtenue: attestation.len(),
+            });
+        }
+
+        Ok(Self {
+            plateforme,
+            cle,
+            preuve,
+            attestation,
+        })
+    }
+
+    /// Encode ce corps, et rend le nombre d'octets écrits.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`] si `sortie` ne suffit pas, et les mêmes
+    /// fautes de cohérence que [`Self::decoder`] : ce qui ne se décoderait pas
+    /// ne s'encode pas non plus.
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        if self.cle.len() != CLE_APPAREIL_OCTETS || self.preuve.len() != PREUVE_APPAREIL_OCTETS {
+            return Err(Erreur::CorpsTropCourt {
+                obtenue: self.cle.len().saturating_add(self.preuve.len()),
+                attendue: CLE_APPAREIL_OCTETS + PREUVE_APPAREIL_OCTETS,
+            });
+        }
+        if self.plateforme.attend_une_attestation() == self.attestation.is_empty() {
+            return Err(if self.attestation.is_empty() {
+                Erreur::AttestationManquante
+            } else {
+                Erreur::AttestationInattendue {
+                    obtenue: self.attestation.len(),
+                }
+            });
+        }
+        let total = COMPTE_PREFIXE_OCTETS.saturating_add(self.attestation.len());
+        if total > COMPTE_CORPS_MAX {
+            return Err(Erreur::CorpsTropLong {
+                obtenue: total,
+                maximum: COMPTE_CORPS_MAX,
+            });
+        }
+        let place = sortie.get_mut(..total).ok_or(Erreur::TamponTropPetit)?;
+        place[0] = self.plateforme.etiquette();
+        let apres_cle = 1 + CLE_APPAREIL_OCTETS;
+        place[1..apres_cle].copy_from_slice(self.cle);
+        place[apres_cle..COMPTE_PREFIXE_OCTETS].copy_from_slice(self.preuve);
+        place[COMPTE_PREFIXE_OCTETS..].copy_from_slice(self.attestation);
+        Ok(total)
+    }
+}
+
 // ── Déclarer une machine ────────────────────────────────────────────────────
 
 /// Les champs de `POST /v1/machines`, dans l'ordre où l'encodeur les écrit.

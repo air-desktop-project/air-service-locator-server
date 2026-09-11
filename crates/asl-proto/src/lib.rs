@@ -395,6 +395,43 @@ pub enum Erreur {
         /// Combien on en a comptés avant de s'arrêter.
         obtenu: usize,
     },
+
+    // ── Le corps binaire de la création d'un compte ──────────────────────────
+    /// Un corps binaire plus court que ses champs de longueur fixe.
+    ///
+    /// **Aucune longueur ne vient des octets** pour ces champs-là : ils font une
+    /// taille connue, ou le corps est refusé. Un corps trop court se remplirait
+    /// de zéros en silence, et une clé à demi lue ne vérifierait plus.
+    CorpsTropCourt {
+        /// Ce qui a été reçu.
+        obtenue: usize,
+        /// Le minimum qu'un corps doit faire.
+        attendue: usize,
+    },
+    /// Un corps binaire plus long que ce que sa partie variable admet.
+    CorpsTropLong {
+        /// Ce qui a été reçu.
+        obtenue: usize,
+        /// Le maximum admis.
+        maximum: usize,
+    },
+    /// Un octet de plate-forme d'attestation qui ne désigne rien.
+    ///
+    /// Sur le fil, `0` aucune, `1` Apple, `2` Google — et rien d'autre.
+    PlateformeInconnue {
+        /// L'octet lu.
+        octet: u8,
+    },
+    /// Une attestation accompagne un corps qui déclare n'en porter aucune.
+    ///
+    /// **C'est la place exacte où l'on glisse des octets que personne ne lit.**
+    /// `0` aucune veut dire aucune : rien ne doit suivre la preuve.
+    AttestationInattendue {
+        /// Combien d'octets de trop.
+        obtenue: usize,
+    },
+    /// Une plate-forme est déclarée, mais aucune attestation ne suit.
+    AttestationManquante,
 }
 
 impl fmt::Display for Erreur {
@@ -521,6 +558,24 @@ impl fmt::Display for Erreur {
             }
             Self::CandidatInvalide { position } => {
                 write!(f, "couple adresse/port illisible en position {position}")
+            }
+            Self::CorpsTropCourt { obtenue, attendue } => {
+                write!(f, "corps de {obtenue} octets, au moins {attendue} attendus")
+            }
+            Self::CorpsTropLong { obtenue, maximum } => {
+                write!(f, "corps de {obtenue} octets, maximum {maximum}")
+            }
+            Self::PlateformeInconnue { octet } => {
+                write!(f, "plate-forme d'attestation inconnue : {octet}")
+            }
+            Self::AttestationInattendue { obtenue } => {
+                write!(
+                    f,
+                    "{obtenue} octets d'attestation là où aucune n'est déclarée"
+                )
+            }
+            Self::AttestationManquante => {
+                f.write_str("une plate-forme est déclarée, mais aucune attestation ne suit")
             }
         }
     }

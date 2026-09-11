@@ -30,7 +30,9 @@
 use libfuzzer_sys::fuzz_target;
 
 use asl_api::corps::{
-    CORPS_MAX, DeclarationMachine, DemandeAlias, DemandeAutorisation, NOM_MACHINE_MAX,
+    CLE_APPAREIL_OCTETS, COMPTE_CORPS_MAX, CORPS_MAX, CreationDeCompte, DeclarationMachine,
+    DemandeAlias, DemandeAutorisation, NOM_MACHINE_MAX, PREUVE_APPAREIL_OCTETS,
+    PlateformeAttestation,
 };
 
 /// Ce caractère change-t-il l'affichage de ce qui l'entoure ?
@@ -119,5 +121,38 @@ fuzz_target!(|octets: &[u8]| {
         let mut encore = [0_u8; CORPS_MAX];
         let deux = relue.encoder(&mut encore).expect("elle se réécrit");
         assert_eq!(&encore[..deux], ecrit, "l'écriture n'est pas canonique");
+    }
+
+    // ── LE CORPS DE POST /v1/comptes ────────────────────────────────────────
+    if let Ok(compte) = CreationDeCompte::decoder(octets) {
+        // Les tranches ont la taille annoncée, et l'attestation est cohérente
+        // avec la plate-forme — ni octet en trop derrière `Aucune`, ni vide
+        // derrière une plate-forme déclarée.
+        assert_eq!(compte.cle.len(), CLE_APPAREIL_OCTETS);
+        assert_eq!(compte.preuve.len(), PREUVE_APPAREIL_OCTETS);
+        match compte.plateforme {
+            PlateformeAttestation::Aucune => assert!(
+                compte.attestation.is_empty(),
+                "une plate-forme Aucune ne doit rien traîner : {} octets",
+                compte.attestation.len()
+            ),
+            PlateformeAttestation::Apple | PlateformeAttestation::Google => assert!(
+                !compte.attestation.is_empty(),
+                "une plate-forme déclarée sans attestation a été acceptée"
+            ),
+        }
+
+        // L'aller-retour, canonique.
+        let mut sortie = [0_u8; COMPTE_CORPS_MAX];
+        let combien = compte
+            .encoder(&mut sortie)
+            .expect("ce qui a été compris se réécrit");
+        let ecrit = &sortie[..combien];
+        assert_eq!(
+            ecrit, octets,
+            "le corps n'est pas canonique : deux écritures"
+        );
+        let relu = CreationDeCompte::decoder(ecrit).expect("ce qu'on écrit se relit");
+        assert_eq!(relu, compte, "l'aller-retour a changé le corps");
     }
 });

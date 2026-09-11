@@ -1064,3 +1064,243 @@ fn un_depot_ne_tient_pas_dans_un_tampon_trop_court() {
     let mut tampon = [0_u8; 8];
     assert!(lu.encoder(&mut tampon).is_err());
 }
+
+// ── Créer un compte, avec preuve et attestation ─────────────────────────────
+
+mod compte {
+    use asl_api::corps::{
+        ATTESTATION_MAX, CLE_APPAREIL_OCTETS, COMPTE_CORPS_MAX, COMPTE_PREFIXE_OCTETS,
+        CreationDeCompte, PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
+    };
+    use asl_proto::Erreur;
+
+    /// Un corps : plate-forme, clé, preuve, puis l'attestation.
+    fn corps(plateforme: u8, attestation: &[u8]) -> Vec<u8> {
+        let mut octets = vec![plateforme];
+        octets.extend_from_slice(&[0xC1; CLE_APPAREIL_OCTETS]);
+        octets.extend_from_slice(&[0x52; PREUVE_APPAREIL_OCTETS]);
+        octets.extend_from_slice(attestation);
+        octets
+    }
+
+    #[test]
+    fn un_corps_avec_attestation_se_lit_et_isole_ses_tranches() {
+        let octets = corps(1, &[0xA5, 0x01, 0x02]);
+        let lu = CreationDeCompte::decoder(&octets).expect("il se lit");
+        assert_eq!(lu.plateforme, PlateformeAttestation::Apple);
+        assert_eq!(lu.cle, &[0xC1; CLE_APPAREIL_OCTETS]);
+        assert_eq!(lu.preuve, &[0x52; PREUVE_APPAREIL_OCTETS]);
+        assert_eq!(lu.attestation, &[0xA5, 0x01, 0x02]);
+    }
+
+    #[test]
+    fn les_trois_plateformes_se_lisent() {
+        assert_eq!(
+            CreationDeCompte::decoder(&corps(0, &[]))
+                .unwrap()
+                .plateforme,
+            PlateformeAttestation::Aucune
+        );
+        assert_eq!(
+            CreationDeCompte::decoder(&corps(1, &[9]))
+                .unwrap()
+                .plateforme,
+            PlateformeAttestation::Apple
+        );
+        assert_eq!(
+            CreationDeCompte::decoder(&corps(2, &[9]))
+                .unwrap()
+                .plateforme,
+            PlateformeAttestation::Google
+        );
+    }
+
+    #[test]
+    fn le_codec_fait_l_aller_retour() {
+        for (plateforme, attestation) in [
+            (PlateformeAttestation::Aucune, &[][..]),
+            (PlateformeAttestation::Apple, &[0xA5, 1, 2, 3][..]),
+            (PlateformeAttestation::Google, &[0xFF; 500][..]),
+        ] {
+            let objet = CreationDeCompte {
+                plateforme,
+                cle: &[0x07; CLE_APPAREIL_OCTETS],
+                preuve: &[0x08; PREUVE_APPAREIL_OCTETS],
+                attestation,
+            };
+            let mut tampon = [0_u8; COMPTE_CORPS_MAX];
+            let n = objet.encoder(&mut tampon).expect("il s'écrit");
+            assert_eq!(CreationDeCompte::decoder(&tampon[..n]), Ok(objet));
+        }
+    }
+
+    #[test]
+    fn un_corps_plus_court_que_le_prefixe_est_refuse() {
+        let court = corps(0, &[]);
+        assert_eq!(court.len(), COMPTE_PREFIXE_OCTETS);
+        assert_eq!(
+            CreationDeCompte::decoder(&court[..COMPTE_PREFIXE_OCTETS - 1]),
+            Err(Erreur::CorpsTropCourt {
+                obtenue: COMPTE_PREFIXE_OCTETS - 1,
+                attendue: COMPTE_PREFIXE_OCTETS
+            })
+        );
+        assert_eq!(
+            CreationDeCompte::decoder(&[]),
+            Err(Erreur::CorpsTropCourt {
+                obtenue: 0,
+                attendue: COMPTE_PREFIXE_OCTETS
+            })
+        );
+    }
+
+    #[test]
+    fn un_corps_juste_au_prefixe_est_un_compte_sans_attestation() {
+        // Exactement le préfixe, plate-forme 0 : c'est un corps valide, et
+        // l'attestation est vide.
+        let octets = corps(0, &[]);
+        let lu = CreationDeCompte::decoder(&octets).expect("valide");
+        assert!(lu.attestation.is_empty());
+        assert_eq!(lu.plateforme, PlateformeAttestation::Aucune);
+    }
+
+    #[test]
+    fn un_corps_trop_long_est_refuse_sans_etre_lu() {
+        let trop = corps(1, &vec![0xEE; ATTESTATION_MAX + 1]);
+        assert_eq!(trop.len(), COMPTE_CORPS_MAX + 1);
+        assert_eq!(
+            CreationDeCompte::decoder(&trop),
+            Err(Erreur::CorpsTropLong {
+                obtenue: COMPTE_CORPS_MAX + 1,
+                maximum: COMPTE_CORPS_MAX
+            })
+        );
+        // Juste à la borne, il passe.
+        let borne = corps(1, &vec![0xEE; ATTESTATION_MAX]);
+        assert!(CreationDeCompte::decoder(&borne).is_ok());
+    }
+
+    #[test]
+    fn une_plateforme_inconnue_est_refusee() {
+        for octet in [3_u8, 4, 200, 255] {
+            assert_eq!(
+                CreationDeCompte::decoder(&corps(octet, &[9])),
+                Err(Erreur::PlateformeInconnue { octet })
+            );
+        }
+    }
+
+    #[test]
+    fn une_attestation_derriere_aucune_est_refusee() {
+        // La place exacte où l'on glisse des octets que personne ne lit.
+        assert_eq!(
+            CreationDeCompte::decoder(&corps(0, &[0x01])),
+            Err(Erreur::AttestationInattendue { obtenue: 1 })
+        );
+        assert_eq!(
+            CreationDeCompte::decoder(&corps(0, &[0xAA; 42])),
+            Err(Erreur::AttestationInattendue { obtenue: 42 })
+        );
+    }
+
+    #[test]
+    fn une_plateforme_declaree_sans_attestation_est_refusee() {
+        assert_eq!(
+            CreationDeCompte::decoder(&corps(1, &[])),
+            Err(Erreur::AttestationManquante)
+        );
+        assert_eq!(
+            CreationDeCompte::decoder(&corps(2, &[])),
+            Err(Erreur::AttestationManquante)
+        );
+    }
+
+    #[test]
+    fn l_encodeur_refuse_ce_que_le_decodeur_refuserait() {
+        // Une clé de mauvaise taille.
+        let mauvais = CreationDeCompte {
+            plateforme: PlateformeAttestation::Aucune,
+            cle: &[0; CLE_APPAREIL_OCTETS - 1],
+            preuve: &[0; PREUVE_APPAREIL_OCTETS],
+            attestation: &[],
+        };
+        let mut tampon = [0_u8; COMPTE_CORPS_MAX];
+        assert!(matches!(
+            mauvais.encoder(&mut tampon),
+            Err(Erreur::CorpsTropCourt { .. })
+        ));
+        // Aucune, mais une attestation quand même.
+        let incoherent = CreationDeCompte {
+            plateforme: PlateformeAttestation::Aucune,
+            cle: &[0; CLE_APPAREIL_OCTETS],
+            preuve: &[0; PREUVE_APPAREIL_OCTETS],
+            attestation: &[1],
+        };
+        assert!(matches!(
+            incoherent.encoder(&mut tampon),
+            Err(Erreur::AttestationInattendue { obtenue: 1 })
+        ));
+        // Apple, mais rien.
+        let vide = CreationDeCompte {
+            plateforme: PlateformeAttestation::Apple,
+            cle: &[0; CLE_APPAREIL_OCTETS],
+            preuve: &[0; PREUVE_APPAREIL_OCTETS],
+            attestation: &[],
+        };
+        assert_eq!(vide.encoder(&mut tampon), Err(Erreur::AttestationManquante));
+    }
+
+    #[test]
+    fn l_encodeur_refuse_une_attestation_demesuree() {
+        // Un objet construit à la main peut porter une attestation plus grande
+        // que ce que le fil admet : l'encodeur la refuse avant d'écrire, même
+        // dans un tampon assez grand.
+        let enorme = vec![0xEE; ATTESTATION_MAX + 1];
+        let objet = CreationDeCompte {
+            plateforme: PlateformeAttestation::Apple,
+            cle: &[0x07; CLE_APPAREIL_OCTETS],
+            preuve: &[0x08; PREUVE_APPAREIL_OCTETS],
+            attestation: &enorme,
+        };
+        let mut tampon = vec![0_u8; COMPTE_CORPS_MAX + 64];
+        assert_eq!(
+            objet.encoder(&mut tampon),
+            Err(Erreur::CorpsTropLong {
+                obtenue: COMPTE_CORPS_MAX + 1,
+                maximum: COMPTE_CORPS_MAX
+            })
+        );
+    }
+
+    #[test]
+    fn l_encodeur_refuse_un_tampon_trop_petit() {
+        let objet = CreationDeCompte {
+            plateforme: PlateformeAttestation::Apple,
+            cle: &[0x07; CLE_APPAREIL_OCTETS],
+            preuve: &[0x08; PREUVE_APPAREIL_OCTETS],
+            attestation: &[0xA5, 1, 2],
+        };
+        let mut minuscule = [0_u8; 10];
+        assert_eq!(objet.encoder(&mut minuscule), Err(Erreur::TamponTropPetit));
+    }
+
+    #[test]
+    fn chaque_faute_a_sa_phrase() {
+        let fautes = [
+            Erreur::CorpsTropCourt {
+                obtenue: 5,
+                attendue: 98,
+            },
+            Erreur::CorpsTropLong {
+                obtenue: 9000,
+                maximum: COMPTE_CORPS_MAX,
+            },
+            Erreur::PlateformeInconnue { octet: 7 },
+            Erreur::AttestationInattendue { obtenue: 3 },
+            Erreur::AttestationManquante,
+        ];
+        for faute in fautes {
+            assert!(!faute.to_string().is_empty());
+        }
+    }
+}

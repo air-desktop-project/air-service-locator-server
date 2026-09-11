@@ -454,9 +454,23 @@ champs de longueur fixe :
 | Verbe | Corps | Taille |
 |---|---|---|
 | `POST /v1/defi` | genre ‖ identifiant (17) ‖ signature (64) | 81 |
-| `POST /v1/comptes` | clé publique (32) ‖ preuve (64) | 96 |
-| `POST /v1/appareils` | clé publique (32) | 32 |
-| `POST /v1/enrolement` | code (10) ‖ clé publique (32) ‖ preuve (64) | 106 |
+| `POST /v1/comptes` | plate-forme (1) ‖ clé d'appareil (33) ‖ preuve (64) ‖ attestation (0…8 Kio) | 98 + attestation |
+| `POST /v1/appareils` | clé d'appareil (33) | 33 |
+| `POST /v1/enrolement` | code (10) ‖ clé de machine (32) ‖ preuve (64) | 106 |
+
+**Deux tailles de clé, et ce n'est pas une inadvertance.** La clé d'un
+APPAREIL fait 33 octets (P-256 compressé, la courbe de la Secure Enclave) ; la
+clé d'une MACHINE en fait 32 (Ed25519). L'enrôlement porte une clé de machine,
+les deux autres une clé d'appareil.
+
+**`POST /v1/comptes` est le seul corps à champ variable de toute l'API**, et le
+seul où la règle des longueurs fixes plie : une chaîne de certificats n'a pas de
+taille. Le corps est donc un préfixe fixe de 98 octets, puis l'attestation, qui
+est tout le reste — **aucune longueur n'est lue des octets pour autant**, il n'y
+a pas de champ de longueur à déplacer. La plate-forme se note `0` aucune, `1`
+Apple, `2` Google ; `0` interdit toute attestation derrière, `1` et `2`
+l'exigent. `asl_api::CreationDeCompte` isole les trois tranches sans les
+interpréter ; `asl-attest` refuse ensuite le moindre octet en trop DANS l'objet.
 
 C'est l'argument d'`asl_cle::message_a_signer`, appliqué au transport : un
 cadrage JSON demanderait d'encoder ces octets, donc **deux écritures possibles du
