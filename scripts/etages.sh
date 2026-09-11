@@ -28,7 +28,7 @@
 #   3. EXÉCUTION  — les seules crates qui lisent, écrivent et attendent. Elles
 #      ne décident de rien, et sont donc HORS des deux contrôles.
 
-etage1=(asl-id asl-proto asl-api asl-registre)
+etage1=(asl-id asl-proto asl-api asl-registre asl-attest)
 
 # `asl-session` EST À L'ÉTAGE 2 BIEN QU'ELLE DÉPENDE DE LA PILE HTTP/3, et c'est
 # le classement qui demande le plus d'explication.

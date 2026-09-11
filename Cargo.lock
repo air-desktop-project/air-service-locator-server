@@ -162,6 +162,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "asl-attest"
+version = "0.1.0"
+
+[[package]]
 name = "asl-auth"
 version = "0.1.0"
 dependencies = [

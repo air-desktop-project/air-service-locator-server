@@ -375,6 +375,32 @@ App Attest et Play Integrity demandent les racines d'Apple et de Google, du CBOR
 et une chaîne à valider. **Exiger l'attestation aujourd'hui, c'est donc refuser
 TOUS les enrôlements.**
 
+**Depuis le 2026-09-11, la GRAMMAIRE est écrite** — `asl-attest`, étage 1 : un
+lecteur CBOR borné qui ne sert que les cinq types majeurs qu'App Attest emploie,
+et l'objet d'attestation lui-même (`fmt`, `attStmt.x5c`, `attStmt.receipt`,
+`authData` et la disposition de WebAuthn qu'il porte). Couverte à 100 %, fuzzée,
+et elle ne vérifie RIEN : elle dit ce que les octets contiennent, pas ce qu'ils
+prouvent.
+
+Ce qui manque encore, et qui n'est pas une formalité :
+
+  1. **La chaîne jusqu'à la racine d'Apple**, le nonce — `SHA-256(authData ‖
+     SHA-256(défi))` — comparé à l'extension `1.2.840.113635.100.8.2` du
+     certificat de la clé, l'empreinte de cette clé publique comparée à
+     l'identifiant, le `rpIdHash` comparé à l'empreinte de l'identifiant d'app,
+     et le compteur à zéro.
+  2. **Une place sur le fil.** `POST /v1/comptes` porte aujourd'hui une clé et
+     une preuve, à champs de longueur fixe : **il n'y a pas d'endroit où mettre
+     une attestation.**
+  3. **Play Integrity**, qui est d'une tout autre forme — un jeton JWS signé par
+     Google, pas une chaîne X.509 — et qui ne se décidera pas en même temps.
+  4. **UNE CAPTURE RÉELLE.** Toute la disposition ci-dessus vient de la
+     documentation d'Apple, et aucun iPhone n'a jamais parlé à ce dépôt. Les
+     essais éprouvent que le lecteur lit ce qu'il croit lire ; ils n'éprouvent
+     pas que c'est bien ce qu'Apple envoie. **Tant qu'une attestation réelle
+     n'aura pas été lue, `exigee` ne peut pas être tenue pour sûre** : le premier
+     appareil légitime serait aussi le premier refusé.
+
 Les deux postures sont défendables et **aucune ne peut être le défaut** : exiger
 livrerait un annuaire qui ne crée aucun compte, dispenser livrerait en silence la
 posture faible. `asl-server` n'a donc **pas de valeur par défaut** — il refuse de
@@ -388,7 +414,8 @@ asl-server --attestation facultative  # n'importe qui crée un compte, et c'est 
 
 Le jour où la vérification s'écrira, elle se branchera à un seul endroit :
 `asl_auth::decider_attestation` prend déjà `atteste` en paramètre, aujourd'hui
-toujours faux.
+toujours faux — et il le restera tant que le point 2 ci-dessus ne sera pas tranché,
+puisque rien, sur le fil, ne porte encore d'attestation à lire.
 
 ### 2.1 bis Ce que porte chaque corps, et pourquoi ce n'est pas toujours du JSON
 

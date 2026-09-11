@@ -99,6 +99,7 @@ fuzz_asl_api_corps corps
 fuzz_asl_cle_signature signature
 fuzz_asl_session_reponse session-reponse
 fuzz_asl_registre_aller_retour registre
+fuzz_asl_attest_objet attestation
 TABLE
 )
 
