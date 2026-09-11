@@ -36,9 +36,9 @@ use ams_h3::{Http3, Reponse};
 use ams_proto_http::RequestHead;
 use ams_proto_quic::StreamId;
 use ams_quic_tls::Connection;
-use asl_cle::{ClePublique, Defi};
+use asl_cle::{CleAppareil, ClePublique, Defi};
 use asl_id::Identifiant;
-use asl_session::{Besoin, Resolution, Session, Trouvaille};
+use asl_session::{Besoin, CleTrouvee, Resolution, Session, Trouvaille};
 use asl_store::Entrepot;
 
 use crate::sonde::{self, Verdict};
@@ -156,30 +156,34 @@ impl Service<'_> {
             // appareil. Le genre de l'identifiant dit dans quelle table
             // chercher, et il vient de la SIGNATURE — `asl-session` l'a lu du
             // corps, mais c'est le message signé qui le rend contraignant.
-            Besoin::ClePourPreuve { machine: qui, .. } => {
-                let rangee = match qui.genre() {
-                    asl_id::Genre::Appareil => self
-                        .entrepot
-                        .appareil(*qui)
-                        .ok()
-                        .flatten()
-                        .map(|appareil| appareil.cle),
-                    // **UNE MACHINE SANS CLÉ NE PROUVE RIEN.** Elle est
-                    // déclarée et pas encore enrôlée ; c'est `None`, et non
-                    // trente-deux zéros dont n'importe qui forgerait la
-                    // signature.
-                    _ => self
-                        .entrepot
-                        .machine(*qui)
-                        .ok()
-                        .flatten()
-                        .and_then(|m| m.cle),
-                };
-                match rangee.map(ClePublique::depuis_octets) {
-                    Some(Ok(cle)) => Trouvaille::Cle(cle),
-                    Some(Err(_)) | None => Trouvaille::Rien,
-                }
-            }
+            Besoin::ClePourPreuve { machine: qui, .. } => match qui.genre() {
+                // **UN APPAREIL SIGNE EN P-256**, et sa clé rangée fait 33
+                // octets. La lire comme un Ed25519 échouerait, et une panne de
+                // courbe se lirait comme une clé fausse.
+                asl_id::Genre::Appareil => match self.entrepot.appareil(*qui).ok().flatten() {
+                    Some(appareil) => match CleAppareil::depuis_octets(appareil.cle) {
+                        Ok(cle) => Trouvaille::Cle(CleTrouvee::Appareil(cle)),
+                        Err(_) => Trouvaille::Rien,
+                    },
+                    None => Trouvaille::Rien,
+                },
+                // **UNE MACHINE SANS CLÉ NE PROUVE RIEN.** Elle est déclarée et
+                // pas encore enrôlée ; c'est `None`, et non trente-deux zéros
+                // dont n'importe qui forgerait la signature.
+                _ => match self
+                    .entrepot
+                    .machine(*qui)
+                    .ok()
+                    .flatten()
+                    .and_then(|m| m.cle)
+                {
+                    Some(octets) => match ClePublique::depuis_octets(octets) {
+                        Ok(cle) => Trouvaille::Cle(CleTrouvee::Machine(cle)),
+                        Err(_) => Trouvaille::Rien,
+                    },
+                    None => Trouvaille::Rien,
+                },
+            },
             Besoin::Compte(qui) => match self.entrepot.compte(*qui) {
                 Ok(Some(compte)) => Trouvaille::Compte {
                     qui: *qui,
@@ -290,7 +294,7 @@ impl Service<'_> {
     }
 
     /// Crée un compte et enrôle l'appareil qui vient de prouver sa clé.
-    fn creer_un_compte(&self, cle: &ClePublique) -> Trouvaille {
+    fn creer_un_compte(&self, cle: &CleAppareil) -> Trouvaille {
         // **L'ATTESTATION EST LA SEULE CHOSE QUI GARDE CE CHEMIN.** Il n'exige
         // aucune signature de compte, pour la raison la plus simple : il n'y a
         // pas encore de compte.
@@ -341,7 +345,7 @@ impl Service<'_> {
     }
 
     /// Enrôle un appareil de plus sur le compte de cette connexion.
-    fn creer_un_appareil(&self, cle: &ClePublique) -> Trouvaille {
+    fn creer_un_appareil(&self, cle: &CleAppareil) -> Trouvaille {
         if asl_auth::decider_attestation(false, self.politique) == asl_auth::Decision::Refuser {
             return Trouvaille::Refus;
         }

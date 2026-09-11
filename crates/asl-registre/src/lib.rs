@@ -53,13 +53,16 @@ pub const ALIAS_OCTETS_MAX: usize = 32;
 pub const NOM_OCTETS_MAX: usize = 64;
 
 /// Ce qu'une clé publique Ed25519 occupe. C'est celle d'une MACHINE.
-///
-/// **La clé d'un APPAREIL est en attente de passer à 33 octets** (P-256, SEC1
-/// compressé — la Secure Enclave ne fait que cette courbe). Ce changement de
-/// taille ne se fait pas ici : il est lié au corps de `POST /v1/comptes`, qui
-/// est le seul à produire cette clé, et le rangement suivra le fil plutôt que
-/// de le précéder. Aujourd'hui l'appareil range encore un Ed25519 de 32 octets.
 pub const CLE_OCTETS: usize = 32;
+
+/// Ce qu'une clé publique d'APPAREIL occupe : un point P-256, SEC1 compressé.
+///
+/// La Secure Enclave et StrongBox ne font que cette courbe, donc la clé d'un
+/// téléphone ne peut pas être un Ed25519 de 32 octets. Égal à
+/// `asl_cle::CLE_APPAREIL_OCTETS`, défini ici plutôt qu'importé — `asl-cle` est
+/// à l'étage 2, ce format à l'étage 1, et une grammaire ne dépend pas d'une
+/// décision.
+pub const CLE_APPAREIL_OCTETS: usize = 33;
 
 /// Ce qu'un jeton de poussée peut faire.
 ///
@@ -591,7 +594,8 @@ impl Machine {
 // ── L'appareil ──────────────────────────────────────────────────────────────
 
 /// Ce qu'un appareil occupe.
-pub const APPAREIL_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS + 1 + 1;
+pub const APPAREIL_OCTETS: usize =
+    PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS + 1 + 1;
 
 /// Un téléphone enrôlé, tel qu'il est rangé.
 ///
@@ -615,14 +619,12 @@ pub struct Appareil {
     pub provenance: Provenance,
     /// Le compte dont cet appareil est un justificatif.
     pub proprietaire: Identifiant,
-    /// Sa clé publique, telle quelle.
+    /// Sa clé publique P-256, SEC1 compressée.
     ///
     /// Celle qui vit dans le matériel sécurisé du téléphone. **L'annuaire n'en
     /// connaît que la partie publique**, et il ne saurait rien faire de l'autre.
-    ///
-    /// **Encore un Ed25519 de 32 octets aujourd'hui, P-256 de 33 demain** —
-    /// voir [`CLE_OCTETS`]. Le changement suit le fil, pas l'inverse.
-    pub cle: [u8; CLE_OCTETS],
+    /// P-256 et non Ed25519 : voir [`CLE_APPAREIL_OCTETS`].
+    pub cle: [u8; CLE_APPAREIL_OCTETS],
     /// Sous quelle attestation il est entré.
     ///
     /// # POURQUOI ON LE GARDE, ALORS QUE LA DÉCISION EST DÉJÀ PRISE
@@ -660,7 +662,7 @@ impl Appareil {
                 .get_mut(PROVENANCE_OCTETS..apres_provenance)
                 .unwrap_or_default(),
         );
-        let apres_cle = apres_provenance.saturating_add(CLE_OCTETS);
+        let apres_cle = apres_provenance.saturating_add(CLE_APPAREIL_OCTETS);
         poser(
             sortie
                 .get_mut(apres_provenance..apres_cle)
@@ -692,8 +694,8 @@ impl Appareil {
                 .unwrap_or_default(),
             Genre::Utilisateur,
         )?;
-        let apres_cle = apres_provenance.saturating_add(CLE_OCTETS);
-        let mut cle = [0_u8; CLE_OCTETS];
+        let apres_cle = apres_provenance.saturating_add(CLE_APPAREIL_OCTETS);
+        let mut cle = [0_u8; CLE_APPAREIL_OCTETS];
         poser(
             &mut cle,
             octets.get(apres_provenance..apres_cle).unwrap_or_default(),
@@ -1394,11 +1396,11 @@ mod tests {
 
     use super::{
         ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
-        Autorisation, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte, Court,
-        ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement, EntreeJournal, Faute, IDENTIFIANT_OCTETS,
-        JETON_OCTETS_MAX, JetonPoussee, JetonRange, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX,
-        NomRange, POUSSEE_OCTETS, PROVENANCE_OCTETS, Plateforme, Portee, Provenance,
-        SERVICE_OCTETS, Service, Verdict,
+        Autorisation, CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte,
+        Court, ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement, EntreeJournal, Faute,
+        IDENTIFIANT_OCTETS, JETON_OCTETS_MAX, JetonPoussee, JetonRange, MACHINE_OCTETS, Machine,
+        NOM_OCTETS_MAX, NomRange, POUSSEE_OCTETS, PROVENANCE_OCTETS, Plateforme, Portee,
+        Provenance, SERVICE_OCTETS, Service, Verdict,
     };
 
     /// Un identifiant de ce genre, reproductible.
@@ -2224,7 +2226,7 @@ mod tests {
         let appareil = Appareil {
             provenance: Provenance::Ici,
             proprietaire: un(Genre::Utilisateur, 7),
-            cle: [0x33; CLE_OCTETS],
+            cle: [0x33; CLE_APPAREIL_OCTETS],
             atteste: Attestation::Apple,
             revoque: false,
         };
@@ -2240,7 +2242,7 @@ mod tests {
         let appareil = Appareil {
             provenance: Provenance::Annuaire(un(Genre::Annuaire, 2)),
             proprietaire: un(Genre::Utilisateur, 7),
-            cle: [0; CLE_OCTETS],
+            cle: [0; CLE_APPAREIL_OCTETS],
             // **ENTRÉ SANS PREUVE**, sous une posture facultative.
             atteste: Attestation::Aucune,
             // **RÉVOQUÉ**, pour que les deux états fassent l'aller-retour.
@@ -2350,7 +2352,7 @@ mod tests {
         let appareil = Appareil {
             provenance: Provenance::Ici,
             proprietaire: un(Genre::Utilisateur, 7),
-            cle: [0x33; CLE_OCTETS],
+            cle: [0x33; CLE_APPAREIL_OCTETS],
             atteste: Attestation::Google,
             revoque: false,
         };
@@ -2367,7 +2369,7 @@ mod tests {
             let appareil = Appareil {
                 provenance: Provenance::Ici,
                 proprietaire: un(Genre::Utilisateur, 7),
-                cle: [0x33; CLE_OCTETS],
+                cle: [0x33; CLE_APPAREIL_OCTETS],
                 atteste,
                 revoque: false,
             };
@@ -2385,14 +2387,14 @@ mod tests {
         let appareil = Appareil {
             provenance: Provenance::Ici,
             proprietaire: un(Genre::Utilisateur, 7),
-            cle: [0x33; CLE_OCTETS],
+            cle: [0x33; CLE_APPAREIL_OCTETS],
             atteste: Attestation::Aucune,
             revoque: false,
         };
         let mut octets = [0_u8; APPAREIL_OCTETS];
         appareil.ecrire(&mut octets);
         // L'octet d'attestation est juste après la clé.
-        let place = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS;
+        let place = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS;
         octets[place] = 0;
         assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 0 }));
         octets[place] = 4;

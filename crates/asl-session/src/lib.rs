@@ -79,11 +79,12 @@ extern crate alloc;
 use ams_h3::Reponse;
 use ams_proto_http::{Method, RequestHead, StatusCode};
 use asl_api::corps::{
-    AutorisationRendue, Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation,
-    DepotJeton, ModificationMachine, Plateforme, Portee,
+    AutorisationRendue, Capacites, CreationDeCompte, DeclarationMachine, DemandeAlias,
+    DemandeAutorisation, DepotJeton, ModificationMachine, Plateforme, PlateformeAttestation,
+    Portee,
 };
 use asl_api::{Exigence, Ressource};
-use asl_cle::{ClePublique, Defi, LiaisonDeCanal, Signature};
+use asl_cle::{CleAppareil, ClePublique, Defi, LiaisonDeCanal, Signature, SignatureAppareil};
 use asl_cle::{CodeEnrolement, TexteCode};
 use asl_id::{Genre, Identifiant};
 use asl_registre::AliasRange;
@@ -150,7 +151,15 @@ pub const POSSESSION_OCTETS: usize = asl_cle::CLE_PUBLIQUE_OCTETS + asl_cle::SIG
 ///
 /// **Aucune preuve de possession ne l'accompagne, et c'est une règle** — voir
 /// [`Besoin::CreerAppareil`].
-pub const CLE_SEULE_OCTETS: usize = asl_cle::CLE_PUBLIQUE_OCTETS;
+pub const CLE_SEULE_OCTETS: usize = asl_cle::CLE_APPAREIL_OCTETS;
+
+/// Ce qu'occupe une clé d'appareil suivie de sa preuve de possession, en P-256.
+///
+/// **C'est le PRÉFIXE de longueur fixe du corps de `POST /v1/comptes`** — la
+/// plate-forme d'attestation et l'attestation elle-même viennent après, et
+/// `asl_api::CreationDeCompte` les délimite.
+pub const POSSESSION_APPAREIL_OCTETS: usize =
+    asl_cle::CLE_APPAREIL_OCTETS + asl_cle::SIGNATURE_APPAREIL_OCTETS;
 
 /// Ce qu'occupe le corps de `POST /v1/enrolement` : le code, la clé, la preuve.
 pub const ENROLEMENT_CORPS_OCTETS: usize = asl_cle::CODE_SYMBOLES + POSSESSION_OCTETS;
@@ -259,8 +268,8 @@ pub enum Besoin<'a> {
     /// PRÉSENTE une clé signe qu'il la détient. Ici l'appareil parle pour
     /// lui-même, donc il signe.
     CreerCompte {
-        /// La clé de l'appareil, dont la possession est déjà prouvée.
-        cle: ClePublique,
+        /// La clé de l'appareil, dont la possession est déjà prouvée. P-256.
+        cle: CleAppareil,
     },
     /// Enrôler un appareil de plus sur le compte de cette connexion.
     ///
@@ -275,8 +284,8 @@ pub enum Besoin<'a> {
     /// **Un compte qui ajoute une clé que personne ne détient n'a nui qu'à
     /// lui-même**, et il lui reste l'appareil qui vient de le faire.
     CreerAppareil {
-        /// La clé du nouvel appareil.
-        cle: ClePublique,
+        /// La clé du nouvel appareil. P-256, non encore prouvée.
+        cle: CleAppareil,
     },
     /// Déclarer une machine, et émettre son premier code d'enrôlement.
     CreerMachine {
@@ -417,6 +426,19 @@ pub struct Resolution {
 
 /// Ce que l'étage 3 a trouvé.
 /// **ELLE N'EST PLUS `Copy`**, et c'est la résolution qui l'en a privée : ses
+/// La clé d'un pair, de la courbe que son genre impose.
+///
+/// Machine ou appareil ne signent pas avec la même mathématique — Ed25519 pour
+/// l'une, P-256 pour l'autre —, et c'est la table d'où la clé est tirée qui
+/// fixe laquelle. Ce type porte ce choix jusqu'à la vérification.
+#[derive(Debug, Clone)]
+pub enum CleTrouvee {
+    /// Une clé de machine, Ed25519.
+    Machine(ClePublique),
+    /// Une clé d'appareil, P-256.
+    Appareil(CleAppareil),
+}
+
 /// autorisations sont une liste, dont la longueur ne se connaît qu'à
 /// l'exécution. Le reste du produit ne copie jamais une trouvaille — il la passe
 /// par référence —, donc cela ne coûte rien.
@@ -435,8 +457,8 @@ pub enum Trouvaille {
         /// Son alias, s'il en a choisi un.
         alias: Option<AliasRange>,
     },
-    /// La clé publique de la machine demandée.
-    Cle(ClePublique),
+    /// La clé publique du pair demandé — machine (Ed25519) ou appareil (P-256).
+    Cle(CleTrouvee),
     /// D'où l'annuaire voit la connexion qui demande.
     ///
     /// **C'EST LE SEUL FAIT QUE L'ANNUAIRE CONSTATE PLUTÔT QU'IL N'ENTENDE**, et
@@ -629,11 +651,24 @@ impl Session {
     ///
     /// Qu'il vérifie ou non. Le garder après un échec laisserait un attaquant
     /// essayer autant de signatures qu'il veut contre un même défi.
-    fn verifier(&mut self, pair: Identifiant, signature: &Signature, cle: &ClePublique) -> bool {
+    fn verifier(&mut self, pair: Identifiant, signature: &Signature, cle: &CleTrouvee) -> bool {
         let Some(defi) = self.defi.take() else {
             return false;
         };
-        if !cle.verifie(pair, &defi, &self.liaison, signature) {
+        // **LA COURBE EST CELLE DE LA CLÉ RANGÉE, PAS UN CHOIX DU FIL.** Les
+        // soixante-quatre octets de signature sont les mêmes des deux côtés ;
+        // ce qui diffère est la mathématique qui les vérifie, et c'est le genre
+        // du pair — donc la table d'où vient la clé — qui la fixe.
+        let ok = match cle {
+            CleTrouvee::Machine(cle) => cle.verifie(pair, &defi, &self.liaison, signature),
+            CleTrouvee::Appareil(cle) => cle.verifie(
+                pair,
+                &defi,
+                &self.liaison,
+                &SignatureAppareil::depuis_octets(*signature.octets()),
+            ),
+        };
+        if !ok {
             return false;
         }
         self.pair = Some(pair);
@@ -653,6 +688,20 @@ impl Session {
     /// cas** : voir [`Besoin::PreuveRefusee`].
     #[must_use]
     fn possession(&self, cle: &ClePublique, signature: &Signature) -> bool {
+        match self.defi {
+            Some(defi) => cle.prouve_sa_possession(&defi, &self.liaison, signature),
+            None => false,
+        }
+    }
+
+    /// Cette signature P-256 prouve-t-elle la possession de cette clé d'appareil ?
+    ///
+    /// La jumelle de [`Self::possession`] pour les APPAREILS. Elles ne se
+    /// fondent pas : une machine signe en Ed25519, un appareil en P-256, et ce
+    /// sont deux mathématiques. Comme l'autre, elle ne consomme pas le défi —
+    /// c'est [`repondre`] qui le dépense.
+    #[must_use]
+    fn possession_d_appareil(&self, cle: &CleAppareil, signature: &SignatureAppareil) -> bool {
         match self.defi {
             Some(defi) => cle.prouve_sa_possession(&defi, &self.liaison, signature),
             None => false,
@@ -800,24 +849,36 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
     }
 }
 
-/// Lit `POST /v1/comptes` : une clé publique, et la preuve qu'on la détient.
+/// Lit `POST /v1/comptes` : plate-forme, clé d'appareil, preuve, attestation.
+///
+/// **L'ATTESTATION N'EST PAS ENCORE VÉRIFIÉE ICI**, et la plate-forme doit
+/// donc valoir `Aucune`. Le branchement d'`asl_apple::verifier` est la tranche
+/// suivante ; en attendant, une plate-forme déclarée est refusée franchement
+/// plutôt qu'acceptée sans preuve — accepter en silence une attestation qu'on
+/// ne lit pas serait pire que de la refuser.
 fn lire_creation_de_compte<'a>(session: &Session, corps: &[u8]) -> Besoin<'a> {
-    let Some((cle, preuve)) = lire_cle_et_preuve(corps) else {
+    let Ok(compte) = CreationDeCompte::decoder(corps) else {
         return Besoin::Deja(StatusCode::BAD_REQUEST);
     };
-    if session.possession(&cle, &preuve) {
+    if compte.plateforme != PlateformeAttestation::Aucune {
+        return Besoin::Deja(StatusCode::NOT_IMPLEMENTED);
+    }
+    let Some((cle, preuve)) = cle_et_preuve_d_appareil(compte.cle, compte.preuve) else {
+        return Besoin::Deja(StatusCode::BAD_REQUEST);
+    };
+    if session.possession_d_appareil(&cle, &preuve) {
         Besoin::CreerCompte { cle }
     } else {
         Besoin::PreuveRefusee
     }
 }
 
-/// Lit `POST /v1/appareils` : une clé publique, et rien d'autre.
+/// Lit `POST /v1/appareils` : une clé d'appareil, et rien d'autre.
 fn lire_creation_d_appareil<'a>(corps: &[u8]) -> Besoin<'a> {
     if corps.len() != CLE_SEULE_OCTETS {
         return Besoin::Deja(StatusCode::BAD_REQUEST);
     }
-    match lire_une_cle(corps) {
+    match lire_une_cle_d_appareil(corps) {
         Some(cle) => Besoin::CreerAppareil { cle },
         None => Besoin::Deja(StatusCode::BAD_REQUEST),
     }
@@ -871,11 +932,15 @@ fn lire_une_cle(corps: &[u8]) -> Option<ClePublique> {
     ClePublique::depuis_octets(octets).ok()
 }
 
-/// Lit une clé publique suivie d'une signature. Exige [`POSSESSION_OCTETS`].
+/// Lit une clé publique Ed25519 suivie de sa signature.
+///
+/// # ELLE NE VÉRIFIE PAS LA LONGUEUR, ET SON SEUL APPELANT L'A DÉJÀ FAIT
+///
+/// L'enrôlement est le dernier à s'en servir depuis que la création de compte
+/// passe par `asl_api::CreationDeCompte` ; et il exige [`ENROLEMENT_CORPS_OCTETS`]
+/// avant d'arriver ici, ce qui fixe cette tranche à exactement
+/// [`POSSESSION_OCTETS`]. Une garde ici serait une branche que rien n'atteint.
 fn lire_cle_et_preuve(corps: &[u8]) -> Option<(ClePublique, Signature)> {
-    if corps.len() != POSSESSION_OCTETS {
-        return None;
-    }
     let cle = lire_une_cle(corps)?;
     let mut brute = [0_u8; asl_cle::SIGNATURE_OCTETS];
     for (place, octet) in brute
@@ -885,6 +950,38 @@ fn lire_cle_et_preuve(corps: &[u8]) -> Option<(ClePublique, Signature)> {
         *place = *octet;
     }
     Some((cle, Signature::depuis_octets(brute)))
+}
+
+/// Lit une clé d'appareil P-256, en tête de ces octets.
+///
+/// **La clé est VÉRIFIÉE** : un point qui n'est pas sur P-256 est refusé ici,
+/// et non au moment où une signature ne vérifie pas. Comme sa jumelle Ed25519,
+/// elle ne vérifie pas la longueur — l'appelant a exigé [`CLE_SEULE_OCTETS`].
+fn lire_une_cle_d_appareil(corps: &[u8]) -> Option<CleAppareil> {
+    let mut octets = [0_u8; asl_cle::CLE_APPAREIL_OCTETS];
+    for (place, octet) in octets.iter_mut().zip(corps.iter()) {
+        *place = *octet;
+    }
+    CleAppareil::depuis_octets(octets).ok()
+}
+
+/// Lit une clé d'appareil et sa preuve, depuis les tranches déjà isolées par
+/// `asl_api::CreationDeCompte`.
+///
+/// **Les tailles sont celles qu'`asl-api` a garanties** : la clé fait
+/// [`asl_cle::CLE_APPAREIL_OCTETS`], la preuve [`asl_cle::SIGNATURE_APPAREIL_OCTETS`].
+/// On les revérifie tout de même, parce que ce qui vient d'une autre crate est
+/// une entrée comme une autre — et parce qu'un `try_into` qui échoue ne coûte
+/// rien à côté d'une clé lue de travers.
+fn cle_et_preuve_d_appareil(cle: &[u8], preuve: &[u8]) -> Option<(CleAppareil, SignatureAppareil)> {
+    // Le `try_into` EST la vérification de longueur : il échoue si la tranche ne
+    // fait pas exactement la taille du tableau.
+    let cle: [u8; asl_cle::CLE_APPAREIL_OCTETS] = cle.try_into().ok()?;
+    let preuve: [u8; asl_cle::SIGNATURE_APPAREIL_OCTETS] = preuve.try_into().ok()?;
+    Some((
+        CleAppareil::depuis_octets(cle).ok()?,
+        SignatureAppareil::depuis_octets(preuve),
+    ))
 }
 
 /// Lit une preuve : dix-sept octets d'identifiant, puis soixante-quatre de
@@ -1840,7 +1937,7 @@ mod tests {
     use asl_cle::LiaisonDeCanal;
 
     use super::{
-        Besoin, CORPS_OCTETS_MAX, JSON_MEDIA, NOMBRE_OCTETS_MAX, POSSESSION_OCTETS, PROBLEME_MEDIA,
+        Besoin, CORPS_OCTETS_MAX, CleTrouvee, JSON_MEDIA, NOMBRE_OCTETS_MAX, PROBLEME_MEDIA,
         Session, Trouvaille, besoin, composer, ecrire_un_nombre, probleme, repondre, statut_de,
         traduire,
     };
@@ -2151,10 +2248,10 @@ mod tests {
 
     #[test]
     fn un_corps_de_creation_de_compte_mal_dimensionne_est_refuse() {
-        // Quatre-vingt-seize octets, ou rien : une clé et une signature, toutes
-        // deux de longueur fixe. Il n'y a aucune longueur à lire, donc aucune à
-        // se faire mentir.
-        for corps in [&b""[..], &[0_u8; 95][..], &[0_u8; 97][..]] {
+        // Le corps de `/v1/comptes` porte maintenant un préfixe de longueur
+        // fixe — plate-forme (1) ‖ clé (33) ‖ preuve (64) = 98 — suivi de
+        // l'attestation. Sous ce préfixe, il est refusé sans rien lire.
+        for corps in [&b""[..], &[0_u8; 97][..]] {
             let combien = corps.len();
             assert_eq!(
                 besoin(&session(), &tete(b"POST", b"/v1/comptes"), corps),
@@ -2163,15 +2260,12 @@ mod tests {
             );
         }
 
-        // **LA BONNE LONGUEUR NE SUFFIT PAS** : il reste à prouver la
-        // possession, et cette session-ci n'a tiré aucun défi.
+        // **LA BONNE LONGUEUR NE SUFFIT PAS** : quatre-vingt-dix-huit octets à
+        // zéro se cadrent — plate-forme `Aucune`, pas d'attestation —, mais la
+        // clé n'est pas un point de la courbe, et c'est refusé à la lecture.
         assert_eq!(
-            besoin(
-                &session(),
-                &tete(b"POST", b"/v1/comptes"),
-                &[0_u8; POSSESSION_OCTETS]
-            ),
-            Besoin::PreuveRefusee
+            besoin(&session(), &tete(b"POST", b"/v1/comptes"), &[0_u8; 98]),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
         );
     }
 
@@ -2250,7 +2344,9 @@ mod tests {
         let reponse = repondre(
             &mut session(),
             &Besoin::Compte(un_compte(1)),
-            &Trouvaille::Cle(asl_cle::CleSecrete::depuis_entropie([1; 32]).publique()),
+            &Trouvaille::Cle(CleTrouvee::Machine(
+                asl_cle::CleSecrete::depuis_entropie([1; 32]).publique(),
+            )),
             None,
             &mut sortie,
         );
@@ -2329,7 +2425,9 @@ mod authentification {
     extern crate alloc;
     use alloc::vec::Vec;
 
-    use super::{Besoin, OCTETS_MEDIA, PREUVE_OCTETS, Session, Trouvaille, besoin, repondre};
+    use super::{
+        Besoin, CleTrouvee, OCTETS_MEDIA, PREUVE_OCTETS, Session, Trouvaille, besoin, repondre,
+    };
 
     fn liaison() -> LiaisonDeCanal {
         LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
@@ -2399,7 +2497,7 @@ mod authentification {
         let reponse = repondre(
             &mut session,
             &quoi,
-            &Trouvaille::Cle(secrete.publique()),
+            &Trouvaille::Cle(CleTrouvee::Machine(secrete.publique())),
             None,
             &mut sortie,
         );
@@ -2438,6 +2536,71 @@ mod authentification {
     }
 
     #[test]
+    fn un_appareil_authentifie_sa_connexion_en_p256() {
+        // **UN TÉLÉPHONE S'AUTHENTIFIE COMME UNE MACHINE**, mais en P-256 : il
+        // signe le défi de la connexion, et le genre `appareil` de sa preuve
+        // envoie `asl-session` vérifier avec la bonne courbe. C'est le chemin
+        // que prend un appareil déjà enrôlé qui rouvre une connexion pour
+        // administrer son compte.
+        let appareil = Identifiant::depuis_entropie(Genre::Appareil, [5; 16]);
+        let secrete =
+            asl_cle::CleSecreteAppareil::depuis_entropie([9; 32]).expect("un scalaire valide");
+        let mut session = Session::new(liaison());
+        let defi = tirer(&mut session, Defi::depuis_octets([7; 32]));
+        let signature = secrete
+            .signer(appareil, &defi, &liaison())
+            .expect("l'appareil signe");
+
+        let mut corps = Vec::with_capacity(PREUVE_OCTETS);
+        corps.push(Genre::Appareil.prefixe());
+        corps.extend_from_slice(appareil.octets());
+        corps.extend_from_slice(signature.octets());
+
+        let quoi = besoin(&session, &tete(b"POST", b"/v1/defi"), &corps);
+        let mut sortie = [0_u8; 256];
+        let reponse = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Cle(CleTrouvee::Appareil(secrete.publique())),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::NO_CONTENT, "{reponse:?}");
+        assert_eq!(session.appareil(), Some(appareil));
+        assert_eq!(session.machine(), None, "un appareil n'est pas une machine");
+    }
+
+    #[test]
+    fn une_signature_d_appareil_fausse_est_refusee() {
+        // La même clé, mais une signature faite pour un AUTRE défi : la courbe
+        // P-256 la refuse comme l'Ed25519 refuse la sienne.
+        let appareil = Identifiant::depuis_entropie(Genre::Appareil, [5; 16]);
+        let secrete =
+            asl_cle::CleSecreteAppareil::depuis_entropie([9; 32]).expect("un scalaire valide");
+        let mut session = Session::new(liaison());
+        tirer(&mut session, Defi::depuis_octets([7; 32]));
+        let autre = Defi::depuis_octets([8; 32]);
+        let signature = secrete
+            .signer(appareil, &autre, &liaison())
+            .expect("l'appareil signe");
+        let mut corps = Vec::with_capacity(PREUVE_OCTETS);
+        corps.push(Genre::Appareil.prefixe());
+        corps.extend_from_slice(appareil.octets());
+        corps.extend_from_slice(signature.octets());
+        let quoi = besoin(&session, &tete(b"POST", b"/v1/defi"), &corps);
+        let mut sortie = [0_u8; 256];
+        let reponse = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Cle(CleTrouvee::Appareil(secrete.publique())),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(session.appareil(), None);
+    }
+
+    #[test]
     fn une_signature_faite_pour_un_autre_defi_est_refusee() {
         // **C'EST LE REJEU**, et c'est ce que le défi existe pour arrêter.
         let (machine, secrete) = une_machine();
@@ -2454,7 +2617,7 @@ mod authentification {
         let reponse = repondre(
             &mut session,
             &quoi,
-            &Trouvaille::Cle(secrete.publique()),
+            &Trouvaille::Cle(CleTrouvee::Machine(secrete.publique())),
             None,
             &mut sortie,
         );
@@ -2481,7 +2644,7 @@ mod authentification {
         let reponse = repondre(
             &mut session,
             &quoi,
-            &Trouvaille::Cle(secrete.publique()),
+            &Trouvaille::Cle(CleTrouvee::Machine(secrete.publique())),
             None,
             &mut sortie,
         );
@@ -2504,7 +2667,7 @@ mod authentification {
         let _ = repondre(
             &mut session,
             &quoi,
-            &Trouvaille::Cle(secrete.publique()),
+            &Trouvaille::Cle(CleTrouvee::Machine(secrete.publique())),
             None,
             &mut sortie,
         );
@@ -2519,7 +2682,7 @@ mod authentification {
         let reponse = repondre(
             &mut session,
             &quoi,
-            &Trouvaille::Cle(secrete.publique()),
+            &Trouvaille::Cle(CleTrouvee::Machine(secrete.publique())),
             None,
             &mut sortie,
         );
@@ -2543,7 +2706,7 @@ mod authentification {
         let reponse = repondre(
             &mut session,
             &quoi,
-            &Trouvaille::Cle(secrete.publique()),
+            &Trouvaille::Cle(CleTrouvee::Machine(secrete.publique())),
             None,
             &mut sortie,
         );
@@ -2630,7 +2793,7 @@ mod authentification {
         let reponse = repondre(
             &mut session,
             &quoi,
-            &Trouvaille::Cle(secrete.publique()),
+            &Trouvaille::Cle(CleTrouvee::Machine(secrete.publique())),
             None,
             &mut sortie,
         );
@@ -2647,7 +2810,7 @@ mod resolution {
     use asl_cle::LiaisonDeCanal;
     use asl_id::{Genre, Identifiant};
 
-    use super::{Besoin, Resolution, Session, Trouvaille, besoin, repondre};
+    use super::{Besoin, CleTrouvee, Resolution, Session, Trouvaille, besoin, repondre};
 
     fn liaison() -> LiaisonDeCanal {
         LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
@@ -2758,7 +2921,7 @@ mod resolution {
         let reponse = repondre(
             &mut session,
             &quoi,
-            &Trouvaille::Cle(secrete.publique()),
+            &Trouvaille::Cle(CleTrouvee::Machine(secrete.publique())),
             None,
             &mut sortie,
         );
@@ -3251,7 +3414,9 @@ mod enveloppe_de_l_annonce {
     use asl_cle::{CleSecrete, Defi, LiaisonDeCanal};
     use asl_id::{Genre, Identifiant};
 
-    use super::{Besoin, JSON_MEDIA, PROBLEME_MEDIA, Session, Trouvaille, besoin, repondre};
+    use super::{
+        Besoin, CleTrouvee, JSON_MEDIA, PROBLEME_MEDIA, Session, Trouvaille, besoin, repondre,
+    };
 
     fn liaison() -> LiaisonDeCanal {
         LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
@@ -3304,7 +3469,7 @@ mod enveloppe_de_l_annonce {
         let _ = repondre(
             &mut session,
             &quoi,
-            &Trouvaille::Cle(secrete.publique()),
+            &Trouvaille::Cle(CleTrouvee::Machine(secrete.publique())),
             None,
             &mut sortie,
         );
@@ -3388,7 +3553,9 @@ mod enveloppe_de_l_annonce {
         let reponse = repondre(
             &mut session,
             &Besoin::Annoncer,
-            &Trouvaille::Cle(CleSecrete::depuis_entropie([1; 32]).publique()),
+            &Trouvaille::Cle(CleTrouvee::Machine(
+                CleSecrete::depuis_entropie([1; 32]).publique(),
+            )),
             None,
             &mut sortie,
         );
@@ -3412,12 +3579,16 @@ mod creations {
 
     use alloc::vec::Vec;
     use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
-    use asl_cle::{CleSecrete, Defi, LiaisonDeCanal, Signature};
+    use asl_api::corps::{CreationDeCompte, PlateformeAttestation};
+    use asl_cle::{
+        CleAppareil, CleSecrete, CleSecreteAppareil, Defi, LiaisonDeCanal, Signature,
+        SignatureAppareil,
+    };
     use asl_id::{Genre, Identifiant};
 
     use super::{
-        Besoin, CLE_SEULE_OCTETS, ENROLEMENT_CORPS_OCTETS, POSSESSION_OCTETS, Session, Trouvaille,
-        besoin, repondre,
+        Besoin, CLE_SEULE_OCTETS, CleTrouvee, ENROLEMENT_CORPS_OCTETS, POSSESSION_APPAREIL_OCTETS,
+        Session, Trouvaille, besoin, repondre,
     };
 
     fn liaison() -> LiaisonDeCanal {
@@ -3458,13 +3629,31 @@ mod creations {
         constructeur.finish().expect("une tête close")
     }
 
-    /// Une clé et sa preuve de possession, pour cette connexion.
-    fn possession(graine: u8) -> (CleSecrete, Vec<u8>) {
-        let secrete = CleSecrete::depuis_entropie([graine; 32]);
+    /// Une clé d'appareil secrète, reproductible.
+    fn cle_d_appareil(graine: u8) -> CleSecreteAppareil {
+        CleSecreteAppareil::depuis_entropie([graine; 32]).expect("un scalaire valide")
+    }
+
+    /// Assemble un corps de `POST /v1/comptes` sans attestation, à partir d'une
+    /// clé et d'une preuve — fût-elle celle d'une AUTRE clé.
+    fn corps_compte(cle: &CleAppareil, preuve: &SignatureAppareil) -> Vec<u8> {
+        let objet = CreationDeCompte {
+            plateforme: PlateformeAttestation::Aucune,
+            cle: &cle.octets(),
+            preuve: preuve.octets(),
+            attestation: &[],
+        };
+        let mut tampon =
+            [0_u8; 1 + asl_cle::CLE_APPAREIL_OCTETS + asl_cle::SIGNATURE_APPAREIL_OCTETS];
+        let n = objet.encoder(&mut tampon).expect("un corps bien formé");
+        tampon[..n].to_vec()
+    }
+
+    /// Une clé d'appareil et un corps de création qui prouve sa possession.
+    fn possession(graine: u8) -> (CleSecreteAppareil, Vec<u8>) {
+        let secrete = cle_d_appareil(graine);
         let preuve = secrete.prouver_la_possession(&defi(), &liaison());
-        let mut corps = Vec::with_capacity(POSSESSION_OCTETS);
-        corps.extend_from_slice(&secrete.publique().octets());
-        corps.extend_from_slice(preuve.octets());
+        let corps = corps_compte(&secrete.publique(), &preuve);
         (secrete, corps)
     }
 
@@ -3497,14 +3686,56 @@ mod creations {
     fn une_preuve_signee_pour_une_autre_cle_ne_vaut_pas() {
         // Les octets sont bien formés, la signature est valide — pour une AUTRE
         // clé. C'est le cas que le message de possession existe pour fermer.
-        let (_, juste) = possession(0x11);
-        let (autre, _) = possession(0x22);
-        let mut corps = autre.publique().octets().to_vec();
-        corps.extend_from_slice(&juste[asl_cle::CLE_PUBLIQUE_OCTETS..]);
+        let juste = cle_d_appareil(0x11).prouver_la_possession(&defi(), &liaison());
+        let autre = cle_d_appareil(0x22);
+        // La clé d'`autre`, mais la preuve faite par `juste` : bien formé,
+        // valide pour une autre clé, et donc sans valeur.
+        let corps = corps_compte(&autre.publique(), &juste);
         assert_eq!(
             besoin(&session_avec_defi(), &tete(b"POST", b"/v1/comptes"), &corps),
             Besoin::PreuveRefusee
         );
+    }
+
+    #[test]
+    fn le_garde_fou_de_longueur_refuse_une_tranche_mal_taillee() {
+        // `asl-api` garantit 33 et 64 ; on le revérifie, parce que ce qui vient
+        // d'une autre crate est une entrée comme une autre. Cet essai éprouve
+        // ce garde-fou directement, puisque le fil, lui, ne peut pas l'atteindre.
+        assert!(super::cle_et_preuve_d_appareil(&[0_u8; 32], &[0_u8; 64]).is_none());
+        assert!(super::cle_et_preuve_d_appareil(&[0_u8; 33], &[0_u8; 63]).is_none());
+        // Et une clé de bonne taille mais qui n'est pas un point : refusée aussi.
+        assert!(super::cle_et_preuve_d_appareil(&[0x04_u8; 33], &[0_u8; 64]).is_none());
+    }
+
+    #[test]
+    fn une_attestation_declaree_rend_501_tant_qu_elle_n_est_pas_verifiee() {
+        // **`Apple` ou `Google` sont bien cadrés, mais pas encore vérifiés.**
+        // Les accepter en silence serait accepter sans preuve ce qui prétend en
+        // porter une ; les refuser franchement par `501` dit la vérité — la
+        // ressource existe, le verbe est servi, et cette vérification-là n'est
+        // pas écrite. Le jour où elle le sera, ce refus tombe.
+        let secrete = cle_d_appareil(0x11);
+        let preuve = secrete.prouver_la_possession(&defi(), &liaison());
+        for plateforme in [PlateformeAttestation::Apple, PlateformeAttestation::Google] {
+            let objet = CreationDeCompte {
+                plateforme,
+                cle: &secrete.publique().octets(),
+                preuve: preuve.octets(),
+                attestation: &[0xA5, 0x01, 0x02],
+            };
+            let mut tampon = [0_u8; 128];
+            let n = objet.encoder(&mut tampon).expect("un corps bien formé");
+            assert_eq!(
+                besoin(
+                    &session_avec_defi(),
+                    &tete(b"POST", b"/v1/comptes"),
+                    &tampon[..n]
+                ),
+                Besoin::Deja(StatusCode::NOT_IMPLEMENTED),
+                "{plateforme:?}"
+            );
+        }
     }
 
     #[test]
@@ -3527,13 +3758,18 @@ mod creations {
     /// **Tous les tableaux de trente-deux octets n'en sont pas**, et c'est
     /// exactement pourquoi la clé est vérifiée à la lecture : en ranger un
     /// ferait échouer toute vérification ultérieure sans qu'on sache pourquoi.
-    const CLE_IMPOSSIBLE: [u8; asl_cle::CLE_PUBLIQUE_OCTETS] = [0x02; 32];
+    /// Trente-trois octets qui ne forment PAS un point compressé : le préfixe
+    /// `0x04` annonce un point NON compressé, qui ferait soixante-cinq octets.
+    const CLE_IMPOSSIBLE: [u8; asl_cle::CLE_APPAREIL_OCTETS] = [0x04; 33];
 
     #[test]
     fn une_cle_qui_n_est_pas_un_point_de_la_courbe_est_refusee() {
-        assert!(asl_cle::ClePublique::depuis_octets(CLE_IMPOSSIBLE).is_err());
-        let mut corps = [0_u8; POSSESSION_OCTETS];
-        corps[..asl_cle::CLE_PUBLIQUE_OCTETS].copy_from_slice(&CLE_IMPOSSIBLE);
+        assert!(CleAppareil::depuis_octets(CLE_IMPOSSIBLE).is_err());
+        // Le corps est bien CADRÉ — plate-forme, 33 octets de clé, 64 de
+        // preuve — mais la clé n'est pas un point : `asl-session` le refuse
+        // après qu'`asl-api` a isolé la tranche.
+        let mut corps = [0_u8; POSSESSION_APPAREIL_OCTETS + 1];
+        corps[1..1 + asl_cle::CLE_APPAREIL_OCTETS].copy_from_slice(&CLE_IMPOSSIBLE);
         assert_eq!(
             besoin(&session_avec_defi(), &tete(b"POST", b"/v1/comptes"), &corps),
             Besoin::Deja(StatusCode::BAD_REQUEST)
@@ -3609,7 +3845,7 @@ mod creations {
     fn un_appareil_de_plus_ne_porte_qu_une_cle() {
         // **AUCUNE PREUVE DE POSSESSION** : le nouveau téléphone ne parle pas
         // sur cette connexion, c'est un appareil déjà enrôlé qui apporte sa clé.
-        let secrete = CleSecrete::depuis_entropie([0x33; 32]);
+        let secrete = cle_d_appareil(0x33);
         let corps = secrete.publique().octets();
         assert_eq!(corps.len(), CLE_SEULE_OCTETS);
         assert_eq!(
@@ -3626,7 +3862,7 @@ mod creations {
 
     #[test]
     fn un_appareil_de_plus_exige_un_appareil_deja_enrole() {
-        let secrete = CleSecrete::depuis_entropie([0x33; 32]);
+        let secrete = cle_d_appareil(0x33);
         let corps = secrete.publique().octets();
         assert_eq!(
             besoin(
@@ -3652,8 +3888,8 @@ mod creations {
     fn un_corps_d_appareil_mal_dimensionne_est_refuse() {
         for corps in [
             &b""[..],
-            &[0_u8; 31][..],
-            &[0_u8; 33][..],
+            &[0_u8; 32][..],
+            &[0_u8; 34][..],
             &CLE_IMPOSSIBLE[..],
         ] {
             let combien = corps.len();
@@ -3673,7 +3909,7 @@ mod creations {
     fn un_appareil_cree_rend_201_puis_403_et_500() {
         let appareil = un(Genre::Appareil, 5);
         let quoi = Besoin::CreerAppareil {
-            cle: CleSecrete::depuis_entropie([0x33; 32]).publique(),
+            cle: cle_d_appareil(0x33).publique(),
         };
         let mut session = session_d_appareil();
         let (statut, rendu) = rendre(&mut session, &quoi, &Trouvaille::AppareilCree(appareil));
@@ -3983,11 +4219,25 @@ mod creations {
     // ── Enrôler une machine ─────────────────────────────────────────────────
 
     /// Le corps de `POST /v1/enrolement` : le code, la clé, la preuve.
+    /// Une clé de MACHINE (Ed25519) et sa preuve de possession.
+    ///
+    /// L'enrôlement ne passe pas à P-256 : c'est une machine qui s'enrôle, et
+    /// une machine signe en Ed25519. Le corps est donc l'ancien — clé de 32,
+    /// preuve de 64 — sans plate-forme ni attestation.
+    fn possession_machine(graine: u8) -> Vec<u8> {
+        let secrete = CleSecrete::depuis_entropie([graine; 32]);
+        let preuve = secrete.prouver_la_possession(&defi(), &liaison());
+        let mut corps =
+            Vec::with_capacity(asl_cle::CLE_PUBLIQUE_OCTETS + asl_cle::SIGNATURE_OCTETS);
+        corps.extend_from_slice(&secrete.publique().octets());
+        corps.extend_from_slice(preuve.octets());
+        corps
+    }
+
     fn corps_d_enrolement(code: &str, graine: u8) -> Vec<u8> {
-        let (_, possession) = possession(graine);
         let mut corps = Vec::with_capacity(ENROLEMENT_CORPS_OCTETS);
         corps.extend_from_slice(code.as_bytes());
-        corps.extend_from_slice(&possession);
+        corps.extend_from_slice(&possession_machine(graine));
         corps
     }
 
@@ -4052,9 +4302,13 @@ mod creations {
     fn un_enrolement_dont_la_cle_n_est_pas_un_point_est_refuse() {
         // Le code est juste, la longueur aussi : c'est la CLÉ qui n'en est pas
         // une. La faute se voit à la lecture, et non trois requêtes plus tard.
+        // Une clé de MACHINE invalide : l'enrôlement est Ed25519, donc 32
+        // octets, et ceux-ci ne forment pas un point.
+        const CLE_MACHINE_IMPOSSIBLE: [u8; asl_cle::CLE_PUBLIQUE_OCTETS] = [0x02; 32];
+        assert!(asl_cle::ClePublique::depuis_octets(CLE_MACHINE_IMPOSSIBLE).is_err());
         let mut corps = corps_d_enrolement("0123456789", 0x44);
         corps[asl_cle::CODE_SYMBOLES..asl_cle::CODE_SYMBOLES + asl_cle::CLE_PUBLIQUE_OCTETS]
-            .copy_from_slice(&CLE_IMPOSSIBLE);
+            .copy_from_slice(&CLE_MACHINE_IMPOSSIBLE);
         assert_eq!(
             besoin(
                 &session_avec_defi(),
@@ -4234,7 +4488,11 @@ mod creations {
         );
 
         let mut session = session_avec_defi();
-        let (statut, _) = rendre(&mut session, &quoi, &Trouvaille::Cle(secrete.publique()));
+        let (statut, _) = rendre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Cle(CleTrouvee::Machine(secrete.publique())),
+        );
         assert_eq!(statut, StatusCode::NO_CONTENT);
         assert_eq!(session.appareil(), Some(appareil));
     }
@@ -4276,7 +4534,11 @@ mod creations {
 
         let mut session = session_avec_defi();
         let quoi = besoin(&session, &tete(b"POST", b"/v1/defi"), &corps);
-        let (statut, _) = rendre(&mut session, &quoi, &Trouvaille::Cle(secrete.publique()));
+        let (statut, _) = rendre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Cle(CleTrouvee::Machine(secrete.publique())),
+        );
         assert_eq!(statut, StatusCode::UNAUTHORIZED);
         assert_eq!(session.appareil(), None);
     }

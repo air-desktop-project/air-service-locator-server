@@ -1317,15 +1317,26 @@ async fn creer_un_compte(
     client: &mut ams_quic_client::Client,
     flux: u64,
     graine: u8,
-) -> (Identifiant, Identifiant, asl_cle::CleSecrete) {
-    let secrete = asl_cle::CleSecrete::depuis_entropie([graine; 32]);
+) -> (Identifiant, Identifiant, asl_cle::CleSecreteAppareil) {
+    // **UNE CLÉ D'APPAREIL, P-256** : c'est un téléphone, et sa clé vit dans la
+    // Secure Enclave, qui ne fait que cette courbe.
+    let secrete =
+        asl_cle::CleSecreteAppareil::depuis_entropie([graine; 32]).expect("un scalaire valide");
     let defi = tirer_le_defi(client, flux).await;
     let liaison = liaison_du_client(client);
     let preuve = secrete.prouver_la_possession(&defi, &liaison);
 
-    let mut corps = Vec::with_capacity(96);
-    corps.extend_from_slice(&secrete.publique().octets());
-    corps.extend_from_slice(preuve.octets());
+    // **PLATE-FORME `Aucune`** : ce banc n'a pas d'attestation à présenter. Le
+    // corps est plate-forme (1) ‖ clé (33) ‖ preuve (64), sans rien derrière.
+    let objet = asl_api::corps::CreationDeCompte {
+        plateforme: asl_api::corps::PlateformeAttestation::Aucune,
+        cle: &secrete.publique().octets(),
+        preuve: preuve.octets(),
+        attestation: &[],
+    };
+    let mut tampon = [0_u8; 98];
+    let n = objet.encoder(&mut tampon).expect("un corps bien formé");
+    let corps = tampon[..n].to_vec();
 
     let (statut, rendu) = poster(
         client,

@@ -553,7 +553,7 @@ fn un_appareil_se_pose_et_se_relit() {
     let appareil = asl_registre::Appareil {
         provenance: Provenance::Ici,
         proprietaire: un(Genre::Utilisateur, 1),
-        cle: [0x77; 32],
+        cle: [0x77; 33],
         atteste: asl_registre::Attestation::Aucune,
         revoque: false,
     };
@@ -722,7 +722,7 @@ fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
         &asl_registre::Appareil {
             provenance: venu,
             proprietaire: compte,
-            cle: [2; 32],
+            cle: [2; 33],
             atteste: asl_registre::Attestation::Aucune,
             revoque: false,
         },
@@ -884,7 +884,7 @@ fn revoquer_un_appareil_emporte_son_jeton() {
         &asl_registre::Appareil {
             provenance: Provenance::Ici,
             proprietaire: un(Genre::Utilisateur, 1),
-            cle: [0x77; 32],
+            cle: [0x77; 33],
             atteste: asl_registre::Attestation::Aucune,
             revoque: false,
         },
@@ -927,7 +927,7 @@ fn revoquer_un_appareil_le_marque_sans_l_effacer() {
         &asl_registre::Appareil {
             provenance: Provenance::Ici,
             proprietaire: un(Genre::Utilisateur, 1),
-            cle: [0x77; 32],
+            cle: [0x77; 33],
             atteste: asl_registre::Attestation::Aucune,
             revoque: false,
         },
@@ -942,7 +942,7 @@ fn revoquer_un_appareil_le_marque_sans_l_effacer() {
     );
     let apres = base.appareil(quel).expect("lisible").expect("il reste");
     assert!(apres.revoque);
-    assert_eq!(apres.cle, [0x77; 32], "la clé reste, et ne vaut plus");
+    assert_eq!(apres.cle, [0x77; 33], "la clé reste, et ne vaut plus");
 
     let _ = std::fs::remove_file(fichier);
 }

@@ -306,7 +306,7 @@ fuzz_target!(|entree: Entree| {
     let appareil = Appareil {
         provenance,
         proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine; 16]),
-        cle: [entree.graine; 32],
+        cle: [entree.graine; 33],
         atteste,
         revoque: entree.graine & 16 != 0,
     };
