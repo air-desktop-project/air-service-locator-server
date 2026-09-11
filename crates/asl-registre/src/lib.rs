@@ -52,7 +52,13 @@ pub const ALIAS_OCTETS_MAX: usize = 32;
 /// Ce qu'un nom de service peut faire. Égal à `asl_proto::NOM_MAX`.
 pub const NOM_OCTETS_MAX: usize = 64;
 
-/// Ce qu'une clé publique Ed25519 occupe.
+/// Ce qu'une clé publique Ed25519 occupe. C'est celle d'une MACHINE.
+///
+/// **La clé d'un APPAREIL est en attente de passer à 33 octets** (P-256, SEC1
+/// compressé — la Secure Enclave ne fait que cette courbe). Ce changement de
+/// taille ne se fait pas ici : il est lié au corps de `POST /v1/comptes`, qui
+/// est le seul à produire cette clé, et le rangement suivra le fil plutôt que
+/// de le précéder. Aujourd'hui l'appareil range encore un Ed25519 de 32 octets.
 pub const CLE_OCTETS: usize = 32;
 
 /// Ce qu'un jeton de poussée peut faire.
@@ -585,7 +591,7 @@ impl Machine {
 // ── L'appareil ──────────────────────────────────────────────────────────────
 
 /// Ce qu'un appareil occupe.
-pub const APPAREIL_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS + 1;
+pub const APPAREIL_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS + 1 + 1;
 
 /// Un téléphone enrôlé, tel qu'il est rangé.
 ///
@@ -609,11 +615,26 @@ pub struct Appareil {
     pub provenance: Provenance,
     /// Le compte dont cet appareil est un justificatif.
     pub proprietaire: Identifiant,
-    /// Sa clé publique Ed25519, telle quelle.
+    /// Sa clé publique, telle quelle.
     ///
     /// Celle qui vit dans le matériel sécurisé du téléphone. **L'annuaire n'en
     /// connaît que la partie publique**, et il ne saurait rien faire de l'autre.
+    ///
+    /// **Encore un Ed25519 de 32 octets aujourd'hui, P-256 de 33 demain** —
+    /// voir [`CLE_OCTETS`]. Le changement suit le fil, pas l'inverse.
     pub cle: [u8; CLE_OCTETS],
+    /// Sous quelle attestation il est entré.
+    ///
+    /// # POURQUOI ON LE GARDE, ALORS QUE LA DÉCISION EST DÉJÀ PRISE
+    ///
+    /// Au moment de créer le compte, `asl-auth` a décidé si l'attestation
+    /// suffisait. Une fois l'appareil rangé, cette décision est du passé — et
+    /// c'est justement pourquoi il faut en garder la trace : **la posture d'un
+    /// annuaire change** (`--attestation facultative` un jour, `exigee` le
+    /// lendemain), et sans ce champ on ne saurait plus, compte par compte,
+    /// lesquels sont entrés sans preuve. C'est ce qu'on regarde le jour où l'on
+    /// resserre, pour savoir qui prévenir.
+    pub atteste: Attestation,
     /// A-t-il été révoqué ?
     ///
     /// # POURQUOI UN DRAPEAU, ET NON UNE LIGNE SUPPRIMÉE
@@ -646,8 +667,13 @@ impl Appareil {
                 .unwrap_or_default(),
             &self.cle,
         );
+        let apres_atteste = apres_cle.saturating_add(1);
         poser_un(
-            sortie.get_mut(apres_cle..).unwrap_or_default(),
+            sortie.get_mut(apres_cle..apres_atteste).unwrap_or_default(),
+            self.atteste.etiquette(),
+        );
+        poser_un(
+            sortie.get_mut(apres_atteste..).unwrap_or_default(),
             u8::from(self.revoque),
         );
     }
@@ -672,9 +698,11 @@ impl Appareil {
             &mut cle,
             octets.get(apres_provenance..apres_cle).unwrap_or_default(),
         );
+        let atteste = Attestation::depuis(octets.get(apres_cle).copied().unwrap_or(0))?;
         // **UN BOOLÉEN N'A QUE DEUX ÉCRITURES**, et `2` n'en est pas une : un
         // enregistrement relu se réécrirait alors différemment de lui-même.
-        let revoque = match octets.get(apres_cle).copied().unwrap_or(0) {
+        let apres_atteste = apres_cle.saturating_add(1);
+        let revoque = match octets.get(apres_atteste).copied().unwrap_or(0) {
             0 => false,
             1 => true,
             lue => return Err(Faute::Etiquette { lue }),
@@ -683,8 +711,69 @@ impl Appareil {
             provenance,
             proprietaire,
             cle,
+            atteste,
             revoque,
         })
+    }
+}
+
+// ── L'attestation sous laquelle un appareil est entré ───────────────────────
+
+/// Ce qui a cautionné un appareil au moment de son enrôlement.
+///
+/// # TROIS ÉTATS, ET `Aucune` EN EST UN À PART ENTIÈRE
+///
+/// Ce n'est pas « attesté ou non » : c'est PAR QUOI. Un annuaire en posture
+/// `facultative` laisse entrer des appareils sans preuve, et il faut pouvoir
+/// dire qu'ils sont entrés ainsi — non pas qu'on a oublié de le noter. `Aucune`
+/// est donc une valeur, pas une absence.
+///
+/// # POURQUOI LES ÉTIQUETTES RANGÉES NE SONT PAS CELLES DU FIL
+///
+/// Sur le fil (`POST /v1/comptes`), la plate-forme se note `0` aucune, `1`
+/// Apple, `2` Google — parce que là, zéro est ce qu'écrit une application qui
+/// n'atteste rien, et c'est un choix explicite de sa part.
+///
+/// **Ici, zéro ne doit désigner personne.** Un octet oublié dans un tampon
+/// réemployé vaut zéro, et s'il valait `Aucune` un appareil mal écrit se
+/// relirait comme un appareil non attesté — un enregistrement à demi formé qui
+/// se croirait entier, exactement ce que le fuzz du registre existe pour
+/// fermer. Les étiquettes rangées commencent donc à `1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attestation {
+    /// Entré sans preuve, sous une posture `facultative`.
+    Aucune,
+    /// Cautionné par Apple App Attest.
+    Apple,
+    /// Cautionné par Google Play Integrity.
+    Google,
+}
+
+impl Attestation {
+    /// L'étiquette d'« aucune ».
+    const AUCUNE: u8 = 1;
+    /// L'étiquette d'Apple.
+    const APPLE: u8 = 2;
+    /// L'étiquette de Google.
+    const GOOGLE: u8 = 3;
+
+    /// Son étiquette rangée. **Aucune ne vaut zéro** — voir l'en-tête du type.
+    const fn etiquette(self) -> u8 {
+        match self {
+            Self::Aucune => Self::AUCUNE,
+            Self::Apple => Self::APPLE,
+            Self::Google => Self::GOOGLE,
+        }
+    }
+
+    /// Relit une étiquette.
+    const fn depuis(octet: u8) -> Result<Self, Faute> {
+        match octet {
+            Self::AUCUNE => Ok(Self::Aucune),
+            Self::APPLE => Ok(Self::Apple),
+            Self::GOOGLE => Ok(Self::Google),
+            lue => Err(Faute::Etiquette { lue }),
+        }
     }
 }
 
@@ -1304,12 +1393,12 @@ mod tests {
     use asl_id::{Genre, Identifiant};
 
     use super::{
-        ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Autorisation,
-        CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte, Court, ENROLEMENT_OCTETS,
-        ENTREE_OCTETS, Enrolement, EntreeJournal, Faute, IDENTIFIANT_OCTETS, JETON_OCTETS_MAX,
-        JetonPoussee, JetonRange, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange,
-        POUSSEE_OCTETS, PROVENANCE_OCTETS, Plateforme, Portee, Provenance, SERVICE_OCTETS, Service,
-        Verdict,
+        ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
+        Autorisation, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte, Court,
+        ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement, EntreeJournal, Faute, IDENTIFIANT_OCTETS,
+        JETON_OCTETS_MAX, JetonPoussee, JetonRange, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX,
+        NomRange, POUSSEE_OCTETS, PROVENANCE_OCTETS, Plateforme, Portee, Provenance,
+        SERVICE_OCTETS, Service, Verdict,
     };
 
     /// Un identifiant de ce genre, reproductible.
@@ -2136,6 +2225,7 @@ mod tests {
             provenance: Provenance::Ici,
             proprietaire: un(Genre::Utilisateur, 7),
             cle: [0x33; CLE_OCTETS],
+            atteste: Attestation::Apple,
             revoque: false,
         };
         let mut octets = [0_u8; APPAREIL_OCTETS];
@@ -2151,6 +2241,8 @@ mod tests {
             provenance: Provenance::Annuaire(un(Genre::Annuaire, 2)),
             proprietaire: un(Genre::Utilisateur, 7),
             cle: [0; CLE_OCTETS],
+            // **ENTRÉ SANS PREUVE**, sous une posture facultative.
+            atteste: Attestation::Aucune,
             // **RÉVOQUÉ**, pour que les deux états fassent l'aller-retour.
             revoque: true,
         };
@@ -2259,6 +2351,7 @@ mod tests {
             provenance: Provenance::Ici,
             proprietaire: un(Genre::Utilisateur, 7),
             cle: [0x33; CLE_OCTETS],
+            atteste: Attestation::Google,
             revoque: false,
         };
         let mut octets = [0_u8; APPAREIL_OCTETS];
@@ -2266,5 +2359,43 @@ mod tests {
         let dernier = APPAREIL_OCTETS.saturating_sub(1);
         octets[dernier] = 2;
         assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 2 }));
+    }
+
+    #[test]
+    fn les_trois_attestations_font_l_aller_retour() {
+        for atteste in [Attestation::Aucune, Attestation::Apple, Attestation::Google] {
+            let appareil = Appareil {
+                provenance: Provenance::Ici,
+                proprietaire: un(Genre::Utilisateur, 7),
+                cle: [0x33; CLE_OCTETS],
+                atteste,
+                revoque: false,
+            };
+            let mut octets = [0_u8; APPAREIL_OCTETS];
+            appareil.ecrire(&mut octets);
+            assert_eq!(Appareil::lire(&octets), Ok(appareil), "pour {atteste:?}");
+        }
+    }
+
+    #[test]
+    fn une_etiquette_d_attestation_a_zero_est_refusee() {
+        // **ZÉRO NE DÉSIGNE PERSONNE**, ici, à la différence du fil : un octet
+        // oublié dans un tampon réemployé vaut zéro, et un appareil à demi
+        // écrit ne doit pas se relire comme un appareil non attesté.
+        let appareil = Appareil {
+            provenance: Provenance::Ici,
+            proprietaire: un(Genre::Utilisateur, 7),
+            cle: [0x33; CLE_OCTETS],
+            atteste: Attestation::Aucune,
+            revoque: false,
+        };
+        let mut octets = [0_u8; APPAREIL_OCTETS];
+        appareil.ecrire(&mut octets);
+        // L'octet d'attestation est juste après la clé.
+        let place = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS;
+        octets[place] = 0;
+        assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 0 }));
+        octets[place] = 4;
+        assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 4 }));
     }
 }

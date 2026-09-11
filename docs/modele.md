@@ -110,7 +110,8 @@ jamais l'utilisateur : il n'y a pas de mot de passe dans ce produit.
 | Champ | Ce que c'est |
 |---|---|
 | `identifiant` | `a-` + 26 caractères. |
-| `clé publique` | La partie publique d'une clé qui vit dans le matériel sécurisé du téléphone et ne peut être employée qu'après une confirmation biométrique. |
+| `clé publique` | La partie publique d'une clé qui vit dans le matériel sécurisé du téléphone et ne peut être employée qu'après une confirmation biométrique. **P-256** — la Secure Enclave et StrongBox ne font que cette courbe (`protocole.md` §2.1). |
+| `attestation` | Sous quoi l'appareil est entré : aucune, Apple, ou Google. **Une valeur, pas une absence** : un annuaire en posture facultative laisse entrer des appareils sans preuve, et il faut pouvoir dire lesquels — c'est ce qu'on regarde le jour où l'on resserre, pour savoir qui prévenir. |
 | `jeton de poussée` | APNs ou FCM, pour les notifications (§2.6). Lié à l'appareil, révoqué avec lui. |
 | `enrôlé le` | Date. |
 | `révoqué le` | Date, ou vide. |

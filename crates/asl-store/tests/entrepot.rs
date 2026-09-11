@@ -554,6 +554,7 @@ fn un_appareil_se_pose_et_se_relit() {
         provenance: Provenance::Ici,
         proprietaire: un(Genre::Utilisateur, 1),
         cle: [0x77; 32],
+        atteste: asl_registre::Attestation::Aucune,
         revoque: false,
     };
     base.poser_appareil(quel, &appareil).expect("écrit");
@@ -722,6 +723,7 @@ fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
             provenance: venu,
             proprietaire: compte,
             cle: [2; 32],
+            atteste: asl_registre::Attestation::Aucune,
             revoque: false,
         },
     )
@@ -883,6 +885,7 @@ fn revoquer_un_appareil_emporte_son_jeton() {
             provenance: Provenance::Ici,
             proprietaire: un(Genre::Utilisateur, 1),
             cle: [0x77; 32],
+            atteste: asl_registre::Attestation::Aucune,
             revoque: false,
         },
     )
@@ -925,6 +928,7 @@ fn revoquer_un_appareil_le_marque_sans_l_effacer() {
             provenance: Provenance::Ici,
             proprietaire: un(Genre::Utilisateur, 1),
             cle: [0x77; 32],
+            atteste: asl_registre::Attestation::Aucune,
             revoque: false,
         },
     )

@@ -325,6 +325,11 @@ impl Service<'_> {
                     provenance: asl_registre::Provenance::Ici,
                     proprietaire: compte,
                     cle: cle.octets(),
+                    // **AUCUNE**, et c'est vrai tant que le fil ne porte pas
+                    // d'attestation : `decider_attestation(false, …)` ci-dessus
+                    // refuse déjà tout compte sous `exigee`, donc un appareil
+                    // qui arrive jusqu'ici est entré sans preuve.
+                    atteste: asl_registre::Attestation::Aucune,
                     revoque: false,
                 },
             )
@@ -352,6 +357,7 @@ impl Service<'_> {
                 provenance: asl_registre::Provenance::Ici,
                 proprietaire: compte,
                 cle: cle.octets(),
+                atteste: asl_registre::Attestation::Aucune,
                 revoque: false,
             },
         ) {

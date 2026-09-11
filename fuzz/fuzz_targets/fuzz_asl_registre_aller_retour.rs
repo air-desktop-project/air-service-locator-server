@@ -44,10 +44,10 @@ use libfuzzer_sys::fuzz_target;
 
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
-    ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Autorisation,
-    COMPTE_OCTETS, Compte, ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement, EntreeJournal, Faute,
-    MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, Portee, Provenance, SERVICE_OCTETS, Service,
-    Verdict,
+    ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
+    Autorisation, COMPTE_OCTETS, Compte, ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement,
+    EntreeJournal, Faute, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, Portee, Provenance,
+    SERVICE_OCTETS, Service, Verdict,
 };
 
 /// Ce qu'on soumet.
@@ -298,10 +298,16 @@ fuzz_target!(|entree: Entree| {
     assert_eq!(Machine::lire(&octets), Ok(machine));
 
     // ── L'APPAREIL ET LE CODE D'ENRÔLEMENT ──────────────────────────────────
+    let atteste = match entree.graine % 3 {
+        0 => Attestation::Aucune,
+        1 => Attestation::Apple,
+        _ => Attestation::Google,
+    };
     let appareil = Appareil {
         provenance,
         proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine; 16]),
         cle: [entree.graine; 32],
+        atteste,
         revoque: entree.graine & 16 != 0,
     };
     let mut octets = [0_u8; APPAREIL_OCTETS];
