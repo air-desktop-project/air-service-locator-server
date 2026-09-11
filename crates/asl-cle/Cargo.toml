@@ -13,6 +13,9 @@ ed25519-dalek.workspace = true
 # `sha2` POUR L'EMPREINTE D'UN CODE D'ENRÔLEMENT, et rien d'autre. Elle est déjà
 # dans le graphe : `ed25519-dalek` la tire.
 sha2.workspace = true
+# P-256 POUR LES APPAREILS, et rien d'autre : la Secure Enclave et StrongBox ne
+# font que cette courbe. Voir `src/appareil.rs`. Déjà dans le graphe.
+p256.workspace = true
 
 [lints]
 workspace = true

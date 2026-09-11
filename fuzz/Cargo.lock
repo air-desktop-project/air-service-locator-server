@@ -171,6 +171,7 @@ version = "0.1.0"
 dependencies = [
  "asl-id",
  "ed25519-dalek",
+ "p256",
  "sha2",
 ]
 

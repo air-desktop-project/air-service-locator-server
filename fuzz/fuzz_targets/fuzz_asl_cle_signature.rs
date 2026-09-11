@@ -20,6 +20,11 @@
 //! 4. **Deux messages différents ont toujours la MÊME LONGUEUR** : les champs
 //!    sont de taille fixe, donc aucune frontière ne se déplace.
 //! 5. **Une signature d'une autre clé ne vérifie jamais.**
+//! 6. **LES MÊMES CINQ, POUR LA CLÉ P-256 D'UN APPAREIL** — et une de plus :
+//!    une signature d'appareil ne vérifie jamais sous un identifiant de
+//!    machine, ni l'inverse. Le genre entre dans le message, et la courbe n'y
+//!    entre pas ; c'est le refus explicite de `CleAppareil::verifie` qui tient
+//!    la frontière, et c'est lui qu'on éprouve.
 
 #![no_main]
 
@@ -27,7 +32,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asl_cle::{
-    ClePublique, CleSecrete, Defi, LiaisonDeCanal, MESSAGE_OCTETS, Signature, message_a_signer,
+    CleAppareil, ClePublique, CleSecrete, CleSecreteAppareil, Defi, LiaisonDeCanal, MESSAGE_OCTETS,
+    Signature, SignatureAppareil, message_a_signer,
 };
 use asl_id::{Genre, Identifiant};
 
@@ -54,6 +60,14 @@ struct Entree {
     cle_quelconque: [u8; 32],
     /// Des octets quelconques, pris pour une signature.
     signature_quelconque: [u8; 64],
+    /// L'entropie de la clé d'un appareil.
+    entropie_appareil: [u8; 32],
+    /// L'identifiant de l'appareil.
+    appareil: [u8; 16],
+    /// Des octets quelconques, pris pour une clé d'appareil.
+    cle_appareil_quelconque: [u8; 33],
+    /// Des octets quelconques, pris pour une signature d'appareil.
+    signature_appareil_quelconque: [u8; 64],
 }
 
 fuzz_target!(|entree: Entree| {
@@ -126,5 +140,72 @@ fuzz_target!(|entree: Entree| {
             ClePublique::depuis_octets(lue.octets()).expect("une clé valide se relit"),
             lue
         );
+    }
+
+    // ── PROPRIÉTÉ 6 : l'appareil, sur P-256 ────────────────────────────────
+    let appareil = Identifiant::depuis_entropie(Genre::Appareil, entree.appareil);
+    let Ok(secrete_appareil) = CleSecreteAppareil::depuis_entropie(entree.entropie_appareil) else {
+        // Zéro, ou au-delà de l'ordre : refusé, pas de panique, et rien à
+        // signer avec.
+        return;
+    };
+    let publique_appareil = secrete_appareil.publique();
+    let signature_appareil = secrete_appareil
+        .signer(appareil, &defi, &liaison)
+        .expect("un identifiant d'appareil est toujours accepté");
+    assert!(
+        publique_appareil.verifie(appareil, &defi, &liaison, &signature_appareil),
+        "une signature d'appareil juste ne vérifie pas"
+    );
+    if autre_defi != defi {
+        assert!(
+            !publique_appareil.verifie(appareil, &autre_defi, &liaison, &signature_appareil),
+            "le défi n'entre pas dans le message d'un appareil : le REJEU est ouvert"
+        );
+    }
+    if autre_liaison != liaison {
+        assert!(
+            !publique_appareil.verifie(appareil, &defi, &autre_liaison, &signature_appareil),
+            "la liaison n'entre pas dans le message d'un appareil : le RELAIS est ouvert"
+        );
+    }
+    // Le même identifiant, pris pour une machine : refusé, quoi que dise la
+    // signature. Et signer pour lui est refusé aussi.
+    let comme_machine = Identifiant::depuis_entropie(Genre::Machine, entree.appareil);
+    assert!(
+        !publique_appareil.verifie(comme_machine, &defi, &liaison, &signature_appareil),
+        "une clé d'appareil a vérifié pour une machine"
+    );
+    assert!(
+        secrete_appareil
+            .signer(comme_machine, &defi, &liaison)
+            .is_err()
+    );
+
+    // La possession : juste, puis liée.
+    let preuve = secrete_appareil.prouver_la_possession(&defi, &liaison);
+    assert!(publique_appareil.prouve_sa_possession(&defi, &liaison, &preuve));
+    if autre_defi != defi {
+        assert!(!publique_appareil.prouve_sa_possession(&autre_defi, &liaison, &preuve));
+    }
+    // Une preuve n'est pas une authentification, ni l'inverse.
+    assert!(!publique_appareil.verifie(appareil, &defi, &liaison, &preuve));
+    assert!(!publique_appareil.prouve_sa_possession(&defi, &liaison, &signature_appareil));
+
+    // Des octets quelconques ne paniquent pas, et une clé lue se relit.
+    let quelconque = SignatureAppareil::depuis_octets(entree.signature_appareil_quelconque);
+    let _ = publique_appareil.verifie(appareil, &defi, &liaison, &quelconque);
+    if let Ok(lue) = CleAppareil::depuis_octets(entree.cle_appareil_quelconque) {
+        let _ = lue.verifie(appareil, &defi, &liaison, &signature_appareil);
+        assert_eq!(
+            CleAppareil::depuis_octets(lue.octets()).expect("une clé valide se relit"),
+            lue
+        );
+        if lue != publique_appareil {
+            assert!(
+                !lue.verifie(appareil, &defi, &liaison, &signature_appareil),
+                "une autre clé d'appareil a vérifié"
+            );
+        }
     }
 });

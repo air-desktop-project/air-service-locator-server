@@ -1,4 +1,8 @@
-//! Les clés Ed25519 des machines, et **ce qu'elles signent**.
+//! Les clés des machines (Ed25519) et des appareils (P-256), et **ce qu'elles
+//! signent**.
+//!
+//! Les appareils sont dans [`appareil`] — et l'en-tête de ce module dit pourquoi
+//! une seconde courbe, et pourquoi celle-là.
 //!
 //! # CE QUE CETTE CRATE TRANCHE, ET QUI N'ÉTAIT PAS SPÉCIFIÉ
 //!
@@ -61,6 +65,14 @@
 //! regardent pas. Les deux vivent donc séparément.
 
 #![no_std]
+
+mod appareil;
+
+pub use appareil::{
+    CLE_APPAREIL_OCTETS, CLE_SECRETE_APPAREIL_OCTETS, CleAppareil, CleSecreteAppareil,
+    MESSAGE_POSSESSION_APPAREIL_OCTETS, SIGNATURE_APPAREIL_OCTETS, SignatureAppareil,
+    message_de_possession_appareil,
+};
 
 use asl_id::{Genre, Identifiant};
 use ed25519_dalek::{
@@ -350,6 +362,19 @@ pub enum Faute {
         /// Le genre fourni.
         obtenu: Genre,
     },
+    /// Un identifiant d'appareil était attendu.
+    ///
+    /// **Une clé P-256 n'est jamais celle d'une machine** : les machines
+    /// signent en Ed25519, et [`CleAppareil`] refuse tout autre genre.
+    PasUnAppareil {
+        /// Le genre fourni.
+        obtenu: Genre,
+    },
+    /// Les octets ne forment pas un scalaire de la courbe.
+    ///
+    /// N'arrive qu'aux clés secrètes P-256 : Ed25519 accepte n'importe quels
+    /// trente-deux octets, P-256 refuse zéro et ce qui dépasse l'ordre.
+    CleSecreteInvalide,
 }
 
 /// La clé publique d'une machine, telle que l'annuaire la connaît.

@@ -353,9 +353,26 @@ d'appareils enrôlés, et rien d'autre.
    Secure Enclave, ou Keystore adossé au TEE — avec un contrôle d'accès qui
    **exige la biométrie pour s'en servir** (`kSecAccessControlBiometryCurrentSet`,
    `setUserAuthenticationRequired(true)`).
+
+   **Et cette clé est donc P-256, pas Ed25519.** La Secure Enclave ne fait que
+   cette courbe, StrongBox aussi : une clé Ed25519 ne peut pas y entrer. Les
+   machines gardent Ed25519 — un daemon sur un Linux n'a pas d'enclave —, les
+   appareils signent en ECDSA P-256 (`asl_cle::CleAppareil`, 33 octets SEC1
+   compressés, signature `r ‖ s` sur 64 octets). Le message signé est le même ;
+   c'est la clé rangée dans l'annuaire qui dit, par sa forme, comment vérifier.
+   Décidé le 2026-09-11, quand l'attestation a fait remonter que la v1 disait
+   « dans le matériel » et n'en permettait pas le moyen.
 2. Elle envoie la clé publique et, quand la plate-forme en fournit une,
-   l'**attestation** de la plate-forme (App Attest, Play Integrity) qui certifie
-   que cette clé vit bien dans du matériel.
+   l'**attestation** de la plate-forme (App Attest, Play Integrity).
+
+   **Ce que l'attestation prouve, et ce qu'elle ne prouve pas.** App Attest
+   n'atteste pas la clé de l'appareil : il atteste une clé À LUI, qui ne signe
+   que pour lui, et iOS n'atteste aucune autre clé. Ce qui est prouvé est donc
+   qu'**une build authentique de notre app, sur un appareil réel, a présenté
+   cette clé** — et c'est le code de cette build qui l'a mise dans l'enclave. Ce
+   n'est pas « cette clé vit dans du matériel », que ce document affirmait, et
+   que rien ne peut établir depuis le serveur sur iOS. (Android, lui, a une
+   attestation de clé qui le pourrait ; ce sera une case de plus, plus tard.)
 3. Toute requête ultérieure est **signée par cette clé**.
 
 **Ce que le serveur vérifie est la signature, pas une identité.** Il ne reçoit
