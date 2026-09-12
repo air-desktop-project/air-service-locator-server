@@ -1070,12 +1070,58 @@ impl Service<'_> {
             return Trouvaille::Rien;
         };
 
+        // **ON NE FILTRE PLUS LES SERVICES NON VIVANTS.** L'écran veut aussi ceux
+        // qui sont partis (`docs/modele.md` §4.2) : un service déclaré dont la
+        // connexion est tombée doit apparaître, sans quoi il semblerait n'avoir
+        // jamais existé.
         let annonces = services
             .into_iter()
-            .filter_map(|(quel, _)| {
-                let vivante = self.vivier.annonce(quel)?;
+            .filter_map(|(quel, enregistre)| {
+                // Le nom d'un service est une clé (alphabet restreint), donc
+                // toujours de l'UTF-8 valide ; un octet corrompu n'affole rien —
+                // le service est simplement omis.
+                let nom = core::str::from_utf8(enregistre.nom.octets()).ok()?;
                 let mut sortie = alloc_reponse();
-                let combien = vivante.reponse().ok()?.encoder(&mut sortie).ok()?;
+                let combien = match self.vivier.annonce(quel) {
+                    // Dans le vivier, mais peut-être en instance de départ tant
+                    // que le balayage ne l'a pas ôtée : on regarde son état.
+                    Some(vivante) => match vivante.etat(instant()) {
+                        asl_annuaire::Etat::Parti { motif } => asl_api::corps::ServiceRendu {
+                            service: quel,
+                            nom,
+                            etat: asl_api::corps::ServiceEtat::Parti {
+                                volontaire: Some(matches!(
+                                    motif,
+                                    asl_annuaire::MotifDeDepart::Volontaire
+                                )),
+                            },
+                        }
+                        .encoder(&mut sortie)
+                        .ok()?,
+                        // Vivant : on réémet l'objet d'annonce déjà éprouvé, tel
+                        // qu'un daemon le reçoit, plutôt que d'en réécrire un.
+                        asl_annuaire::Etat::Annonce | asl_annuaire::Etat::Joignable { .. } => {
+                            let mut objet = alloc_reponse();
+                            let n = vivante.reponse().ok()?.encoder(&mut objet).ok()?;
+                            objet.truncate(n);
+                            asl_api::corps::ServiceRendu {
+                                service: quel,
+                                nom,
+                                etat: asl_api::corps::ServiceEtat::Annonce { annonce: &objet },
+                            }
+                            .encoder(&mut sortie)
+                            .ok()?
+                        }
+                    },
+                    // Déclaré, mais aucune session vivante : parti, motif perdu.
+                    None => asl_api::corps::ServiceRendu {
+                        service: quel,
+                        nom,
+                        etat: asl_api::corps::ServiceEtat::Parti { volontaire: None },
+                    }
+                    .encoder(&mut sortie)
+                    .ok()?,
+                };
                 sortie.truncate(combien);
                 Some(sortie)
             })

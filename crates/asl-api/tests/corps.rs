@@ -1868,3 +1868,75 @@ mod compte {
         }
     }
 }
+
+// ── Ce qu'une liste de services rend ────────────────────────────────────────
+
+use asl_api::corps::{ServiceEtat, ServiceRendu};
+
+/// Encode un service rendu, et rend les octets.
+fn encoder_service(quoi: &ServiceRendu) -> Vec<u8> {
+    let mut sortie = vec![0_u8; CORPS_MAX];
+    let combien = quoi.encoder(&mut sortie).expect("il s'encode");
+    sortie.truncate(combien);
+    sortie
+}
+
+/// L'identifiant de service dont ces tests se servent.
+fn un_service() -> Identifiant {
+    Identifiant::depuis_entropie(Genre::Service, [0x55; 16])
+}
+
+#[test]
+fn un_service_vivant_porte_son_objet_d_annonce_verbatim() {
+    // L'objet d'annonce est réémis TEL QUEL : c'est le serveur qui l'a produit
+    // par `Reponse::encoder`, et le réécrire ici l'aurait dupliqué.
+    let annonce = br#"{"service":"s-x","joignabilite":[]}"#;
+    let rendu = ServiceRendu {
+        service: un_service(),
+        nom: "grenier-http",
+        etat: ServiceEtat::Annonce { annonce },
+    };
+    let octets = encoder_service(&rendu);
+    let texte = core::str::from_utf8(&octets).unwrap();
+    assert_eq!(
+        texte,
+        format!(
+            r#"{{"service":"{}","nom":"grenier-http","etat":"annonce","annonce":{{"service":"s-x","joignabilite":[]}}}}"#,
+            un_service().texte().as_str(),
+        )
+    );
+}
+
+#[test]
+fn un_service_parti_dit_si_le_depart_fut_volontaire() {
+    // Volontaire connu (true/false) ou perdu (null) : les trois se rendent, et
+    // se distinguent.
+    for (volontaire, mot) in [(Some(true), "true"), (Some(false), "false"), (None, "null")] {
+        let rendu = ServiceRendu {
+            service: un_service(),
+            nom: "nas",
+            etat: ServiceEtat::Parti { volontaire },
+        };
+        let octets = encoder_service(&rendu);
+        let texte = core::str::from_utf8(&octets).unwrap();
+        assert_eq!(
+            texte,
+            format!(
+                r#"{{"service":"{}","nom":"nas","etat":"parti","volontaire":{mot}}}"#,
+                un_service().texte().as_str(),
+            ),
+            "volontaire={volontaire:?}"
+        );
+    }
+}
+
+#[test]
+fn un_tampon_trop_petit_se_dit_pour_un_service_rendu() {
+    let rendu = ServiceRendu {
+        service: un_service(),
+        nom: "nas",
+        etat: ServiceEtat::Parti { volontaire: None },
+    };
+    let mut minuscule = [0_u8; 8];
+    assert_eq!(rendu.encoder(&mut minuscule), Err(Erreur::TamponTropPetit));
+}

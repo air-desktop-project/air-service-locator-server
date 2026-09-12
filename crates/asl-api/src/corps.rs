@@ -1171,6 +1171,110 @@ impl AppareilRendu {
     }
 }
 
+// ── Ce qu'une liste de services rend ────────────────────────────────────────
+
+/// Le mot JSON de l'état d'un service vivant.
+const ETAT_ANNONCE: &str = "annonce";
+/// Celui d'un service dont la connexion est tombée.
+const ETAT_PARTI: &str = "parti";
+
+/// L'état d'un service, tel que `GET /v1/machines/{m}/services` le rend.
+///
+/// # DEUX ÉTATS, ET CE QU'ON PEUT DIRE DE CHACUN
+///
+/// L'état vivant d'une annonce N'EST PAS RANGÉ (`asl-loop-tokio::vivier` : « ce
+/// qui n'existe qu'en mémoire »). On ne rend donc que ce qu'on peut CONSTATER à
+/// l'instant de la demande.
+#[derive(Debug, Clone, Copy)]
+pub enum ServiceEtat<'a> {
+    /// Le service est vivant ; `annonce` est son objet [`asl_proto::Reponse`]
+    /// DÉJÀ ENCODÉ, réémis verbatim.
+    ///
+    /// **Le serveur l'a produit lui-même par `Reponse::encoder`**, jamais une
+    /// entrée extérieure — et le réécrire ici, à l'étage de la grammaire, aurait
+    /// donné deux écritures du même objet, qui finissent par diverger. Ses
+    /// points d'écoute sont dans sa `joignabilite` : on ne les répète pas.
+    Annonce {
+        /// L'objet JSON de la réponse d'annonce, déjà encodé.
+        annonce: &'a [u8],
+    },
+    /// Le service est déclaré mais sa connexion n'est plus tenue.
+    Parti {
+        /// Le départ était-il volontaire ? `None` — rendu `null` — si la session
+        /// a déjà été balayée du vivier et que le motif est perdu. Il n'y a pas
+        /// de date de départ rangée à rendre.
+        volontaire: Option<bool>,
+    },
+}
+
+/// Un service d'une machine, tel que `GET /v1/machines/{m}/services` le rend.
+///
+/// # UN SOUS-ENSEMBLE, POUR LA MÊME RAISON QUE [`MachineRendue`]
+///
+/// `docs/protocole.md` §2.2 veut « les services, leurs candidats, leur état et
+/// la date de la dernière sonde ». L'état vivant n'est pas persisté : après un
+/// redémarrage, un service déclaré non-vivant ne se distingue pas d'un « parti »,
+/// et il n'existe pas d'horodatage de départ à rendre. On rend donc le nom, un
+/// état constaté, et — pour un service vivant — l'objet d'annonce entier.
+#[derive(Debug, Clone, Copy)]
+pub struct ServiceRendu<'a> {
+    /// L'identifiant du service.
+    pub service: Identifiant,
+    /// Le nom que la machine lui a donné. C'est une CLÉ à l'alphabet restreint —
+    /// pas du texte libre —, donc sûr à réémettre sans échappement : aucun `"`
+    /// ni `\` ne peut y figurer.
+    pub nom: &'a str,
+    /// Son état, et ce qui s'y rattache.
+    pub etat: ServiceEtat<'a>,
+}
+
+impl ServiceRendu<'_> {
+    /// Encode un service rendu.
+    ///
+    /// ```jsonc
+    /// {"service":"s-…","nom":"grenier-http","etat":"annonce","annonce":{…}}
+    /// {"service":"s-…","nom":"grenier-http","etat":"parti","volontaire":true}
+    /// {"service":"s-…","nom":"grenier-http","etat":"parti","volontaire":null}
+    /// ```
+    ///
+    /// # PAS DE DÉCODEUR, ET C'EST ASSUMÉ
+    ///
+    /// Ce type est ÉMIS par le serveur, jamais relu par lui. Sa seule partie non
+    /// triviale — l'objet d'annonce — est un [`asl_proto::Reponse`], qui a son
+    /// propre décodeur et son propre fuzz. Un décodeur ici ne relirait que
+    /// l'enveloppe et dupliquerait le reste.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`].
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{\"service\":\"");
+        ecrivain.pousser(self.service.texte().as_str().as_bytes());
+        ecrivain.pousser(b"\",\"nom\":\"");
+        ecrivain.pousser(self.nom.as_bytes());
+        ecrivain.pousser(b"\",\"etat\":\"");
+        match self.etat {
+            ServiceEtat::Annonce { annonce } => {
+                ecrivain.pousser(ETAT_ANNONCE.as_bytes());
+                ecrivain.pousser(b"\",\"annonce\":");
+                ecrivain.pousser(annonce);
+            }
+            ServiceEtat::Parti { volontaire } => {
+                ecrivain.pousser(ETAT_PARTI.as_bytes());
+                ecrivain.pousser(b"\",\"volontaire\":");
+                ecrivain.pousser(match volontaire {
+                    Some(true) => b"true".as_slice(),
+                    Some(false) => b"false".as_slice(),
+                    None => b"null".as_slice(),
+                });
+            }
+        }
+        ecrivain.pousser(b"}");
+        ecrivain.achever()
+    }
+}
+
 /// Pose une valeur, ou refuse le champ en double.
 ///
 /// **UN CHAMP EN DOUBLE EST UN REFUS, ET NON UN DERNIER-GAGNE.** Deux lecteurs
