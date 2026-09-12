@@ -30,9 +30,9 @@
 use libfuzzer_sys::fuzz_target;
 
 use asl_api::corps::{
-    AppareilRendu, CLE_APPAREIL_OCTETS, COMPTE_CORPS_MAX, CORPS_MAX, CreationDeCompte,
-    DeclarationMachine, DemandeAlias, DemandeAutorisation, MachineRendue, NOM_MACHINE_MAX,
-    PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
+    AppareilRendu, AutorisationRendue, CLE_APPAREIL_OCTETS, COMPTE_CORPS_MAX, CORPS_MAX,
+    CreationDeCompte, DeclarationMachine, DemandeAlias, DemandeAutorisation, MachineRendue,
+    NOM_MACHINE_MAX, PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
 };
 
 /// Ce caractère change-t-il l'affichage de ce qui l'entoure ?
@@ -118,6 +118,38 @@ fuzz_target!(|octets: &[u8]| {
         let relue = DemandeAutorisation::decoder(ecrit).expect("ce qu'on écrit se relit");
         assert_eq!(relue, demande, "l'aller-retour a changé la demande");
 
+        let mut encore = [0_u8; CORPS_MAX];
+        let deux = relue.encoder(&mut encore).expect("elle se réécrit");
+        assert_eq!(&encore[..deux], ecrit, "l'écriture n'est pas canonique");
+    }
+
+    // ── CE QU'UNE LISTE D'AUTORISATIONS REND ────────────────────────────────
+    if let Ok(rendue) = AutorisationRendue::decoder(octets) {
+        // L'étiquette rendue est du texte libre : elle repart dans une réponse,
+        // donc ne porte rien de ce que l'encodeur ne saurait écrire sans
+        // échappement.
+        for caractere in rendue.etiquette.chars() {
+            assert!(
+                caractere != '"'
+                    && caractere != '\\'
+                    && !caractere.is_control()
+                    && !invisible(caractere),
+                "une étiquette rendue porte {caractere:?}, que l'encodeur ne saurait pas écrire"
+            );
+        }
+        assert!(
+            !rendue.etiquette.is_empty() && rendue.etiquette.len() <= NOM_MACHINE_MAX,
+            "une étiquette rendue de {} octets a été acceptée",
+            rendue.etiquette.len()
+        );
+
+        let mut sortie = [0_u8; CORPS_MAX];
+        let combien = rendue
+            .encoder(&mut sortie)
+            .expect("ce qui a été compris se réécrit");
+        let ecrit = &sortie[..combien];
+        let relue = AutorisationRendue::decoder(ecrit).expect("ce qu'on écrit se relit");
+        assert_eq!(relue, rendue, "l'aller-retour a changé l'autorisation");
         let mut encore = [0_u8; CORPS_MAX];
         let deux = relue.encoder(&mut encore).expect("elle se réécrit");
         assert_eq!(&encore[..deux], ecrit, "l'écriture n'est pas canonique");

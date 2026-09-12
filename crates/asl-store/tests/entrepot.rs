@@ -452,6 +452,7 @@ fn autorisation(
         a,
         portee,
         revoquee: false,
+        etiquette: NomRange::nouveau("essai").expect("court"),
     }
 }
 
@@ -736,6 +737,7 @@ fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
             a: un(Genre::Utilisateur, 7),
             portee: asl_registre::Portee::ToutLeCompte,
             revoquee: false,
+            etiquette: NomRange::nouveau("essai").expect("court"),
         },
     )
     .expect("écrit");
@@ -967,6 +969,7 @@ fn revoquer_une_autorisation_la_marque_et_la_laisse_visible() {
             a: beneficiaire,
             portee: asl_registre::Portee::ToutLeCompte,
             revoquee: false,
+            etiquette: NomRange::nouveau("essai").expect("court"),
         },
     )
     .expect("écrit");
@@ -1144,6 +1147,7 @@ fn les_autorisations_sortent_dans_les_deux_sens_avec_leur_identifiant() {
                     a,
                     portee: asl_registre::Portee::ToutLeCompte,
                     revoquee: false,
+                    etiquette: NomRange::nouveau("essai").expect("court"),
                 },
             )
             .expect("elle s'écrit");
@@ -1196,6 +1200,7 @@ fn une_autorisation_revoquee_reste_dans_la_liste() {
                 a: autre,
                 portee: asl_registre::Portee::ToutLeCompte,
                 revoquee: false,
+                etiquette: NomRange::nouveau("essai").expect("court"),
             },
         )
         .expect("elle s'écrit");

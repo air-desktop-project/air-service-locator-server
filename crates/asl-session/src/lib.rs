@@ -79,9 +79,8 @@ extern crate alloc;
 use ams_h3::Reponse;
 use ams_proto_http::{Method, RequestHead, StatusCode};
 use asl_api::corps::{
-    AutorisationRendue, Capacites, CreationDeCompte, DeclarationMachine, DemandeAlias,
-    DemandeAutorisation, DepotJeton, ModificationMachine, Plateforme, PlateformeAttestation,
-    Portee,
+    Capacites, CreationDeCompte, DeclarationMachine, DemandeAlias, DemandeAutorisation, DepotJeton,
+    ModificationMachine, Plateforme, PlateformeAttestation, Portee,
 };
 use asl_api::{Exigence, Ressource};
 use asl_cle::{CleAppareil, ClePublique, Defi, LiaisonDeCanal, Signature, SignatureAppareil};
@@ -357,6 +356,8 @@ pub enum Besoin<'a> {
         a: Identifiant,
         /// Jusqu'où elle porte.
         portee: Portee,
+        /// Le libellé de l'octroi, du texte emprunté au corps de la requête.
+        etiquette: &'a str,
     },
     /// Savoir d'où l'annuaire voit cette connexion.
     ///
@@ -519,12 +520,17 @@ pub enum Trouvaille {
         /// Ce que chaque service annonce, déjà encodé.
         annonces: alloc::vec::Vec<alloc::vec::Vec<u8>>,
     },
-    /// Les autorisations d'un compte, dans les deux sens.
+    /// Les autorisations d'un compte, dans les deux sens, **chacune déjà
+    /// encodée**.
     ///
     /// **RÉVOQUÉES COMPRISES, ET MARQUÉES.** Même raison qu'un appareil révoqué
     /// (`protocole.md` §2.2) : l'écran qu'on regarde après avoir retiré un accès
     /// doit montrer ce qu'on a retiré.
-    Autorisations(alloc::vec::Vec<AutorisationRendue>),
+    ///
+    /// Comme [`Trouvaille::Machines`] : l'étiquette est du texte emprunté à ce
+    /// que l'étage 3 vient de lire, et il l'encode sur place plutôt que de le
+    /// faire vivre jusqu'ici.
+    Autorisations(alloc::vec::Vec<alloc::vec::Vec<u8>>),
     /// Les machines d'un compte, **chacune déjà encodée**.
     ///
     /// Comme [`Trouvaille::ServicesDeMachine`], et pour la même raison : le nom
@@ -872,6 +878,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
                 Ok(demande) => Besoin::Autoriser {
                     a: demande.a,
                     portee: demande.portee,
+                    etiquette: demande.etiquette,
                 },
                 Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
@@ -1259,8 +1266,8 @@ pub fn repondre<'o>(
             _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
         },
         Besoin::MesAutorisations => match trouvaille {
-            Trouvaille::Autorisations(quoi) => composer_les_autorisations(quoi, sortie),
-            _ => composer_les_autorisations(&alloc::vec::Vec::new(), sortie),
+            Trouvaille::Autorisations(quoi) => composer_une_liste(quoi, sortie),
+            _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
         },
 
         // ── CE QUI CRÉE, ET CE QUI DÉPENSE UN DÉFI ──────────────────────
@@ -1624,62 +1631,6 @@ fn composer_une_liste<'o>(quoi: &[alloc::vec::Vec<u8>], sortie: &'o mut [u8]) ->
     )
 }
 
-/// Compose un tableau d'autorisations, dans les deux sens.
-fn composer_les_autorisations<'o>(
-    quoi: &[AutorisationRendue],
-    sortie: &'o mut [u8],
-) -> Reponse<'o> {
-    let mut place = [0_u8; asl_proto::cadrage::MESSAGE_MAX];
-    let combien = {
-        let mut liste = asl_proto::cadrage::Liste::nouvelle(&mut place);
-        for autorisation in quoi {
-            // **UN CORPS QUI BORNE, ET NON UN `Result` QU'ON JETTE.**
-            //
-            // `AutorisationRendue::encoder` peut rendre `TamponTropPetit` — et
-            // ici il ne le peut PAS : les cinq champs sont de taille connue, et
-            // `AUTORISATION_RENDUE_MAX` porte le calcul qui le démontre.
-            //
-            // Écrire quand même une branche pour ce cas poserait du code que
-            // rien ne peut atteindre, donc que personne n'éprouvera jamais et
-            // que tout le monde croira éprouvé. C'est l'idiome de [`Corps`],
-            // employé ici pour la septième fois.
-            let mut une = Corps::<AUTORISATION_RENDUE_MAX>::neuf();
-            une.pousser_encode(autorisation);
-            liste.ajouter(une.rendu());
-        }
-        match liste.achever() {
-            Ok(combien) => combien,
-            // Même raison que ci-dessus.
-            Err(_) => {
-                return composer(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    PROBLEME_MEDIA,
-                    probleme(StatusCode::INTERNAL_SERVER_ERROR),
-                    sortie,
-                );
-            }
-        }
-    };
-    composer(
-        StatusCode::OK,
-        JSON_MEDIA,
-        place.get(..combien).unwrap_or_default(),
-        sortie,
-    )
-}
-
-/// Ce qu'occupe une autorisation encodée, au plus.
-///
-/// Quatre identifiants de vingt-huit caractères, les noms de champs, la
-/// ponctuation, et `false`. **Démontré plutôt qu'estimé**, comme
-/// [`CREATION_CORPS_MAX`].
-const AUTORISATION_RENDUE_MAX: usize = 256;
-
-const _: () = assert!(
-    AUTORISATION_RENDUE_MAX >= 4 * 28 + 64,
-    "une autorisation rendue pourrait être tronquée en silence"
-);
-
 /// Un corps de création, qui BORNE au lieu d'échouer.
 ///
 /// # POURQUOI PAS `asl_proto::cadrage::Ecrivain`
@@ -1732,16 +1683,6 @@ impl<const N: usize> Corps<N> {
         let combien =
             ecrire_un_nombre(usize::try_from(valeur).unwrap_or(usize::MAX), &mut chiffres);
         self.pousser(chiffres.get(..combien).unwrap_or_default());
-    }
-
-    /// Encode une autorisation dedans, en bornant.
-    ///
-    /// L'encodeur rend un `Result` parce qu'il ne connaît pas son tampon ; ici
-    /// on le connaît, et `AUTORISATION_RENDUE_MAX` porte la preuve qu'il suffit.
-    fn pousser_encode(&mut self, quoi: &AutorisationRendue) {
-        let mut place = [0_u8; N];
-        let combien = quoi.encoder(&mut place).unwrap_or(0);
-        self.pousser(place.get(..combien).unwrap_or_default());
     }
 
     /// Ce qui a été écrit.
@@ -3280,14 +3221,22 @@ mod resolution {
         (statut, corps)
     }
 
-    fn une_autorisation_rendue(marque: u8) -> AutorisationRendue {
+    fn une_autorisation_rendue(marque: u8) -> AutorisationRendue<'static> {
         AutorisationRendue {
             autorisation: un(Genre::Autorisation, marque),
             par: un(Genre::Utilisateur, 1),
             a: un(Genre::Utilisateur, 2),
             portee: Portee::ToutLeCompte,
             revoquee: false,
+            etiquette: "accès partagé",
         }
+    }
+
+    /// Encode une autorisation rendue comme l'étage 3 le fait, en octets.
+    fn encoder_rendue(rendue: &AutorisationRendue<'_>) -> Vec<u8> {
+        let mut place = [0_u8; 256];
+        let combien = rendue.encoder(&mut place).unwrap();
+        place.get(..combien).unwrap_or_default().to_vec()
     }
 
     #[test]
@@ -3420,8 +3369,8 @@ mod resolution {
         );
         assert_eq!(statut, StatusCode::INTERNAL_SERVER_ERROR);
 
-        let beaucoup: Vec<AutorisationRendue> = (0..=asl_proto::LISTE_MAX)
-            .map(|_| une_autorisation_rendue(3))
+        let beaucoup: Vec<Vec<u8>> = (0..=asl_proto::LISTE_MAX)
+            .map(|_| encoder_rendue(&une_autorisation_rendue(3)))
             .collect();
         let (statut, _) = rendu(
             &Besoin::MesAutorisations,
@@ -3482,11 +3431,12 @@ mod resolution {
             a: un(Genre::Utilisateur, 1),
             portee: Portee::UneMachine(un(Genre::Machine, 9)),
             revoquee: false,
+            etiquette: "le nas du grenier",
         };
 
         let (statut, corps) = rendu(
             &Besoin::MesAutorisations,
-            &Trouvaille::Autorisations(vec![accordee, recue]),
+            &Trouvaille::Autorisations(vec![encoder_rendue(&accordee), encoder_rendue(&recue)]),
         );
         assert_eq!(statut, StatusCode::OK);
         assert!(corps.starts_with('['), "{corps}");
@@ -4579,7 +4529,10 @@ mod creations {
         );
 
         let beneficiaire = un(Genre::Utilisateur, 3);
-        let corps = alloc::format!(r#"{{"a":"{}","portee":"tout"}}"#, beneficiaire.texte());
+        let corps = alloc::format!(
+            r#"{{"a":"{}","portee":"tout","etiquette":"essai"}}"#,
+            beneficiaire.texte()
+        );
         assert_eq!(
             besoin(
                 &session_d_appareil(),
@@ -4588,7 +4541,8 @@ mod creations {
             ),
             Besoin::Autoriser {
                 a: beneficiaire,
-                portee: asl_api::corps::Portee::ToutLeCompte
+                portee: asl_api::corps::Portee::ToutLeCompte,
+                etiquette: "essai"
             }
         );
     }
@@ -4598,7 +4552,10 @@ mod creations {
     #[test]
     fn une_autorisation_se_demande_et_se_rend() {
         let beneficiaire = un(Genre::Utilisateur, 3);
-        let corps = alloc::format!(r#"{{"a":"{}","portee":"tout"}}"#, beneficiaire.texte());
+        let corps = alloc::format!(
+            r#"{{"a":"{}","portee":"tout","etiquette":"essai"}}"#,
+            beneficiaire.texte()
+        );
         let quoi = besoin(
             &session_d_appareil(),
             &tete(b"POST", b"/v1/autorisations"),
@@ -4608,7 +4565,8 @@ mod creations {
             quoi,
             Besoin::Autoriser {
                 a: beneficiaire,
-                portee: asl_api::corps::Portee::ToutLeCompte
+                portee: asl_api::corps::Portee::ToutLeCompte,
+                etiquette: "essai"
             }
         );
 

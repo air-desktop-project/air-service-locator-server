@@ -255,7 +255,11 @@ impl Service<'_> {
             } => self.modifier_une_machine(*machine, *nom, *capacites),
             Besoin::NouveauCode { machine } => self.emettre_un_code(*machine),
             Besoin::Enroler { empreinte, cle } => self.enroler(empreinte, cle),
-            Besoin::Autoriser { a, portee } => self.autoriser(*a, *portee),
+            Besoin::Autoriser {
+                a,
+                portee,
+                etiquette,
+            } => self.autoriser(*a, *portee, etiquette),
 
             // ── CE QUI RETIRE ───────────────────────────────────────────
             Besoin::PoserJetonDePoussee {
@@ -639,11 +643,23 @@ impl Service<'_> {
     }
 
     /// Accorde une autorisation à un autre compte.
-    fn autoriser(&self, a: Identifiant, portee: asl_api::corps::Portee) -> Trouvaille {
+    fn autoriser(
+        &self,
+        a: Identifiant,
+        portee: asl_api::corps::Portee,
+        etiquette: &str,
+    ) -> Trouvaille {
         let (Some(par), Some(quelle)) = (
             self.compte_de_la_connexion(),
             self.un_identifiant(asl_id::Genre::Autorisation),
         ) else {
+            return Trouvaille::Rien;
+        };
+
+        // L'étiquette a déjà été bornée par `asl-api` (texte libre, 1 à 64
+        // octets) ; `NomRange::nouveau` ne peut donc échouer que sur une
+        // longueur, et un `Rien` (500) est le mot juste si l'invariant cassait.
+        let Ok(etiquette) = asl_registre::NomRange::nouveau(etiquette) else {
             return Trouvaille::Rien;
         };
 
@@ -716,6 +732,7 @@ impl Service<'_> {
                 a,
                 portee,
                 revoquee: false,
+                etiquette,
             },
         ) {
             Ok(()) => Trouvaille::AutorisationCreee(quelle),
@@ -1175,21 +1192,36 @@ impl Service<'_> {
         // quel côté chacune est, et un lecteur qui connaît son identifiant sait
         // lequel il est. Deux tableaux auraient obligé l'application à savoir
         // dans lequel chercher.
-        let rendre = |(quelle, quoi): (Identifiant, asl_registre::Autorisation)| {
-            asl_api::corps::AutorisationRendue {
-                autorisation: quelle,
-                par: quoi.par,
-                a: quoi.a,
-                portee: match quoi.portee {
-                    asl_registre::Portee::ToutLeCompte => asl_api::corps::Portee::ToutLeCompte,
-                    asl_registre::Portee::UneMachine(q) => asl_api::corps::Portee::UneMachine(q),
-                    asl_registre::Portee::UnService(q) => asl_api::corps::Portee::UnService(q),
-                },
-                revoquee: quoi.revoquee,
-            }
-        };
+        let elements = accordees
+            .into_iter()
+            .chain(recues)
+            .filter_map(|(quelle, quoi)| {
+                // L'étiquette rangée est un texte libre déjà validé UTF-8 à
+                // l'entrée (`Lecteur::texte_libre`) ; un octet corrompu ne
+                // panique pas — l'autorisation est simplement omise.
+                let etiquette = core::str::from_utf8(quoi.etiquette.octets()).ok()?;
+                let rendue = asl_api::corps::AutorisationRendue {
+                    autorisation: quelle,
+                    par: quoi.par,
+                    a: quoi.a,
+                    portee: match quoi.portee {
+                        asl_registre::Portee::ToutLeCompte => asl_api::corps::Portee::ToutLeCompte,
+                        asl_registre::Portee::UneMachine(q) => {
+                            asl_api::corps::Portee::UneMachine(q)
+                        }
+                        asl_registre::Portee::UnService(q) => asl_api::corps::Portee::UnService(q),
+                    },
+                    revoquee: quoi.revoquee,
+                    etiquette,
+                };
+                let mut sortie = alloc_reponse();
+                let combien = rendue.encoder(&mut sortie).ok()?;
+                sortie.truncate(combien);
+                Some(sortie)
+            })
+            .collect();
 
-        Trouvaille::Autorisations(accordees.into_iter().chain(recues).map(rendre).collect())
+        Trouvaille::Autorisations(elements)
     }
 
     /// Lance une sonde par point sondable, et rend la main aussitôt.

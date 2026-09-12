@@ -713,6 +713,7 @@ async fn avec_l_autorisation_le_meme_service_cesse_d_etre_introuvable() {
             a: compte_b,
             portee: asl_registre::Portee::ToutLeCompte,
             revoquee: false,
+            etiquette: asl_registre::NomRange::nouveau("essai").expect("court"),
         },
     )
     .expect("écrite");
@@ -951,6 +952,7 @@ async fn un_service_annonce_par_a_se_retrouve_chez_b_qui_y_a_droit() {
             a: compte_b,
             portee: asl_registre::Portee::ToutLeCompte,
             revoquee: false,
+            etiquette: asl_registre::NomRange::nouveau("essai").expect("court"),
         },
     )
     .expect("écrite");
@@ -1539,7 +1541,10 @@ async fn le_produit_entier_se_monte_par_l_api_et_rien_d_autre() {
     );
 
     // ── A AUTORISE B ────────────────────────────────────────────────────────
-    let demande = format!(r#"{{"a":"{}","portee":"tout"}}"#, compte_b.texte());
+    let demande = format!(
+        r#"{{"a":"{}","portee":"tout","etiquette":"banc d'essai"}}"#,
+        compte_b.texte()
+    );
     let (statut, rendu) = poster(
         &mut alice,
         12,

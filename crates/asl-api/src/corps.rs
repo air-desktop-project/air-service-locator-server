@@ -540,7 +540,7 @@ fn decoder_capacites(lecteur: &mut Lecteur<'_>) -> Result<Capacites, Erreur> {
 // ── Accorder une autorisation ───────────────────────────────────────────────
 
 /// Les champs de `POST /v1/autorisations`.
-const CHAMPS_AUTORISATION: [&str; 2] = ["a", "portee"];
+const CHAMPS_AUTORISATION: [&str; 3] = ["a", "portee", "etiquette"];
 
 /// Le mot qui désigne la portée la plus large.
 const TOUT: &str = "tout";
@@ -563,14 +563,20 @@ pub enum Portee {
 
 /// Ce que `POST /v1/autorisations` demande.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DemandeAutorisation {
+pub struct DemandeAutorisation<'a> {
     /// Le compte qui en bénéficiera.
     pub a: Identifiant,
     /// Jusqu'où elle porte.
     pub portee: Portee,
+    /// Le libellé qu'on retrouvera « six mois plus tard » (`modele.md` §2.5).
+    ///
+    /// Du texte libre, aux mêmes règles qu'un nom de machine : lu par
+    /// [`Lecteur::texte_libre`] — qui refuse `"`, `\`, les contrôles et les
+    /// forceurs bidi —, non vide, au plus [`NOM_MACHINE_MAX`] octets.
+    pub etiquette: &'a str,
 }
 
-impl DemandeAutorisation {
+impl<'a> DemandeAutorisation<'a> {
     /// Décode une demande d'autorisation.
     ///
     /// ```jsonc
@@ -589,7 +595,7 @@ impl DemandeAutorisation {
     /// # Erreurs
     ///
     /// Celles du cadrage, plus [`Erreur::IdentifiantInvalide`].
-    pub fn decoder(octets: &[u8]) -> Result<Self, Erreur> {
+    pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
         if octets.len() > CORPS_MAX {
             return Err(Erreur::MessageTropLong {
                 obtenue: octets.len(),
@@ -601,6 +607,7 @@ impl DemandeAutorisation {
         let mut vus = 0_u8;
         let mut a: Option<Identifiant> = None;
         let mut portee: Option<Portee> = None;
+        let mut etiquette: Option<&'a str> = None;
 
         loop {
             let position_cle = lecteur.position();
@@ -620,15 +627,36 @@ impl DemandeAutorisation {
             vus |= bit;
 
             lecteur.attendre(b':', "deux-points")?;
-            let position = lecteur.position();
-            let texte = lecteur.chaine()?;
-            if rang == 0 {
-                a = Some(
-                    Identifiant::analyser_genre(Genre::Utilisateur, texte)
-                        .map_err(|_| Erreur::IdentifiantInvalide { position })?,
-                );
-            } else {
-                portee = Some(lire_portee(texte, position)?);
+            match rang {
+                0 => {
+                    let position = lecteur.position();
+                    let texte = lecteur.chaine()?;
+                    a = Some(
+                        Identifiant::analyser_genre(Genre::Utilisateur, texte)
+                            .map_err(|_| Erreur::IdentifiantInvalide { position })?,
+                    );
+                }
+                1 => {
+                    let position = lecteur.position();
+                    let texte = lecteur.chaine()?;
+                    portee = Some(lire_portee(texte, position)?);
+                }
+                // **L'ÉTIQUETTE EST DU TEXTE LIBRE, AUX RÈGLES D'UN NOM DE
+                // MACHINE.** Même lecture que [`lire_les_champs_de_machine`] : ce
+                // sont les seuls deux champs du produit où l'humain écrit ce qu'il
+                // veut, et il faut les refuser aux mêmes bornes.
+                _ => {
+                    let texte = lecteur.texte_libre()?;
+                    if texte.is_empty() {
+                        return Err(Erreur::NomVide);
+                    }
+                    if texte.len() > NOM_MACHINE_MAX {
+                        return Err(Erreur::NomTropLong {
+                            obtenue: texte.len(),
+                        });
+                    }
+                    etiquette = Some(texte);
+                }
             }
 
             lecteur.sauter_blancs();
@@ -655,6 +683,9 @@ impl DemandeAutorisation {
             portee: portee.ok_or(Erreur::ChampManquant {
                 nom: CHAMPS_AUTORISATION[1],
             })?,
+            etiquette: etiquette.ok_or(Erreur::ChampManquant {
+                nom: CHAMPS_AUTORISATION[2],
+            })?,
         })
     }
 
@@ -674,6 +705,10 @@ impl DemandeAutorisation {
                 ecrivain.pousser(quoi.texte().as_str().as_bytes());
             }
         }
+        ecrivain.pousser(b"\",\"etiquette\":\"");
+        // Réémise sans échappement : `texte_libre` a déjà refusé, à l'entrée,
+        // `"`, `\` et les contrôles — ce qu'un encodeur JSON aurait à échapper.
+        ecrivain.pousser(self.etiquette.as_bytes());
         ecrivain.pousser(b"\"}");
         ecrivain.achever()
     }
@@ -701,7 +736,7 @@ impl DemandeAutorisation {
 /// regarde après avoir retiré un accès doit montrer ce qu'on a retiré.** Les
 /// taire ferait douter d'avoir cliqué.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AutorisationRendue {
+pub struct AutorisationRendue<'a> {
     /// L'identifiant de l'autorisation elle-même.
     ///
     /// **C'est lui qu'on passe à `DELETE /v1/autorisations/{g}`.** Une liste
@@ -716,13 +751,18 @@ pub struct AutorisationRendue {
     pub portee: Portee,
     /// A-t-elle été retirée ?
     pub revoquee: bool,
+    /// Le libellé donné à l'octroi, pour savoir ce qu'on révoque.
+    ///
+    /// Du texte emprunté à ce que l'étage 3 vient de lire — le nom rangé de
+    /// l'autorisation. Comme un nom de machine, il se réémet sans échappement.
+    pub etiquette: &'a str,
 }
 
-impl AutorisationRendue {
+impl<'a> AutorisationRendue<'a> {
     /// Encode une autorisation.
     ///
     /// ```jsonc
-    /// {"autorisation":"g-…","par":"u-…","a":"u-…","portee":"tout","revoquee":false}
+    /// {"autorisation":"g-…","par":"u-…","a":"u-…","portee":"tout","revoquee":false,"etiquette":"accès NAS"}
     /// ```
     ///
     /// # Erreurs
@@ -745,7 +785,10 @@ impl AutorisationRendue {
         }
         ecrivain.pousser(b"\",\"revoquee\":");
         ecrivain.pousser(if self.revoquee { b"true" } else { b"false" });
-        ecrivain.pousser(b"}");
+        ecrivain.pousser(b",\"etiquette\":\"");
+        // Sans échappement, pour la même raison que le nom d'une machine.
+        ecrivain.pousser(self.etiquette.as_bytes());
+        ecrivain.pousser(b"\"}");
         ecrivain.achever()
     }
 
@@ -759,7 +802,7 @@ impl AutorisationRendue {
     /// # Erreurs
     ///
     /// Celles du cadrage.
-    pub fn decoder(octets: &[u8]) -> Result<Self, Erreur> {
+    pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
         let mut lecteur = asl_proto::cadrage::Lecteur::nouveau(octets);
         lecteur.attendre(b'{', "un objet")?;
 
@@ -768,6 +811,7 @@ impl AutorisationRendue {
         let mut a = None;
         let mut portee = None;
         let mut revoquee = None;
+        let mut etiquette: Option<&'a str> = None;
 
         loop {
             lecteur.sauter_blancs();
@@ -799,6 +843,19 @@ impl AutorisationRendue {
                     poser(&mut portee, lire_portee(texte, ou)?, position)?;
                 }
                 "revoquee" => poser(&mut revoquee, lire_booleen(&mut lecteur)?, position)?,
+                // Mêmes règles qu'un nom de machine — voir `DemandeAutorisation`.
+                "etiquette" => {
+                    let texte = lecteur.texte_libre()?;
+                    if texte.is_empty() {
+                        return Err(Erreur::NomVide);
+                    }
+                    if texte.len() > NOM_MACHINE_MAX {
+                        return Err(Erreur::NomTropLong {
+                            obtenue: texte.len(),
+                        });
+                    }
+                    poser(&mut etiquette, texte, position)?;
+                }
                 _ => return Err(Erreur::ChampInconnu { position }),
             }
 
@@ -820,6 +877,7 @@ impl AutorisationRendue {
             a: a.ok_or(Erreur::ChampManquant { nom: "a" })?,
             portee: portee.ok_or(Erreur::ChampManquant { nom: "portee" })?,
             revoquee: revoquee.ok_or(Erreur::ChampManquant { nom: "revoquee" })?,
+            etiquette: etiquette.ok_or(Erreur::ChampManquant { nom: "etiquette" })?,
         })
     }
 }

@@ -212,14 +212,11 @@ fn un_tampon_trop_petit_se_dit() {
     let mut sortie = [0_u8; 4];
     assert_eq!(lue.encoder(&mut sortie), Err(Erreur::TamponTropPetit));
 
-    let demande = DemandeAutorisation::decoder(
-        format!(
-            r#"{{"a":"{}","portee":"tout"}}"#,
-            un(Genre::Utilisateur).texte()
-        )
-        .as_bytes(),
-    )
-    .expect("elle se lit");
+    let corps = format!(
+        r#"{{"a":"{}","portee":"tout","etiquette":"essai"}}"#,
+        un(Genre::Utilisateur).texte()
+    );
+    let demande = DemandeAutorisation::decoder(corps.as_bytes()).expect("elle se lit");
     assert_eq!(demande.encoder(&mut sortie), Err(Erreur::TamponTropPetit));
 }
 
@@ -356,10 +353,14 @@ fn les_trois_portees_se_lisent_et_se_reecrivent() {
             Portee::UnService(service),
         ),
     ] {
-        let corps = format!(r#"{{"a":"{}","portee":"{texte}"}}"#, compte.texte());
+        let corps = format!(
+            r#"{{"a":"{}","portee":"{texte}","etiquette":"accès"}}"#,
+            compte.texte()
+        );
         let lue = DemandeAutorisation::decoder(corps.as_bytes()).expect("elle se lit");
         assert_eq!(lue.a, compte);
         assert_eq!(lue.portee, attendue, "{texte}");
+        assert_eq!(lue.etiquette, "accès");
 
         let mut sortie = [0_u8; CORPS_MAX];
         let combien = lue.encoder(&mut sortie).expect("elle se réécrit");
@@ -414,7 +415,10 @@ fn un_beneficiaire_qui_n_est_pas_un_compte_est_refuse() {
 #[test]
 fn une_demande_mal_formee_est_refusee() {
     let compte = un(Genre::Utilisateur);
-    let juste = format!(r#"{{"a":"{}","portee":"tout"}}"#, compte.texte());
+    let juste = format!(
+        r#"{{"a":"{}","portee":"tout","etiquette":"essai"}}"#,
+        compte.texte()
+    );
 
     assert_eq!(
         DemandeAutorisation::decoder(format!(r#"{{"a":"{}"}}"#, compte.texte()).as_bytes())
@@ -450,6 +454,45 @@ fn une_demande_mal_formee_est_refusee() {
         DemandeAutorisation::decoder(format!(r#"{{"a" "{}"}}"#, compte.texte()).as_bytes())
             .is_err()
     );
+}
+
+#[test]
+fn l_etiquette_d_une_autorisation_suit_les_regles_d_un_nom() {
+    let compte = un(Genre::Utilisateur);
+    let debut = format!(r#"{{"a":"{}","portee":"tout""#, compte.texte());
+
+    // Absente : c'est un champ requis.
+    assert_eq!(
+        DemandeAutorisation::decoder(format!("{debut}}}").as_bytes()).map(|_| ()),
+        Err(Erreur::ChampManquant { nom: "etiquette" })
+    );
+    // Vide : refusée, comme un nom de machine.
+    assert_eq!(
+        DemandeAutorisation::decoder(format!(r#"{debut},"etiquette":""}}"#).as_bytes()).map(|_| ()),
+        Err(Erreur::NomVide)
+    );
+    // Trop longue : au-delà de soixante-quatre octets.
+    let trop_longue = "x".repeat(NOM_MACHINE_MAX + 1);
+    assert_eq!(
+        DemandeAutorisation::decoder(
+            format!(r#"{debut},"etiquette":"{trop_longue}"}}"#).as_bytes()
+        )
+        .map(|_| ()),
+        Err(Erreur::NomTropLong {
+            obtenue: NOM_MACHINE_MAX + 1
+        })
+    );
+    // Un caractère de contrôle : refusé par `texte_libre`.
+    assert!(
+        DemandeAutorisation::decoder(format!("{debut},\"etiquette\":\"a\u{7}b\"}}").as_bytes())
+            .is_err()
+    );
+    // Soixante-quatre octets exactement : acceptée, et relue à l'identique.
+    let juste = "y".repeat(NOM_MACHINE_MAX);
+    let corps = format!(r#"{debut},"etiquette":"{juste}"}}"#);
+    let lue =
+        DemandeAutorisation::decoder(corps.as_bytes()).expect("soixante-quatre octets tiennent");
+    assert_eq!(lue.etiquette, juste);
 }
 
 #[test]
@@ -511,8 +554,17 @@ fn une_demande_qui_ne_commence_pas_par_un_objet_est_refusee() {
 
 #[test]
 fn une_valeur_d_autorisation_qui_n_est_pas_une_chaine_est_refusee() {
+    // Le bénéficiaire, puis la portée : chacun se lit comme une chaîne, et un
+    // nombre à la place n'en est pas une.
     assert!(matches!(
         DemandeAutorisation::decoder(br#"{"a":1}"#),
+        Err(Erreur::JsonAttendu { .. })
+    ));
+    let compte = un(Genre::Utilisateur);
+    assert!(matches!(
+        DemandeAutorisation::decoder(
+            format!(r#"{{"a":"{}","portee":1}}"#, compte.texte()).as_bytes()
+        ),
         Err(Erreur::JsonAttendu { .. })
     ));
 }
@@ -623,20 +675,21 @@ fn une_demande_d_alias_mal_formee_est_refusee() {
 use asl_api::corps::AutorisationRendue;
 
 /// Encode, et rend les octets.
-fn encoder_rendue(quoi: &AutorisationRendue) -> Vec<u8> {
+fn encoder_rendue(quoi: &AutorisationRendue<'_>) -> Vec<u8> {
     let mut sortie = vec![0_u8; CORPS_MAX];
     let combien = quoi.encoder(&mut sortie).expect("elle s'encode");
     sortie.truncate(combien);
     sortie
 }
 
-fn une_rendue(portee: Portee, revoquee: bool) -> AutorisationRendue {
+fn une_rendue(portee: Portee, revoquee: bool) -> AutorisationRendue<'static> {
     AutorisationRendue {
         autorisation: Identifiant::depuis_entropie(Genre::Autorisation, [0x11; 16]),
         par: Identifiant::depuis_entropie(Genre::Utilisateur, [0x22; 16]),
         a: Identifiant::depuis_entropie(Genre::Utilisateur, [0x33; 16]),
         portee,
         revoquee,
+        etiquette: "accès partagé",
     }
 }
 
@@ -700,7 +753,8 @@ fn les_deux_sens_se_distinguent_par_par_et_a() {
     // `protocole.md` §2.2 : « les deux sens ». Deux tableaux séparés auraient
     // obligé l'application à savoir dans lequel chercher.
     let rendue = une_rendue(Portee::ToutLeCompte, false);
-    let relue = AutorisationRendue::decoder(&encoder_rendue(&rendue)).unwrap();
+    let octets = encoder_rendue(&rendue);
+    let relue = AutorisationRendue::decoder(&octets).unwrap();
     assert_ne!(relue.par, relue.a, "un compte ne s'autorise pas lui-même");
 }
 
@@ -731,6 +785,7 @@ fn un_champ_manquant_est_nomme() {
     for (retire, nom) in [
         (r#""revoquee":false"#, "revoquee"),
         (r#""portee":"tout""#, "portee"),
+        (r#""etiquette":"accès partagé""#, "etiquette"),
     ] {
         let bon = encoder_rendue(&une_rendue(Portee::ToutLeCompte, false));
         let texte = core::str::from_utf8(&bon).unwrap();
@@ -746,8 +801,8 @@ fn un_champ_manquant_est_nomme() {
 #[test]
 fn un_champ_en_double_est_refuse_quel_qu_il_soit() {
     // **ET NON UN DERNIER-GAGNE** : deux lecteurs qui choisiraient différemment
-    // liraient deux messages dans un seul. La règle vaut pour LES CINQ champs,
-    // et l'éprouver sur un seul laisserait quatre refus que personne n'a lus.
+    // liraient deux messages dans un seul. La règle vaut pour LES SIX champs, et
+    // l'éprouver sur un seul laisserait cinq refus que personne n'a lus.
     let modele = une_rendue(Portee::ToutLeCompte, false);
     let bon = encoder_rendue(&modele);
     let texte = core::str::from_utf8(&bon).unwrap().to_owned();
@@ -761,6 +816,7 @@ fn un_champ_en_double_est_refuse_quel_qu_il_soit() {
         format!(r#""a":"{}""#, modele.a.texte().as_str()),
         r#""portee":"tout""#.to_owned(),
         r#""revoquee":false"#.to_owned(),
+        r#""etiquette":"accès partagé""#.to_owned(),
     ];
 
     for morceau in morceaux {
@@ -798,13 +854,51 @@ fn un_champ_inconnu_est_refuse() {
     let texte = core::str::from_utf8(&bon).unwrap();
     let ajoute = texte.replacen(
         r#""revoquee":false"#,
-        r#""etiquette":"x","revoquee":false"#,
+        r#""couleur":"x","revoquee":false"#,
         1,
     );
     assert!(matches!(
         AutorisationRendue::decoder(ajoute.as_bytes()),
         Err(Erreur::ChampInconnu { .. })
     ));
+}
+
+#[test]
+fn l_etiquette_rendue_suit_les_regles_d_un_nom() {
+    // Le décodeur existe pour les liaisons ; ses bornes sont celles de l'écriture.
+    let bon = encoder_rendue(&une_rendue(Portee::ToutLeCompte, false));
+    let texte = core::str::from_utf8(&bon).unwrap();
+
+    let vide = texte.replacen(r#""etiquette":"accès partagé""#, r#""etiquette":"""#, 1);
+    assert_eq!(
+        AutorisationRendue::decoder(vide.as_bytes()).map(|_| ()),
+        Err(Erreur::NomVide),
+        "{vide}"
+    );
+
+    let longue = "x".repeat(NOM_MACHINE_MAX + 1);
+    let trop = texte.replacen(
+        r#""etiquette":"accès partagé""#,
+        &format!(r#""etiquette":"{longue}""#),
+        1,
+    );
+    assert_eq!(
+        AutorisationRendue::decoder(trop.as_bytes()).map(|_| ()),
+        Err(Erreur::NomTropLong {
+            obtenue: NOM_MACHINE_MAX + 1
+        })
+    );
+
+    // Un caractère de contrôle : refusé par `texte_libre` lui-même.
+    let controle = texte.replacen(
+        r#""etiquette":"accès partagé""#,
+        "\"etiquette\":\"a\u{7}b\"",
+        1,
+    );
+    assert!(
+        AutorisationRendue::decoder(controle.as_bytes()).is_err(),
+        "{controle}"
+    );
 }
 
 #[test]

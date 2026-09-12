@@ -1105,8 +1105,16 @@ impl Portee {
 }
 
 /// Ce qu'une autorisation occupe.
-pub const AUTORISATION_OCTETS: usize =
-    PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS + PORTEE_OCTETS + 1;
+///
+/// Le dernier `1 + NOM_OCTETS_MAX` est l'étiquette, un [`Court`] comme le nom
+/// d'une machine : un octet de longueur, puis ses octets.
+pub const AUTORISATION_OCTETS: usize = PROVENANCE_OCTETS
+    + IDENTIFIANT_OCTETS
+    + IDENTIFIANT_OCTETS
+    + PORTEE_OCTETS
+    + 1
+    + 1
+    + NOM_OCTETS_MAX;
 
 /// Une arête entre deux comptes.
 ///
@@ -1131,6 +1139,14 @@ pub struct Autorisation {
     pub portee: Portee,
     /// A-t-elle été retirée ?
     pub revoquee: bool,
+    /// Le libellé que son auteur lui a donné.
+    ///
+    /// **Pour l'humain, jamais pour la machine** (`docs/modele.md` §2.5) : rien
+    /// ne se cherche par lui. C'est ce qu'on lit « six mois plus tard » pour
+    /// savoir ce qu'on révoque. Du texte libre, aux mêmes règles qu'un nom de
+    /// machine — la grammaire d'entrée (`asl_api`) a déjà refusé ce qui ne s'y
+    /// range pas.
+    pub etiquette: NomRange,
 }
 
 impl Autorisation {
@@ -1157,6 +1173,9 @@ impl Autorisation {
             sortie.get_mut(revoquee).unwrap_or_default(),
             u8::from(self.revoquee),
         );
+        let etiquette = tranche(1 + NOM_OCTETS_MAX);
+        self.etiquette
+            .ecrire(sortie.get_mut(etiquette).unwrap_or_default());
     }
 
     /// Relit une autorisation.
@@ -1195,12 +1214,15 @@ impl Autorisation {
             1 => true,
             lue => return Err(Faute::Etiquette { lue }),
         };
+        let etiquette =
+            NomRange::lire(octets.get(prendre(1 + NOM_OCTETS_MAX)).unwrap_or_default())?;
         Ok(Self {
             provenance,
             par,
             a,
             portee,
             revoquee,
+            etiquette,
         })
     }
 }
@@ -1399,8 +1421,8 @@ mod tests {
         Autorisation, CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte,
         Court, ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement, EntreeJournal, Faute,
         IDENTIFIANT_OCTETS, JETON_OCTETS_MAX, JetonPoussee, JetonRange, MACHINE_OCTETS, Machine,
-        NOM_OCTETS_MAX, NomRange, POUSSEE_OCTETS, PROVENANCE_OCTETS, Plateforme, Portee,
-        Provenance, SERVICE_OCTETS, Service, Verdict,
+        NOM_OCTETS_MAX, NomRange, PORTEE_OCTETS, POUSSEE_OCTETS, PROVENANCE_OCTETS, Plateforme,
+        Portee, Provenance, SERVICE_OCTETS, Service, Verdict,
     };
 
     /// Un identifiant de ce genre, reproductible.
@@ -1842,7 +1864,18 @@ mod tests {
             a: un(Genre::Utilisateur, 2),
             portee,
             revoquee: false,
+            etiquette: NomRange::nouveau("le portable de Léa").unwrap(),
         }
+    }
+
+    #[test]
+    fn une_autorisation_garde_son_etiquette() {
+        // L'étiquette fait l'aller-retour, texte non nul comme un nom.
+        let mut autorisation = une_autorisation(Portee::ToutLeCompte);
+        autorisation.etiquette = NomRange::nouveau("accès NAS, révoquer en juin").unwrap();
+        let mut sortie = [0_u8; AUTORISATION_OCTETS];
+        autorisation.ecrire(&mut sortie);
+        assert_eq!(Autorisation::lire(&sortie), Ok(autorisation));
     }
 
     #[test]
@@ -1941,11 +1974,32 @@ mod tests {
         let autorisation = une_autorisation(Portee::ToutLeCompte);
         let mut octets = [0_u8; AUTORISATION_OCTETS];
         autorisation.ecrire(&mut octets);
-        let dernier = AUTORISATION_OCTETS - 1;
-        octets[dernier] = 2;
+        // Le drapeau de révocation est juste après la portée, avant l'étiquette
+        // — ce n'est plus le dernier octet depuis que l'étiquette existe.
+        let drapeau = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS + PORTEE_OCTETS;
+        octets[drapeau] = 2;
         assert_eq!(
             Autorisation::lire(&octets),
             Err(Faute::Etiquette { lue: 2 })
+        );
+    }
+
+    #[test]
+    fn une_etiquette_dont_la_longueur_deborde_refuse_l_autorisation() {
+        // L'étiquette est un `Court` : une longueur annoncée au-delà de sa borne
+        // n'est pas une étiquette, et l'autorisation entière est refusée.
+        let autorisation = une_autorisation(Portee::ToutLeCompte);
+        let mut octets = [0_u8; AUTORISATION_OCTETS];
+        autorisation.ecrire(&mut octets);
+        let longueur =
+            PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS + PORTEE_OCTETS + 1;
+        octets[longueur] = u8::try_from(NOM_OCTETS_MAX + 1).expect("tient sur un octet");
+        assert_eq!(
+            Autorisation::lire(&octets),
+            Err(Faute::Longueur {
+                annoncee: NOM_OCTETS_MAX + 1,
+                maximum: NOM_OCTETS_MAX,
+            })
         );
     }
 

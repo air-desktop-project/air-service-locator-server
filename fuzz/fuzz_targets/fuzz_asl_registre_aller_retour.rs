@@ -271,6 +271,12 @@ fuzz_target!(|entree: Entree| {
         a: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine ^ 0xFF; 16]),
         portee,
         revoquee: entree.graine & 4 != 0,
+        // **L'ÉTIQUETTE EST DU TEXTE LIBRE**, comme un nom de machine : ce qui
+        // est éprouvé ici est son RANGEMENT, le refus se prend dans `asl-api`.
+        etiquette: match NomRange::nouveau(&entree.nom_de_machine) {
+            Ok(etiquette) => etiquette,
+            Err(_) => return,
+        },
     };
     let mut octets = [0_u8; AUTORISATION_OCTETS];
     autorisation.ecrire(&mut octets);
