@@ -132,6 +132,23 @@ const AUTORISATIONS: TableDefinition<'_, &[u8], &[u8; AUTORISATION_OCTETS]> =
 const MACHINES_PAR_COMPTE: TableDefinition<'_, &[u8], &[u8]> =
     TableDefinition::new("machines-par-compte");
 
+/// L'index des appareils d'un compte : `compte ‖ appareil`.
+///
+/// # LA MÊME FORME QUE [`MACHINES_PAR_COMPTE`], ET POUR LA MÊME RAISON
+///
+/// `APPAREILS` est indexée par appareil, et porte son propriétaire à l'intérieur.
+/// Répondre à « quels sont les appareils de ce compte ? » — ce que
+/// `GET /v1/appareils` demande — imposait sinon un balayage de TOUS les appareils
+/// de l'annuaire. Le compte en tête fait que les siens se suivent, donc qu'un
+/// intervalle remplace le balayage.
+///
+/// **Un appareil créé AVANT cet index n'y figure pas**, et ne se listera qu'une
+/// fois réécrit. C'est le même compromis que `MACHINES_PAR_COMPTE` a accepté à sa
+/// naissance ; il est tenable ici parce qu'un appareil ne vient jamais d'ailleurs
+/// et qu'aucun déploiement n'en porte encore de réel.
+const APPAREILS_PAR_COMPTE: TableDefinition<'_, &[u8], &[u8]> =
+    TableDefinition::new("appareils-par-compte");
+
 /// L'index des autorisations reçues : `bénéficiaire ‖ autorisation`.
 ///
 /// **C'EST LE SENS DANS LEQUEL ON INTERROGE.** Une résolution demande « ce
@@ -335,6 +352,7 @@ impl Entrepot {
             // même chose pour un lecteur et pas du tout la même pour redb.
             ecriture.open_table(AUTORISATIONS_ACCORDEES)?;
             ecriture.open_table(MACHINES_PAR_COMPTE)?;
+            ecriture.open_table(APPAREILS_PAR_COMPTE)?;
             ecriture.open_table(POUSSEES)?;
             ecriture.open_table(JOURNAL)?;
             ecriture.open_table(RANG)?;
@@ -504,6 +522,38 @@ impl Entrepot {
             }
         }
         Ok(trouvees)
+    }
+
+    /// Les appareils d'un compte, révoqués compris, avec leur identifiant.
+    ///
+    /// **UN INTERVALLE, ET NON UN BALAYAGE** — voir [`APPAREILS_PAR_COMPTE`]. Une
+    /// entrée d'index qui a survécu à un appareil disparu est SAUTÉE, comme pour
+    /// les machines : le magasin principal a le dernier mot.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Faute::Base`], [`Faute::Enregistrement`].
+    pub fn appareils_de_compte(
+        &self,
+        compte: Identifiant,
+    ) -> Result<Vec<(Identifiant, Appareil)>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let index = lecture.open_table(APPAREILS_PAR_COMPTE)?;
+        let table = lecture.open_table(APPAREILS)?;
+
+        let (debut, fin) = intervalle(compte);
+        let mut trouves = Vec::new();
+        for entree in index.range(debut.as_slice()..fin.as_slice())? {
+            let (_, valeur) = entree?;
+            let quel = depuis_clef(valeur.value())?;
+            if let Some(brut) = table.get(valeur.value())? {
+                trouves.push((
+                    quel,
+                    Appareil::lire(brut.value()).map_err(Faute::Enregistrement)?,
+                ));
+            }
+        }
+        Ok(trouves)
     }
 
     /// Les services d'une machine, avec leur identifiant.
@@ -815,6 +865,15 @@ impl Entrepot {
         {
             let mut table = ecriture.open_table(APPAREILS)?;
             table.insert(clef(quel).as_slice(), &octets)?;
+            // **LE PROPRIÉTAIRE NE CHANGE JAMAIS**, comme pour une machine : un
+            // appareil qu'on réécrirait pour un autre compte serait un autre
+            // appareil. Il n'y a donc pas d'ancienne entrée d'index à retirer, et
+            // réécrire le même appareil (une révocation) réinscrit la même paire.
+            let mut par_compte = ecriture.open_table(APPAREILS_PAR_COMPTE)?;
+            par_compte.insert(
+                paire(appareil.proprietaire, quel).as_slice(),
+                clef(quel).as_slice(),
+            )?;
         }
         ecriture.commit()?;
         Ok(())

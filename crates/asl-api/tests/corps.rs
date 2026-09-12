@@ -1065,6 +1065,476 @@ fn un_depot_ne_tient_pas_dans_un_tampon_trop_court() {
     assert!(lu.encoder(&mut tampon).is_err());
 }
 
+// ── Ce qu'une liste de machines rend ────────────────────────────────────────
+
+use asl_api::corps::{AppareilRendu, MachineRendue, PlateformeAttestation};
+
+/// Encode une machine rendue, et rend les octets.
+fn encoder_machine(quoi: &MachineRendue) -> Vec<u8> {
+    let mut sortie = vec![0_u8; CORPS_MAX];
+    let combien = quoi.encoder(&mut sortie).expect("elle s'encode");
+    sortie.truncate(combien);
+    sortie
+}
+
+/// Une machine rendue, reproductible.
+fn une_machine_rendue(nom: &str, capacites: Capacites, enrolee: bool) -> MachineRendue<'_> {
+    MachineRendue {
+        machine: Identifiant::depuis_entropie(Genre::Machine, [0x44; 16]),
+        nom,
+        capacites,
+        enrolee,
+    }
+}
+
+#[test]
+fn une_machine_rendue_fait_l_aller_et_le_retour() {
+    // **L'ENCODEUR A UN DÉCODEUR, ET C'EST POUR CELA** — comme pour une
+    // autorisation rendue. Le nom porte de l'UTF-8, y compris hors ASCII.
+    for nom in ["grenier", "salle à manger", "日本語のサーバ"] {
+        for capacites in [
+            Capacites {
+                annonce: false,
+                lecture: false,
+            },
+            Capacites {
+                annonce: true,
+                lecture: false,
+            },
+            Capacites {
+                annonce: false,
+                lecture: true,
+            },
+            Capacites {
+                annonce: true,
+                lecture: true,
+            },
+        ] {
+            for enrolee in [false, true] {
+                let avant = une_machine_rendue(nom, capacites, enrolee);
+                let octets = encoder_machine(&avant);
+                let apres = MachineRendue::decoder(&octets).expect("elle se relit");
+                assert_eq!(apres, avant, "{nom} {capacites:?} enrolée={enrolee}");
+                // L'écriture est canonique : re-encoder rend les mêmes octets.
+                assert_eq!(encoder_machine(&apres), octets, "écriture non canonique");
+            }
+        }
+    }
+}
+
+#[test]
+fn l_etat_de_cle_se_lit_dans_la_liste() {
+    // L'écran affiche « en attente » ou « enrôlée » : les deux mots doivent y
+    // être, et se distinguer.
+    let attendue = encoder_machine(&une_machine_rendue("m", Capacites::default(), false));
+    let enrolee = encoder_machine(&une_machine_rendue("m", Capacites::default(), true));
+    assert!(
+        core::str::from_utf8(&attendue)
+            .unwrap()
+            .contains(r#""cle":"attendue""#)
+    );
+    assert!(
+        core::str::from_utf8(&enrolee)
+            .unwrap()
+            .contains(r#""cle":"enrolee""#)
+    );
+    assert_ne!(attendue, enrolee);
+}
+
+#[test]
+fn un_etat_de_cle_inconnu_est_refuse() {
+    let bon = encoder_machine(&une_machine_rendue("m", Capacites::default(), true));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    let faux = texte.replacen(r#""cle":"enrolee""#, r#""cle":"perdue""#, 1);
+    assert!(matches!(
+        MachineRendue::decoder(faux.as_bytes()),
+        Err(Erreur::JsonAttendu { .. })
+    ));
+}
+
+#[test]
+fn un_nom_de_machine_rendue_vide_est_refuse() {
+    // La même borne que la déclaration : un nom vide n'existe pas.
+    let octets = encoder_machine(&une_machine_rendue("", Capacites::default(), false));
+    assert_eq!(MachineRendue::decoder(&octets), Err(Erreur::NomVide));
+}
+
+#[test]
+fn un_nom_de_machine_rendue_trop_long_est_refuse() {
+    let long = "a".repeat(NOM_MACHINE_MAX + 1);
+    let octets = encoder_machine(&une_machine_rendue(&long, Capacites::default(), false));
+    assert_eq!(
+        MachineRendue::decoder(&octets),
+        Err(Erreur::NomTropLong {
+            obtenue: NOM_MACHINE_MAX + 1
+        })
+    );
+}
+
+#[test]
+fn une_machine_rendue_a_ses_champs_manquants_nommes() {
+    for (retire, nom) in [
+        (r#","cle":"attendue""#, "cle"),
+        (r#","capacites":[]"#, "capacites"),
+    ] {
+        let bon = encoder_machine(&une_machine_rendue("m", Capacites::default(), false));
+        let texte = core::str::from_utf8(&bon).unwrap();
+        let ampute = texte.replacen(retire, "", 1);
+        assert_eq!(
+            MachineRendue::decoder(ampute.as_bytes()),
+            Err(Erreur::ChampManquant { nom }),
+            "{ampute}"
+        );
+    }
+}
+
+#[test]
+fn un_champ_de_machine_rendue_en_double_est_refuse() {
+    let bon = encoder_machine(&une_machine_rendue("m", Capacites::default(), false));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    let faux = texte.replacen(r#""nom":"m""#, r#""nom":"m","nom":"m""#, 1);
+    assert!(matches!(
+        MachineRendue::decoder(faux.as_bytes()),
+        Err(Erreur::ChampEnDouble { .. })
+    ));
+}
+
+#[test]
+fn un_champ_de_machine_rendue_inconnu_est_refuse() {
+    let bon = encoder_machine(&une_machine_rendue("m", Capacites::default(), false));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    let faux = texte.replacen(r#"{"machine":"#, r#"{"xyz":"z","machine":"#, 1);
+    assert!(matches!(
+        MachineRendue::decoder(faux.as_bytes()),
+        Err(Erreur::ChampInconnu { .. })
+    ));
+}
+
+#[test]
+fn une_machine_rendue_veut_un_genre_de_machine() {
+    let bon = encoder_machine(&une_machine_rendue("m", Capacites::default(), false));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0x44; 16]);
+    let appareil = Identifiant::depuis_entropie(Genre::Appareil, [0x44; 16]);
+    let faux = texte.replacen(machine.texte().as_str(), appareil.texte().as_str(), 1);
+    assert!(matches!(
+        MachineRendue::decoder(faux.as_bytes()),
+        Err(Erreur::IdentifiantInvalide { .. })
+    ));
+}
+
+#[test]
+fn une_machine_rendue_refuse_chaque_forme_cassee() {
+    // **CHAQUE `?` DU DÉCODEUR EST UN REFUS QUE QUELQU'UN DÉCLENCHE.** On les
+    // parcourt un par un, pour qu'aucun ne se croie éprouvé sans l'être.
+    let modele = une_machine_rendue(
+        "grenier",
+        Capacites {
+            annonce: true,
+            lecture: true,
+        },
+        true,
+    );
+    let bon = encoder_machine(&modele);
+    let texte = core::str::from_utf8(&bon).unwrap().to_owned();
+
+    // Pas un objet, nom de champ absent, deux-points manquant.
+    for brut in [
+        b"".as_slice(),
+        b"[]",
+        b"{",
+        br#"{"machine":}"#,
+        br#"{"machine" "x"}"#,
+    ] {
+        assert!(MachineRendue::decoder(brut).is_err(), "{brut:?}");
+    }
+
+    // Une valeur de mauvaise forme, champ par champ.
+    for (avant, apres) in [
+        (r#""nom":"grenier""#, r#""nom":123"#),
+        (r#""cle":"enrolee""#, r#""cle":123"#),
+        (
+            r#""capacites":["annonce","lecture"]"#,
+            r#""capacites":"annonce""#,
+        ),
+        (r#""capacites":["annonce","lecture"]"#, r#""capacites":[1]"#),
+    ] {
+        let faux = texte.replacen(avant, apres, 1);
+        assert!(MachineRendue::decoder(faux.as_bytes()).is_err(), "{faux}");
+    }
+
+    // Ce qui suit l'objet, et un objet mal fermé.
+    let mut trop = bon.clone();
+    trop.extend_from_slice(b" et la suite");
+    assert!(MachineRendue::decoder(&trop).is_err());
+    let mal_ferme = texte.replacen(r#""cle":"enrolee"}"#, r#""cle":"enrolee" x"#, 1);
+    assert!(
+        MachineRendue::decoder(mal_ferme.as_bytes()).is_err(),
+        "{mal_ferme}"
+    );
+}
+
+#[test]
+fn chaque_champ_de_machine_rendue_refuse_le_double_et_se_nomme_absent() {
+    let modele = une_machine_rendue(
+        "grenier",
+        Capacites {
+            annonce: true,
+            lecture: true,
+        },
+        true,
+    );
+    let bon = encoder_machine(&modele);
+    let texte = core::str::from_utf8(&bon).unwrap().to_owned();
+
+    let morceaux = [
+        (
+            format!(r#""machine":"{}""#, modele.machine.texte().as_str()),
+            "machine",
+        ),
+        (r#""nom":"grenier""#.to_owned(), "nom"),
+        (
+            r#""capacites":["annonce","lecture"]"#.to_owned(),
+            "capacites",
+        ),
+        (r#""cle":"enrolee""#.to_owned(), "cle"),
+    ];
+    for (morceau, nom) in morceaux {
+        let double = texte.replacen(&morceau, &format!("{morceau},{morceau}"), 1);
+        assert!(
+            matches!(
+                MachineRendue::decoder(double.as_bytes()),
+                Err(Erreur::ChampEnDouble { .. })
+            ),
+            "{double}"
+        );
+        let ampute = if texte.contains(&format!(",{morceau}")) {
+            texte.replacen(&format!(",{morceau}"), "", 1)
+        } else {
+            texte.replacen(&format!("{morceau},"), "", 1)
+        };
+        assert_eq!(
+            MachineRendue::decoder(ampute.as_bytes()),
+            Err(Erreur::ChampManquant { nom }),
+            "{ampute}"
+        );
+    }
+}
+
+#[test]
+fn un_tampon_trop_petit_se_dit_pour_une_machine_rendue() {
+    let mut sortie = [0_u8; 8];
+    assert_eq!(
+        une_machine_rendue("grenier", Capacites::default(), true).encoder(&mut sortie),
+        Err(Erreur::TamponTropPetit)
+    );
+}
+
+// ── Ce qu'une liste d'appareils rend ────────────────────────────────────────
+
+/// Encode un appareil rendu, et rend les octets.
+fn encoder_appareil(quoi: &AppareilRendu) -> Vec<u8> {
+    let mut sortie = vec![0_u8; CORPS_MAX];
+    let combien = quoi.encoder(&mut sortie).expect("il s'encode");
+    sortie.truncate(combien);
+    sortie
+}
+
+/// Un appareil rendu, reproductible.
+fn un_appareil_rendu(attestation: PlateformeAttestation, revoque: bool) -> AppareilRendu {
+    AppareilRendu {
+        appareil: Identifiant::depuis_entropie(Genre::Appareil, [0x55; 16]),
+        attestation,
+        revoque,
+    }
+}
+
+#[test]
+fn un_appareil_rendu_fait_l_aller_et_le_retour() {
+    for attestation in [
+        PlateformeAttestation::Aucune,
+        PlateformeAttestation::Apple,
+        PlateformeAttestation::Google,
+    ] {
+        for revoque in [false, true] {
+            let avant = un_appareil_rendu(attestation, revoque);
+            let octets = encoder_appareil(&avant);
+            let apres = AppareilRendu::decoder(&octets).expect("il se relit");
+            assert_eq!(apres, avant, "{attestation:?} révoqué={revoque}");
+            assert_eq!(encoder_appareil(&apres), octets, "écriture non canonique");
+        }
+    }
+}
+
+#[test]
+fn une_revocation_d_appareil_se_lit_dans_la_liste() {
+    // **L'ÉCRAN QU'ON REGARDE APRÈS AVOIR PERDU UN TÉLÉPHONE.** Un appareil
+    // révoqué reste rendu, et le dit.
+    let vif = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+    let mort = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, true));
+    assert!(
+        core::str::from_utf8(&vif)
+            .unwrap()
+            .contains(r#""revoque":false"#)
+    );
+    assert!(
+        core::str::from_utf8(&mort)
+            .unwrap()
+            .contains(r#""revoque":true"#)
+    );
+    assert_ne!(vif, mort);
+}
+
+#[test]
+fn une_attestation_inconnue_est_refusee() {
+    let bon = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    let faux = texte.replacen(
+        r#""attestation":"apple""#,
+        r#""attestation":"microsoft""#,
+        1,
+    );
+    assert!(matches!(
+        AppareilRendu::decoder(faux.as_bytes()),
+        Err(Erreur::JsonAttendu { .. })
+    ));
+}
+
+#[test]
+fn un_appareil_rendu_a_ses_champs_manquants_nommes() {
+    for (retire, nom) in [
+        (r#","revoque":false"#, "revoque"),
+        (r#","attestation":"apple""#, "attestation"),
+    ] {
+        let bon = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+        let texte = core::str::from_utf8(&bon).unwrap();
+        let ampute = texte.replacen(retire, "", 1);
+        assert_eq!(
+            AppareilRendu::decoder(ampute.as_bytes()),
+            Err(Erreur::ChampManquant { nom }),
+            "{ampute}"
+        );
+    }
+}
+
+#[test]
+fn un_champ_d_appareil_rendu_en_double_est_refuse() {
+    let bon = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    let faux = texte.replacen(
+        r#""revoque":false"#,
+        r#""revoque":false,"revoque":false"#,
+        1,
+    );
+    assert!(matches!(
+        AppareilRendu::decoder(faux.as_bytes()),
+        Err(Erreur::ChampEnDouble { .. })
+    ));
+}
+
+#[test]
+fn un_champ_d_appareil_rendu_inconnu_est_refuse() {
+    let bon = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    let faux = texte.replacen(r#"{"appareil":"#, r#"{"xyz":"z","appareil":"#, 1);
+    assert!(matches!(
+        AppareilRendu::decoder(faux.as_bytes()),
+        Err(Erreur::ChampInconnu { .. })
+    ));
+}
+
+#[test]
+fn un_appareil_rendu_veut_un_genre_d_appareil() {
+    let bon = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    let appareil = Identifiant::depuis_entropie(Genre::Appareil, [0x55; 16]);
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0x55; 16]);
+    let faux = texte.replacen(appareil.texte().as_str(), machine.texte().as_str(), 1);
+    assert!(matches!(
+        AppareilRendu::decoder(faux.as_bytes()),
+        Err(Erreur::IdentifiantInvalide { .. })
+    ));
+}
+
+#[test]
+fn un_appareil_rendu_refuse_chaque_forme_cassee() {
+    let modele = un_appareil_rendu(PlateformeAttestation::Apple, false);
+    let bon = encoder_appareil(&modele);
+    let texte = core::str::from_utf8(&bon).unwrap().to_owned();
+
+    for brut in [
+        b"".as_slice(),
+        b"[]",
+        b"{",
+        br#"{"appareil":}"#,
+        br#"{"appareil" "x"}"#,
+    ] {
+        assert!(AppareilRendu::decoder(brut).is_err(), "{brut:?}");
+    }
+
+    for (avant, apres) in [
+        (r#""attestation":"apple""#, r#""attestation":123"#),
+        (r#""revoque":false"#, r#""revoque":123"#),
+    ] {
+        let faux = texte.replacen(avant, apres, 1);
+        assert!(AppareilRendu::decoder(faux.as_bytes()).is_err(), "{faux}");
+    }
+
+    let mut trop = bon.clone();
+    trop.extend_from_slice(b"!!!");
+    assert!(AppareilRendu::decoder(&trop).is_err());
+    let mal_ferme = texte.replacen(r#""revoque":false}"#, r#""revoque":false x"#, 1);
+    assert!(
+        AppareilRendu::decoder(mal_ferme.as_bytes()).is_err(),
+        "{mal_ferme}"
+    );
+}
+
+#[test]
+fn chaque_champ_d_appareil_rendu_refuse_le_double_et_se_nomme_absent() {
+    let modele = un_appareil_rendu(PlateformeAttestation::Apple, false);
+    let bon = encoder_appareil(&modele);
+    let texte = core::str::from_utf8(&bon).unwrap().to_owned();
+
+    let morceaux = [
+        (
+            format!(r#""appareil":"{}""#, modele.appareil.texte().as_str()),
+            "appareil",
+        ),
+        (r#""attestation":"apple""#.to_owned(), "attestation"),
+        (r#""revoque":false"#.to_owned(), "revoque"),
+    ];
+    for (morceau, nom) in morceaux {
+        let double = texte.replacen(&morceau, &format!("{morceau},{morceau}"), 1);
+        assert!(
+            matches!(
+                AppareilRendu::decoder(double.as_bytes()),
+                Err(Erreur::ChampEnDouble { .. })
+            ),
+            "{double}"
+        );
+        let ampute = if texte.contains(&format!(",{morceau}")) {
+            texte.replacen(&format!(",{morceau}"), "", 1)
+        } else {
+            texte.replacen(&format!("{morceau},"), "", 1)
+        };
+        assert_eq!(
+            AppareilRendu::decoder(ampute.as_bytes()),
+            Err(Erreur::ChampManquant { nom }),
+            "{ampute}"
+        );
+    }
+}
+
+#[test]
+fn un_tampon_trop_petit_se_dit_pour_un_appareil_rendu() {
+    let mut sortie = [0_u8; 8];
+    assert_eq!(
+        un_appareil_rendu(PlateformeAttestation::Apple, false).encoder(&mut sortie),
+        Err(Erreur::TamponTropPetit)
+    );
+}
+
 // ── Créer un compte, avec preuve et attestation ─────────────────────────────
 
 mod compte {

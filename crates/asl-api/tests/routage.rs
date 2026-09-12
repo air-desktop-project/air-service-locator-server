@@ -616,3 +616,39 @@ fn l_enrolement_d_une_machine_ne_se_confond_pas_avec_l_emission_d_un_code() {
     assert_eq!(resolu.ressource, Ressource::EnrolementMachine { machine });
     assert_eq!(resolu.exigence, Exigence::Appareil);
 }
+
+// ── Les deux verbes des listes ──────────────────────────────────────────────
+
+#[test]
+fn machines_et_appareils_servent_lecture_et_creation() {
+    // **`GET` LISTE, `POST` CRÉE.** Les écrans « Machines » et « Compte »
+    // (`protocole.md` §2.2) n'avaient aucun verbe pour se remplir tant que ces
+    // ressources ne servaient que la création.
+    for cible in [&b"/v1/machines"[..], &b"/v1/appareils"[..]] {
+        for (methode, sert) in [
+            (Methode::Get, true),
+            (Methode::Post, true),
+            (Methode::Put, false),
+            (Methode::Patch, false),
+            (Methode::Delete, false),
+        ] {
+            let resolu = resoudre(methode, cible).expect("la cible se route");
+            assert_eq!(
+                resolu.sert,
+                sert,
+                "{} {methode:?}",
+                core::str::from_utf8(cible).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn lister_ses_machines_ou_appareils_exige_un_appareil() {
+    // La lecture n'ouvre pas plus que la création : c'est le compte de l'appareil
+    // qui demande, et lui seul. Nommer un autre compte n'y donne pas droit.
+    for cible in [&b"/v1/machines"[..], &b"/v1/appareils"[..]] {
+        let resolu = resoudre(Methode::Get, cible).expect("la cible se route");
+        assert_eq!(resolu.exigence, Exigence::Appareil);
+    }
+}

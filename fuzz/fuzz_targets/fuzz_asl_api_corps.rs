@@ -30,9 +30,9 @@
 use libfuzzer_sys::fuzz_target;
 
 use asl_api::corps::{
-    CLE_APPAREIL_OCTETS, COMPTE_CORPS_MAX, CORPS_MAX, CreationDeCompte, DeclarationMachine,
-    DemandeAlias, DemandeAutorisation, NOM_MACHINE_MAX, PREUVE_APPAREIL_OCTETS,
-    PlateformeAttestation,
+    AppareilRendu, CLE_APPAREIL_OCTETS, COMPTE_CORPS_MAX, CORPS_MAX, CreationDeCompte,
+    DeclarationMachine, DemandeAlias, DemandeAutorisation, MachineRendue, NOM_MACHINE_MAX,
+    PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
 };
 
 /// Ce caractère change-t-il l'affichage de ce qui l'entoure ?
@@ -120,6 +120,53 @@ fuzz_target!(|octets: &[u8]| {
 
         let mut encore = [0_u8; CORPS_MAX];
         let deux = relue.encoder(&mut encore).expect("elle se réécrit");
+        assert_eq!(&encore[..deux], ecrit, "l'écriture n'est pas canonique");
+    }
+
+    // ── CE QU'UNE LISTE DE MACHINES REND ────────────────────────────────────
+    if let Ok(machine) = MachineRendue::decoder(octets) {
+        // **3. LE NOM RENDU NE PORTE RIEN DE CE QUI EST REFUSÉ.** Le même texte
+        // libre que la déclaration, et il repart dans une réponse : ce qu'il
+        // porte doit pouvoir se réécrire sans échappement.
+        for caractere in machine.nom.chars() {
+            assert!(
+                caractere != '"'
+                    && caractere != '\\'
+                    && !caractere.is_control()
+                    && !invisible(caractere),
+                "un nom rendu porte {caractere:?}, que l'encodeur ne saurait pas écrire"
+            );
+        }
+        assert!(
+            !machine.nom.is_empty() && machine.nom.len() <= NOM_MACHINE_MAX,
+            "un nom rendu de {} octets a été accepté",
+            machine.nom.len()
+        );
+
+        // 2. L'aller-retour, canonique.
+        let mut sortie = [0_u8; CORPS_MAX];
+        let combien = machine
+            .encoder(&mut sortie)
+            .expect("ce qui a été compris se réécrit");
+        let ecrit = &sortie[..combien];
+        let relue = MachineRendue::decoder(ecrit).expect("ce qu'on écrit se relit");
+        assert_eq!(relue, machine, "l'aller-retour a changé la machine");
+        let mut encore = [0_u8; CORPS_MAX];
+        let deux = relue.encoder(&mut encore).expect("elle se réécrit");
+        assert_eq!(&encore[..deux], ecrit, "l'écriture n'est pas canonique");
+    }
+
+    // ── CE QU'UNE LISTE D'APPAREILS REND ────────────────────────────────────
+    if let Ok(appareil) = AppareilRendu::decoder(octets) {
+        let mut sortie = [0_u8; CORPS_MAX];
+        let combien = appareil
+            .encoder(&mut sortie)
+            .expect("ce qui a été compris se réécrit");
+        let ecrit = &sortie[..combien];
+        let relu = AppareilRendu::decoder(ecrit).expect("ce qu'on écrit se relit");
+        assert_eq!(relu, appareil, "l'aller-retour a changé l'appareil");
+        let mut encore = [0_u8; CORPS_MAX];
+        let deux = relu.encoder(&mut encore).expect("il se réécrit");
         assert_eq!(&encore[..deux], ecrit, "l'écriture n'est pas canonique");
     }
 

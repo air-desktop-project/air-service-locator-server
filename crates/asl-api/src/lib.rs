@@ -297,7 +297,7 @@ impl Ressource<'_> {
         match self {
             Self::Annonce => &[Methode::Post],
             Self::Defi => &[Methode::Get, Methode::Post],
-            Self::Comptes | Self::Appareils | Self::Machines | Self::Enrolement => &[Methode::Post],
+            Self::Comptes | Self::Enrolement => &[Methode::Post],
             Self::Utilisateur { .. }
             | Self::Vu
             | Self::Poussees
@@ -313,7 +313,9 @@ impl Ressource<'_> {
             Self::PousseeAppareil { .. } => &[Methode::Put],
             Self::Machine { .. } => &[Methode::Patch],
             Self::EnrolementMachine { .. } => &[Methode::Post],
-            Self::Autorisations => &[Methode::Get, Methode::Post],
+            Self::Appareils | Self::Machines | Self::Autorisations => {
+                &[Methode::Get, Methode::Post]
+            }
             Self::Alias => &[Methode::Put, Methode::Delete],
         }
     }

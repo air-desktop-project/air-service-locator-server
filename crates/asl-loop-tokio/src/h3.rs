@@ -226,6 +226,8 @@ impl Service<'_> {
                 Trouvaille::Resolutions(self.rassembler_par_nom(service))
             }
             Besoin::ServicesDeMachine { machine } => self.rassembler_les_services(*machine),
+            Besoin::MesMachines => self.rassembler_les_machines(),
+            Besoin::MesAppareils => self.rassembler_les_appareils(),
             Besoin::MesAutorisations => self.rassembler_les_autorisations(),
             // **RIEN À CHERCHER** : ouvrir le flux ne dépend d'aucun état, et
             // ce qui s'y écrira ensuite n'est pas une réponse à une requête.
@@ -1067,6 +1069,89 @@ impl Service<'_> {
             proprietaire: visee.proprietaire,
             annonces,
         }
+    }
+
+    /// Les machines du compte qui demande, pour l'écran qui les liste.
+    ///
+    /// **LE COMPTE EST CELUI DE L'APPAREIL, ET PERSONNE NE LE NOMME.** On lit
+    /// l'appareil de la session pour son propriétaire, comme
+    /// [`Self::rassembler_les_autorisations`] ; nommer un compte donnerait à un
+    /// appareil le droit de lire les machines d'un autre.
+    fn rassembler_les_machines(&self) -> Trouvaille {
+        let Some(appareil) = self.session.appareil() else {
+            return Trouvaille::Rien;
+        };
+        let Ok(Some(rangee)) = self.entrepot.appareil(appareil) else {
+            return Trouvaille::Rien;
+        };
+        let Ok(machines) = self.entrepot.machines_de_compte(rangee.proprietaire) else {
+            return Trouvaille::Rien;
+        };
+
+        let elements = machines
+            .into_iter()
+            .filter_map(|(quelle, machine)| {
+                // Le nom rangé est un texte libre déjà validé UTF-8 à l'entrée
+                // (`Lecteur::texte_libre`) ; un octet corrompu ne panique pas —
+                // la machine est simplement omise.
+                let nom = core::str::from_utf8(machine.nom.octets()).ok()?;
+                let rendue = asl_api::corps::MachineRendue {
+                    machine: quelle,
+                    nom,
+                    capacites: asl_api::corps::Capacites {
+                        annonce: machine.annonce,
+                        lecture: machine.lecture,
+                    },
+                    enrolee: machine.cle.is_some(),
+                };
+                let mut sortie = alloc_reponse();
+                let combien = rendue.encoder(&mut sortie).ok()?;
+                sortie.truncate(combien);
+                Some(sortie)
+            })
+            .collect();
+
+        Trouvaille::Machines(elements)
+    }
+
+    /// Les appareils du compte qui demande, révoqués compris.
+    fn rassembler_les_appareils(&self) -> Trouvaille {
+        let Some(appareil) = self.session.appareil() else {
+            return Trouvaille::Rien;
+        };
+        let Ok(Some(rangee)) = self.entrepot.appareil(appareil) else {
+            return Trouvaille::Rien;
+        };
+        let Ok(appareils) = self.entrepot.appareils_de_compte(rangee.proprietaire) else {
+            return Trouvaille::Rien;
+        };
+
+        let elements = appareils
+            .into_iter()
+            .filter_map(|(quel, enregistre)| {
+                let rendue = asl_api::corps::AppareilRendu {
+                    appareil: quel,
+                    attestation: match enregistre.atteste {
+                        asl_registre::Attestation::Aucune => {
+                            asl_api::corps::PlateformeAttestation::Aucune
+                        }
+                        asl_registre::Attestation::Apple => {
+                            asl_api::corps::PlateformeAttestation::Apple
+                        }
+                        asl_registre::Attestation::Google => {
+                            asl_api::corps::PlateformeAttestation::Google
+                        }
+                    },
+                    revoque: enregistre.revoque,
+                };
+                let mut sortie = alloc_reponse();
+                let combien = rendue.encoder(&mut sortie).ok()?;
+                sortie.truncate(combien);
+                Some(sortie)
+            })
+            .collect();
+
+        Trouvaille::Appareils(elements)
     }
 
     /// Les autorisations d'un compte, dans les deux sens.

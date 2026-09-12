@@ -824,6 +824,295 @@ impl AutorisationRendue {
     }
 }
 
+// ── Ce qu'une liste de machines rend ────────────────────────────────────────
+
+/// Le mot qui dit qu'une machine a une clé.
+const CLE_ENROLEE: &str = "enrolee";
+/// Le mot qui dit qu'une machine attend encore la sienne.
+const CLE_ATTENDUE: &str = "attendue";
+
+/// Une machine, telle que `GET /v1/machines` la rend à l'application.
+///
+/// # UN SOUS-ENSEMBLE, ET COMPATIBLE EN AVANT
+///
+/// `docs/protocole.md` §2.2 décrit une forme plus riche — la date d'enrôlement,
+/// le code en cours et son expiration, la distinction d'une clé RÉVOQUÉE d'une
+/// clé jamais posée. **Le serveur ne les sert pas encore, et deux d'entre eux ne
+/// le pourront jamais tels quels** : il ne RANGE aucun horodatage (une
+/// `asl_registre::Provenance` ne porte pas de date, et les étages 1 et 2 n'ont
+/// pas d'horloge), et le code d'enrôlement ne se garde que par son empreinte
+/// (C14) — on ne peut donc pas le RE-rendre dans une liste. Ce qui est ici est
+/// donc un sous-ensemble ; un lecteur qui attend les autres champs les trouve
+/// absents, jamais faux. L'objet reste un objet, et un champ ajouté plus tard ne
+/// casse pas celui qui lit ceux d'aujourd'hui.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineRendue<'a> {
+    /// L'identifiant de la machine. **C'est lui qu'on passe à
+    /// `PATCH /v1/machines/{m}` ou à `DELETE /v1/machines/{m}/cle`.**
+    pub machine: Identifiant,
+    /// Le nom que son propriétaire lui a donné — du texte libre.
+    pub nom: &'a str,
+    /// Ce qu'elle a le droit de faire.
+    pub capacites: Capacites,
+    /// A-t-elle une clé ? `true` la rend « enrolee », `false` « attendue ».
+    ///
+    /// # DEUX ÉTATS, ET NON TROIS
+    ///
+    /// Une clé révoquée et une clé jamais posée sont toutes deux « pas de clé »
+    /// dans ce qui est rangé (`asl_registre::Machine::cle` vaut `None` dans les
+    /// deux cas). Les distinguer demanderait un état que le serveur ne garde pas
+    /// encore ; on rend donc « attendue » pour l'une comme pour l'autre, plutôt
+    /// qu'une distinction qu'on inventerait.
+    pub enrolee: bool,
+}
+
+impl<'a> MachineRendue<'a> {
+    /// Encode une machine rendue.
+    ///
+    /// ```jsonc
+    /// {"machine":"m-…","nom":"grenier","capacites":["annonce"],"cle":"enrolee"}
+    /// ```
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`].
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{\"machine\":\"");
+        ecrivain.pousser(self.machine.texte().as_str().as_bytes());
+        ecrivain.pousser(b"\",\"nom\":\"");
+        // **LE NOM SE RÉÉMET SANS ÉCHAPPEMENT, ET C'EST SÛR.** Le seul texte
+        // libre du produit est entré par [`Lecteur::texte_libre`], qui a déjà
+        // refusé `"`, `\`, les contrôles et les forceurs bidi — précisément les
+        // caractères qu'un encodeur JSON aurait à échapper. Ce cadrage n'a donc
+        // pas d'échappeur, exactement comme [`DeclarationMachine::encoder`].
+        ecrivain.pousser(self.nom.as_bytes());
+        ecrivain.pousser(b"\",\"capacites\":[");
+        let mut deja = false;
+        if self.capacites.annonce {
+            ecrivain.pousser(b"\"annonce\"");
+            deja = true;
+        }
+        if self.capacites.lecture {
+            if deja {
+                ecrivain.pousser(b",");
+            }
+            ecrivain.pousser(b"\"lecture\"");
+        }
+        ecrivain.pousser(b"],\"cle\":\"");
+        ecrivain.pousser(
+            if self.enrolee {
+                CLE_ENROLEE
+            } else {
+                CLE_ATTENDUE
+            }
+            .as_bytes(),
+        );
+        ecrivain.pousser(b"\"}");
+        ecrivain.achever()
+    }
+
+    /// Décode une machine rendue.
+    ///
+    /// **ELLE EXISTE POUR LES ESSAIS ET POUR LES LIAISONS**, pas pour le
+    /// serveur : celui-ci n'a qu'à écrire. Voir [`AutorisationRendue::decoder`].
+    ///
+    /// # Erreurs
+    ///
+    /// Celles du cadrage, plus [`Erreur::NomVide`] et [`Erreur::NomTropLong`].
+    pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
+        let mut lecteur = asl_proto::cadrage::Lecteur::nouveau(octets);
+        lecteur.attendre(b'{', "un objet")?;
+
+        let mut machine = None;
+        let mut nom: Option<&str> = None;
+        let mut capacites = None;
+        let mut enrolee = None;
+
+        loop {
+            lecteur.sauter_blancs();
+            let position = lecteur.position();
+            let champ = lecteur.chaine()?;
+            lecteur.attendre(b':', "deux-points")?;
+
+            match champ {
+                "machine" => poser(
+                    &mut machine,
+                    lire_genre(&mut lecteur, Genre::Machine)?,
+                    position,
+                )?,
+                "nom" => {
+                    let texte = lecteur.texte_libre()?;
+                    if texte.is_empty() {
+                        return Err(Erreur::NomVide);
+                    }
+                    if texte.len() > NOM_MACHINE_MAX {
+                        return Err(Erreur::NomTropLong {
+                            obtenue: texte.len(),
+                        });
+                    }
+                    poser(&mut nom, texte, position)?;
+                }
+                "capacites" => poser(&mut capacites, decoder_capacites(&mut lecteur)?, position)?,
+                "cle" => {
+                    let ou = lecteur.position();
+                    let etat = match lecteur.chaine()? {
+                        CLE_ENROLEE => true,
+                        CLE_ATTENDUE => false,
+                        _ => {
+                            return Err(Erreur::JsonAttendu {
+                                position: ou,
+                                attendu: "enrolee ou attendue",
+                            });
+                        }
+                    };
+                    poser(&mut enrolee, etat, position)?;
+                }
+                _ => return Err(Erreur::ChampInconnu { position }),
+            }
+
+            lecteur.sauter_blancs();
+            match lecteur.regarder() {
+                Some(b',') => lecteur.avancer(),
+                _ => break,
+            }
+        }
+
+        lecteur.attendre(b'}', "la fin de l'objet")?;
+        lecteur.fin()?;
+
+        Ok(Self {
+            machine: machine.ok_or(Erreur::ChampManquant { nom: "machine" })?,
+            nom: nom.ok_or(Erreur::ChampManquant { nom: "nom" })?,
+            capacites: capacites.ok_or(Erreur::ChampManquant { nom: "capacites" })?,
+            enrolee: enrolee.ok_or(Erreur::ChampManquant { nom: "cle" })?,
+        })
+    }
+}
+
+// ── Ce qu'une liste d'appareils rend ────────────────────────────────────────
+
+/// Le mot JSON d'une attestation, tel qu'une liste le rend.
+const fn mot_d_attestation(plateforme: PlateformeAttestation) -> &'static str {
+    match plateforme {
+        PlateformeAttestation::Aucune => "aucune",
+        PlateformeAttestation::Apple => "apple",
+        PlateformeAttestation::Google => "google",
+    }
+}
+
+/// L'attestation que ce mot désigne, ou un refus.
+fn attestation_du_mot(texte: &str, position: usize) -> Result<PlateformeAttestation, Erreur> {
+    match texte {
+        "aucune" => Ok(PlateformeAttestation::Aucune),
+        "apple" => Ok(PlateformeAttestation::Apple),
+        "google" => Ok(PlateformeAttestation::Google),
+        _ => Err(Erreur::JsonAttendu {
+            position,
+            attendu: "aucune, apple ou google",
+        }),
+    }
+}
+
+/// Un appareil, tel que `GET /v1/appareils` le rend à l'application.
+///
+/// # UN SOUS-ENSEMBLE, POUR LA MÊME RAISON QUE [`MachineRendue`]
+///
+/// `docs/protocole.md` §2.2 décrit aussi une date d'enrôlement et une date de
+/// révocation. Le serveur ne RANGE aucune date ; ce qui est ici — l'identifiant,
+/// l'attestation sous laquelle il est entré, et s'il est révoqué — est tout ce
+/// qu'il garde de lui.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppareilRendu {
+    /// L'identifiant de l'appareil. **C'est lui qu'on passe à
+    /// `DELETE /v1/appareils/{a}`.**
+    pub appareil: Identifiant,
+    /// Sous quelle attestation il est entré (`docs/modele.md` §2.2 : ce qu'on
+    /// regarde le jour où l'on resserre la posture).
+    pub attestation: PlateformeAttestation,
+    /// A-t-il été révoqué ? **Un appareil révoqué reste rendu** — c'est l'écran
+    /// qu'on regarde après avoir perdu un téléphone, et une ligne disparue n'y
+    /// dirait rien.
+    pub revoque: bool,
+}
+
+impl AppareilRendu {
+    /// Encode un appareil rendu.
+    ///
+    /// ```jsonc
+    /// {"appareil":"a-…","attestation":"apple","revoque":false}
+    /// ```
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`].
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{\"appareil\":\"");
+        ecrivain.pousser(self.appareil.texte().as_str().as_bytes());
+        ecrivain.pousser(b"\",\"attestation\":\"");
+        ecrivain.pousser(mot_d_attestation(self.attestation).as_bytes());
+        ecrivain.pousser(b"\",\"revoque\":");
+        ecrivain.pousser(if self.revoque { b"true" } else { b"false" });
+        ecrivain.pousser(b"}");
+        ecrivain.achever()
+    }
+
+    /// Décode un appareil rendu.
+    ///
+    /// **ELLE EXISTE POUR LES ESSAIS ET POUR LES LIAISONS**, comme
+    /// [`AutorisationRendue::decoder`].
+    ///
+    /// # Erreurs
+    ///
+    /// Celles du cadrage.
+    pub fn decoder(octets: &[u8]) -> Result<Self, Erreur> {
+        let mut lecteur = asl_proto::cadrage::Lecteur::nouveau(octets);
+        lecteur.attendre(b'{', "un objet")?;
+
+        let mut appareil = None;
+        let mut attestation = None;
+        let mut revoque = None;
+
+        loop {
+            lecteur.sauter_blancs();
+            let position = lecteur.position();
+            let champ = lecteur.chaine()?;
+            lecteur.attendre(b':', "deux-points")?;
+
+            match champ {
+                "appareil" => poser(
+                    &mut appareil,
+                    lire_genre(&mut lecteur, Genre::Appareil)?,
+                    position,
+                )?,
+                "attestation" => {
+                    let ou = lecteur.position();
+                    let texte = lecteur.chaine()?;
+                    poser(&mut attestation, attestation_du_mot(texte, ou)?, position)?;
+                }
+                "revoque" => poser(&mut revoque, lire_booleen(&mut lecteur)?, position)?,
+                _ => return Err(Erreur::ChampInconnu { position }),
+            }
+
+            lecteur.sauter_blancs();
+            match lecteur.regarder() {
+                Some(b',') => lecteur.avancer(),
+                _ => break,
+            }
+        }
+
+        lecteur.attendre(b'}', "la fin de l'objet")?;
+        lecteur.fin()?;
+
+        Ok(Self {
+            appareil: appareil.ok_or(Erreur::ChampManquant { nom: "appareil" })?,
+            attestation: attestation.ok_or(Erreur::ChampManquant { nom: "attestation" })?,
+            revoque: revoque.ok_or(Erreur::ChampManquant { nom: "revoque" })?,
+        })
+    }
+}
+
 /// Pose une valeur, ou refuse le champ en double.
 ///
 /// **UN CHAMP EN DOUBLE EST UN REFUS, ET NON UN DERNIER-GAGNE.** Deux lecteurs

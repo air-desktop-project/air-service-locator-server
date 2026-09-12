@@ -239,6 +239,17 @@ pub enum Besoin<'a> {
         /// La machine dont on veut les services.
         machine: Identifiant,
     },
+    /// Les machines du compte qui demande.
+    ///
+    /// `protocole.md` §2.2 : l'écran « Machines ». Le demandeur est un APPAREIL,
+    /// et il ne voit que les machines de SON compte — l'étage 3 lit le compte de
+    /// l'appareil, et n'accepte pas qu'on nomme un autre compte.
+    MesMachines,
+    /// Les appareils du compte qui demande, **révoqués compris**.
+    ///
+    /// `protocole.md` §2.2 : l'écran « Compte ». Même public et même règle que
+    /// [`Besoin::MesMachines`].
+    MesAppareils,
     /// Les autorisations d'un compte, **dans les deux sens**.
     ///
     /// `protocole.md` §2.2 : « ce que j'ai accordé, ce qu'on m'a accordé ».
@@ -514,6 +525,14 @@ pub enum Trouvaille {
     /// (`protocole.md` §2.2) : l'écran qu'on regarde après avoir retiré un accès
     /// doit montrer ce qu'on a retiré.
     Autorisations(alloc::vec::Vec<AutorisationRendue>),
+    /// Les machines d'un compte, **chacune déjà encodée**.
+    ///
+    /// Comme [`Trouvaille::ServicesDeMachine`], et pour la même raison : le nom
+    /// d'une machine est du texte emprunté à ce que l'étage 3 vient de lire, et
+    /// il l'encode sur place plutôt que de le faire vivre jusqu'ici.
+    Machines(alloc::vec::Vec<alloc::vec::Vec<u8>>),
+    /// Les appareils d'un compte, **chacun déjà encodé**, révoqués compris.
+    Appareils(alloc::vec::Vec<alloc::vec::Vec<u8>>),
     /// L'annonce a été prise, et voici ce qu'il faut répondre.
     ///
     /// Le corps est déjà encodé par `asl_proto::Reponse` — l'étage 3 l'a
@@ -811,13 +830,22 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         },
         Ressource::ServicesMachine { machine } => Besoin::ServicesDeMachine { machine },
         Ressource::Comptes => lire_creation_de_compte(session, corps),
-        Ressource::Appareils => lire_creation_d_appareil(corps),
-        Ressource::Machines => match DeclarationMachine::decoder(corps) {
-            Ok(demande) => Besoin::CreerMachine {
-                nom: demande.nom,
-                capacites: demande.capacites,
+        // **DEUX VERBES, DEUX BESOINS** — voir `Ressource::Autorisations` plus
+        // bas. Un `GET` liste ; un `POST` crée. Le routage sert les deux depuis
+        // que `protocole.md` §2.2 a nommé les écrans qui lisent.
+        Ressource::Appareils => match methode {
+            asl_api::Methode::Get => Besoin::MesAppareils,
+            _ => lire_creation_d_appareil(corps),
+        },
+        Ressource::Machines => match methode {
+            asl_api::Methode::Get => Besoin::MesMachines,
+            _ => match DeclarationMachine::decoder(corps) {
+                Ok(demande) => Besoin::CreerMachine {
+                    nom: demande.nom,
+                    capacites: demande.capacites,
+                },
+                Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
-            Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
         },
         Ressource::Machine { machine } => match ModificationMachine::decoder(corps) {
             Ok(demande) => Besoin::ModifierMachine {
@@ -1219,6 +1247,17 @@ pub fn repondre<'o>(
             .avec_champ(b"content-type", JSON_MEDIA)
             .tenue(),
 
+        Besoin::MesMachines => match trouvaille {
+            Trouvaille::Machines(quoi) => composer_une_liste(quoi, sortie),
+            // Rien lu, ou une trouvaille d'un autre besoin : un tableau vide, et
+            // `200`. « Ce compte n'a pas de machine » est une réponse, pas une
+            // faute, exactement comme pour une liste de services refusée.
+            _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
+        },
+        Besoin::MesAppareils => match trouvaille {
+            Trouvaille::Appareils(quoi) => composer_une_liste(quoi, sortie),
+            _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
+        },
         Besoin::MesAutorisations => match trouvaille {
             Trouvaille::Autorisations(quoi) => composer_les_autorisations(quoi, sortie),
             _ => composer_les_autorisations(&alloc::vec::Vec::new(), sortie),
@@ -2232,8 +2271,11 @@ mod tests {
 
     #[test]
     fn une_ressource_qui_ne_sert_pas_ce_verbe_est_un_405() {
+        // `/v1/defi` sert `GET` et `POST`, jamais `DELETE` ; et il n'exige rien,
+        // donc c'est bien le verbe qu'on refuse, pas une preuve qui manque.
+        // (`/v1/machines` sert désormais `GET` — voir les écrans de liste.)
         assert_eq!(
-            besoin(&session(), &tete(b"GET", b"/v1/machines"), b""),
+            besoin(&session(), &tete(b"DELETE", b"/v1/defi"), b""),
             Besoin::Deja(StatusCode::METHOD_NOT_ALLOWED)
         );
     }
@@ -2983,6 +3025,80 @@ mod resolution {
         );
     }
 
+    /// Une session qu'un APPAREIL a authentifiée en P-256 — le public des écrans
+    /// mobiles. Voir `un_appareil_authentifie_sa_connexion_en_p256`.
+    fn session_appareil() -> Session {
+        let appareil = un(Genre::Appareil, 1);
+        let secrete =
+            asl_cle::CleSecreteAppareil::depuis_entropie([9; 32]).expect("un scalaire valide");
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 256];
+
+        let quoi = besoin(&session, &tete_de(b"GET", b"/v1/defi"), b"");
+        let voulu = asl_cle::Defi::depuis_octets([9; 32]);
+        let _ = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Rien,
+            Some(voulu),
+            &mut sortie,
+        );
+
+        let signature = secrete
+            .signer(appareil, &voulu, &liaison())
+            .expect("l'appareil signe");
+        let mut corps = alloc::vec::Vec::new();
+        corps.push(Genre::Appareil.prefixe());
+        corps.extend_from_slice(appareil.octets());
+        corps.extend_from_slice(signature.octets());
+
+        let quoi = besoin(&session, &tete_de(b"POST", b"/v1/defi"), &corps);
+        let reponse = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Cle(CleTrouvee::Appareil(secrete.publique())),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::NO_CONTENT);
+        session
+    }
+
+    #[test]
+    fn lister_ses_machines_et_ses_appareils_se_route_par_get() {
+        // **`GET` LISTE.** Les deux ressources servaient la seule création ; un
+        // `GET` tombait donc dans un décodeur, sur un corps vide.
+        let session = session_appareil();
+        assert_eq!(
+            besoin(&session, &tete_de(b"GET", b"/v1/machines"), b""),
+            Besoin::MesMachines
+        );
+        assert_eq!(
+            besoin(&session, &tete_de(b"GET", b"/v1/appareils"), b""),
+            Besoin::MesAppareils
+        );
+    }
+
+    #[test]
+    fn creer_reste_un_post_sur_les_memes_ressources() {
+        // L'autre bout du même geste : `POST` crée. Le `GET` ne l'a pas remplacé.
+        let session = session_appareil();
+        assert_eq!(
+            besoin(
+                &session,
+                &tete_de(b"POST", b"/v1/machines"),
+                br#"{"nom":"grenier","capacites":[]}"#,
+            ),
+            Besoin::CreerMachine {
+                nom: "grenier",
+                capacites: asl_api::corps::Capacites::default(),
+            }
+        );
+        // Un corps vide ne crée rien, mais le chemin de création est bien celui
+        // qu'un `POST` emprunte — c'est l'arm qu'on couvre.
+        let _ = besoin(&session, &tete_de(b"POST", b"/v1/appareils"), b"");
+    }
+
     #[test]
     fn son_propre_service_se_sert_sans_autorisation() {
         // Le propriétaire n'a besoin de l'autorisation de personne pour ses
@@ -3188,11 +3304,34 @@ mod resolution {
                 Trouvaille::Rien,
             ),
             (Besoin::MesAutorisations, Trouvaille::Rien),
+            (Besoin::MesMachines, Trouvaille::Rien),
+            (Besoin::MesAppareils, Trouvaille::Rien),
         ] {
             let (statut, corps) = rendu(&besoin_, &trouvaille);
             assert_eq!(statut, StatusCode::OK, "{besoin_:?}");
             assert_eq!(corps, "[]", "{besoin_:?}");
         }
+    }
+
+    #[test]
+    fn mes_machines_rend_ce_que_l_etage_3_a_deja_encode() {
+        // L'étage 3 encode chaque machine (le nom est emprunté à ce qu'il vient
+        // de lire) ; l'étage 2 n'a qu'à les assembler en tableau.
+        let objet = b"{\"machine\":\"m-x\"}".to_vec();
+        let (statut, corps) = rendu(
+            &Besoin::MesMachines,
+            &Trouvaille::Machines(vec![objet.clone(), objet]),
+        );
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(corps, r#"[{"machine":"m-x"},{"machine":"m-x"}]"#, "{corps}");
+    }
+
+    #[test]
+    fn mes_appareils_rend_ce_que_l_etage_3_a_deja_encode() {
+        let objet = b"{\"appareil\":\"a-x\"}".to_vec();
+        let (statut, corps) = rendu(&Besoin::MesAppareils, &Trouvaille::Appareils(vec![objet]));
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(corps, r#"[{"appareil":"a-x"}]"#, "{corps}");
     }
 
     #[test]
