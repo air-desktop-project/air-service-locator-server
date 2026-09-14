@@ -530,6 +530,12 @@ qui vient de le faire.
 La règle, en une phrase : **celui qui PRÉSENTE une clé signe qu'il la détient ;
 celui pour qui un tiers déjà authentifié l'apporte ne signe pas.**
 
+C'est aussi ce qui fixe le sens du geste entre les deux écrans : c'est le
+NOUVEL appareil qui montre sa clé, et l'ANCIEN qui la lit — jamais l'ancien qui
+« exporte » le compte vers le nouveau (`modele.md` §2.2). Le nouveau, une fois
+sa clé rangée, apprend l'identifiant du compte et le sien par le même canal, à
+l'envers, et prouve la clé sur sa propre connexion avec `POST /v1/defi`.
+
 ### 2.1 quater Ce que « effet immédiat » veut dire, et ce qu'il coûte
 
 Effacer une clé dans l'entrepôt suffit à refuser la PROCHAINE authentification.
