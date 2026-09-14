@@ -229,6 +229,14 @@ pub enum Ressource<'a> {
         /// L'appareil visé.
         appareil: Identifiant,
     },
+    /// `/v1/appareils/{a}/description` — dire son système et son modèle.
+    ///
+    /// **Pour soi seulement**, comme la poussée : c'est l'appareil qui se
+    /// décrit, et le décrire depuis un autre serait lui prêter des mots.
+    DescriptionAppareil {
+        /// L'appareil visé.
+        appareil: Identifiant,
+    },
     /// `/v1/machines` — déclarer une machine.
     Machines,
     /// `/v1/machines/{m}` — changer son nom ou ses capacités.
@@ -310,7 +318,7 @@ impl Ressource<'_> {
             | Self::CleMachine { .. }
             | Self::Autorisation { .. }
             | Self::Exposition { .. } => &[Methode::Delete],
-            Self::PousseeAppareil { .. } => &[Methode::Put],
+            Self::PousseeAppareil { .. } | Self::DescriptionAppareil { .. } => &[Methode::Put],
             Self::Machine { .. } => &[Methode::Patch],
             Self::EnrolementMachine { .. } => &[Methode::Post],
             Self::Appareils | Self::Machines | Self::Autorisations => {
@@ -609,6 +617,9 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
             appareil: identifiant(appareil, Genre::Appareil)?,
         }),
         ["v1", "appareils", appareil, "poussee"] => Ok(Ressource::PousseeAppareil {
+            appareil: identifiant(appareil, Genre::Appareil)?,
+        }),
+        ["v1", "appareils", appareil, "description"] => Ok(Ressource::DescriptionAppareil {
             appareil: identifiant(appareil, Genre::Appareil)?,
         }),
         ["v1", "machines"] => Ok(Ressource::Machines),

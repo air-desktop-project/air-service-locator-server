@@ -601,9 +601,9 @@ pub const APPAREIL_OCTETS: usize =
 ///
 /// # QUATRE CHAMPS, ET C'EST TOUT CE QU'UN APPAREIL EST
 ///
-/// Ni modèle, ni système, ni nom, ni adresse : rien de ce qui désignerait
-/// l'appareil ou son porteur (C13). Un appareil, pour l'annuaire, est **une clé
-/// publique rattachée à un compte**, et rien d'autre.
+/// Ni nom, ni adresse : rien de ce qui désignerait le porteur (C13). Un
+/// appareil, pour l'annuaire, est **une clé publique rattachée à un compte**,
+/// et rien d'autre.
 ///
 /// `docs/modele.md` §2.2 lui donne aussi deux dates. **Elles ne sont pas ici, et
 /// c'est un manque nommé** : rien ne les écrit ni ne les lit encore, et un champ
@@ -613,6 +613,10 @@ pub const APPAREIL_OCTETS: usize =
 /// pas ici parce qu'il ne tient pas dans une rangée de taille fixe, et parce
 /// qu'il se retire seul : un appareil qui refuse les notifications reste un
 /// appareil.
+///
+/// **Le système et le modèle sont ailleurs aussi** — voir [`Description`]. Ce
+/// que l'appareil dit de lui-même n'est pas ce qui le prouve, et ne se range
+/// pas à côté.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Appareil {
     /// D'où vient cet enregistrement.
@@ -898,6 +902,136 @@ impl JetonPoussee {
             provenance,
             plateforme,
             jeton,
+        })
+    }
+}
+
+// ── La description d'un appareil ────────────────────────────────────────────
+
+/// Le système qu'un appareil fait tourner.
+///
+/// # TROIS, ET LA LISTE EST FERMÉE
+///
+/// Ce n'est pas un champ libre : l'application qui décrit l'appareil est l'une
+/// des trois que ce produit porte, et un système qu'aucune n'annonce serait un
+/// enregistrement qu'aucune ne saurait afficher. Un quatrième se déclarera ici,
+/// avec son étiquette, le jour où une quatrième application existera.
+///
+/// **CE N'EST PAS [`Plateforme`].** Celle-là dit à qui présenter un jeton de
+/// poussée ; celle-ci dit ce que l'appareil fait tourner. Un Mac n'a pas de
+/// jeton et a bien un système.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Systeme {
+    /// iOS — un iPhone ou un iPad.
+    Ios,
+    /// Android.
+    Android,
+    /// macOS — l'application d'enrôlement du Mac.
+    Macos,
+}
+
+impl Systeme {
+    /// L'étiquette d'iOS.
+    const IOS: u8 = 1;
+    /// L'étiquette d'Android.
+    const ANDROID: u8 = 2;
+    /// L'étiquette de macOS.
+    const MACOS: u8 = 3;
+
+    /// Son étiquette rangée. **Aucune ne vaut zéro**, pour la raison écrite sur
+    /// [`Attestation`] : un tampon réemployé vaut zéro, et ne doit désigner
+    /// personne.
+    const fn etiquette(self) -> u8 {
+        match self {
+            Self::Ios => Self::IOS,
+            Self::Android => Self::ANDROID,
+            Self::Macos => Self::MACOS,
+        }
+    }
+
+    /// Relit une étiquette.
+    const fn depuis(octet: u8) -> Result<Self, Faute> {
+        match octet {
+            Self::IOS => Ok(Self::Ios),
+            Self::ANDROID => Ok(Self::Android),
+            Self::MACOS => Ok(Self::Macos),
+            lue => Err(Faute::Etiquette { lue }),
+        }
+    }
+}
+
+/// Ce qu'une description d'appareil occupe.
+pub const DESCRIPTION_OCTETS: usize = PROVENANCE_OCTETS + 1 + 1 + NOM_OCTETS_MAX;
+
+/// Ce qu'un appareil dit de lui-même : son système, et son modèle.
+///
+/// # UNE ÉTIQUETTE, PAS UNE PREUVE
+///
+/// C'est l'appareil qui la pose, sur sa propre connexion, et l'annuaire ne
+/// vérifie rien de ce qu'elle dit : un appareil pirate peut se dire « iPhone
+/// 17 ». Ce qui identifie un appareil est son identifiant `a-…`, et c'est lui
+/// que les applications affichent à côté. La description sert à ce que l'écran
+/// Compte montre « MacBook Pro » et non « Autre » — de quoi reconnaître les
+/// siens, jamais de quoi les prouver.
+///
+/// # LE MODÈLE, ET JAMAIS LE NOM DONNÉ PAR L'UTILISATEUR
+///
+/// Un téléphone porte deux textes : le nom que son porteur lui a donné —
+/// « iPhone de Thierry », un prénom, précisément ce que C13 refuse — et le nom
+/// de son modèle, qui ne nomme personne. **Seul le second entre ici**, et
+/// l'application qui pose la description en répond. Ce module range du texte
+/// libre aux mêmes règles qu'un nom de machine ([`Machine::nom`]) ; le refus de
+/// ce qui ne s'affiche pas se prend dans `asl-api`, à l'entrée.
+///
+/// # RANGÉE À PART DE L'APPAREIL, COMME LE JETON
+///
+/// Elle est posée APRÈS l'enrôlement, par un second verbe, et un appareil qui
+/// ne l'a pas posée reste un appareil entier. Un champ dans la rangée
+/// d'appareil aurait fait d'une étiquette d'affichage une réécriture de ce qui
+/// prouve son identité — et aurait changé la forme d'une table que des bases
+/// réelles portent déjà.
+///
+/// **Elle reste quand l'appareil est révoqué**, à l'inverse du jeton : l'écran
+/// d'après une perte doit montrer CE QU'ON a retiré, et « iPhone 17, révoqué »
+/// le dit mieux que « Autre, révoqué ».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Description {
+    /// D'où vient cet enregistrement.
+    pub provenance: Provenance,
+    /// Ce que l'appareil fait tourner.
+    pub systeme: Systeme,
+    /// Le modèle, tel que l'appareil se nomme — « MacBook Pro (2019) ».
+    pub modele: NomRange,
+}
+
+impl Description {
+    /// Écrit cette description.
+    pub fn ecrire(&self, sortie: &mut [u8; DESCRIPTION_OCTETS]) {
+        self.provenance
+            .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
+        poser_un(
+            sortie.get_mut(PROVENANCE_OCTETS..).unwrap_or_default(),
+            self.systeme.etiquette(),
+        );
+        let apres = PROVENANCE_OCTETS.saturating_add(1);
+        self.modele
+            .ecrire(sortie.get_mut(apres..).unwrap_or_default());
+    }
+
+    /// Relit une description.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas une description.
+    pub fn lire(octets: &[u8; DESCRIPTION_OCTETS]) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        let systeme = Systeme::depuis(octets.get(PROVENANCE_OCTETS).copied().unwrap_or(0))?;
+        let apres = PROVENANCE_OCTETS.saturating_add(1);
+        let modele = NomRange::lire(octets.get(apres..).unwrap_or_default())?;
+        Ok(Self {
+            provenance,
+            systeme,
+            modele,
         })
     }
 }
@@ -1419,10 +1553,11 @@ mod tests {
     use super::{
         ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
         Autorisation, CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte,
-        Court, ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement, EntreeJournal, Faute,
-        IDENTIFIANT_OCTETS, JETON_OCTETS_MAX, JetonPoussee, JetonRange, MACHINE_OCTETS, Machine,
-        NOM_OCTETS_MAX, NomRange, PORTEE_OCTETS, POUSSEE_OCTETS, PROVENANCE_OCTETS, Plateforme,
-        Portee, Provenance, SERVICE_OCTETS, Service, Verdict,
+        Court, DESCRIPTION_OCTETS, Description, ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement,
+        EntreeJournal, Faute, IDENTIFIANT_OCTETS, JETON_OCTETS_MAX, JetonPoussee, JetonRange,
+        MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, PORTEE_OCTETS, POUSSEE_OCTETS,
+        PROVENANCE_OCTETS, Plateforme, Portee, Provenance, SERVICE_OCTETS, Service, Systeme,
+        Verdict,
     };
 
     /// Un identifiant de ce genre, reproductible.
@@ -2270,6 +2405,107 @@ mod tests {
         assert_eq!(
             JetonPoussee::lire(&octets),
             Err(Faute::NonImprimable { position: 0 })
+        );
+    }
+
+    // ── La description d'un appareil ────────────────────────────────────────
+
+    /// Une description, reproductible.
+    fn une_description(systeme: Systeme, modele: &str) -> Description {
+        Description {
+            provenance: Provenance::Ici,
+            systeme,
+            modele: nom_de_machine(modele),
+        }
+    }
+
+    #[test]
+    fn une_description_fait_l_aller_retour() {
+        for systeme in [Systeme::Ios, Systeme::Android, Systeme::Macos] {
+            let description = une_description(systeme, "MacBook Pro (2019)");
+            let mut octets = [0_u8; DESCRIPTION_OCTETS];
+            description.ecrire(&mut octets);
+            assert_eq!(Description::lire(&octets), Ok(description), "{systeme:?}");
+        }
+    }
+
+    #[test]
+    fn une_description_venue_d_un_pair_fait_l_aller_retour() {
+        // C17 : elle porte son origine comme tout le reste.
+        let description = Description {
+            provenance: Provenance::Annuaire(un(Genre::Annuaire, 2)),
+            ..une_description(Systeme::Android, "Pixel 9")
+        };
+        let mut octets = [0_u8; DESCRIPTION_OCTETS];
+        description.ecrire(&mut octets);
+        assert_eq!(Description::lire(&octets), Ok(description));
+    }
+
+    #[test]
+    fn un_modele_porte_du_texte_libre_jusqu_a_la_borne() {
+        // **LES MÊMES RÈGLES QU'UN NOM DE MACHINE** : tout l'UTF-8, en octets.
+        let description = une_description(Systeme::Ios, "iPhone 17 — édition « été » 📱");
+        let mut octets = [0_u8; DESCRIPTION_OCTETS];
+        description.ecrire(&mut octets);
+        assert_eq!(Description::lire(&octets), Ok(description));
+
+        let long = "m".repeat(NOM_OCTETS_MAX);
+        let description = une_description(Systeme::Macos, &long);
+        description.ecrire(&mut octets);
+        assert_eq!(Description::lire(&octets), Ok(description));
+        assert_eq!(description.modele.longueur(), NOM_OCTETS_MAX);
+    }
+
+    #[test]
+    fn un_systeme_inconnu_refuse_la_description() {
+        let description = une_description(Systeme::Ios, "iPhone 17");
+        let mut octets = [0_u8; DESCRIPTION_OCTETS];
+        description.ecrire(&mut octets);
+        // **ZÉRO EN FAIT PARTIE** : un tampon réemployé vaut zéro, et ne doit
+        // désigner aucun système.
+        for lue in [0_u8, 4, 200] {
+            octets[PROVENANCE_OCTETS] = lue;
+            assert_eq!(
+                Description::lire(&octets),
+                Err(Faute::Etiquette { lue }),
+                "{lue}"
+            );
+        }
+    }
+
+    #[test]
+    fn une_provenance_ou_un_modele_corrompu_refuse_la_description() {
+        let description = une_description(Systeme::Ios, "iPhone 17");
+        let mut octets = [0_u8; DESCRIPTION_OCTETS];
+
+        description.ecrire(&mut octets);
+        octets[0] = 9;
+        assert_eq!(Description::lire(&octets), Err(Faute::Etiquette { lue: 9 }));
+
+        // Une longueur au-delà du tableau se voit : la borne du modèle est
+        // celle d'un nom, et 64 tient dans un octet avec de la marge.
+        description.ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 1] = 250;
+        assert_eq!(
+            Description::lire(&octets),
+            Err(Faute::Longueur {
+                annoncee: 250,
+                maximum: NOM_OCTETS_MAX,
+            })
+        );
+
+        // Une longueur raccourcie laisse du texte dans le bourrage.
+        description.ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 1] = 3;
+        assert_eq!(Description::lire(&octets), Err(Faute::Bourrage));
+    }
+
+    #[test]
+    fn une_description_fait_la_taille_annoncee() {
+        // Provenance, système, longueur du modèle, modèle.
+        assert_eq!(
+            DESCRIPTION_OCTETS,
+            PROVENANCE_OCTETS + 1 + 1 + NOM_OCTETS_MAX
         );
     }
 

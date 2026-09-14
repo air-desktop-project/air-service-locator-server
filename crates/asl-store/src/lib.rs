@@ -32,9 +32,9 @@ use std::path::Path;
 use asl_id::Identifiant;
 use asl_registre::{
     APPAREIL_OCTETS, AUTORISATION_OCTETS, Appareil, Autorisation, CLEF_JOURNAL_OCTETS,
-    COMPTE_OCTETS, Compte, ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement, EntreeJournal,
-    IDENTIFIANT_OCTETS, JetonPoussee, MACHINE_OCTETS, Machine, POUSSEE_OCTETS, SERVICE_OCTETS,
-    Service,
+    COMPTE_OCTETS, Compte, DESCRIPTION_OCTETS, Description, ENROLEMENT_OCTETS, ENTREE_OCTETS,
+    Enrolement, EntreeJournal, IDENTIFIANT_OCTETS, JetonPoussee, MACHINE_OCTETS, Machine,
+    POUSSEE_OCTETS, SERVICE_OCTETS, Service,
 };
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
@@ -74,6 +74,23 @@ const APPAREILS: TableDefinition<'_, &[u8], &[u8; APPAREIL_OCTETS]> =
 /// requêtes un champ que presque aucune ne regarde.
 const POUSSEES: TableDefinition<'_, &[u8], &[u8; POUSSEE_OCTETS]> =
     TableDefinition::new("poussees");
+
+/// Ce que chaque appareil dit de lui-même, **par identifiant d'appareil**.
+///
+/// # UNE TABLE À PART, ET NON UNE COLONNE — POUR UNE RAISON DE PLUS
+///
+/// `asl_registre::Description` dit les raisons de fond. Celle qui se voit ici
+/// est qu'une colonne changerait la forme de [`APPAREILS`], et que des bases
+/// réelles la portent déjà : redb ouvre une table avec le type qu'on lui
+/// déclare, et une rangée plus longue ne se relirait plus. Une table neuve est
+/// vide sur une base ancienne, ce qui est exactement le sens voulu — « pas
+/// encore décrit ».
+///
+/// **Elle SURVIT à la révocation**, à l'inverse de [`POUSSEES`] : l'écran
+/// d'après une perte doit montrer ce qu'on a retiré, et une description est
+/// ce qui le rend lisible.
+const DESCRIPTIONS: TableDefinition<'_, &[u8], &[u8; DESCRIPTION_OCTETS]> =
+    TableDefinition::new("descriptions");
 
 /// Les codes d'enrôlement en attente, **par empreinte du code**.
 ///
@@ -354,6 +371,7 @@ impl Entrepot {
             ecriture.open_table(MACHINES_PAR_COMPTE)?;
             ecriture.open_table(APPAREILS_PAR_COMPTE)?;
             ecriture.open_table(POUSSEES)?;
+            ecriture.open_table(DESCRIPTIONS)?;
             ecriture.open_table(JOURNAL)?;
             ecriture.open_table(RANG)?;
             ecriture.commit()?;
@@ -524,11 +542,17 @@ impl Entrepot {
         Ok(trouvees)
     }
 
-    /// Les appareils d'un compte, révoqués compris, avec leur identifiant.
+    /// Les appareils d'un compte, révoqués compris, avec leur identifiant et
+    /// ce que chacun a dit de lui-même — `None` tant qu'il ne l'a pas fait.
     ///
     /// **UN INTERVALLE, ET NON UN BALAYAGE** — voir [`APPAREILS_PAR_COMPTE`]. Une
     /// entrée d'index qui a survécu à un appareil disparu est SAUTÉE, comme pour
     /// les machines : le magasin principal a le dernier mot.
+    ///
+    /// **La description se lit dans la même transaction** : c'est l'écran Compte
+    /// qui demande, et il montre les deux ensemble. Une lecture par appareil
+    /// après coup pourrait voir une description posée entre-temps sur un
+    /// appareil qui n'était pas dans la liste.
     ///
     /// # Erreurs
     ///
@@ -536,10 +560,11 @@ impl Entrepot {
     pub fn appareils_de_compte(
         &self,
         compte: Identifiant,
-    ) -> Result<Vec<(Identifiant, Appareil)>, Faute> {
+    ) -> Result<Vec<(Identifiant, Appareil, Option<Description>)>, Faute> {
         let lecture = self.base.begin_read()?;
         let index = lecture.open_table(APPAREILS_PAR_COMPTE)?;
         let table = lecture.open_table(APPAREILS)?;
+        let descriptions = lecture.open_table(DESCRIPTIONS)?;
 
         let (debut, fin) = intervalle(compte);
         let mut trouves = Vec::new();
@@ -547,9 +572,16 @@ impl Entrepot {
             let (_, valeur) = entree?;
             let quel = depuis_clef(valeur.value())?;
             if let Some(brut) = table.get(valeur.value())? {
+                let description = match descriptions.get(valeur.value())? {
+                    Some(brute) => {
+                        Some(Description::lire(brute.value()).map_err(Faute::Enregistrement)?)
+                    }
+                    None => None,
+                };
                 trouves.push((
                     quel,
                     Appareil::lire(brut.value()).map_err(Faute::Enregistrement)?,
+                    description,
                 ));
             }
         }
@@ -938,6 +970,11 @@ impl Entrepot {
         //
         // L'appareil, lui, reste marqué : l'écran d'après une perte doit
         // MONTRER ce qu'on a retiré. Le jeton n'a rien à montrer.
+        //
+        // **LA DESCRIPTION RESTE**, pour la même raison que l'appareil : elle
+        // est ce qui rend lisible ce qu'on a retiré — « iPhone 17, révoqué »
+        // plutôt que « Autre, révoqué ». Elle ne donne aucun droit, donc rien
+        // ne presse de l'effacer.
         {
             let mut table = ecriture.open_table(POUSSEES)?;
             table.remove(clef_appareil.as_slice())?;
@@ -1000,6 +1037,49 @@ impl Entrepot {
         }
         ecriture.commit()?;
         Ok(avait)
+    }
+
+    // ── Les descriptions d'appareil ─────────────────────────────────────────
+
+    /// Pose ou remplace ce que cet appareil dit de lui-même.
+    ///
+    /// **UNE SEULE PAR APPAREIL, ET LA NEUVE REMPLACE L'ANCIENNE** : un système
+    /// mis à jour, un téléphone restauré sur un autre modèle — l'appareil se
+    /// redécrit, et l'écran montre ce qu'il est aujourd'hui.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] si la base refuse.
+    pub fn poser_description(
+        &self,
+        appareil: Identifiant,
+        description: &Description,
+    ) -> Result<(), Faute> {
+        let mut octets = [0_u8; DESCRIPTION_OCTETS];
+        description.ecrire(&mut octets);
+        let ecriture = self.base.begin_write()?;
+        {
+            let mut table = ecriture.open_table(DESCRIPTIONS)?;
+            table.insert(clef(appareil).as_slice(), &octets)?;
+        }
+        ecriture.commit()?;
+        Ok(())
+    }
+
+    /// Ce que cet appareil a dit de lui-même, s'il l'a fait.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn description(&self, appareil: Identifiant) -> Result<Option<Description>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let table = lecture.open_table(DESCRIPTIONS)?;
+        match table.get(clef(appareil).as_slice())? {
+            Some(brut) => Ok(Some(
+                Description::lire(brut.value()).map_err(Faute::Enregistrement)?,
+            )),
+            None => Ok(None),
+        }
     }
 
     // ── Les codes d'enrôlement ──────────────────────────────────────────────
@@ -1301,6 +1381,25 @@ impl Entrepot {
                 appareils.remove(clef.as_slice())?;
             }
             combien = combien.saturating_add(condamnes_appareils.len());
+
+            // ── LES DESCRIPTIONS D'APPAREIL ─────────────────────────────────
+            //
+            // Même raison que les appareils : rien n'en vient d'ailleurs
+            // aujourd'hui, et elles portent leur provenance quand même.
+            let mut descriptions = ecriture.open_table(DESCRIPTIONS)?;
+            let mut condamnees_descriptions = Vec::new();
+            for entree in descriptions.iter()? {
+                let (clef, valeur) = entree?;
+                let description =
+                    Description::lire(valeur.value()).map_err(Faute::Enregistrement)?;
+                if description.provenance.vient_de(annuaire) {
+                    condamnees_descriptions.push(clef.value().to_vec());
+                }
+            }
+            for clef in &condamnees_descriptions {
+                descriptions.remove(clef.as_slice())?;
+            }
+            combien = combien.saturating_add(condamnees_descriptions.len());
 
             // ── LES CODES D'ENRÔLEMENT EN ATTENTE ───────────────────────────
             let mut codes = ecriture.open_table(ENROLEMENTS)?;

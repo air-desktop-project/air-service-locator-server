@@ -1078,10 +1078,10 @@ fn attestation_du_mot(texte: &str, position: usize) -> Result<PlateformeAttestat
 ///
 /// `docs/protocole.md` §2.2 décrit aussi une date d'enrôlement et une date de
 /// révocation. Le serveur ne RANGE aucune date ; ce qui est ici — l'identifiant,
-/// l'attestation sous laquelle il est entré, et s'il est révoqué — est tout ce
-/// qu'il garde de lui.
+/// l'attestation sous laquelle il est entré, s'il est révoqué, et ce qu'il a dit
+/// de lui-même — est tout ce qu'il garde de lui.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AppareilRendu {
+pub struct AppareilRendu<'a> {
     /// L'identifiant de l'appareil. **C'est lui qu'on passe à
     /// `DELETE /v1/appareils/{a}`.**
     pub appareil: Identifiant,
@@ -1092,13 +1092,23 @@ pub struct AppareilRendu {
     /// qu'on regarde après avoir perdu un téléphone, et une ligne disparue n'y
     /// dirait rien.
     pub revoque: bool,
+    /// Ce qu'il a dit de lui-même par `PUT /v1/appareils/{a}/description`, ou
+    /// rien s'il ne l'a pas encore fait.
+    ///
+    /// **DEUX CHAMPS SUR LE FIL, `plateforme` ET `modele`, ABSENTS ENSEMBLE OU
+    /// PRÉSENTS ENSEMBLE.** Ils sont posés d'un seul geste, et un lecteur qui
+    /// n'en trouverait qu'un ne saurait pas quoi afficher. Une description
+    /// reste rendue sur un appareil révoqué : l'écran d'après une perte doit
+    /// montrer CE QU'ON a retiré.
+    pub description: Option<DescriptionAppareil<'a>>,
 }
 
-impl AppareilRendu {
+impl<'a> AppareilRendu<'a> {
     /// Encode un appareil rendu.
     ///
     /// ```jsonc
     /// {"appareil":"a-…","attestation":"apple","revoque":false}
+    /// {"appareil":"a-…","attestation":"apple","revoque":false,"plateforme":"ios","modele":"iPhone 17"}
     /// ```
     ///
     /// # Erreurs
@@ -1112,6 +1122,15 @@ impl AppareilRendu {
         ecrivain.pousser(mot_d_attestation(self.attestation).as_bytes());
         ecrivain.pousser(b"\",\"revoque\":");
         ecrivain.pousser(if self.revoque { b"true" } else { b"false" });
+        if let Some(description) = &self.description {
+            ecrivain.pousser(b",\"plateforme\":\"");
+            ecrivain.pousser(description.systeme.mot().as_bytes());
+            ecrivain.pousser(b"\",\"modele\":\"");
+            // Réémis sans échappement, comme le nom d'une machine : c'est le
+            // même texte libre, entré par [`Lecteur::texte_libre`].
+            ecrivain.pousser(description.modele.as_bytes());
+            ecrivain.pousser(b"\"");
+        }
         ecrivain.pousser(b"}");
         ecrivain.achever()
     }
@@ -1123,14 +1142,17 @@ impl AppareilRendu {
     ///
     /// # Erreurs
     ///
-    /// Celles du cadrage.
-    pub fn decoder(octets: &[u8]) -> Result<Self, Erreur> {
+    /// Celles du cadrage. Une `plateforme` sans `modele`, ou l'inverse, est un
+    /// [`Erreur::ChampManquant`] : les deux vont ensemble.
+    pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
         let mut lecteur = asl_proto::cadrage::Lecteur::nouveau(octets);
         lecteur.attendre(b'{', "un objet")?;
 
         let mut appareil = None;
         let mut attestation = None;
         let mut revoque = None;
+        let mut systeme = None;
+        let mut modele: Option<&'a str> = None;
 
         loop {
             lecteur.sauter_blancs();
@@ -1150,6 +1172,12 @@ impl AppareilRendu {
                     poser(&mut attestation, attestation_du_mot(texte, ou)?, position)?;
                 }
                 "revoque" => poser(&mut revoque, lire_booleen(&mut lecteur)?, position)?,
+                "plateforme" => {
+                    let ou = lecteur.position();
+                    let texte = lecteur.chaine()?;
+                    poser(&mut systeme, systeme_du_mot(texte, ou)?, position)?;
+                }
+                "modele" => poser(&mut modele, lire_modele(&mut lecteur)?, position)?,
                 _ => return Err(Erreur::ChampInconnu { position }),
             }
 
@@ -1163,10 +1191,18 @@ impl AppareilRendu {
         lecteur.attendre(b'}', "la fin de l'objet")?;
         lecteur.fin()?;
 
+        let description = match (systeme, modele) {
+            (None, None) => None,
+            (Some(systeme), Some(modele)) => Some(DescriptionAppareil { systeme, modele }),
+            (Some(_), None) => return Err(Erreur::ChampManquant { nom: "modele" }),
+            (None, Some(_)) => return Err(Erreur::ChampManquant { nom: "plateforme" }),
+        };
+
         Ok(Self {
             appareil: appareil.ok_or(Erreur::ChampManquant { nom: "appareil" })?,
             attestation: attestation.ok_or(Erreur::ChampManquant { nom: "attestation" })?,
             revoque: revoque.ok_or(Erreur::ChampManquant { nom: "revoque" })?,
+            description,
         })
     }
 }
@@ -1564,6 +1600,194 @@ impl<'a> DepotJeton<'a> {
         ecrivain.pousser(self.plateforme.mot().as_bytes());
         ecrivain.pousser(b"\",\"jeton\":\"");
         ecrivain.pousser(self.jeton.as_bytes());
+        ecrivain.pousser(b"\"}");
+        ecrivain.achever()
+    }
+}
+
+// ── Décrire son appareil ────────────────────────────────────────────────────
+
+/// Les champs de `PUT /v1/appareils/{a}/description`.
+const CHAMPS_DESCRIPTION: [&str; 2] = ["plateforme", "modele"];
+
+/// Le système qu'un appareil fait tourner.
+///
+/// **TROIS, ET LA LISTE EST FERMÉE** : les trois applications de ce produit.
+/// Sur le fil, le champ s'appelle `plateforme` — c'est le mot des applications
+/// —, et le type ne s'appelle pas ainsi pour ne pas se confondre avec
+/// [`Plateforme`], qui dit à qui présenter un jeton de poussée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Systeme {
+    /// iOS — un iPhone ou un iPad.
+    Ios,
+    /// Android.
+    Android,
+    /// macOS — l'application d'enrôlement du Mac.
+    Macos,
+}
+
+impl Systeme {
+    /// Le mot qui le désigne sur le fil.
+    #[must_use]
+    pub const fn mot(self) -> &'static str {
+        match self {
+            Self::Ios => "ios",
+            Self::Android => "android",
+            Self::Macos => "macos",
+        }
+    }
+
+    /// Ce que ce mot désigne, s'il désigne quelque chose.
+    #[must_use]
+    pub fn depuis_le_mot(mot: &str) -> Option<Self> {
+        match mot {
+            "ios" => Some(Self::Ios),
+            "android" => Some(Self::Android),
+            "macos" => Some(Self::Macos),
+            _ => None,
+        }
+    }
+}
+
+/// Le système que ce mot désigne, ou un refus qui dit lesquels existent.
+fn systeme_du_mot(texte: &str, position: usize) -> Result<Systeme, Erreur> {
+    Systeme::depuis_le_mot(texte).ok_or(Erreur::JsonAttendu {
+        position,
+        attendu: "ios, android ou macos",
+    })
+}
+
+/// Lit un modèle : du texte libre, non vide, d'au plus [`NOM_MACHINE_MAX`].
+///
+/// **LES MÊMES RÈGLES QUE LE NOM D'UNE MACHINE**, et le même lecteur : c'est un
+/// texte d'affichage, comparé à rien, qui porte les accents de qui l'écrit et
+/// refuse ce qui ne s'affiche pas ou retourne ses voisins.
+fn lire_modele<'a>(lecteur: &mut Lecteur<'a>) -> Result<&'a str, Erreur> {
+    let texte = lecteur.texte_libre()?;
+    if texte.is_empty() {
+        return Err(Erreur::NomVide);
+    }
+    if texte.len() > NOM_MACHINE_MAX {
+        return Err(Erreur::NomTropLong {
+            obtenue: texte.len(),
+        });
+    }
+    Ok(texte)
+}
+
+/// Ce que `PUT /v1/appareils/{a}/description` pose : ce que l'appareil dit de
+/// lui-même.
+///
+/// # LE MODÈLE, ET JAMAIS LE NOM DONNÉ PAR L'UTILISATEUR
+///
+/// Un téléphone porte deux textes. Le nom que son porteur lui a donné —
+/// « iPhone de Thierry » — est un prénom, précisément ce que C13 refuse ; le
+/// nom de son modèle — « iPhone 17 » — ne nomme personne. **L'application
+/// n'envoie que le second**, et ce décodeur ne peut pas les distinguer : la
+/// règle est tenue à l'entrée, par l'application, et écrite ici pour qu'on
+/// sache où elle se tient.
+///
+/// # UNE ÉTIQUETTE, PAS UNE PREUVE
+///
+/// L'annuaire ne vérifie rien de ce qu'elle dit. Ce qui identifie un appareil
+/// est son `a-…` ; ceci sert à ce que l'écran Compte montre « MacBook Pro » et
+/// non « Autre ».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescriptionAppareil<'a> {
+    /// Ce que l'appareil fait tourner.
+    pub systeme: Systeme,
+    /// Son modèle — du texte libre, aux règles du nom d'une machine.
+    pub modele: &'a str,
+}
+
+impl<'a> DescriptionAppareil<'a> {
+    /// Décode une description.
+    ///
+    /// ```jsonc
+    /// {"plateforme": "macos", "modele": "MacBook Pro (2019)"}
+    /// ```
+    ///
+    /// # Erreurs
+    ///
+    /// Celles du cadrage, plus [`Erreur::ChampManquant`], [`Erreur::NomVide`]
+    /// pour un modèle vide et [`Erreur::NomTropLong`] au-delà de
+    /// [`NOM_MACHINE_MAX`].
+    pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
+        if octets.len() > CORPS_MAX {
+            return Err(Erreur::MessageTropLong {
+                obtenue: octets.len(),
+            });
+        }
+        let mut lecteur = Lecteur::nouveau(octets);
+        lecteur.attendre(b'{', "un objet")?;
+
+        let mut vus = 0_u8;
+        let mut systeme: Option<Systeme> = None;
+        let mut modele: Option<&'a str> = None;
+
+        loop {
+            let position_cle = lecteur.position();
+            let cle = lecteur.chaine()?;
+            let rang = CHAMPS_DESCRIPTION
+                .iter()
+                .position(|champ| *champ == cle)
+                .ok_or(Erreur::ChampInconnu {
+                    position: position_cle,
+                })?;
+            let bit = 1_u8 << rang;
+            if vus & bit != 0 {
+                return Err(Erreur::ChampEnDouble {
+                    position: position_cle,
+                });
+            }
+            vus |= bit;
+
+            lecteur.attendre(b':', "deux-points")?;
+            if rang == 0 {
+                let position = lecteur.position();
+                let texte = lecteur.chaine()?;
+                systeme = Some(systeme_du_mot(texte, position)?);
+            } else {
+                modele = Some(lire_modele(&mut lecteur)?);
+            }
+
+            lecteur.sauter_blancs();
+            match lecteur.regarder() {
+                Some(b',') => lecteur.avancer(),
+                Some(b'}') => {
+                    lecteur.avancer();
+                    break;
+                }
+                _ => {
+                    return Err(Erreur::JsonAttendu {
+                        position: lecteur.position(),
+                        attendu: "une virgule ou la fin de l'objet",
+                    });
+                }
+            }
+        }
+        lecteur.fin()?;
+
+        let systeme = systeme.ok_or(Erreur::ChampManquant {
+            nom: CHAMPS_DESCRIPTION[0],
+        })?;
+        let modele = modele.ok_or(Erreur::ChampManquant {
+            nom: CHAMPS_DESCRIPTION[1],
+        })?;
+        Ok(Self { systeme, modele })
+    }
+
+    /// Encode cette description, et rend le nombre d'octets écrits.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`].
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{\"plateforme\":\"");
+        ecrivain.pousser(self.systeme.mot().as_bytes());
+        ecrivain.pousser(b"\",\"modele\":\"");
+        ecrivain.pousser(self.modele.as_bytes());
         ecrivain.pousser(b"\"}");
         ecrivain.achever()
     }

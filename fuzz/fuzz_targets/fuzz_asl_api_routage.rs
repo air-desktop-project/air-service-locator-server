@@ -70,6 +70,9 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Appareils => "/v1/appareils".to_owned(),
         Ressource::Appareil { appareil } => format!("/v1/appareils/{appareil}"),
         Ressource::PousseeAppareil { appareil } => format!("/v1/appareils/{appareil}/poussee"),
+        Ressource::DescriptionAppareil { appareil } => {
+            format!("/v1/appareils/{appareil}/description")
+        }
         Ressource::Machines => "/v1/machines".to_owned(),
         Ressource::Machine { machine } => format!("/v1/machines/{machine}"),
         Ressource::EnrolementMachine { machine } => format!("/v1/machines/{machine}/enrolement"),

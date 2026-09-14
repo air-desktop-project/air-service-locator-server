@@ -1843,6 +1843,136 @@ async fn un_jeton_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
 }
 
 #[tokio::test]
+async fn un_appareil_se_decrit_et_l_ecran_compte_le_montre() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // L'écran Compte montrait le Mac comme « Autre » : `GET /v1/appareils` ne
+    // rendait ni système ni modèle, et c'est pourtant l'écran qu'on regarde pour
+    // vérifier qu'aucun appareil de trop n'est entré. Ici, un appareil se
+    // décrit, et la liste le rend — pour lui seul, et jamais un « nom ».
+    let (autorite, racine, chaine, cle) = materiel("description-appareil");
+    let (base, fichier) = entrepot("description-appareil");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let (_compte, appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA2).await;
+
+    let mut bob = connecter(&racine, adresse).await;
+    let (_autre_compte, autre, _autre_secrete) = creer_un_compte(&mut bob, 0, 0xB2).await;
+
+    // ── AVANT : LA LISTE NE PORTE NI PLATE-FORME NI MODÈLE ───────────────────
+    ams_quic_client::envoyer_une_requete(&mut alice, 12, 17, b"/v1/appareils", None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut alice, 12).await;
+    assert_eq!(
+        champ(&champs(alice.recu(12)), b":status"),
+        Some(&b"200"[..])
+    );
+    let texte = String::from_utf8_lossy(&rendu).into_owned();
+    assert!(texte.contains(appareil.texte().as_str()), "{texte}");
+    assert!(
+        !texte.contains("plateforme") && !texte.contains("modele"),
+        "absents tant qu'ils n'ont pas été posés : {texte}"
+    );
+
+    // ── L'APPAREIL SE DÉCRIT ─────────────────────────────────────────────────
+    // `21` est l'index QPACK de `:method: PUT`.
+    let cible = format!("/v1/appareils/{}/description", appareil.texte());
+    ams_quic_client::envoyer_avec_media(
+        &mut alice,
+        16,
+        21,
+        cible.as_bytes(),
+        None,
+        br#"{"plateforme":"macos","modele":"MacBook Pro (2019)"}"#,
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 16).await;
+    assert_eq!(
+        champ(&champs(alice.recu(16)), b":status"),
+        Some(&b"204"[..]),
+        "un appareil se décrit lui-même"
+    );
+
+    // ── APRÈS : L'ÉCRAN COMPTE MONTRE « MacBook Pro », ET NON « Autre » ─────
+    ams_quic_client::envoyer_une_requete(&mut alice, 20, 17, b"/v1/appareils", None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut alice, 20).await;
+    let texte = String::from_utf8_lossy(&rendu).into_owned();
+    assert!(
+        texte.contains(r#""plateforme":"macos","modele":"MacBook Pro (2019)""#),
+        "{texte}"
+    );
+    // Un seul appareil sur ce compte : la liste est cet objet entre crochets, et
+    // il se relit avec le décodeur des liaisons.
+    let seul = texte
+        .strip_prefix('[')
+        .and_then(|reste| reste.strip_suffix(']'))
+        .unwrap_or_else(|| panic!("une liste : {texte}"));
+    let lu = asl_api::corps::AppareilRendu::decoder(seul.as_bytes()).expect("il se relit");
+    assert_eq!(lu.appareil, appareil);
+    assert_eq!(
+        lu.description,
+        Some(asl_api::corps::DescriptionAppareil {
+            systeme: asl_api::corps::Systeme::Macos,
+            modele: "MacBook Pro (2019)",
+        })
+    );
+
+    // ── ET BOB NE VOIT PAS LA DESCRIPTION D'ALICE : CE N'EST PAS SON COMPTE ─
+    ams_quic_client::envoyer_une_requete(&mut bob, 12, 17, b"/v1/appareils", None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut bob, 12).await;
+    let texte = String::from_utf8_lossy(&rendu).into_owned();
+    assert!(texte.contains(autre.texte().as_str()), "{texte}");
+    assert!(!texte.contains("MacBook"), "{texte}");
+
+    // ── DÉCRIRE L'APPAREIL D'UN AUTRE : LE `404` DE CE QUI N'EXISTE PAS ─────
+    let cible = format!("/v1/appareils/{}/description", autre.texte());
+    ams_quic_client::envoyer_avec_media(
+        &mut alice,
+        24,
+        21,
+        cible.as_bytes(),
+        None,
+        br#"{"plateforme":"ios","modele":"iPhone 17"}"#,
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 24).await;
+    assert_eq!(
+        champ(&champs(alice.recu(24)), b":status"),
+        Some(&b"404"[..]),
+        "décrire l'appareil d'un autre ne dit pas qu'il existe"
+    );
+
+    // ── UN « NOM » N'EST PAS UN CHAMP, ET C'EST `400` ────────────────────────
+    //
+    // « iPhone de Thierry » est ce que C13 refuse. Le verbe ne connaît pas ce
+    // champ, et le dit à l'appelant : c'est lui qui vise son propre appareil.
+    let cible = format!("/v1/appareils/{}/description", appareil.texte());
+    ams_quic_client::envoyer_avec_media(
+        &mut alice,
+        28,
+        21,
+        cible.as_bytes(),
+        None,
+        br#"{"plateforme":"ios","nom":"iPhone de Thierry"}"#,
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 28).await;
+    assert_eq!(
+        champ(&champs(alice.recu(28)), b":status"),
+        Some(&b"400"[..]),
+        "un nom n'est pas une description"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
 async fn retirer_la_capacite_d_annonce_ferme_la_connexion_du_daemon() {
     // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
     //

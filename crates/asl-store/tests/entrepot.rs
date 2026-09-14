@@ -11,8 +11,8 @@ use std::path::PathBuf;
 
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
-    AliasRange, Compte, EntreeJournal, JetonPoussee, JetonRange, Machine, NomRange, Plateforme,
-    Provenance, Verdict,
+    AliasRange, Compte, Description, EntreeJournal, JetonPoussee, JetonRange, Machine, NomRange,
+    Plateforme, Provenance, Systeme, Verdict,
 };
 use asl_store::{Entrepot, Faute};
 
@@ -750,6 +750,15 @@ fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
         },
     )
     .expect("écrit");
+    base.poser_description(
+        appareil,
+        &Description {
+            provenance: venu,
+            systeme: Systeme::Ios,
+            modele: NomRange::nouveau("iPhone 17").expect("un nom"),
+        },
+    )
+    .expect("écrit");
 
     // Et une ligne de journal, qui doit SURVIVRE — c'est la seule exception, et
     // elle est écrite dans C17 : ce qui motive une rupture est souvent ce que le
@@ -766,14 +775,15 @@ fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
 
     let efface = base.oublier_ce_qui_vient_de(pair).expect("rompu");
     assert_eq!(
-        efface, 6,
-        "un compte, une machine, un service, une autorisation, un appareil, un code"
+        efface, 7,
+        "un compte, une machine, un service, une autorisation, un appareil, un code, une description"
     );
 
     assert_eq!(base.compte(compte).expect("lisible"), None);
     assert_eq!(base.machine(machine).expect("lisible"), None);
     assert_eq!(base.service(service).expect("lisible"), None);
     assert_eq!(base.appareil(appareil).expect("lisible"), None);
+    assert_eq!(base.description(appareil).expect("lisible"), None);
     assert!(base.consommer_enrolement(&clef).expect("lisible").is_none());
     assert!(
         base.service_par_nom(machine, "depot")
@@ -820,6 +830,120 @@ fn une_base_neuve_rend_des_listes_vides_et_non_des_fautes() {
             .is_empty()
     );
     assert!(base.jeton(appareil).expect("lisible").is_none());
+    assert!(base.description(appareil).expect("lisible").is_none());
+    assert!(
+        base.appareils_de_compte(compte)
+            .expect("lisible")
+            .is_empty()
+    );
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+// ── Les descriptions d'appareil ─────────────────────────────────────────────
+
+/// Une description d'essai, venue d'ici.
+fn description(systeme: Systeme, modele: &str) -> Description {
+    Description {
+        provenance: Provenance::Ici,
+        systeme,
+        modele: NomRange::nouveau(modele).expect("il tient"),
+    }
+}
+
+/// Un appareil d'essai, de ce compte.
+fn appareil_de(compte: Identifiant) -> asl_registre::Appareil {
+    asl_registre::Appareil {
+        provenance: Provenance::Ici,
+        proprietaire: compte,
+        cle: [0x77; 33],
+        atteste: asl_registre::Attestation::Aucune,
+        revoque: false,
+    }
+}
+
+#[test]
+fn une_description_se_pose_se_relit_et_se_remplace() {
+    // **LA NEUVE REMPLACE L'ANCIENNE** : un appareil qui se redécrit est ce
+    // qu'il est aujourd'hui, pas ce qu'il a été.
+    let (base, fichier) = entrepot("description");
+    let quel = un(Genre::Appareil, 3);
+    assert!(base.description(quel).expect("lisible").is_none());
+
+    base.poser_description(quel, &description(Systeme::Ios, "iPhone 17"))
+        .expect("écrit");
+    let lue = base
+        .description(quel)
+        .expect("lisible")
+        .expect("elle est là");
+    assert_eq!(lue.systeme, Systeme::Ios);
+    assert_eq!(lue.modele.octets(), "iPhone 17".as_bytes());
+
+    base.poser_description(quel, &description(Systeme::Macos, "MacBook Pro (2019)"))
+        .expect("écrit");
+    let lue = base
+        .description(quel)
+        .expect("lisible")
+        .expect("elle est là");
+    assert_eq!(lue.systeme, Systeme::Macos, "le système change aussi");
+    assert_eq!(lue.modele.octets(), "MacBook Pro (2019)".as_bytes());
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+#[test]
+fn la_liste_des_appareils_porte_leur_description_quand_ils_en_ont_une() {
+    // **C'EST L'ÉCRAN COMPTE** : deux appareils, dont un seul s'est décrit.
+    // L'autre reste dans la liste, sans description — « pas encore », et non
+    // « absent ».
+    let (base, fichier) = entrepot("liste-decrite");
+    let compte = un(Genre::Utilisateur, 1);
+    let decrit = un(Genre::Appareil, 2);
+    let muet = un(Genre::Appareil, 3);
+    base.poser_appareil(decrit, &appareil_de(compte))
+        .expect("écrit");
+    base.poser_appareil(muet, &appareil_de(compte))
+        .expect("écrit");
+    base.poser_description(decrit, &description(Systeme::Android, "Pixel 9"))
+        .expect("écrit");
+
+    let liste = base.appareils_de_compte(compte).expect("lisible");
+    assert_eq!(liste.len(), 2);
+    for (quel, _, lue) in liste {
+        if quel == decrit {
+            let lue = lue.expect("décrit");
+            assert_eq!(lue.systeme, Systeme::Android);
+            assert_eq!(lue.modele.octets(), b"Pixel 9");
+        } else {
+            assert_eq!(quel, muet);
+            assert!(lue.is_none(), "un appareil muet n'a pas de description");
+        }
+    }
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+#[test]
+fn revoquer_un_appareil_garde_sa_description() {
+    // **À L'INVERSE DU JETON.** La description ne donne aucun droit, et elle est
+    // ce qui rend lisible ce qu'on a retiré : « iPhone 17, révoqué ».
+    let (base, fichier) = entrepot("revoque-description");
+    let compte = un(Genre::Utilisateur, 1);
+    let quel = un(Genre::Appareil, 3);
+    base.poser_appareil(quel, &appareil_de(compte))
+        .expect("écrit");
+    base.poser_description(quel, &description(Systeme::Ios, "iPhone 17"))
+        .expect("écrit");
+
+    base.revoquer_appareil(quel).expect("révoqué");
+    let liste = base.appareils_de_compte(compte).expect("lisible");
+    let (_, appareil, lue) = liste.first().expect("il reste");
+    assert!(appareil.revoque);
+    assert_eq!(
+        lue.map(|quoi| quoi.systeme),
+        Some(Systeme::Ios),
+        "la description reste avec l'appareil marqué"
+    );
 
     let _ = std::fs::remove_file(fichier);
 }

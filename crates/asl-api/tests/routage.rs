@@ -57,6 +57,10 @@ fn chaque_chemin_designe_sa_ressource() {
         Ressource::PousseeAppareil { .. }
     ));
     assert!(matches!(
+        resoudre_get(&format!("/v1/appareils/{a}/description")).unwrap(),
+        Ressource::DescriptionAppareil { .. }
+    ));
+    assert!(matches!(
         resoudre_get(&format!("/v1/machines/{m}")).unwrap(),
         Ressource::Machine { .. }
     ));
@@ -486,8 +490,12 @@ fn chaque_route_qui_porte_un_identifiant_verifie_son_genre() {
     let mauvais = ident(Genre::Utilisateur);
     let m = ident(Genre::Machine);
 
-    let cas: [(String, Genre); 8] = [
+    let cas: [(String, Genre); 9] = [
         (format!("/v1/appareils/{mauvais}/poussee"), Genre::Appareil),
+        (
+            format!("/v1/appareils/{mauvais}/description"),
+            Genre::Appareil,
+        ),
         (format!("/v1/machines/{mauvais}"), Genre::Machine),
         (format!("/v1/machines/{mauvais}/enrolement"), Genre::Machine),
         (format!("/v1/machines/{mauvais}/cle"), Genre::Machine),
@@ -650,5 +658,31 @@ fn lister_ses_machines_ou_appareils_exige_un_appareil() {
     for cible in [&b"/v1/machines"[..], &b"/v1/appareils"[..]] {
         let resolu = resoudre(Methode::Get, cible).expect("la cible se route");
         assert_eq!(resolu.exigence, Exigence::Appareil);
+    }
+}
+
+// ── Les deux verbes « pour soi seulement » ──────────────────────────────────
+
+#[test]
+fn la_poussee_et_la_description_ne_servent_que_put_et_exigent_un_appareil() {
+    // Les deux ont la même forme : un appareil dépose quelque chose SUR
+    // LUI-MÊME. Le jeton vient de son système ; la description est ce qu'il
+    // dit de lui. Aucun des deux ne se lit ici — `GET /v1/appareils` les rend.
+    let a = ident(Genre::Appareil);
+    for cible in [
+        format!("/v1/appareils/{a}/poussee"),
+        format!("/v1/appareils/{a}/description"),
+    ] {
+        for (methode, sert) in [
+            (Methode::Get, false),
+            (Methode::Post, false),
+            (Methode::Put, true),
+            (Methode::Patch, false),
+            (Methode::Delete, false),
+        ] {
+            let resolu = resoudre(methode, cible.as_bytes()).expect("la cible se route");
+            assert_eq!(resolu.sert, sert, "{cible} {methode:?}");
+            assert_eq!(resolu.exigence, Exigence::Appareil, "{cible}");
+        }
     }
 }

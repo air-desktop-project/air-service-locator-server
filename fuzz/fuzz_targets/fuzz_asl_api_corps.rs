@@ -31,8 +31,8 @@ use libfuzzer_sys::fuzz_target;
 
 use asl_api::corps::{
     AppareilRendu, AutorisationRendue, CLE_APPAREIL_OCTETS, COMPTE_CORPS_MAX, CORPS_MAX,
-    CreationDeCompte, DeclarationMachine, DemandeAlias, DemandeAutorisation, MachineRendue,
-    NOM_MACHINE_MAX, PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
+    CreationDeCompte, DeclarationMachine, DemandeAlias, DemandeAutorisation, DescriptionAppareil,
+    MachineRendue, NOM_MACHINE_MAX, PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
 };
 
 /// Ce caractère change-t-il l'affichage de ce qui l'entoure ?
@@ -188,8 +188,49 @@ fuzz_target!(|octets: &[u8]| {
         assert_eq!(&encore[..deux], ecrit, "l'écriture n'est pas canonique");
     }
 
+    // ── CE QU'UN APPAREIL DIT DE LUI-MÊME ───────────────────────────────────
+    if let Ok(description) = DescriptionAppareil::decoder(octets) {
+        // **3. LE MODÈLE NE PORTE RIEN DE CE QUI EST REFUSÉ**, comme le nom
+        // d'une machine : il repart dans `GET /v1/appareils` sans échappement.
+        for caractere in description.modele.chars() {
+            assert!(
+                caractere != '"'
+                    && caractere != '\\'
+                    && !caractere.is_control()
+                    && !invisible(caractere),
+                "un modèle accepté porte {caractere:?}, que l'encodeur ne saurait pas écrire"
+            );
+        }
+        assert!(
+            !description.modele.is_empty() && description.modele.len() <= NOM_MACHINE_MAX,
+            "un modèle de {} octets a été accepté",
+            description.modele.len()
+        );
+
+        // 2. L'aller-retour, canonique.
+        let mut sortie = [0_u8; CORPS_MAX];
+        let combien = description
+            .encoder(&mut sortie)
+            .expect("ce qui a été compris se réécrit");
+        let ecrit = &sortie[..combien];
+        let relue = DescriptionAppareil::decoder(ecrit).expect("ce qu'on écrit se relit");
+        assert_eq!(relue, description, "l'aller-retour a changé la description");
+        let mut encore = [0_u8; CORPS_MAX];
+        let deux = relue.encoder(&mut encore).expect("elle se réécrit");
+        assert_eq!(&encore[..deux], ecrit, "l'écriture n'est pas canonique");
+    }
+
     // ── CE QU'UNE LISTE D'APPAREILS REND ────────────────────────────────────
     if let Ok(appareil) = AppareilRendu::decoder(octets) {
+        // Une description rendue va par deux, et son modèle suit les règles
+        // ci-dessus.
+        if let Some(description) = &appareil.description {
+            assert!(
+                !description.modele.is_empty() && description.modele.len() <= NOM_MACHINE_MAX,
+                "un modèle rendu de {} octets a été accepté",
+                description.modele.len()
+            );
+        }
         let mut sortie = [0_u8; CORPS_MAX];
         let combien = appareil
             .encoder(&mut sortie)
