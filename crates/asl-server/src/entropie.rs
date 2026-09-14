@@ -1,6 +1,6 @@
 //! D'où viennent les défis.
 //!
-//! # `getrandom(2)`, ET NON UN GÉNÉRATEUR À NOUS
+//! # LE CSPRNG DU NOYAU, ET NON UN GÉNÉRATEUR À NOUS
 //!
 //! Un défi qui se devine ne défie personne : il suffirait de le prédire pour
 //! préparer une signature à l'avance. C'est donc le CSPRNG du noyau, et rien
@@ -13,10 +13,19 @@
 //! `libc` est déjà là — nous l'employons pour `geteuid`. L'appel tient en
 //! quinze lignes, boucle comprise.
 //!
-//! # LA BOUCLE N'EST PAS DE LA PRUDENCE DÉCORATIVE
+//! # UN APPEL PAR SYSTÈME, LA MÊME BOUCLE
 //!
-//! `getrandom(2)` peut rendre MOINS d'octets qu'on n'en demande, et peut échouer
-//! avec `EINTR` si un signal arrive. Prendre le premier retour pour argent
+//! L'annuaire a vocation à tourner sur Linux, macOS et Windows. Le noyau se
+//! demande différemment selon le système, et c'est le SEUL endroit du binaire
+//! où cela se voit :
+//!
+//! - Linux : `getrandom(2)`. Il peut rendre MOINS d'octets qu'on n'en demande,
+//!   et échouer avec `EINTR` si un signal arrive.
+//! - macOS et les BSD : `getentropy(2)`. Il remplit tout ou échoue, mais refuse
+//!   plus de 256 octets par appel.
+//! - Windows : à venir (`BCryptGenRandom`), quand le reste du binaire y sera.
+//!
+//! La boucle qui suit sert les deux : prendre le premier retour pour argent
 //! comptant laisserait un défi partiellement nul — c'est-à-dire un défi qu'on
 //! devine en partie.
 
@@ -55,11 +64,7 @@ fn remplir(quoi: &mut [u8]) -> io::Result<()> {
     let mut ecrits = 0_usize;
     while ecrits < quoi.len() {
         let reste = quoi.get_mut(ecrits..).unwrap_or_default();
-        // SAFETY: `reste` est une tranche vivante que nous possédons, et la
-        // longueur passée est exactement la sienne. `getrandom` n'écrit rien
-        // au-delà.
-        let combien =
-            unsafe { libc::getrandom(reste.as_mut_ptr().cast::<libc::c_void>(), reste.len(), 0) };
+        let combien = tirer(reste);
         if combien < 0 {
             let faute = io::Error::last_os_error();
             // **`EINTR` N'EST PAS UNE PANNE**, c'est un signal qui est passé.
@@ -75,6 +80,32 @@ fn remplir(quoi: &mut [u8]) -> io::Result<()> {
         ecrits = ecrits.saturating_add(combien);
     }
     Ok(())
+}
+
+/// Un appel au noyau : le nombre d'octets écrits au début de `reste`, ou un
+/// négatif avec `errno` posé. Le contrat est celui de `getrandom(2)`, et
+/// l'autre système s'y plie.
+#[cfg(target_os = "linux")]
+fn tirer(reste: &mut [u8]) -> isize {
+    // SAFETY: `reste` est une tranche vivante que nous possédons, et la
+    // longueur passée est exactement la sienne. `getrandom` n'écrit rien
+    // au-delà.
+    unsafe { libc::getrandom(reste.as_mut_ptr().cast::<libc::c_void>(), reste.len(), 0) }
+}
+
+/// `getentropy(2)` : tout ou rien, et pas plus de 256 octets — on demande donc
+/// au plus 256, et l'on rend ce qui a été écrit, comme `getrandom` le ferait.
+#[cfg(not(target_os = "linux"))]
+fn tirer(reste: &mut [u8]) -> isize {
+    const PAR_APPEL: usize = 256;
+    let combien = reste.len().min(PAR_APPEL);
+    // SAFETY: `reste` est une tranche vivante que nous possédons, et `combien`
+    // ne dépasse ni sa longueur ni ce que `getentropy` accepte.
+    let issue = unsafe { libc::getentropy(reste.as_mut_ptr().cast::<libc::c_void>(), combien) };
+    if issue < 0 {
+        return -1;
+    }
+    isize::try_from(combien).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -115,7 +146,8 @@ mod tests {
     #[test]
     fn remplir_une_grande_tranche_la_remplit_entierement() {
         // **C'EST LA BOUCLE QU'ON ÉPROUVE ICI** : au-delà de 256 octets,
-        // `getrandom` a le droit de rendre moins que demandé.
+        // `getrandom` a le droit de rendre moins que demandé, et `getentropy`
+        // refuse tout net.
         let mut grande = [0_u8; 4096];
         remplir(&mut grande).expect("le noyau fournit");
         let nuls = grande.iter().filter(|octet| **octet == 0).count();

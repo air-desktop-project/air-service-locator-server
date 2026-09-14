@@ -90,7 +90,7 @@ exclude = ["fuzz"]
 [workspace.package]
 # Version en LOCKSTEP : toutes les crates la partagent via `version.workspace`.
 # Un seul numéro à incrémenter, donc aucune dérive possible entre les paquets.
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 # PAS DE `rust-version`, ET C'EST DÉLIBÉRÉ.
 #
