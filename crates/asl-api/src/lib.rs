@@ -180,6 +180,20 @@ pub enum Ressource<'a> {
     /// en train d'installer, qui veut savoir si elle atteint l'annuaire et
     /// comment il la voit, avant même d'avoir un code d'enrôlement.
     Vu,
+    /// `/v1/version` — la version de l'annuaire, `{"version": "0.2.0"}`.
+    ///
+    /// # ELLE N'EXIGE RIEN, ET C'EST LA SIXIÈME
+    ///
+    /// Ceux qui ont besoin de la lire sont précisément ceux qui n'ont pas
+    /// encore de clé : l'application qui va créer un compte, la machine qu'on
+    /// installe, l'exploitant qui vérifie qu'un banc sert bien ce qu'il croit.
+    /// Et elle ne révèle rien qui ne soit déjà public — ce logiciel est libre,
+    /// et sa version dit quel dépôt lire, pas quelle faille chercher.
+    ///
+    /// Elle rend la VERSION, et rien d'autre : ni commit, ni posture, ni
+    /// réglage. Ce qu'un annuaire sait de lui-même au-delà de ce nombre est
+    /// l'affaire de son exploitant, qui le lit sur la machine.
+    Version,
     /// `/v1/defi` — le défi d'authentification de CETTE connexion.
     ///
     /// # POURQUOI UNE RESSOURCE, ET NON UNE POIGNÉE DE MAIN À PART
@@ -308,6 +322,7 @@ impl Ressource<'_> {
             Self::Comptes | Self::Enrolement => &[Methode::Post],
             Self::Utilisateur { .. }
             | Self::Vu
+            | Self::Version
             | Self::Poussees
             | Self::ServicesMachine { .. }
             | Self::Expositions
@@ -336,7 +351,7 @@ impl Ressource<'_> {
 
     /// Ce qu'il faut prouver pour l'atteindre.
     ///
-    /// # LES CINQ RESSOURCES SANS EXIGENCE, ET POURQUOI CHACUNE
+    /// # LES SIX RESSOURCES SANS EXIGENCE, ET POURQUOI CHACUNE
     ///
     /// - **`/v1/comptes`** : on n'a pas encore de compte. C'est l'attestation de
     ///   la plate-forme qui protège ce chemin, pas une signature de compte.
@@ -351,6 +366,8 @@ impl Ressource<'_> {
     ///   déjà 128 bits qu'il ne peut pas deviner et qu'il tient de son porteur.
     /// - **`/v1/vu`** : elle ne parle que de la connexion qui demande, et ne
     ///   rend rien qu'un serveur STUN public ne rendrait. Voir [`Ressource::Vu`].
+    /// - **`/v1/version`** : un nombre public d'un logiciel libre, dont ont
+    ///   besoin ceux qui n'ont pas encore de clé. Voir [`Ressource::Version`].
     #[must_use]
     pub const fn exigence(&self) -> Exigence {
         match self {
@@ -359,6 +376,7 @@ impl Ressource<'_> {
             | Self::Enrolement
             | Self::AliasResolu { .. }
             | Self::Vu
+            | Self::Version
             | Self::Utilisateur { .. } => Exigence::Aucune,
             Self::Annonce | Self::Poussees => Exigence::MachineAnnonce,
             Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
@@ -637,6 +655,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         }),
         ["v1", "poussees"] => Ok(Ressource::Poussees),
         ["v1", "vu"] => Ok(Ressource::Vu),
+        ["v1", "version"] => Ok(Ressource::Version),
         ["v1", "autorisations"] => Ok(Ressource::Autorisations),
         ["v1", "autorisations", autorisation] => Ok(Ressource::Autorisation {
             autorisation: identifiant(autorisation, Genre::Autorisation)?,

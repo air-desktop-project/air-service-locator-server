@@ -157,6 +157,8 @@ asl-server — un annuaire de services air-service-locator.
   --attestation <exigee|facultative>                        (obligatoire)
   --apple-app  <id>       l'identifiant de l'app Apple      (avec l'env.)
   --apple-environnement <production|developpement>          (avec l'app)
+  --version               la version et le commit, puis s'arrête
+  --aide                  ceci
 
 `--attestation` N'A PAS DE DÉFAUT, ET C'EST DÉLIBÉRÉ. La vérification de
 l'attestation de plate-forme n'est pas écrite : `exigee` refuse donc TOUT

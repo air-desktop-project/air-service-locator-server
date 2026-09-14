@@ -1757,6 +1757,36 @@ async fn on_apprend_d_ou_l_on_est_vu_sans_rien_annoncer_ni_prouver() {
 }
 
 #[tokio::test]
+async fn la_version_se_lit_sans_rien_prouver() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // Une connexion qui n'a présenté aucune clé lit la version de l'annuaire,
+    // et c'est celle du workspace — la même que `asl-server --version`.
+    let (autorite, racine, chaine, cle) = materiel("version");
+    let (base, fichier) = entrepot("version");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    let mut client = connecter(&racine, adresse).await;
+    ams_quic_client::envoyer_une_requete(&mut client, 0, 17, b"/v1/version", None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut client, 0).await;
+    assert_eq!(
+        champ(&champs(client.recu(0)), b":status"),
+        Some(&b"200"[..]),
+        "{}",
+        String::from_utf8_lossy(&rendu)
+    );
+    assert_eq!(
+        rendu,
+        format!(r#"{{"version":"{}"}}"#, env!("CARGO_PKG_VERSION")).into_bytes()
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
 async fn un_jeton_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
     // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
     //

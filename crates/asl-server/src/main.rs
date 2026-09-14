@@ -54,6 +54,21 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// Ce que `asl-server --version` imprime : `asl-server 0.2.0 (181e291)`.
+///
+/// La version est celle du workspace, en lockstep (`Cargo.toml`) ; le commit
+/// vient de `build.rs`, et manque quand le binaire n'a pas été construit dans
+/// un dépôt — on l'omet alors plutôt que d'écrire « inconnu », qui aurait
+/// l'air d'une valeur. Un `+` derrière le commit dit que l'arbre était modifié.
+fn version() -> String {
+    let commit = env!("ASL_COMMIT");
+    if commit.is_empty() {
+        format!("asl-server {}", env!("CARGO_PKG_VERSION"))
+    } else {
+        format!("asl-server {} ({commit})", env!("CARGO_PKG_VERSION"))
+    }
+}
+
 /// Tout ce qui peut échouer, rassemblé pour que `main` reste lisible.
 fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
     // **EN PREMIER** : voir l'en-tête, et `asl-loop-tokio::privileges`.
@@ -65,6 +80,10 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         .any(|quoi| quoi == "--aide" || quoi == "-h")
     {
         print!("{USAGE}");
+        return Ok(());
+    }
+    if arguments.iter().any(|quoi| quoi == "--version") {
+        println!("{}", version());
         return Ok(());
     }
     let reglages = Reglages::depuis(&arguments).inspect_err(|_| eprint!("{USAGE}"))?;
