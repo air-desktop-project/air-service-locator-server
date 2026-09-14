@@ -120,6 +120,21 @@ jamais l'utilisateur : il n'y a pas de mot de passe dans ce produit.
 définitivement.** L'application le dit à l'enrôlement et pousse à en enrôler un
 second ; elle ne l'impose pas.
 
+**Un second appareil ne s'ajoute pas en « important » le compte : il s'ajoute
+en faisant enrôler SA clé par un appareil qui l'est déjà.** L'intuition
+contraire — exporter l'identifiant `u-…` depuis le premier appareil, le lire
+depuis le second — ne peut pas marcher ici, et ce n'est pas une limite
+d'implémentation : l'identifiant est public et ne prouve rien, et la clé qui
+prouve ne quitte jamais le matériel où elle est née. Il n'y a donc rien à
+exporter. Le sens du geste est le sens inverse : **le nouvel appareil montre sa
+clé publique** (un code à l'écran) ; **l'appareil déjà enrôlé la lit, la
+présente à l'annuaire** (`POST /v1/appareils`, `protocole.md` §2.1 ter) et rend
+en retour au nouveau l'identifiant du compte et le sien ; le nouveau prouve
+alors sa clé sur sa propre connexion. Rien de secret ne passe d'un écran à
+l'autre — une clé publique, deux identifiants —, et cela vaut quelle que soit
+la paire d'appareils : deux téléphones, ou un Mac et un téléphone (le Mac
+affiche un code, il n'en lit pas ; ce qu'il reçoit se colle).
+
 ### 2.3 Machine
 
 Déclarée par un utilisateur depuis l'application.
