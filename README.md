@@ -162,8 +162,21 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.2.0_amd64.deb
+sudo dpkg -i asl-server_0.2.1_amd64.deb
 ```
+
+**`asl-server` ne se construit et ne tourne que sur Linux, et c'est à dessein.**
+Le binaire parle directement à la libc de Linux : `getrandom` pour l'entropie
+(`crates/asl-server/src/entropie.rs`), `SOCK_NONBLOCK | SOCK_CLOEXEC` posés à
+l'ouverture de la socket (`crates/asl-server/src/socket.rs`), sans la fenêtre
+qu'un `fcntl` après coup laisserait ouverte. Sur macOS, `cargo build -p
+asl-server` échoue sur ces symboles — ce n'est pas un défaut à corriger, c'est
+la cible qui le dit. **Les étages 1 et 2 sont portables** (ils ne touchent ni
+fichier, ni socket, ni horloge), et le client `asl` se construit et tourne sur
+macOS. Le jour où un annuaire devra tourner sur un Mac — pour développer les
+applications sans banc, par exemple —, le port tient en quelques `cfg(target_os)`
+dans ces deux fichiers ; ce qui le rendrait durable est un job macOS dans la CI,
+et c'est ce job, pas le `cfg`, qui serait la décision.
 
 **Le paquet n'active ni ne démarre le service**, et il lui manque exprès deux
 choses qu'un paquet ne peut pas décider :
