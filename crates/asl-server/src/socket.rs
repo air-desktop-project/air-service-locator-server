@@ -14,6 +14,16 @@
 //! `std` ne permet pas de régler une option avant `bind`, et il faut donc
 //! descendre à la libc — trois appels, et l'on remonte aussitôt.
 //!
+//! # CE QUI DIFFÈRE ENTRE LINUX ET LES BSD (macOS COMPRIS)
+//!
+//! L'annuaire a vocation à tourner sur Linux, macOS et Windows, et cette socket
+//! est l'un des rares endroits où le système se voit. Linux règle `O_NONBLOCK`
+//! et `FD_CLOEXEC` à la création, d'un seul appel, sans fenêtre où la socket
+//! bloque ou s'hérite. Les BSD n'ont pas ces drapeaux : on les pose juste
+//! après, par `fcntl`, avant que quiconque ait pu la voir — le descripteur
+//! n'est encore confié à personne, et rien ne se lance entre les deux. Et
+//! leur `sockaddr_in6` porte une longueur, `sin6_len`, que Linux n'a pas.
+//!
 //! # CE QUE LA DOUBLE PILE CHANGE POUR LA BOUCLE
 //!
 //! Un pair IPv4 se présente en adresse **mappée** : `::ffff:203.0.113.7`. La
@@ -38,6 +48,7 @@ pub fn ecouter(port: u16) -> io::Result<std::net::UdpSocket> {
     // laisserait une fenêtre où la socket bloque.
     // `SOCK_CLOEXEC` : rien de ce que nous lançons n'a à hériter de cette
     // socket, et un descripteur hérité par mégarde survit à qui l'a ouvert.
+    #[cfg(target_os = "linux")]
     let descripteur = unsafe {
         libc::socket(
             libc::AF_INET6,
@@ -45,6 +56,9 @@ pub fn ecouter(port: u16) -> io::Result<std::net::UdpSocket> {
             0,
         )
     };
+    // SAFETY: même contrat ; les deux drapeaux se posent juste après.
+    #[cfg(not(target_os = "linux"))]
+    let descripteur = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, 0) };
     if descripteur < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -52,6 +66,20 @@ pub fn ecouter(port: u16) -> io::Result<std::net::UdpSocket> {
     // personne d'autre. `from_raw_fd` en prend la propriété, donc la fermeture
     // est assurée même si ce qui suit échoue.
     let socket = unsafe { std::net::UdpSocket::from_raw_fd(descripteur) };
+
+    // Sur les BSD, ce que Linux a fait à la création : non bloquante, et
+    // fermée à l'`exec`. `std` sait le premier de façon portable ; le second
+    // est un `fcntl`.
+    #[cfg(not(target_os = "linux"))]
+    {
+        socket.set_nonblocking(true)?;
+        // SAFETY: `descripteur` est vivant (`socket` le possède), et `F_SETFD`
+        // avec `FD_CLOEXEC` ne touche à rien d'autre que ses drapeaux.
+        let ferme = unsafe { libc::fcntl(descripteur, libc::F_SETFD, libc::FD_CLOEXEC) };
+        if ferme < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
 
     // **LE CŒUR DE CE MODULE** : `IPV6_V6ONLY` à zéro, explicitement.
     let non: libc::c_int = 0;
@@ -77,7 +105,23 @@ pub fn ecouter(port: u16) -> io::Result<std::net::UdpSocket> {
     }
 
     let mut ou: libc::sockaddr_in6 = unsafe { core::mem::zeroed() };
-    ou.sin6_family = libc::c_ushort::try_from(libc::AF_INET6).unwrap_or(0);
+    // `sa_family_t` : `u16` sur Linux, `u8` sur les BSD — le type de la libc
+    // suit le système, et c'est lui qu'on demande.
+    ou.sin6_family = libc::sa_family_t::try_from(libc::AF_INET6).unwrap_or(0);
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "la taille d'une sockaddr_in6 tient dans un u8 — c'est ce que sin6_len attend"
+    )]
+    {
+        ou.sin6_len = core::mem::size_of::<libc::sockaddr_in6>() as u8;
+    }
     ou.sin6_port = port.to_be();
     // `sin6_addr` reste à zéro : c'est `in6addr_any`, toutes les adresses.
 
