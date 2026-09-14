@@ -24,3 +24,9 @@ se merge pas.**
 - `scripts/check-version.sh` tient tout cela, et la CI le lance sur chaque
   pull request. `asl-server --version` dit la version et le commit du binaire ;
   `GET /v1/version` la rend à qui interroge l'annuaire.
+- **Ce qui est exempté, et c'est tranché (Thierry, 2026-09-14) : les notes de
+  coordination.** Elles vont sur `main` en commit direct, sans PR ni bump —
+  ici, ce fichier n'en porte pas encore ; côté client, c'est la section « Ce
+  que l'autre session attend » de son `CLAUDE.md` et ses réponses. **Tout ce
+  qui touche au code, aux spécifications (`docs/`), à la CI ou aux scripts
+  passe par PR et change la version.**
