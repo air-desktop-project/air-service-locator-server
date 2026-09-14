@@ -267,6 +267,11 @@ impl Service<'_> {
                 plateforme,
                 jeton,
             } => self.poser_un_jeton(*appareil, *plateforme, jeton),
+            Besoin::PoserDescription {
+                appareil,
+                systeme,
+                modele,
+            } => self.poser_une_description(*appareil, *systeme, modele),
             Besoin::RevoquerAppareil { appareil } => self.revoquer_un_appareil(*appareil),
             Besoin::RevoquerCleMachine { machine } => self.revoquer_une_cle(*machine),
             Besoin::RevoquerAutorisation { autorisation } => {
@@ -849,6 +854,49 @@ impl Service<'_> {
         }
     }
 
+    /// Pose ce qu'un appareil dit de lui-même — **pour lui-même seulement**.
+    ///
+    /// La même garde que [`Service::poser_un_jeton`], et pour la même forme :
+    /// c'est l'appareil de CETTE connexion qui parle de lui, et viser un autre
+    /// rend le `404` de ce qui n'existe pas. Un appareil révoqué ne se décrit
+    /// plus non plus — `compte_de_la_connexion` l'écarte —, non qu'il y ait un
+    /// droit à protéger, mais parce qu'un téléphone déclaré perdu n'a plus rien
+    /// à dire sur ce compte.
+    fn poser_une_description(
+        &self,
+        vise: Identifiant,
+        systeme: asl_api::corps::Systeme,
+        modele: &str,
+    ) -> Trouvaille {
+        let Some(moi) = self.session.appareil() else {
+            return Trouvaille::Rien;
+        };
+        if moi != vise {
+            return Trouvaille::Rien;
+        }
+        let Some(_compte) = self.compte_de_la_connexion() else {
+            return Trouvaille::Rien;
+        };
+        let Ok(modele) = asl_registre::NomRange::nouveau(modele) else {
+            return Trouvaille::Rien;
+        };
+        match self.entrepot.poser_description(
+            vise,
+            &asl_registre::Description {
+                provenance: asl_registre::Provenance::Ici,
+                systeme: match systeme {
+                    asl_api::corps::Systeme::Ios => asl_registre::Systeme::Ios,
+                    asl_api::corps::Systeme::Android => asl_registre::Systeme::Android,
+                    asl_api::corps::Systeme::Macos => asl_registre::Systeme::Macos,
+                },
+                modele,
+            },
+        ) {
+            Ok(()) => Trouvaille::Fait,
+            Err(_) => Trouvaille::Rien,
+        }
+    }
+
     /// Retire une autorisation que ce compte a accordée.
     fn revoquer_une_autorisation(&self, quelle: Identifiant) -> Trouvaille {
         let (Some(compte), Ok(Some(rangee))) = (
@@ -1191,7 +1239,21 @@ impl Service<'_> {
 
         let elements = appareils
             .into_iter()
-            .filter_map(|(quel, enregistre)| {
+            .filter_map(|(quel, enregistre, rangee)| {
+                // **UNE DESCRIPTION ILLISIBLE EST OMISE, PAS L'APPAREIL.** Le
+                // modèle a été rangé par `NomRange`, donc il est de l'UTF-8
+                // valide ; si un jour il ne l'était plus, c'est une étiquette
+                // d'affichage qui manquerait, pas l'appareil qu'elle décrit.
+                let description = rangee.as_ref().and_then(|quoi| {
+                    Some(asl_api::corps::DescriptionAppareil {
+                        systeme: match quoi.systeme {
+                            asl_registre::Systeme::Ios => asl_api::corps::Systeme::Ios,
+                            asl_registre::Systeme::Android => asl_api::corps::Systeme::Android,
+                            asl_registre::Systeme::Macos => asl_api::corps::Systeme::Macos,
+                        },
+                        modele: core::str::from_utf8(quoi.modele.octets()).ok()?,
+                    })
+                });
                 let rendue = asl_api::corps::AppareilRendu {
                     appareil: quel,
                     attestation: match enregistre.atteste {
@@ -1206,6 +1268,7 @@ impl Service<'_> {
                         }
                     },
                     revoque: enregistre.revoque,
+                    description,
                 };
                 let mut sortie = alloc_reponse();
                 let combien = rendue.encoder(&mut sortie).ok()?;

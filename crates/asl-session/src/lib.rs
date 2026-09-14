@@ -80,7 +80,7 @@ use ams_h3::Reponse;
 use ams_proto_http::{Method, RequestHead, StatusCode};
 use asl_api::corps::{
     Capacites, CreationDeCompte, DeclarationMachine, DemandeAlias, DemandeAutorisation, DepotJeton,
-    ModificationMachine, Plateforme, PlateformeAttestation, Portee,
+    DescriptionAppareil, ModificationMachine, Plateforme, PlateformeAttestation, Portee, Systeme,
 };
 use asl_api::{Exigence, Ressource};
 use asl_cle::{CleAppareil, ClePublique, Defi, LiaisonDeCanal, Signature, SignatureAppareil};
@@ -383,6 +383,24 @@ pub enum Besoin<'a> {
         plateforme: Plateforme,
         /// Le jeton, tel que la plate-forme l'a donné.
         jeton: &'a str,
+    },
+    /// Dire ce que cet appareil est : son système, son modèle.
+    ///
+    /// **POUR SOI SEULEMENT, COMME LE JETON**, et le refus se cache derrière le
+    /// même `404`. La raison est moins grave — décrire l'appareil d'un autre ne
+    /// détourne rien — mais la règle est la même parce qu'elle est plus simple à
+    /// tenir qu'une exception : c'est l'appareil qui parle de lui, sur sa
+    /// propre connexion.
+    ///
+    /// **Une étiquette, pas une preuve.** L'annuaire ne vérifie rien de ce
+    /// qu'elle dit ; ce qui identifie est l'`a-…` (`docs/modele.md` §2.2).
+    PoserDescription {
+        /// L'appareil visé, qui doit être celui de cette connexion.
+        appareil: Identifiant,
+        /// Ce qu'il fait tourner.
+        systeme: Systeme,
+        /// Son modèle, du texte emprunté au corps de la requête.
+        modele: &'a str,
     },
     /// Révoquer un appareil du compte de cette connexion.
     ///
@@ -891,6 +909,14 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
             },
             Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
         },
+        Ressource::DescriptionAppareil { appareil } => match DescriptionAppareil::decoder(corps) {
+            Ok(description) => Besoin::PoserDescription {
+                appareil,
+                systeme: description.systeme,
+                modele: description.modele,
+            },
+            Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+        },
         Ressource::Appareil { appareil } => Besoin::RevoquerAppareil { appareil },
         Ressource::CleMachine { machine } => Besoin::RevoquerCleMachine { machine },
         Ressource::Autorisation { autorisation } => Besoin::RevoquerAutorisation { autorisation },
@@ -1393,6 +1419,7 @@ pub fn repondre<'o>(
         Besoin::RevoquerAppareil { .. }
         | Besoin::ModifierMachine { .. }
         | Besoin::PoserJetonDePoussee { .. }
+        | Besoin::PoserDescription { .. }
         | Besoin::RevoquerCleMachine { .. }
         | Besoin::RevoquerAutorisation { .. }
         | Besoin::PoserAlias { .. }
@@ -4225,6 +4252,74 @@ mod creations {
             &br#"{"plateforme":"apns"}"#[..],
             &br#"{"plateforme":"windows","jeton":"x"}"#[..],
             &br#"{"plateforme":"apns","jeton":""}"#[..],
+        ] {
+            assert_eq!(
+                besoin(
+                    &session_d_appareil(),
+                    &tete(b"PUT", cible.as_bytes()),
+                    corps
+                ),
+                Besoin::Deja(StatusCode::BAD_REQUEST),
+                "{corps:?}"
+            );
+        }
+    }
+
+    // ── La description d'un appareil ────────────────────────────────────────
+
+    #[test]
+    fn les_deux_bornes_du_modele_sont_le_meme_nombre() {
+        // Le modèle suit les règles du nom d'une machine, borne comprise : la
+        // même égalité que `NOM_MACHINE_MAX` tient avec le rangement.
+        assert_eq!(
+            asl_api::corps::NOM_MACHINE_MAX,
+            asl_registre::NOM_OCTETS_MAX
+        );
+    }
+
+    #[test]
+    fn une_description_se_lit_et_rend_204() {
+        let appareil = un(Genre::Appareil, 5);
+        let cible = alloc::format!("/v1/appareils/{}/description", appareil.texte());
+        let quoi = besoin(
+            &session_d_appareil(),
+            &tete(b"PUT", cible.as_bytes()),
+            br#"{"plateforme":"macos","modele":"MacBook Pro (2019)"}"#,
+        );
+        assert_eq!(
+            quoi,
+            Besoin::PoserDescription {
+                appareil,
+                systeme: asl_api::corps::Systeme::Macos,
+                modele: "MacBook Pro (2019)",
+            }
+        );
+
+        let mut session = session_d_appareil();
+        assert_eq!(
+            rendre(&mut session, &quoi, &Trouvaille::Fait).0,
+            StatusCode::NO_CONTENT
+        );
+        // **DÉCRIRE L'APPAREIL D'UN AUTRE REND LE MÊME `404`** qu'un appareil
+        // qui n'existe pas — la même règle que le jeton.
+        assert_eq!(
+            rendre(&mut session, &quoi, &Trouvaille::Rien).0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn une_description_mal_formee_est_refusee() {
+        let appareil = un(Genre::Appareil, 5);
+        let cible = alloc::format!("/v1/appareils/{}/description", appareil.texte());
+        for corps in [
+            &b"{}"[..],
+            &br#"{"plateforme":"ios"}"#[..],
+            &br#"{"plateforme":"windows","modele":"x"}"#[..],
+            &br#"{"plateforme":"ios","modele":""}"#[..],
+            // **UN NOM N'EST PAS UN CHAMP** : c'est ce que C13 refuse, et le
+            // verbe ne le connaît pas.
+            &br#"{"plateforme":"ios","modele":"iPhone 17","nom":"iPhone de Thierry"}"#[..],
         ] {
             assert_eq!(
                 besoin(

@@ -113,8 +113,30 @@ jamais l'utilisateur : il n'y a pas de mot de passe dans ce produit.
 | `clé publique` | La partie publique d'une clé qui vit dans le matériel sécurisé du téléphone et ne peut être employée qu'après une confirmation biométrique. **P-256** — la Secure Enclave et StrongBox ne font que cette courbe (`protocole.md` §2.1). |
 | `attestation` | Sous quoi l'appareil est entré : aucune, Apple, ou Google. **Une valeur, pas une absence** : un annuaire en posture facultative laisse entrer des appareils sans preuve, et il faut pouvoir dire lesquels — c'est ce qu'on regarde le jour où l'on resserre, pour savoir qui prévenir. |
 | `jeton de poussée` | APNs ou FCM, pour les notifications (§2.6). Lié à l'appareil, révoqué avec lui. |
+| `plateforme` | `ios`, `android` ou `macos` — ce que l'appareil fait tourner. **Déclaré par l'appareil lui-même**, absent tant qu'il ne l'a pas fait. |
+| `modele` | « iPhone 17 », « MacBook Pro (2019) » — le nom de son **modèle**, libre, 1 à 64 octets, aux règles du nom de machine (§2.3). Déclaré avec la plate-forme, absent avec elle. |
 | `enrôlé le` | Date. |
 | `révoqué le` | Date, ou vide. |
+
+**La plate-forme et le modèle sont une étiquette que l'appareil se pose
+lui-même, pas une preuve.** L'annuaire ne vérifie rien de ce qu'elle dit — un
+appareil pirate peut se dire « iPhone 17 ». Ce qui identifie un appareil est
+son identifiant `a-…`, et c'est lui que les applications affichent à côté ;
+l'étiquette sert à ce que l'écran Compte — celui qu'on regarde pour vérifier
+qu'aucun appareil de trop n'est entré — montre « MacBook Pro » et non
+« Autre », de quoi reconnaître les siens, jamais de quoi les prouver. Elle
+reste sur un appareil révoqué, pour la même raison qu'il reste marqué :
+« iPhone 17, révoqué » dit ce qu'on a retiré.
+
+**C'est le MODÈLE, et jamais le nom que l'utilisateur a donné à son
+téléphone.** « iPhone de Thierry » porte un prénom — précisément ce que C13
+refuse — et l'application ne l'envoie pas ; « iPhone 17 » ne nomme personne. Le
+précédent est la machine, qui a déjà un nom « pour l'humain » (§2.3) : ce que
+le produit a décidé est qu'une étiquette d'affichage n'est pas une donnée
+personnelle, et ce qui reste à décider, appareil par appareil, est ce qu'on
+met dedans. **Un nom libre saisi par l'utilisateur et rangé sur l'annuaire est
+exactement la « commodité » par laquelle C13 dit qu'elle tombera** ; s'il en
+faut un, il vit dans le carnet local de l'application, et n'en sort pas.
 
 **Un compte à un seul appareil est un compte qu'un téléphone perdu ferme
 définitivement.** L'application le dit à l'enrôlement et pousse à en enrôler un

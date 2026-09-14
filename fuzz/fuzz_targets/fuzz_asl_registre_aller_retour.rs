@@ -45,9 +45,9 @@ use libfuzzer_sys::fuzz_target;
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
     ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
-    Autorisation, COMPTE_OCTETS, Compte, ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement,
-    EntreeJournal, Faute, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, Portee, Provenance,
-    SERVICE_OCTETS, Service, Verdict,
+    Autorisation, COMPTE_OCTETS, Compte, DESCRIPTION_OCTETS, Description, ENROLEMENT_OCTETS,
+    ENTREE_OCTETS, Enrolement, EntreeJournal, Faute, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX,
+    NomRange, Portee, Provenance, SERVICE_OCTETS, Service, Systeme, Verdict,
 };
 
 /// Ce qu'on soumet.
@@ -77,6 +77,8 @@ struct Entree {
     appareil: [u8; APPAREIL_OCTETS],
     /// Les octets d'un enrôlement.
     enrolement: [u8; ENROLEMENT_OCTETS],
+    /// Les octets d'une description d'appareil.
+    description: [u8; DESCRIPTION_OCTETS],
     /// Le verdict, choisi parmi trois.
     verdict: u8,
     /// L'instant.
@@ -132,6 +134,19 @@ fuzz_target!(|entree: Entree| {
                 "un enrôlement relu ne se réécrit pas octet pour octet"
             );
             assert_eq!(Enrolement::lire(&refait), Ok(enrolement));
+        }
+        Err(faute) => nommee(faute),
+    }
+
+    match Description::lire(&entree.description) {
+        Ok(description) => {
+            let mut refait = [0_u8; DESCRIPTION_OCTETS];
+            description.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.description,
+                "une description relue ne se réécrit pas octet pour octet"
+            );
+            assert_eq!(Description::lire(&refait), Ok(description));
         }
         Err(faute) => nommee(faute),
     }
@@ -328,4 +343,23 @@ fuzz_target!(|entree: Entree| {
     let mut octets = [0_u8; ENROLEMENT_OCTETS];
     enrolement.ecrire(&mut octets);
     assert_eq!(Enrolement::lire(&octets), Ok(enrolement));
+
+    // ── LA DESCRIPTION D'UN APPAREIL ────────────────────────────────────────
+    //
+    // Le modèle est du texte libre aux règles du nom de machine : ce qui est
+    // éprouvé ici est son RANGEMENT, le refus se prend dans `asl-api`.
+    if let Ok(modele) = NomRange::nouveau(&entree.nom_de_machine) {
+        let description = Description {
+            provenance,
+            systeme: match entree.graine % 3 {
+                0 => Systeme::Ios,
+                1 => Systeme::Android,
+                _ => Systeme::Macos,
+            },
+            modele,
+        };
+        let mut octets = [0_u8; DESCRIPTION_OCTETS];
+        description.ecrire(&mut octets);
+        assert_eq!(Description::lire(&octets), Ok(description));
+    }
 });

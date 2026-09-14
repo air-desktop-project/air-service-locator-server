@@ -1159,9 +1159,176 @@ fn un_depot_ne_tient_pas_dans_un_tampon_trop_court() {
     assert!(lu.encoder(&mut tampon).is_err());
 }
 
+// ── Décrire son appareil ────────────────────────────────────────────────────
+
+#[test]
+fn une_description_se_lit_et_se_reecrit_a_l_identique() {
+    for octets in [
+        &br#"{"plateforme":"ios","modele":"iPhone 17"}"#[..],
+        &br#"{"plateforme":"android","modele":"Pixel 9"}"#[..],
+        &br#"{"plateforme":"macos","modele":"MacBook Pro (2019)"}"#[..],
+        // **DU TEXTE LIBRE**, comme le nom d'une machine.
+        "{\"plateforme\":\"macos\",\"modele\":\"Mac « du grenier » 🖥\"}".as_bytes(),
+    ] {
+        let lu = DescriptionAppareil::decoder(octets).expect("elle se lit");
+        let mut tampon = [0_u8; 128];
+        let ecrit = lu.encoder(&mut tampon).expect("elle se réécrit");
+        assert_eq!(
+            &tampon[..ecrit],
+            octets,
+            "{}",
+            String::from_utf8_lossy(octets)
+        );
+    }
+}
+
+#[test]
+fn l_ordre_des_champs_d_une_description_ne_compte_pas() {
+    let lu = DescriptionAppareil::decoder(br#"{"modele":"Pixel 9","plateforme":"android"}"#)
+        .expect("elle se lit");
+    assert_eq!(lu.systeme, Systeme::Android);
+    assert_eq!(lu.modele, "Pixel 9");
+}
+
+#[test]
+fn les_trois_systemes_et_eux_seuls() {
+    // **LA LISTE EST FERMÉE** : les trois applications du produit.
+    assert_eq!(Systeme::depuis_le_mot("ios"), Some(Systeme::Ios));
+    assert_eq!(Systeme::depuis_le_mot("android"), Some(Systeme::Android));
+    assert_eq!(Systeme::depuis_le_mot("macos"), Some(Systeme::Macos));
+    for mot in ["iOS", "windows", "", "ios ", "apns"] {
+        assert_eq!(Systeme::depuis_le_mot(mot), None, "{mot}");
+    }
+    for systeme in [Systeme::Ios, Systeme::Android, Systeme::Macos] {
+        assert_eq!(Systeme::depuis_le_mot(systeme.mot()), Some(systeme));
+    }
+    assert!(matches!(
+        DescriptionAppareil::decoder(br#"{"plateforme":"windows","modele":"x"}"#),
+        Err(Erreur::JsonAttendu {
+            attendu: "ios, android ou macos",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn un_modele_vide_ou_trop_long_est_refuse() {
+    assert_eq!(
+        DescriptionAppareil::decoder(br#"{"plateforme":"ios","modele":""}"#).map(|_| ()),
+        Err(Erreur::NomVide)
+    );
+
+    let juste = "m".repeat(NOM_MACHINE_MAX);
+    let corps = format!(r#"{{"plateforme":"ios","modele":"{juste}"}}"#);
+    assert!(
+        DescriptionAppareil::decoder(corps.as_bytes()).is_ok(),
+        "la borne passe"
+    );
+
+    let trop = "m".repeat(NOM_MACHINE_MAX + 1);
+    let corps = format!(r#"{{"plateforme":"ios","modele":"{trop}"}}"#);
+    assert_eq!(
+        DescriptionAppareil::decoder(corps.as_bytes()).map(|_| ()),
+        Err(Erreur::NomTropLong {
+            obtenue: NOM_MACHINE_MAX + 1
+        })
+    );
+
+    // **EN OCTETS**, comme le nom d'une machine : un modèle en idéogrammes y
+    // tient trois fois moins de caractères.
+    let ideogrammes = "機".repeat(NOM_MACHINE_MAX / 3 + 1);
+    let corps = format!(r#"{{"plateforme":"ios","modele":"{ideogrammes}"}}"#);
+    assert!(matches!(
+        DescriptionAppareil::decoder(corps.as_bytes()),
+        Err(Erreur::NomTropLong { .. })
+    ));
+}
+
+#[test]
+fn un_modele_refuse_ce_qu_un_nom_de_machine_refuse() {
+    // Les mêmes règles, tenues par le même lecteur : un échappement, un
+    // contrôle, un forceur de sens d'écriture.
+    for corps in [
+        &br#"{"plateforme":"ios","modele":"a\"b"}"#[..],
+        &br#"{"plateforme":"ios","modele":"a\\b"}"#[..],
+        &b"{\"plateforme\":\"ios\",\"modele\":\"a\tb\"}"[..],
+        "{\"plateforme\":\"ios\",\"modele\":\"a\u{202E}b\"}".as_bytes(),
+    ] {
+        assert!(
+            DescriptionAppareil::decoder(corps).is_err(),
+            "{:?} devrait être refusé",
+            String::from_utf8_lossy(corps)
+        );
+    }
+}
+
+#[test]
+fn une_description_incomplete_inconnue_ou_double_est_refusee() {
+    assert_eq!(
+        DescriptionAppareil::decoder(br#"{"modele":"iPhone 17"}"#).map(|_| ()),
+        Err(Erreur::ChampManquant { nom: "plateforme" })
+    );
+    assert_eq!(
+        DescriptionAppareil::decoder(br#"{"plateforme":"ios"}"#).map(|_| ()),
+        Err(Erreur::ChampManquant { nom: "modele" })
+    );
+    assert!(matches!(
+        DescriptionAppareil::decoder(br#"{"plateforme":"ios","nom":"iPhone de Thierry"}"#),
+        Err(Erreur::ChampInconnu { .. })
+    ));
+    assert!(matches!(
+        DescriptionAppareil::decoder(br#"{"plateforme":"ios","plateforme":"macos","modele":"x"}"#),
+        Err(Erreur::ChampEnDouble { .. })
+    ));
+    assert!(matches!(
+        DescriptionAppareil::decoder(br#"{"modele":"x","modele":"y","plateforme":"ios"}"#),
+        Err(Erreur::ChampEnDouble { .. })
+    ));
+}
+
+#[test]
+fn une_description_mal_cadree_est_refusee() {
+    for octets in [
+        &b""[..],
+        &b"["[..],
+        &br#"{}"#[..],
+        &br#"{"plateforme" "ios","modele":"x"}"#[..],
+        &br#"{"plateforme":"ios" "modele":"x"}"#[..],
+        &br#"{"plateforme":"ios","modele":"x""#[..],
+        &br#"{"plateforme":"ios","modele":"x"}y"#[..],
+        &br#"{"plateforme":"ios","modele":17}"#[..],
+        &br#"{"plateforme":1,"modele":"x"}"#[..],
+        &br#"{"plateforme":"ios",}"#[..],
+    ] {
+        assert!(
+            DescriptionAppareil::decoder(octets).is_err(),
+            "{:?} devrait être refusé",
+            String::from_utf8_lossy(octets)
+        );
+    }
+
+    let trop = vec![b'{'; CORPS_MAX + 1];
+    assert_eq!(
+        DescriptionAppareil::decoder(&trop).map(|_| ()),
+        Err(Erreur::MessageTropLong {
+            obtenue: CORPS_MAX + 1
+        })
+    );
+}
+
+#[test]
+fn une_description_ne_tient_pas_dans_un_tampon_trop_court() {
+    let lu = DescriptionAppareil::decoder(br#"{"plateforme":"ios","modele":"iPhone 17"}"#)
+        .expect("elle se lit");
+    let mut tampon = [0_u8; 8];
+    assert!(lu.encoder(&mut tampon).is_err());
+}
+
 // ── Ce qu'une liste de machines rend ────────────────────────────────────────
 
-use asl_api::corps::{AppareilRendu, MachineRendue, PlateformeAttestation};
+use asl_api::corps::{
+    AppareilRendu, DescriptionAppareil, MachineRendue, PlateformeAttestation, Systeme,
+};
 
 /// Encode une machine rendue, et rend les octets.
 fn encoder_machine(quoi: &MachineRendue) -> Vec<u8> {
@@ -1434,12 +1601,21 @@ fn encoder_appareil(quoi: &AppareilRendu) -> Vec<u8> {
     sortie
 }
 
-/// Un appareil rendu, reproductible.
-fn un_appareil_rendu(attestation: PlateformeAttestation, revoque: bool) -> AppareilRendu {
+/// Un appareil rendu, reproductible, qui ne s'est pas décrit.
+fn un_appareil_rendu(attestation: PlateformeAttestation, revoque: bool) -> AppareilRendu<'static> {
     AppareilRendu {
         appareil: Identifiant::depuis_entropie(Genre::Appareil, [0x55; 16]),
         attestation,
         revoque,
+        description: None,
+    }
+}
+
+/// Le même, qui s'est décrit.
+fn un_appareil_decrit(systeme: Systeme, modele: &str) -> AppareilRendu<'_> {
+    AppareilRendu {
+        description: Some(DescriptionAppareil { systeme, modele }),
+        ..un_appareil_rendu(PlateformeAttestation::Apple, false)
     }
 }
 
@@ -1627,6 +1803,114 @@ fn un_tampon_trop_petit_se_dit_pour_un_appareil_rendu() {
         un_appareil_rendu(PlateformeAttestation::Apple, false).encoder(&mut sortie),
         Err(Erreur::TamponTropPetit)
     );
+}
+
+#[test]
+fn un_appareil_decrit_rend_sa_plateforme_et_son_modele() {
+    // **ABSENTS TANT QU'ILS N'ONT PAS ÉTÉ POSÉS**, présents ensemble après.
+    let muet = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+    let texte = core::str::from_utf8(&muet).unwrap();
+    assert!(
+        !texte.contains("plateforme") && !texte.contains("modele"),
+        "{texte}"
+    );
+
+    for (systeme, modele) in [
+        (Systeme::Ios, "iPhone 17"),
+        (Systeme::Android, "Pixel 9"),
+        (Systeme::Macos, "MacBook Pro (2019)"),
+        // Le modèle est du texte libre : les accents et les émoji y passent.
+        (Systeme::Macos, "MacBook « été » 📱"),
+    ] {
+        let avant = un_appareil_decrit(systeme, modele);
+        let octets = encoder_appareil(&avant);
+        let texte = core::str::from_utf8(&octets).unwrap();
+        assert!(
+            texte.ends_with(&format!(
+                r#","plateforme":"{}","modele":"{modele}"}}"#,
+                systeme.mot()
+            )),
+            "{texte}"
+        );
+        let apres = AppareilRendu::decoder(&octets).expect("il se relit");
+        assert_eq!(apres, avant, "{systeme:?}");
+        assert_eq!(encoder_appareil(&apres), octets, "écriture non canonique");
+    }
+}
+
+#[test]
+fn une_description_rendue_va_par_deux() {
+    // Une plate-forme sans modèle, ou l'inverse, n'est pas « à moitié décrit » :
+    // c'est un objet qu'on ne saurait pas afficher.
+    let bon = encoder_appareil(&un_appareil_decrit(Systeme::Ios, "iPhone 17"));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    assert_eq!(
+        AppareilRendu::decoder(texte.replacen(r#","modele":"iPhone 17""#, "", 1).as_bytes()),
+        Err(Erreur::ChampManquant { nom: "modele" })
+    );
+    assert_eq!(
+        AppareilRendu::decoder(texte.replacen(r#","plateforme":"ios""#, "", 1).as_bytes()),
+        Err(Erreur::ChampManquant { nom: "plateforme" })
+    );
+    // Et chacun refuse le double.
+    for morceau in [r#""plateforme":"ios""#, r#""modele":"iPhone 17""#] {
+        let double = texte.replacen(morceau, &format!("{morceau},{morceau}"), 1);
+        assert!(
+            matches!(
+                AppareilRendu::decoder(double.as_bytes()),
+                Err(Erreur::ChampEnDouble { .. })
+            ),
+            "{double}"
+        );
+    }
+}
+
+#[test]
+fn une_description_rendue_refuse_ce_que_le_verbe_refuse() {
+    let bon = encoder_appareil(&un_appareil_decrit(Systeme::Ios, "iPhone 17"));
+    let texte = core::str::from_utf8(&bon).unwrap();
+    assert!(matches!(
+        AppareilRendu::decoder(
+            texte
+                .replacen(r#""plateforme":"ios""#, r#""plateforme":"windows""#, 1)
+                .as_bytes()
+        ),
+        Err(Erreur::JsonAttendu {
+            attendu: "ios, android ou macos",
+            ..
+        })
+    ));
+    assert_eq!(
+        AppareilRendu::decoder(
+            texte
+                .replacen(r#""modele":"iPhone 17""#, r#""modele":"""#, 1)
+                .as_bytes()
+        ),
+        Err(Erreur::NomVide)
+    );
+    let trop = "m".repeat(NOM_MACHINE_MAX + 1);
+    assert_eq!(
+        AppareilRendu::decoder(
+            texte
+                .replacen(
+                    r#""modele":"iPhone 17""#,
+                    &format!(r#""modele":"{trop}""#),
+                    1
+                )
+                .as_bytes()
+        ),
+        Err(Erreur::NomTropLong {
+            obtenue: NOM_MACHINE_MAX + 1
+        })
+    );
+    // Un modèle n'est pas un nombre, et une plate-forme non plus.
+    for (avant, apres) in [
+        (r#""modele":"iPhone 17""#, r#""modele":17"#),
+        (r#""plateforme":"ios""#, r#""plateforme":1"#),
+    ] {
+        let faux = texte.replacen(avant, apres, 1);
+        assert!(AppareilRendu::decoder(faux.as_bytes()).is_err(), "{faux}");
+    }
 }
 
 // ── Créer un compte, avec preuve et attestation ─────────────────────────────

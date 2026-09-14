@@ -583,9 +583,12 @@ l'empêcherait de comprendre.
 |---|---|
 | `POST /v1/comptes` | Crée le compte et enrôle le premier appareil. Rend `u-…`. |
 | `POST /v1/appareils` | Enrôle un appareil de plus. **Signé par un appareil déjà enrôlé.** |
+| `GET /v1/appareils` | Les appareils de MON compte, révoqués compris et marqués : l'écran « Compte ». Chacun rend `appareil`, `attestation`, `revoque`, et — s'il les a posés — `plateforme` et `modele`. |
 | `PUT /v1/appareils/{a}/poussee` | Dépose ou renouvelle le jeton APNs / FCM. **Pour soi seulement** ; voir ci-dessous. |
+| `PUT /v1/appareils/{a}/description` | Dit ce que cet appareil est : `{"plateforme": "macos", "modele": "MacBook Pro (2019)"}`, la plate-forme parmi `ios`, `android`, `macos`. **Pour soi seulement**, même règle que la poussée ; voir ci-dessous. |
 | `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. **Il est marqué, non effacé** : l'écran qu'on regarde après avoir perdu un téléphone doit montrer ce qu'on a retiré. |
 | `POST /v1/machines` | Déclare une machine, avec son **nom** et ses **capacités** (`annonce`, `lecture`). **Rend un code d'enrôlement** — dix symboles, à usage unique, valable dix minutes. La machine n'a **pas encore de clé**. |
+| `GET /v1/machines` | Les machines de MON compte : l'écran « Machines ». Chacune rend `machine`, `nom`, `capacites`, et `cle` (`enrolee` ou `attendue`). |
 | `PATCH /v1/machines/{m}` | Change le nom ou les capacités. **Ce qui est absent ne change pas** ; voir ci-dessous. |
 | `POST /v1/machines/{m}/enrolement` | Émet un nouveau code, pour ré-enrôler une machine dont la clé a été révoquée ou perdue. **Le code précédent meurt à l'émission du suivant.** |
 | `DELETE /v1/machines/{m}/cle` | Révoque la clé. **Effet immédiat : connexions fermées, baux tombés** (voir ci-dessous). La machine reste — son nom, ses capacités, ses services ; elle perd le moyen de prouver qu'elle est elle. |
@@ -662,6 +665,43 @@ appareil qui n'en veut plus est un appareil qu'on révoque.
 **Et l'ENVOI n'est pas écrit.** Ce verbe range le jeton ; rien ne s'en sert
 encore. Le dire ici est plus honnête que de laisser croire qu'une notification
 part parce que l'application a réussi son dépôt.
+
+### Ce qu'une description d'appareil est, et ce qu'elle n'est pas
+
+```jsonc
+PUT /v1/appareils/{a}/description
+{"plateforme": "macos", "modele": "MacBook Pro (2019)"}
+```
+
+**Une étiquette que l'appareil se pose lui-même, pas une preuve.** L'annuaire
+ne vérifie rien de ce qu'elle dit ; ce qui identifie un appareil est son `a-…`
+(`modele.md` §2.2). Elle existe pour un écran : celui qu'on regarde pour
+vérifier qu'aucun appareil de trop n'est entré, et qui montrait le Mac comme
+« Autre » parce qu'il ne savait rien d'autre de lui que `attestation: "aucune"`.
+
+**Chaque appareil la pose juste après sa preuve**, et la repose quand elle
+change. `GET /v1/appareils` rend les deux champs tels quels, et les OMET tant
+qu'ils n'ont pas été posés — absents, jamais vides ni faux.
+
+**Pour soi seulement, exactement comme le jeton** : viser l'appareil d'un autre
+rend le `404` d'un appareil qui n'existe pas. La raison est moins grave —
+décrire l'appareil d'un autre ne détourne rien — mais une seule règle pour les
+deux verbes est plus simple à tenir qu'une exception, et c'est bien l'appareil
+qui parle de lui, sur sa propre connexion. **Un corps mal formé rend `400`**,
+et le corps ne connaît que ces deux champs : un `nom` est un champ inconnu.
+
+**`plateforme` est une liste fermée** — `ios`, `android`, `macos`, les trois
+applications de ce produit. **`modele` est du texte libre**, aux règles exactes
+du nom d'une machine (`modele.md` §2.3) : 1 à 64 octets, tout l'UTF-8, sans
+échappement, sans contrôle, sans forceur de sens d'écriture. C'est le nom du
+MODÈLE — « iPhone 17 » —, et jamais le nom que l'utilisateur a donné à son
+téléphone : « iPhone de Thierry » porte un prénom, et l'application ne l'envoie
+pas.
+
+**Elle reste quand l'appareil est révoqué**, à l'inverse du jeton : l'écran
+d'après une perte doit montrer ce qu'on a retiré, et « iPhone 17, révoqué » le
+dit mieux que « Autre, révoqué ». Elle ne donne aucun droit, donc rien ne presse
+de l'effacer.
 
 ### Ce qu'un `PATCH` change, et ce qu'il ferme
 
