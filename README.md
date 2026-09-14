@@ -162,8 +162,22 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.2.0_amd64.deb
+sudo dpkg -i asl-server_0.2.2_amd64.deb
 ```
+
+**`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
+Linux est la cible déployée, et **macOS se construit et tourne** — le binaire
+écoute en double pile et le client `asl` le joint en IPv4 et en IPv6. Le système
+ne se voit qu'à deux endroits, `crates/asl-server/src/entropie.rs` (le CSPRNG du
+noyau : `getrandom` sur Linux, `getentropy` sur les BSD) et
+`crates/asl-server/src/socket.rs` (les drapeaux de la socket, `sin6_len`), sous
+`cfg(target_os)`. **C'est le job `macOS` de la CI, et non ces `cfg`, qui fait
+que cela reste vrai** — il construit le workspace et lance les essais du
+binaire hors harnais QUIC, dont `ams-quic-client` ne finit pas ses flux sur
+macOS (le vrai client, lui, passe). **Windows reste à faire** : l'entropie
+(`BCryptGenRandom`) et la socket y sont à écrire, et rien ne l'atteste encore.
+Les étages 1 et 2 ne touchent ni fichier, ni socket, ni horloge : ils sont
+portables par construction.
 
 **Le paquet n'active ni ne démarre le service**, et il lui manque exprès deux
 choses qu'un paquet ne peut pas décider :
