@@ -117,7 +117,13 @@ n'a rien examiné est un mensonge poli.
 ```sh
 scripts/check-tout.sh     # tout : étages, pile, sans-C, clippy, essais, fuzz, couverture, format
 scripts/check-dco.sh      # après avoir committé : DCO et paternité
+scripts/check-version.sh  # après avoir committé : la version a changé, et toutes les crates la partagent
 ```
+
+**Chaque PR change la version** (`CLAUDE.md`), et `check-version` la tient : une
+PR dont `[workspace.package] version` est celle de `main` ne se merge pas.
+`asl-server --version` dit la version et le commit du binaire ;
+`GET /v1/version` la rend à qui interroge l'annuaire.
 
 L'ordre n'est pas arbitraire, et le formatage est en dernier : une faute de forme
 ne doit pas cacher une faute de fond.
@@ -155,8 +161,8 @@ ferme.
 La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
-scripts/paquet.sh                    # asl-server_0.1.0_amd64.deb
-sudo dpkg -i asl-server_0.1.0_amd64.deb
+scripts/paquet.sh                    # asl-server_<version>_amd64.deb
+sudo dpkg -i asl-server_0.2.0_amd64.deb
 ```
 
 **Le paquet n'active ni ne démarre le service**, et il lui manque exprès deux

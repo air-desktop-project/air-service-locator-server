@@ -64,6 +64,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Defi => "/v1/defi".to_owned(),
         Ressource::Poussees => "/v1/poussees".to_owned(),
         Ressource::Vu => "/v1/vu".to_owned(),
+        Ressource::Version => "/v1/version".to_owned(),
         Ressource::Comptes => "/v1/comptes".to_owned(),
         Ressource::Enrolement => "/v1/enrolement".to_owned(),
         Ressource::Utilisateur { compte } => format!("/v1/utilisateurs/{compte}"),
@@ -166,7 +167,7 @@ fuzz_target!(|entree: Entree| {
 
     // ── LA LISTE CLOSE DE CE QUI N'EXIGE RIEN ───────────────────────────────
     //
-    // Six ressources, et chacune a sa raison écrite sur `Ressource::exigence`.
+    // Sept ressources, et chacune a sa raison écrite sur `Ressource::exigence`.
     // **CETTE ASSERTION A DÉJÀ SERVI** : elle a arrêté `/v1/enrolement` le jour
     // de son ajout. Le verbe était légitime et sa liberté délibérée — mais
     // c'est précisément le point : une ressource ne devient publique que si
@@ -177,6 +178,7 @@ fuzz_target!(|entree: Entree| {
                 ressource,
                 Ressource::Defi
                     | Ressource::Vu
+                    | Ressource::Version
                     | Ressource::Comptes
                     | Ressource::Enrolement
                     | Ressource::AliasResolu { .. }

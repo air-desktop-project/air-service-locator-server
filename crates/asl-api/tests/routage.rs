@@ -226,6 +226,9 @@ fn trois_ressources_seulement_n_exigent_rien() {
         // cas le plus utile : la machine qu'on installe, qui veut savoir si elle
         // atteint l'annuaire avant même d'avoir un code d'enrôlement.
         "/v1/vu".to_owned(),
+        // **`/v1/version` NON PLUS** : ceux qui ont besoin de la lire n'ont pas
+        // encore de clé, et un numéro de version de logiciel libre est public.
+        "/v1/version".to_owned(),
         format!("/v1/utilisateurs/{u}"),
     ] {
         assert_eq!(
@@ -684,5 +687,21 @@ fn la_poussee_et_la_description_ne_servent_que_put_et_exigent_un_appareil() {
             assert_eq!(resolu.sert, sert, "{cible} {methode:?}");
             assert_eq!(resolu.exigence, Exigence::Appareil, "{cible}");
         }
+    }
+}
+
+// ── La version ──────────────────────────────────────────────────────────────
+
+#[test]
+fn la_version_se_lit_et_ne_se_lit_que_par_get() {
+    let resolu = resoudre(Methode::Get, b"/v1/version").expect("elle se route");
+    assert_eq!(resolu.ressource, Ressource::Version);
+    assert!(resolu.sert);
+    assert_eq!(resolu.exigence, Exigence::Aucune);
+    for methode in [Methode::Post, Methode::Put, Methode::Patch, Methode::Delete] {
+        assert!(
+            !resoudre(methode, b"/v1/version").unwrap().sert,
+            "{methode:?}"
+        );
     }
 }

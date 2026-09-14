@@ -597,6 +597,7 @@ l'empêcherait de comprendre.
 | `GET /v1/alias/{alias}` | Rend l'identifiant, **et rien d'autre**. Public — c'est l'emploi de l'alias, et son coût (`modele.md` §2.1). |
 | `GET /v1/machines/{m}/services` | Les services, leurs candidats, leur état et la date de la dernière sonde. |
 | `GET /v1/vu` | **D'où l'annuaire voit cette connexion**, sans rien annoncer ni prouver. Voir ci-dessous. |
+| `GET /v1/version` | **La version de l'annuaire qui répond**, `{"version": "0.2.0"}`, sans rien prouver. Voir ci-dessous. |
 | `GET /v1/utilisateurs/{u}` | **Confirme qu'un identifiant existe**, et rien d'autre : ni nom, ni machines, ni services. Sert à ce qu'une faute de frappe ne produise pas une autorisation muette. |
 | `POST /v1/autorisations` | Accorde. Bénéficiaire `u-…`, portée, étiquette. Déclenche la notification. |
 | `GET /v1/autorisations` | Les deux sens : ce que j'ai accordé, ce qu'on m'a accordé. |
@@ -610,7 +611,7 @@ l'empêcherait de comprendre.
 {"adresse": "2001:db8::1c2d", "port": 49152, "famille": 6}
 ```
 
-**Elle n'exige rien**, et c'est la cinquième et dernière ressource dans ce cas.
+**Elle n'exige rien**, et c'est la cinquième ressource dans ce cas (la sixième est `GET /v1/version`).
 Elle ne parle QUE de la connexion qui la pose : rien d'un compte, d'une machine
 ou d'un service, et rien qu'un serveur STUN public ne rendrait. Il n'y a pas
 d'amplification à craindre — la poignée de main QUIC a déjà prouvé un aller-retour
@@ -634,6 +635,29 @@ quelqu'un rencontre `::ffff:203.0.113.7`.
 **Elle ne dit rien du NAT.** Le verdict de NAT se tranche en comparant cette
 adresse à celles qu'un daemon ANNONCE, et un appelant qui n'a rien annoncé n'a
 rien à comparer. Répondre ici serait affirmer ce qui n'a pas été mesuré.
+
+### `GET /v1/version` — quelle version de l'annuaire répond
+
+```jsonc
+{"version": "0.2.0"}
+```
+
+**Elle n'exige rien, et c'est la sixième ressource dans ce cas.** Ceux qui ont
+besoin de la lire sont précisément ceux qui n'ont pas encore de clé :
+l'application qui va créer un compte et veut savoir si l'annuaire sert les
+verbes qu'elle emploie, la machine qu'on installe, l'exploitant qui vérifie
+qu'un banc sert bien ce qu'il croit. Et elle ne révèle rien qui ne soit déjà
+public : ce logiciel est libre, et **chaque PR change sa version**
+(`CLAUDE.md`), donc ce nombre nomme exactement un état du dépôt.
+
+**La version, et rien d'autre.** Ni commit, ni posture d'attestation, ni
+réglage : ce qu'un annuaire sait de lui-même au-delà de ce nombre est l'affaire
+de son exploitant, qui le lit sur la machine avec `asl-server --version`.
+
+**Ce qu'elle promet aux applications : un point de comparaison, pas une
+négociation.** Une application qui lit `0.1.0` là où elle attend le verbe de
+description (`0.2.0`) peut le dire à son utilisateur plutôt que de journaliser
+un `404` ; elle ne demande pas à l'annuaire de parler autrement.
 
 ### Ce qu'un jeton de poussée exige, et ce qu'il ne promet pas
 

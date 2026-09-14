@@ -159,6 +159,10 @@ impl Service<'_> {
             // Le fait demandé n'est ni dans l'entrepôt ni dans la requête : il
             // est dans la socket, et seul cet étage la tient.
             Besoin::OuSuisJeVu => Trouvaille::VuDepuis(self.vu_depuis),
+            // **LA VERSION DU WORKSPACE, EN LOCKSTEP** : toutes les crates la
+            // partagent (`Cargo.toml`), donc celle-ci est celle du binaire, et
+            // `scripts/check-version.sh` tient l'égalité.
+            Besoin::Version => Trouvaille::Version(env!("CARGO_PKG_VERSION")),
 
             Besoin::Annoncer => self
                 .annoncer()

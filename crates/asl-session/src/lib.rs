@@ -364,6 +364,12 @@ pub enum Besoin<'a> {
     /// **AUCUN ARGUMENT** : le fait demandé est celui de la connexion elle-même,
     /// et le nommer laisserait croire qu'on peut demander celui d'un autre.
     OuSuisJeVu,
+    /// Savoir quelle version de l'annuaire répond.
+    ///
+    /// **AUCUNE PREUVE**, comme [`Besoin::OuSuisJeVu`], et pour une raison
+    /// voisine : ceux qui ont besoin de la lire n'ont pas encore de clé. La
+    /// version est un fait du binaire, que l'étage 3 rapporte.
+    Version,
     /// Déposer ou renouveler le jeton de poussée d'un appareil.
     ///
     /// # UN APPAREIL NE DÉPOSE QUE POUR LUI-MÊME
@@ -506,6 +512,9 @@ pub enum Trouvaille {
     /// **C'EST LE SEUL FAIT QUE L'ANNUAIRE CONSTATE PLUTÔT QU'IL N'ENTENDE**, et
     /// il ne peut venir que de l'étage 3 : c'est lui qui tient la socket.
     VuDepuis(asl_proto::VuDepuis),
+    /// La version de l'annuaire qui répond — celle du binaire, que seul
+    /// l'étage 3 connaît. Du texte semver, `0.2.0`, sans rien à échapper.
+    Version(&'static str),
     /// De quoi décider d'une résolution.
     Resolution(Resolution),
     /// De quoi décider d'une LISTE de résolutions.
@@ -849,6 +858,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         },
         Ressource::Poussees => Besoin::EcouterLesPoussees,
         Ressource::Vu => Besoin::OuSuisJeVu,
+        Ressource::Version => Besoin::Version,
         Ressource::OuParNom { service } => Besoin::OuParNom {
             service: service.as_str(),
         },
@@ -1445,6 +1455,24 @@ pub fn repondre<'o>(
             ),
         },
 
+        // **LA MÊME TABLE DE STATUTS QUE `/v1/vu`**, et pour la même raison :
+        // cette ressource n'exige aucune preuve, donc `Rien` rend `404` et non
+        // `500` — un `500` qu'un inconnu peut fabriquer n'en est plus un.
+        Besoin::Version => match trouvaille {
+            Trouvaille::Version(version) => rendre_la_version(version, sortie),
+            Trouvaille::Rien => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+            _ => composer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::INTERNAL_SERVER_ERROR),
+                sortie,
+            ),
+        },
         Besoin::OuSuisJeVu => match trouvaille {
             Trouvaille::VuDepuis(vu) => rendre_ou_l_on_est_vu(*vu, sortie),
             // **`Rien` REND `404`, ET NON `500`**, comme partout ailleurs dans
@@ -1520,6 +1548,21 @@ fn rendre_ou_l_on_est_vu(vu: asl_proto::VuDepuis, sortie: &mut [u8]) -> Reponse<
     corps.pousser(br#","famille":"#);
     corps.pousser_un_nombre(if vu.est_ipv6() { 6 } else { 4 });
     corps.pousser(b"}");
+    composer(StatusCode::OK, JSON_MEDIA, corps.rendu(), sortie)
+}
+
+/// Rend `{"version":"0.2.0"}`.
+///
+/// **SANS ÉCHAPPEMENT, ET C'EST SÛR** : la version vient de `CARGO_PKG_VERSION`
+/// du binaire — des chiffres, des points, au plus un tiret et des lettres —,
+/// jamais du réseau. Elle est bornée par [`VU_CORPS_MAX`], qui a de la marge :
+/// une version qui ne tiendrait pas dans quatre-vingts octets serait une faute de
+/// manifeste, et `Corps` la tronquerait plutôt que de déborder.
+fn rendre_la_version<'a>(version: &str, sortie: &'a mut [u8]) -> Reponse<'a> {
+    let mut corps = Corps::<VU_CORPS_MAX>::neuf();
+    corps.pousser(br#"{"version":""#);
+    corps.pousser(version.as_bytes());
+    corps.pousser(br#""}"#);
     composer(StatusCode::OK, JSON_MEDIA, corps.rendu(), sortie)
 }
 
@@ -4135,6 +4178,36 @@ mod creations {
         assert_eq!(
             besoin(&session_d_appareil(), &tete(b"POST", b"/v1/machines"), b"{"),
             Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    // ── La version ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn la_version_ne_demande_aucune_preuve_et_se_rend_telle_quelle() {
+        assert_eq!(
+            besoin(&Session::new(liaison()), &tete(b"GET", b"/v1/version"), b""),
+            Besoin::Version
+        );
+        let mut session = Session::new(liaison());
+        let (statut, rendu) = rendre(
+            &mut session,
+            &Besoin::Version,
+            &Trouvaille::Version("0.2.0-essai"),
+        );
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(&rendu[..], br#"{"version":"0.2.0-essai"}"#);
+
+        // **`Rien` REND `404`, ET NON `500`** : la ressource est publique, et
+        // un `500` qu'un inconnu peut fabriquer n'en est plus un.
+        assert_eq!(
+            rendre(&mut session, &Besoin::Version, &Trouvaille::Rien).0,
+            StatusCode::NOT_FOUND
+        );
+        // Une trouvaille d'un autre besoin ne peut venir que de l'étage 3.
+        assert_eq!(
+            rendre(&mut session, &Besoin::Version, &Trouvaille::Fait).0,
+            StatusCode::INTERNAL_SERVER_ERROR
         );
     }
 
