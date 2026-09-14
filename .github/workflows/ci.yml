@@ -111,6 +111,65 @@ jobs:
       - name: check-version
         run: ./scripts/check-version.sh "origin/${{ github.base_ref }}"
 
+  # ── macOS : le binaire s'y construit et y tourne ───────────────────────────
+  #
+  # `asl-server` a vocation à tourner sur Linux, macOS et Windows. Le port macOS
+  # tient en quelques `cfg(target_os)` dans `entropie.rs` et `socket.rs`, et
+  # **c'est ce job, pas les `cfg`, qui fait que cela reste vrai** : sans lui,
+  # le premier appel à la libc de Linux ajouté par habitude casserait le Mac en
+  # silence, et on ne l'apprendrait qu'à la prochaine construction sur place.
+  #
+  # Ce qu'il fait, et ce qu'il ne fait pas : il construit tout le workspace, il
+  # lance les essais unitaires du binaire et ceux de `tests/binaire.rs` qui ne
+  # tiennent pas au harnais QUIC. **Il SAUTE `le_binaire_sert_un_compte…`** :
+  # `ams-quic-client`, le harnais d'essai, ne finit pas ses flux sur macOS
+  # (aucun octet reçu en dix secondes) alors que le vrai client `asl` joint le
+  # même binaire en IPv4 et en IPv6 — c'est le harnais qui trébuche, pas le
+  # serveur, et un essai qu'on saute en le nommant vaut mieux qu'un essai qu'on
+  # laisse rouge. Le jour où le harnais passe, la ligne `--skip` s'enlève.
+  #
+  # Il lance aussi les deux scripts que macOS a déjà fait trébucher (`sed` des
+  # BSD, `bash` 3.2) : `check-toolchain` et `check-version`. Les autres
+  # barrières restent celles de Linux, où l'on déploie.
+  macos:
+    name: macOS — asl-server se construit et tourne
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Toolchain épinglée
+        run: |
+          rustup show active-toolchain
+          cargo --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-macos-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-macos-
+
+      - name: check-toolchain et check-version, sur les outils des BSD
+        run: |
+          ./scripts/check-toolchain.sh
+          ./scripts/check-version.sh
+
+      - name: cargo build
+        run: cargo build --workspace --locked
+
+      - name: essais du binaire, hors harnais QUIC
+        run: |
+          cargo test -p asl-server --locked --bins
+          cargo test -p asl-server --locked --test binaire -- --skip le_binaire_sert_un_compte
+
+      - name: asl-server --version
+        run: ./target/debug/asl-server --version
+
   # ── La vérification du code ────────────────────────────────────────────────
   verification:
     name: compile, clippy, tests, format
