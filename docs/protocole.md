@@ -344,6 +344,13 @@ ici.
 code consommé est SUPPRIMÉ, pas marqué. L'annuaire ne fait pas la différence, et
 n'a donc rien à en dire.
 
+**La réponse rend l'identifiant de la machine, ET celui de son propriétaire** :
+`{"machine": "m-…", "proprietaire": "u-…"}`. La machine ne connaissait ni l'un
+ni l'autre — le code désignait tout —, et elle doit pouvoir dire pour qui elle
+agit sans repasser par l'annuaire : l'utilitaire range les deux dans son fichier
+d'identité, et `asl identite` les rend hors ligne. Une machine enrôlée avant
+cette ligne les apprend par `GET /v1/moi` (§3).
+
 ### 2.1 Enrôler un appareil
 
 Il n'y a **pas de mot de passe** dans ce produit. Un compte est un jeu
@@ -599,6 +606,7 @@ l'empêcherait de comprendre.
 | `GET /v1/vu` | **D'où l'annuaire voit cette connexion**, sans rien annoncer ni prouver. Voir ci-dessous. |
 | `GET /v1/version` | **La version de l'annuaire qui répond**, `{"version": "0.2.0"}`, sans rien prouver. Voir ci-dessous. |
 | `GET /v1/utilisateurs/{u}` | **Confirme qu'un identifiant existe**, et rien d'autre : ni nom, ni machines, ni services. Sert à ce qu'une faute de frappe ne produise pas une autorisation muette. |
+| `GET /v1/utilisateurs/{u}/machines` | **Les machines de `u` que le demandeur a le droit de voir** — les siennes si `u` est lui, sinon celles que les autorisations de `u` envers lui couvrent (`modele.md` §2.5). Voir ci-dessous. Servi aussi sur la voie machine (§3). |
 | `POST /v1/autorisations` | Accorde. Bénéficiaire `u-…`, portée, étiquette. Déclenche la notification. |
 | `GET /v1/autorisations` | Les deux sens : ce que j'ai accordé, ce qu'on m'a accordé. |
 | `DELETE /v1/autorisations/{g}` | Révoque. Effet immédiat. |
@@ -775,10 +783,33 @@ l'annuaire qui a plus à dire que ce protocole ne sait exprimer, et la réponse 
 une **pagination à concevoir**, pas un réessai.
 
 **`GET /v1/machines/{m}/services` ne regarde aucune autorisation.** C'est l'écran
-qui montre MES machines ; le chemin inter-comptes est `GET /v1/ou`. Les confondre
-donnerait à une autorisation de lecture — accordée pour joindre un service — le
-droit d'énumérer le parc de celui qui l'a accordée. Ce n'est pas ce qu'il a
-accordé.
+qui montre MES machines ; les chemins inter-comptes sont `GET /v1/ou` pour les
+services et `GET /v1/utilisateurs/{u}/machines` pour les machines — chacun
+calculé depuis les arêtes du demandeur, jamais depuis ce qu'il désigne (C10).
+
+### Les machines d'un utilisateur — ce qu'une autorisation donne à voir
+
+```jsonc
+GET /v1/utilisateurs/{u}/machines
+[{"machine": "m-…", "nom": "grenier"}, {"machine": "m-…", "nom": "nas"}]
+```
+
+**Une autorisation de portée « tout le compte » donne la liste entière des
+machines de celui qui l'a accordée** — identifiant et nom, rien d'autre : ni
+capacités, ni clé, ni code, qui n'appartiennent qu'au propriétaire. Une portée
+« une machine » ne rend que celle-là ; « un service », celle qui le porte.
+`u` égal au demandeur rend ses propres machines, comme `GET /v1/machines` mais
+sous la même forme. **Sans aucune arête entre `u` et le demandeur, la liste est
+vide** — vide, pas `403` ni `404` : un tiers qui interroge un compte qui ne lui
+a rien accordé n'apprend rien, et n'apprend pas non plus qu'il n'a rien, après
+le même délai (C9). Il sait déjà que `u` existe, par le booléen ; il ne saura
+rien de plus.
+
+C'est une décision de produit qui tranche contre une prudence antérieure, et
+`modele.md` §2.5 en porte la raison : un `m-…` est public par construction,
+et un bénéficiaire à qui l'on a dit « tout » n'a pas à deviner. **Ce qu'elle
+coûte est dit à celui qui accorde**, au moment d'accorder : « tout le compte »
+livre aussi la liste de ses machines.
 
 **`GET /v1/autorisations` rend un seul tableau pour les deux sens**, et y laisse
 les révoquées, marquées. `par` et `a` disent de quel côté chacune est, et un
@@ -825,6 +856,25 @@ jeton.** La signature authentifie la machine, la machine désigne son
 propriétaire, et l'annuaire ne rend que ce que ce propriétaire a le droit de
 voir : ses propres services, et ceux qu'une autorisation lui a accordés
 (`modele.md` §2.5).
+
+```
+GET /v1/moi
+{"machine": "m-…", "proprietaire": "u-…"}
+```
+
+**Une machine peut demander qui elle est et à qui elle appartient**, sur sa
+connexion authentifiée, sans rien d'autre. Les deux identifiants sont publics ;
+ce que la réponse prouve est que l'annuaire tient bien cette clé pour cette
+machine de ce compte. C'est ce qu'`asl diagnostic` affiche, et ce qui remplit
+le fichier d'identité d'une machine enrôlée avant que l'enrôlement ne rende le
+propriétaire (§2.0).
+
+**La voie machine sert aussi `GET /v1/ou?service=` — toutes les instances d'un
+nom que le propriétaire a le droit de voir — et `GET /v1/utilisateurs/{u}/machines`**
+(§2.2), avec la même règle : calculé depuis les arêtes du propriétaire de la
+machine qui demande. C'est ce qui permet à un programme de B de partir d'un
+`u-…` que A lui a donné et d'arriver à un port, sans qu'un humain ait à
+recopier des `m-…`.
 
 **L'authentification est portée par la CONNEXION, pas par la requête**, et c'est
 un effet direct du transport tenu : la clé est prouvée une fois à
@@ -881,6 +931,10 @@ se tromperait de coupable.
 - Un identifiant porte **128 bits** : il ne se devine pas.
 - **L'alias est la seule surface énumérable**, et il ne rend qu'un identifiant —
   jamais une machine, jamais un service, jamais un état (`modele.md` §2.1).
+- **Le parc d'un compte ne se liste que sur autorisation de ce compte** :
+  `GET /v1/utilisateurs/{u}/machines` rend ce qu'une arête accorde, et une liste
+  vide à qui n'en a aucune (§2.2). Ce n'est pas une énumération : c'est ce que
+  « tout mon compte » veut dire quand on l'accorde.
 - **Un service hors de la portée du demandeur et un service inexistant rendent
   la même réponse, après le même délai** (contrainte C9). Sans cela, l'écart de
   temps dit à B que la machine d'A existe alors qu'il n'y a pas droit — et c'est

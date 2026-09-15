@@ -174,7 +174,7 @@ compte. Elle le prouve avec un secret, comme celle qui annonce.
 |---|---|
 | `identifiant` | `m-` + 26 caractères. **Public.** |
 | `nom` | Libre, 1 à 64 **octets**. Pour l'humain, jamais pour la machine. |
-| `propriétaire` | Un utilisateur. |
+| `propriétaire` | Un utilisateur. **La machine le sait** : l'annuaire le lui rend à l'enrôlement et sur demande (`protocole.md` §2.0, §3), parce qu'une machine qui agit au nom d'un compte doit pouvoir dire lequel — à son exploitant comme à ses journaux. Identifiant public, comme le sien. |
 | `capacités` | `annonce`, `lecture`, ou les deux. Choisies à la déclaration, modifiables. |
 | `clé publique` | Ed25519, **ou rien**. Une machine déclarée n'en a pas encore : elle arrive à l'enrôlement, et la partie privée est générée SUR la machine et n'en sort jamais. |
 
@@ -369,11 +369,34 @@ Une arête, elle, **nomme le bénéficiaire**. On voit à qui on a donné, on re
 seule forme qui permette de répondre à « qui peut voir mes services ? », qui est
 la question qu'un utilisateur se pose vraiment.
 
+#### Une autorisation donne aussi à voir les MACHINES — c'est décidé
+
+**« Tout mon compte » veut dire tout : les services, et les machines qui les
+portent.** Un bénéficiaire d'une autorisation de portée « tout le compte »
+peut demander la **liste des machines** de celui qui l'a accordée — leurs
+identifiants `m-…` et leurs noms — et, de là, ce que chacune sert. Une portée
+plus étroite ne montre que ce qu'elle nomme : la machine, ou celle qui porte le
+service.
+
+C'est une décision, et elle tranche contre une prudence antérieure qui refusait
+toute énumération du parc, même autorisée. La raison de l'abandonner : un
+identifiant de machine est **public par construction** — c'est ce qu'on donne à
+un tiers pour qu'il joigne un service (`protocole.md` §3, `GET /v1/ou/{m}/{s}`)
+—, et un bénéficiaire à qui A a dit « tout mon compte » n'a pas à deviner les
+`m-…` d'A un par un, ni à connaître le nom de chaque service pour découvrir
+qu'il existe. Ce que C10 exige tient toujours : **rien ne se lit sans
+autorisation nominative**, et la liste se calcule depuis les arêtes du
+demandeur, jamais depuis l'identifiant qu'il désigne. Ce qui change est ce
+qu'une arête accorde — et c'est écrit ici, au moment où A accorde, pas
+découvert après.
+
 #### Ce que le bénéficiaire voit, et qu'il faut dire à celui qui accorde
 
 Accorder n'est pas neutre. B voit alors :
 
-- **les noms des machines** d'A qui portent les services concernés,
+- **les machines** d'A dans la portée — leurs identifiants et leurs noms ; avec
+  la portée « tout le compte », **toutes ses machines**, même celles qui ne
+  servent rien,
 - **les noms des services**,
 - **les adresses et ports** — donc des adresses IP réelles d'A,
 - **l'état et la date de dernière joignabilité**.
