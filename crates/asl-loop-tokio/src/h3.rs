@@ -197,7 +197,7 @@ impl Service<'_> {
                     .flatten()
                     .and_then(|m| m.cle)
                 {
-                    Some(octets) => match ClePublique::depuis_octets(octets) {
+                    Some(liee) => match ClePublique::depuis_octets(liee.cle) {
                         Ok(cle) => Trouvaille::Cle(CleTrouvee::Machine(cle)),
                         Err(_) => Trouvaille::Rien,
                     },
@@ -361,31 +361,22 @@ impl Service<'_> {
 
         if self
             .entrepot
-            .poser_compte(
-                compte,
-                &asl_registre::Compte {
-                    provenance: asl_registre::Provenance::Ici,
-                    alias: None,
-                },
-            )
+            .creer_compte(compte, asl_registre::Provenance::Ici, None)
             .is_err()
         {
             return Trouvaille::Rien;
         }
+        // **CE SOUS QUOI IL EST RÉELLEMENT ENTRÉ**, pour qu'on sache plus tard,
+        // compte par compte, qui a été attesté et qui non — le jour où l'on
+        // resserre la posture.
         if self
             .entrepot
-            .poser_appareil(
+            .creer_appareil(
                 appareil,
-                &asl_registre::Appareil {
-                    provenance: asl_registre::Provenance::Ici,
-                    proprietaire: compte,
-                    cle: cle.octets(),
-                    // **CE SOUS QUOI IL EST RÉELLEMENT ENTRÉ**, pour qu'on sache
-                    // plus tard, compte par compte, qui a été attesté et qui
-                    // non — le jour où l'on resserre la posture.
-                    atteste,
-                    revoque: false,
-                },
+                asl_registre::Provenance::Ici,
+                compte,
+                cle.octets(),
+                atteste,
             )
             .is_err()
         {
@@ -447,15 +438,12 @@ impl Service<'_> {
         ) else {
             return Trouvaille::Rien;
         };
-        match self.entrepot.poser_appareil(
+        match self.entrepot.creer_appareil(
             appareil,
-            &asl_registre::Appareil {
-                provenance: asl_registre::Provenance::Ici,
-                proprietaire: compte,
-                cle: cle.octets(),
-                atteste: asl_registre::Attestation::Aucune,
-                revoque: false,
-            },
+            asl_registre::Provenance::Ici,
+            compte,
+            cle.octets(),
+            asl_registre::Attestation::Aucune,
         ) {
             Ok(()) => Trouvaille::AppareilCree(appareil),
             Err(_) => Trouvaille::Rien,
@@ -474,19 +462,18 @@ impl Service<'_> {
             return Trouvaille::Rien;
         };
 
+        // **SANS CLÉ**, et c'est l'état d'une machine déclarée : la clé
+        // arrivera avec le code, générée sur place.
         if self
             .entrepot
-            .poser_machine(
+            .creer_machine(
                 machine,
-                &asl_registre::Machine {
-                    provenance: asl_registre::Provenance::Ici,
-                    proprietaire: compte,
-                    // **SANS CLÉ**, et c'est l'état d'une machine déclarée : la
-                    // clé arrivera avec le code, générée sur place.
-                    cle: None,
+                asl_registre::Provenance::Ici,
+                compte,
+                nom,
+                asl_registre::Capacites {
                     annonce: capacites.annonce,
                     lecture: capacites.lecture,
-                    nom,
                 },
             )
             .is_err()
@@ -538,33 +525,27 @@ impl Service<'_> {
 
         let nom = match nom {
             Some(texte) => match asl_registre::NomRange::nouveau(texte) {
-                Ok(range) => range,
+                Ok(range) => Some(range),
                 Err(_) => return Trouvaille::Rien,
             },
-            None => rangee.nom,
+            None => None,
         };
-        let (annonce, lecture) = match capacites {
-            Some(demandees) => (demandees.annonce, demandees.lecture),
-            None => (rangee.annonce, rangee.lecture),
-        };
-        let perd_l_annonce = rangee.annonce && !annonce;
+        let capacites = capacites.map(|demandees| asl_registre::Capacites {
+            annonce: demandees.annonce,
+            lecture: demandees.lecture,
+        });
+        let perd_l_annonce = rangee.annonce && capacites.is_some_and(|quoi| !quoi.annonce);
 
-        match self.entrepot.poser_machine(
-            machine,
-            &asl_registre::Machine {
-                nom,
-                annonce,
-                lecture,
-                ..rangee
-            },
-        ) {
-            Ok(()) => {
+        // **CHAMP PAR CHAMP** : l'entrepôt n'estampille que ce qui est donné,
+        // et c'est ce que la règle de conflit compare (`replication.md` §3.2).
+        match self.entrepot.modifier_machine(machine, nom, capacites) {
+            Ok(Some(_)) => {
                 if perd_l_annonce {
                     self.a_fermer.push(machine);
                 }
                 Trouvaille::Fait
             }
-            Err(_) => Trouvaille::Rien,
+            Ok(None) | Err(_) => Trouvaille::Rien,
         }
     }
 
@@ -604,20 +585,22 @@ impl Service<'_> {
             .saturating_add(asl_auth::VALIDITE_CODE_SECONDES.saturating_mul(1_000));
 
         self.entrepot
-            .poser_enrolement(
+            .emettre_enrolement(
                 &code.empreinte(),
-                &asl_registre::Enrolement {
-                    provenance: asl_registre::Provenance::Ici,
-                    machine,
-                    expire_a,
-                },
+                asl_registre::Provenance::Ici,
+                machine,
+                expire_a,
             )
             .ok()?;
         Some((code.texte_groupe(), expire_a))
     }
 
     /// Lie cette clé à la machine que ce code désigne.
-    fn enroler(&self, empreinte: &[u8], cle: &ClePublique) -> Trouvaille {
+    fn enroler(
+        &self,
+        empreinte: &[u8; asl_registre::EMPREINTE_OCTETS],
+        cle: &ClePublique,
+    ) -> Trouvaille {
         // **LE CODE MEURT ICI, QU'IL SERVE OU NON.** Consommer d'abord et
         // décider ensuite est ce qui rend « à usage unique » vrai : un code
         // expiré qu'on laisserait en place resterait un secret vivant, et deux
@@ -638,21 +621,20 @@ impl Service<'_> {
         let Some(enrolement) = trouve else {
             return Trouvaille::Refus;
         };
-        let Ok(Some(rangee)) = self.entrepot.machine(enrolement.machine) else {
-            return Trouvaille::Rien;
-        };
-        match self.entrepot.poser_machine(
+        // **L'EMPREINTE ET L'ESTAMPILLE D'ÉMISSION PARTENT AVEC LA LIAISON**
+        // (`replication.md` §5.2) : l'autre racine retire le code, et sait
+        // quel code a lié cette clé — c'est ce que sa règle de conflit compare.
+        match self.entrepot.lier_cle(
             enrolement.machine,
-            &asl_registre::Machine {
-                cle: Some(cle.octets()),
-                ..rangee
-            },
+            cle.octets(),
+            *empreinte,
+            enrolement.estampille,
         ) {
-            Ok(()) => Trouvaille::Enrolee {
+            Ok(Some(rangee)) => Trouvaille::Enrolee {
                 machine: enrolement.machine,
                 proprietaire: rangee.proprietaire,
             },
-            Err(_) => Trouvaille::Rien,
+            Ok(None) | Err(_) => Trouvaille::Rien,
         }
     }
 
@@ -844,16 +826,13 @@ impl Service<'_> {
             return Trouvaille::Refus;
         }
 
-        match self.entrepot.poser_autorisation(
+        match self.entrepot.accorder_autorisation(
             quelle,
-            &asl_registre::Autorisation {
-                provenance: asl_registre::Provenance::Ici,
-                par,
-                a,
-                portee,
-                revoquee: false,
-                etiquette,
-            },
+            asl_registre::Provenance::Ici,
+            par,
+            a,
+            portee,
+            etiquette,
         ) {
             Ok(()) => Trouvaille::AutorisationCreee(quelle),
             Err(_) => Trouvaille::Rien,
@@ -906,18 +885,12 @@ impl Service<'_> {
         // **LA CLÉ S'EFFACE, LA MACHINE RESTE.** Elle garde son nom, ses
         // capacités et ses services ; ce qu'elle perd est le moyen de prouver
         // qu'elle est elle. Un nouveau code la remettra en marche.
-        match self.entrepot.poser_machine(
-            machine,
-            &asl_registre::Machine {
-                cle: None,
-                ..rangee
-            },
-        ) {
-            Ok(()) => {
+        match self.entrepot.revoquer_cle(machine) {
+            Ok(Some(_)) => {
                 self.a_fermer.push(machine);
                 Trouvaille::Fait
             }
-            Err(_) => Trouvaille::Rien,
+            Ok(None) | Err(_) => Trouvaille::Rien,
         }
     }
 
@@ -955,14 +928,12 @@ impl Service<'_> {
         };
         match self.entrepot.poser_jeton(
             vise,
-            &asl_registre::JetonPoussee {
-                provenance: asl_registre::Provenance::Ici,
-                plateforme: match plateforme {
-                    asl_api::corps::Plateforme::Apns => asl_registre::Plateforme::Apns,
-                    asl_api::corps::Plateforme::Fcm => asl_registre::Plateforme::Fcm,
-                },
-                jeton,
+            asl_registre::Provenance::Ici,
+            match plateforme {
+                asl_api::corps::Plateforme::Apns => asl_registre::Plateforme::Apns,
+                asl_api::corps::Plateforme::Fcm => asl_registre::Plateforme::Fcm,
             },
+            jeton,
         ) {
             Ok(()) => Trouvaille::Fait,
             Err(_) => Trouvaille::Rien,
@@ -997,15 +968,13 @@ impl Service<'_> {
         };
         match self.entrepot.poser_description(
             vise,
-            &asl_registre::Description {
-                provenance: asl_registre::Provenance::Ici,
-                systeme: match systeme {
-                    asl_api::corps::Systeme::Ios => asl_registre::Systeme::Ios,
-                    asl_api::corps::Systeme::Android => asl_registre::Systeme::Android,
-                    asl_api::corps::Systeme::Macos => asl_registre::Systeme::Macos,
-                },
-                modele,
+            asl_registre::Provenance::Ici,
+            match systeme {
+                asl_api::corps::Systeme::Ios => asl_registre::Systeme::Ios,
+                asl_api::corps::Systeme::Android => asl_registre::Systeme::Android,
+                asl_api::corps::Systeme::Macos => asl_registre::Systeme::Macos,
             },
+            modele,
         ) {
             Ok(()) => Trouvaille::Fait,
             Err(_) => Trouvaille::Rien,
@@ -1036,11 +1005,11 @@ impl Service<'_> {
     ///
     /// # LES DEUX VERBES SONT LA MÊME ÉCRITURE
     ///
-    /// `poser_compte` tient déjà l'index des alias, et le met d'accord avec le
-    /// compte qu'on écrit : l'ancien alias part, le neuf entre, et un alias déjà
-    /// pris est refusé. Écrire un chemin à part pour le retrait aurait dédoublé
-    /// cette mise d'accord — et c'est la copie qu'on oublie qui laisse un index
-    /// désignant un compte qui n'a plus cet alias.
+    /// `reclamer_alias` tient l'index des réclamations, et le met d'accord avec
+    /// le compte qu'on écrit : l'ancienne réclamation part, la neuve entre, et
+    /// un alias déjà pris est refusé. Écrire un chemin à part pour le retrait
+    /// aurait dédoublé cette mise d'accord — et c'est la copie qu'on oublie qui
+    /// laisse un index désignant un compte qui n'a plus cet alias.
     fn poser_l_alias(&self, alias: Option<&str>) -> Trouvaille {
         let (Some(compte),) = (self.compte_de_la_connexion(),) else {
             return Trouvaille::Rien;
@@ -1052,19 +1021,10 @@ impl Service<'_> {
             },
             None => None,
         };
-        let Ok(Some(rangee)) = self.entrepot.compte(compte) else {
-            return Trouvaille::Rien;
-        };
-        match self.entrepot.poser_compte(
-            compte,
-            &asl_registre::Compte {
-                alias: range,
-                ..rangee
-            },
-        ) {
-            Ok(()) => Trouvaille::Fait,
+        match self.entrepot.reclamer_alias(compte, range) {
+            Ok(true) => Trouvaille::Fait,
             Err(asl_store::Faute::AliasPris) => Trouvaille::Conflit,
-            Err(_) => Trouvaille::Rien,
+            Ok(false) | Err(_) => Trouvaille::Rien,
         }
     }
 
@@ -1124,13 +1084,11 @@ impl Service<'_> {
                     (self.tirer_un_identifiant)()?,
                 );
                 self.entrepot
-                    .poser_service(
+                    .declarer_service(
                         neuf,
-                        &asl_registre::Service {
-                            provenance: asl_registre::Provenance::Ici,
-                            machine: qui,
-                            nom: asl_registre::NomRange::nouveau(nom).ok()?,
-                        },
+                        asl_registre::Provenance::Ici,
+                        qui,
+                        asl_registre::NomRange::nouveau(nom).ok()?,
                     )
                     .ok()?;
                 neuf

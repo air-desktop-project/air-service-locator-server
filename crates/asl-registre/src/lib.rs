@@ -46,6 +46,15 @@ pub const IDENTIFIANT_OCTETS: usize = 17;
 /// Ce qu'une provenance occupe.
 pub const PROVENANCE_OCTETS: usize = 1 + IDENTIFIANT_OCTETS;
 
+/// Ce qu'une estampille occupe : le compteur, puis l'identifiant de la racine.
+pub const ESTAMPILLE_OCTETS: usize = 8 + IDENTIFIANT_OCTETS;
+
+/// Ce que l'empreinte d'un code d'enrôlement occupe. Égal à
+/// `asl_cle::EMPREINTE_OCTETS`, défini ici plutôt qu'importé — pour la raison
+/// écrite sur [`CLE_APPAREIL_OCTETS`] : une grammaire ne dépend pas d'une
+/// décision.
+pub const EMPREINTE_OCTETS: usize = 32;
+
 /// Ce qu'un alias peut faire, en octets. Égal à `asl_api::ALIAS_MAX`.
 pub const ALIAS_OCTETS_MAX: usize = 32;
 
@@ -125,6 +134,21 @@ pub enum Faute {
     NonImprimable {
         /// Où, dans le texte.
         position: usize,
+    },
+    /// Une opération dont les octets s'arrêtent avant la fin de sa charge.
+    ///
+    /// # ELLE N'EXISTE QUE POUR LES OPÉRATIONS, ET C'EST STRUCTUREL
+    ///
+    /// Un enregistrement se lit dans un tableau de sa taille exacte, donc il
+    /// ne peut pas être tronqué : la forme du type est la borne. Une opération
+    /// se lit dans une TRANCHE — le disque en range une par valeur, le fil les
+    /// enchaîne — et c'est son genre qui dit combien d'octets elle occupe. Une
+    /// tranche plus courte que ce que le genre annonce n'est pas une opération.
+    Tronquee {
+        /// Ce que le genre exigeait.
+        attendus: usize,
+        /// Ce qu'il y avait.
+        obtenus: usize,
     },
 }
 
@@ -380,10 +404,62 @@ impl Provenance {
     }
 }
 
+// ── L'estampille (`docs/modele.md` §2.10) ───────────────────────────────────
+
+/// Quand — au sens d'une horloge de Lamport — et par quelle racine un
+/// enregistrement a été écrit.
+///
+/// # UNE COLONNE DE PLUS, SUR LE MODÈLE DE L'ORIGINE
+///
+/// Chaque racine tient un compteur, et chaque écriture locale porte
+/// `(compteur, racine)` : le compteur avance de un à chaque écriture, et se
+/// hisse au-dessus de tout ce que la racine reçoit de l'autre
+/// (`docs/replication.md` §4). **C'est ce qui rend la règle de conflit
+/// calculable après coup**, dans les deux ordres d'arrivée — et non l'heure
+/// murale, que deux machines n'ont pas en commun et qu'un NTP recale.
+///
+/// # L'ORDRE EST TOTAL, ET C'EST LE `derive` QUI LE TIENT
+///
+/// Le compteur d'abord, la racine ensuite : c'est l'ordre des champs, et
+/// `Ord` dérivé les compare dans cet ordre. Deux racines qui calculent
+/// « le plus ancien » sur des estampilles obtiennent donc le même — c'est
+/// l'invariant de `replication.md` §3.1, et l'essai `l_ordre_des_estampilles…`
+/// le tient.
+///
+/// **Elle ne dit pas l'heure**, et c'est une qualité : répliquer n'ajoute
+/// aucune ligne de temps à ce que l'entrepôt porte déjà (C13, C18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Estampille {
+    /// La `compteur`-ième écriture de cette racine.
+    pub compteur: u64,
+    /// La racine qui a écrit.
+    pub racine: Identifiant,
+}
+
+impl Estampille {
+    /// Écrit cette estampille. Occupe [`ESTAMPILLE_OCTETS`].
+    fn ecrire(self, sortie: &mut [u8]) {
+        poser(sortie, &self.compteur.to_be_bytes());
+        ecrire_identifiant(self.racine, sortie.get_mut(8..).unwrap_or_default());
+    }
+
+    /// Relit une estampille, et EXIGE que la racine soit un annuaire.
+    fn lire(octets: &[u8]) -> Result<Self, Faute> {
+        let mut compteur = [0_u8; 8];
+        poser(&mut compteur, octets);
+        let racine = lire_identifiant(octets.get(8..).unwrap_or_default(), Genre::Annuaire)?;
+        Ok(Self {
+            compteur: u64::from_be_bytes(compteur),
+            racine,
+        })
+    }
+}
+
 // ── Le compte ───────────────────────────────────────────────────────────────
 
 /// Ce qu'un compte occupe.
-pub const COMPTE_OCTETS: usize = PROVENANCE_OCTETS + 1 + 1 + ALIAS_OCTETS_MAX;
+pub const COMPTE_OCTETS: usize =
+    PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + ESTAMPILLE_OCTETS + 1 + 1 + ALIAS_OCTETS_MAX;
 
 /// Un compte d'utilisateur.
 ///
@@ -397,16 +473,42 @@ pub const COMPTE_OCTETS: usize = PROVENANCE_OCTETS + 1 + 1 + ALIAS_OCTETS_MAX;
 pub struct Compte {
     /// D'où vient cet enregistrement.
     pub provenance: Provenance,
+    /// Sa dernière écriture.
+    pub estampille: Estampille,
     /// L'alias public, si l'utilisateur en a choisi un.
     pub alias: Option<AliasRange>,
+    /// La réclamation courante de l'alias — son dernier `PUT` ou `DELETE`.
+    ///
+    /// # UN ALIAS EST UNE RÉCLAMATION, ET LA PLUS ANCIENNE TIENT
+    ///
+    /// `docs/replication.md` §3.2 : pour un alias donné, le titulaire est le
+    /// compte dont la réclamation courante porte la plus petite estampille.
+    /// C'est une fonction de l'ensemble des réclamations, pas de leur ordre
+    /// d'arrivée — et pour la calculer, chaque compte doit porter QUAND il a
+    /// réclamé. Sans alias, c'est l'estampille de son dernier retrait, ou de
+    /// sa création.
+    pub reclamation: Estampille,
 }
 
 impl Compte {
     /// Écrit ce compte.
     pub fn ecrire(&self, sortie: &mut [u8; COMPTE_OCTETS]) {
+        let mut curseur = 0_usize;
+        let mut tranche = |combien: usize| {
+            let debut = curseur;
+            curseur = curseur.saturating_add(combien);
+            debut..curseur
+        };
+        let provenance = tranche(PROVENANCE_OCTETS);
         self.provenance
-            .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
-        let reste = sortie.get_mut(PROVENANCE_OCTETS..).unwrap_or_default();
+            .ecrire(sortie.get_mut(provenance).unwrap_or_default());
+        let estampille = tranche(ESTAMPILLE_OCTETS);
+        self.estampille
+            .ecrire(sortie.get_mut(estampille).unwrap_or_default());
+        let reclamation = tranche(ESTAMPILLE_OCTETS);
+        self.reclamation
+            .ecrire(sortie.get_mut(reclamation).unwrap_or_default());
+        let reste = sortie.get_mut(curseur..).unwrap_or_default();
         match &self.alias {
             Some(alias) => {
                 poser_un(reste, 1);
@@ -422,8 +524,57 @@ impl Compte {
     ///
     /// [`Faute`] si les octets ne forment pas un compte.
     pub fn lire(octets: &[u8; COMPTE_OCTETS]) -> Result<Self, Faute> {
+        let mut curseur = 0_usize;
+        let mut prendre = |combien: usize| {
+            let debut = curseur;
+            curseur = curseur.saturating_add(combien);
+            debut..curseur
+        };
+        let provenance =
+            Provenance::lire(octets.get(prendre(PROVENANCE_OCTETS)).unwrap_or_default())?;
+        let estampille =
+            Estampille::lire(octets.get(prendre(ESTAMPILLE_OCTETS)).unwrap_or_default())?;
+        let reclamation =
+            Estampille::lire(octets.get(prendre(ESTAMPILLE_OCTETS)).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            reclamation,
+            octets.get(curseur..).unwrap_or_default(),
+        )
+    }
+
+    /// Relit un compte de la forme d'avant l'estampille, et lui donne celle-ci.
+    ///
+    /// **C'est la reprise de `docs/replication.md` §11.4** : une base écrite
+    /// avant 0.5.0 n'a ni estampille ni réclamation, et chaque enregistrement
+    /// en reçoit une, attribuée en séquence par la racine qui reprend. La
+    /// réclamation reçoit la même : l'alias qu'un compte tenait est réclamé
+    /// depuis sa reprise.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un compte ancien.
+    pub fn lire_ancien(
+        octets: &[u8; ancien::COMPTE_OCTETS],
+        estampille: Estampille,
+    ) -> Result<Self, Faute> {
         let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
-        let reste = octets.get(PROVENANCE_OCTETS..).unwrap_or_default();
+        Self::lire_corps(
+            provenance,
+            estampille,
+            estampille,
+            octets.get(PROVENANCE_OCTETS..).unwrap_or_default(),
+        )
+    }
+
+    /// Ce qui suit la provenance et les estampilles : l'alias, ou rien.
+    fn lire_corps(
+        provenance: Provenance,
+        estampille: Estampille,
+        reclamation: Estampille,
+        reste: &[u8],
+    ) -> Result<Self, Faute> {
         let alias = match reste.first().copied().unwrap_or(0) {
             0 => {
                 if !bourrage_nul(reste.get(1..).unwrap_or_default()) {
@@ -434,15 +585,85 @@ impl Compte {
             1 => Some(AliasRange::lire(reste.get(1..).unwrap_or_default())?),
             lue => return Err(Faute::Etiquette { lue }),
         };
-        Ok(Self { provenance, alias })
+        Ok(Self {
+            provenance,
+            estampille,
+            alias,
+            reclamation,
+        })
     }
 }
 
 // ── La machine ──────────────────────────────────────────────────────────────
 
 /// Ce qu'une machine occupe.
-pub const MACHINE_OCTETS: usize =
-    PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS + 1 + 1 + NOM_OCTETS_MAX;
+///
+/// Cinq estampilles : la dernière écriture, le nom, les capacités, et les deux
+/// de la clé — la liaison, et l'émission du code qui l'a liée.
+pub const MACHINE_OCTETS: usize = PROVENANCE_OCTETS
+    + ESTAMPILLE_OCTETS
+    + ESTAMPILLE_OCTETS
+    + ESTAMPILLE_OCTETS
+    + ESTAMPILLE_OCTETS
+    + ESTAMPILLE_OCTETS
+    + IDENTIFIANT_OCTETS
+    + CLE_OCTETS
+    + 1
+    + 1
+    + NOM_OCTETS_MAX;
+
+/// Les deux capacités d'une machine.
+///
+/// **C'est le miroir d'`asl_auth::Capacites`**, et il faut dire pourquoi il y
+/// en a deux : celui-là DÉCIDE et vit à l'étage 2, celui-ci RANGE et vit à
+/// l'étage 1 — la même raison que [`Portee`]. Il n'existe que pour
+/// l'opération `machine-modifiee`, qui porte « les capacités » comme UN champ
+/// avec UNE estampille ; l'enregistrement, lui, les range en deux bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capacites {
+    /// Cette machine peut-elle annoncer des services ?
+    pub annonce: bool,
+    /// Cette machine peut-elle interroger l'annuaire ?
+    pub lecture: bool,
+}
+
+impl Capacites {
+    /// L'octet qui les range : annonce en bit 0, lecture en bit 1.
+    const fn octet(self) -> u8 {
+        let mut drapeaux = 0_u8;
+        if self.annonce {
+            drapeaux |= Machine::BIT_ANNONCE;
+        }
+        if self.lecture {
+            drapeaux |= Machine::BIT_LECTURE;
+        }
+        drapeaux
+    }
+}
+
+/// La clé d'une machine, et ce qui l'a liée.
+///
+/// # DEUX ESTAMPILLES, ET LA RÈGLE QUI LES EXIGE
+///
+/// `docs/replication.md` §3.2 : quand le même code a été consommé des deux
+/// côtés, **la liaison qui gagne est celle du code le plus récemment ÉMIS ; à
+/// code égal, la première consommation.** Pour le calculer après coup, la clé
+/// doit porter les deux — l'estampille d'émission de son code, et la sienne.
+/// C'est un ordre total, donc le plus grand gagne quel que soit l'ordre
+/// d'arrivée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CleLiee {
+    /// La clé publique Ed25519.
+    ///
+    /// **Elle n'est pas interprétée ici.** `asl_cle::ClePublique::depuis_octets`
+    /// sait dire si ces octets forment un point de la courbe ; ce module range
+    /// des octets, et une seconde vérification serait une seconde vérité.
+    pub cle: [u8; CLE_OCTETS],
+    /// L'écriture qui l'a liée.
+    pub liaison: Estampille,
+    /// L'émission du code qui l'a liée.
+    pub code: Estampille,
+}
 
 /// Une machine, telle qu'elle est rangée.
 ///
@@ -455,13 +676,22 @@ pub const MACHINE_OCTETS: usize =
 /// Ce module range donc deux bits, et `asl-auth` construit son type à partir
 /// d'eux. C'est une ligne de plus à l'appel, et une arête en moins dans le
 /// graphe.
+///
+/// # UNE ESTAMPILLE PAR CHAMP, LÀ OÙ `PATCH` EST CHAMP PAR CHAMP
+///
+/// `docs/replication.md` §3.2 : un `PATCH` de machine des deux côtés se règle
+/// **champ par champ** — le nom a son estampille, les capacités ont la leur.
+/// Une règle par enregistrement ferait perdre un nom parce qu'une capacité a
+/// gagné.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Machine {
     /// D'où vient cet enregistrement.
     pub provenance: Provenance,
+    /// Sa dernière écriture.
+    pub estampille: Estampille,
     /// Le compte qui possède cette machine.
     pub proprietaire: Identifiant,
-    /// Sa clé publique Ed25519, **si elle en a une**.
+    /// Sa clé publique Ed25519, **si elle en a une**, et ce qui l'a liée.
     ///
     /// # UNE MACHINE DÉCLARÉE N'A PAS ENCORE DE CLÉ
     ///
@@ -474,15 +704,13 @@ pub struct Machine {
     /// valeur absurde pour Ed25519 : c'est un point d'ordre faible, que certaines
     /// vérifications acceptent, et dont on peut forger des signatures. Une
     /// machine sans clé aurait alors eu une clé que n'importe qui détient.
-    ///
-    /// **Elle n'est pas interprétée ici.** `asl_cle::ClePublique::depuis_octets`
-    /// sait dire si ces octets forment un point de la courbe ; ce module range
-    /// des octets, et une seconde vérification serait une seconde vérité.
-    pub cle: Option<[u8; CLE_OCTETS]>,
+    pub cle: Option<CleLiee>,
     /// Cette machine peut-elle annoncer des services ?
     pub annonce: bool,
     /// Cette machine peut-elle interroger l'annuaire ?
     pub lecture: bool,
+    /// La dernière écriture des capacités.
+    pub capacites_estampille: Estampille,
     /// Le nom que son propriétaire lui a donné.
     ///
     /// **Pour l'humain, jamais pour la machine** (`docs/modele.md` §2.3) : rien
@@ -490,6 +718,8 @@ pub struct Machine {
     /// porte du texte libre là où le nom d'un SERVICE ne le peut pas — celui-là
     /// est une clé, et une clé qui a deux écritures n'en est pas une.
     pub nom: NomRange,
+    /// La dernière écriture du nom.
+    pub nom_estampille: Estampille,
 }
 
 impl Machine {
@@ -504,40 +734,66 @@ impl Machine {
     /// coûté un octet pour dire la même chose.
     const BIT_CLE: u8 = 0b0000_0100;
 
+    /// Les capacités, comme un seul champ.
+    #[must_use]
+    pub const fn capacites(&self) -> Capacites {
+        Capacites {
+            annonce: self.annonce,
+            lecture: self.lecture,
+        }
+    }
+
     /// Écrit cette machine.
     pub fn ecrire(&self, sortie: &mut [u8; MACHINE_OCTETS]) {
+        let mut curseur = 0_usize;
+        let mut tranche = |combien: usize| {
+            let debut = curseur;
+            curseur = curseur.saturating_add(combien);
+            debut..curseur
+        };
+        let provenance = tranche(PROVENANCE_OCTETS);
         self.provenance
-            .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
-        let apres_provenance = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+            .ecrire(sortie.get_mut(provenance).unwrap_or_default());
+        let estampille = tranche(ESTAMPILLE_OCTETS);
+        self.estampille
+            .ecrire(sortie.get_mut(estampille).unwrap_or_default());
+        let nom_estampille = tranche(ESTAMPILLE_OCTETS);
+        self.nom_estampille
+            .ecrire(sortie.get_mut(nom_estampille).unwrap_or_default());
+        let capacites_estampille = tranche(ESTAMPILLE_OCTETS);
+        self.capacites_estampille
+            .ecrire(sortie.get_mut(capacites_estampille).unwrap_or_default());
+        let liaison = tranche(ESTAMPILLE_OCTETS);
+        let code = tranche(ESTAMPILLE_OCTETS);
+        let proprietaire = tranche(IDENTIFIANT_OCTETS);
         ecrire_identifiant(
             self.proprietaire,
-            sortie
-                .get_mut(PROVENANCE_OCTETS..apres_provenance)
-                .unwrap_or_default(),
+            sortie.get_mut(proprietaire).unwrap_or_default(),
         );
-        let apres_cle = apres_provenance.saturating_add(CLE_OCTETS);
-        let place = sortie
-            .get_mut(apres_provenance..apres_cle)
-            .unwrap_or_default();
+        let cle = tranche(CLE_OCTETS);
         match &self.cle {
-            Some(cle) => poser(place, cle),
-            // Le bourrage à zéro, pour la raison écrite sur `bourrage_nul`.
-            None => place.fill(0),
+            Some(liee) => {
+                liee.liaison
+                    .ecrire(sortie.get_mut(liaison).unwrap_or_default());
+                liee.code.ecrire(sortie.get_mut(code).unwrap_or_default());
+                poser(sortie.get_mut(cle).unwrap_or_default(), &liee.cle);
+            }
+            // Le bourrage à zéro, pour la raison écrite sur `bourrage_nul` —
+            // les deux estampilles de la clé comme la clé elle-même.
+            None => {
+                sortie.get_mut(liaison).unwrap_or_default().fill(0);
+                sortie.get_mut(code).unwrap_or_default().fill(0);
+                sortie.get_mut(cle).unwrap_or_default().fill(0);
+            }
         }
-        let mut drapeaux = 0_u8;
-        if self.annonce {
-            drapeaux |= Self::BIT_ANNONCE;
-        }
-        if self.lecture {
-            drapeaux |= Self::BIT_LECTURE;
-        }
+        let mut drapeaux = self.capacites().octet();
         if self.cle.is_some() {
             drapeaux |= Self::BIT_CLE;
         }
-        poser_un(sortie.get_mut(apres_cle..).unwrap_or_default(), drapeaux);
-        let apres_drapeaux = apres_cle.saturating_add(1);
+        let place = tranche(1);
+        poser_un(sortie.get_mut(place).unwrap_or_default(), drapeaux);
         self.nom
-            .ecrire(sortie.get_mut(apres_drapeaux..).unwrap_or_default());
+            .ecrire(sortie.get_mut(curseur..).unwrap_or_default());
     }
 
     /// Relit une machine.
@@ -546,48 +802,167 @@ impl Machine {
     ///
     /// [`Faute`] si les octets ne forment pas une machine.
     pub fn lire(octets: &[u8; MACHINE_OCTETS]) -> Result<Self, Faute> {
+        let mut curseur = 0_usize;
+        let mut prendre = |combien: usize| {
+            let debut = curseur;
+            curseur = curseur.saturating_add(combien);
+            debut..curseur
+        };
+        let provenance =
+            Provenance::lire(octets.get(prendre(PROVENANCE_OCTETS)).unwrap_or_default())?;
+        let estampille =
+            Estampille::lire(octets.get(prendre(ESTAMPILLE_OCTETS)).unwrap_or_default())?;
+        let nom_estampille =
+            Estampille::lire(octets.get(prendre(ESTAMPILLE_OCTETS)).unwrap_or_default())?;
+        let capacites_estampille =
+            Estampille::lire(octets.get(prendre(ESTAMPILLE_OCTETS)).unwrap_or_default())?;
+        let liaison = octets.get(prendre(ESTAMPILLE_OCTETS)).unwrap_or_default();
+        let code = octets.get(prendre(ESTAMPILLE_OCTETS)).unwrap_or_default();
+        Self::lire_corps(
+            provenance,
+            Estampilles {
+                estampille,
+                nom: nom_estampille,
+                capacites: capacites_estampille,
+            },
+            LiaisonRangee::Lue { liaison, code },
+            octets.get(curseur..).unwrap_or_default(),
+        )
+    }
+
+    /// Relit une machine de la forme d'avant l'estampille, et lui donne
+    /// celle-ci — pour chacun de ses champs.
+    ///
+    /// La reprise de `docs/replication.md` §11.4 : le nom, les capacités et la
+    /// clé, si elle est là, sont réputés écrits à la reprise, par la racine qui
+    /// reprend ; et le code qui a lié la clé est réputé émis au même instant.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas une machine ancienne.
+    pub fn lire_ancien(
+        octets: &[u8; ancien::MACHINE_OCTETS],
+        estampille: Estampille,
+    ) -> Result<Self, Faute> {
         let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
-        let apres_provenance = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+        Self::lire_corps(
+            provenance,
+            Estampilles {
+                estampille,
+                nom: estampille,
+                capacites: estampille,
+            },
+            LiaisonRangee::Reprise(estampille),
+            octets.get(PROVENANCE_OCTETS..).unwrap_or_default(),
+        )
+    }
+
+    /// Ce qui suit les estampilles : le propriétaire, la clé, les drapeaux,
+    /// le nom — la forme qu'une machine a toujours eue.
+    fn lire_corps(
+        provenance: Provenance,
+        estampilles: Estampilles,
+        liaison: LiaisonRangee<'_>,
+        reste: &[u8],
+    ) -> Result<Self, Faute> {
+        let mut curseur = 0_usize;
+        let mut prendre = |combien: usize| {
+            let debut = curseur;
+            curseur = curseur.saturating_add(combien);
+            debut..curseur
+        };
         let proprietaire = lire_identifiant(
-            octets
-                .get(PROVENANCE_OCTETS..apres_provenance)
-                .unwrap_or_default(),
+            reste.get(prendre(IDENTIFIANT_OCTETS)).unwrap_or_default(),
             Genre::Utilisateur,
         )?;
-        let apres_cle = apres_provenance.saturating_add(CLE_OCTETS);
-        let brute = octets.get(apres_provenance..apres_cle).unwrap_or_default();
+        let brute = reste.get(prendre(CLE_OCTETS)).unwrap_or_default();
         // **LES BITS INCONNUS SONT REFUSÉS.** Les accepter en silence ferait
         // relire sans broncher un enregistrement écrit par une version qui en
         // sait plus que nous — et lui prêterait des capacités qu'on ne
         // comprendrait pas.
-        let drapeaux = octets.get(apres_cle).copied().unwrap_or(0);
+        let drapeaux = reste
+            .get(prendre(1))
+            .and_then(<[u8]>::first)
+            .copied()
+            .unwrap_or(0);
         let connus = Self::BIT_ANNONCE | Self::BIT_LECTURE | Self::BIT_CLE;
         if drapeaux & !connus != 0 {
             return Err(Faute::Etiquette { lue: drapeaux });
         }
         let cle = if drapeaux & Self::BIT_CLE == 0 {
-            // **PAS DE CLÉ VEUT DIRE QUE LA PLACE EST NULLE.** Sans ce contrôle,
-            // deux enregistrements différents se reliraient identiques, et l'un
-            // d'eux ne se réécrirait pas comme il a été lu.
-            if !bourrage_nul(brute) {
+            // **PAS DE CLÉ VEUT DIRE QUE LA PLACE EST NULLE** — la clé, et ses
+            // deux estampilles. Sans ce contrôle, deux enregistrements
+            // différents se reliraient identiques, et l'un d'eux ne se
+            // réécrirait pas comme il a été lu.
+            if !bourrage_nul(brute) || !liaison.est_nulle() {
                 return Err(Faute::Bourrage);
             }
             None
         } else {
             let mut octets = [0_u8; CLE_OCTETS];
             poser(&mut octets, brute);
-            Some(octets)
+            let (liaison, code) = liaison.lire()?;
+            Some(CleLiee {
+                cle: octets,
+                liaison,
+                code,
+            })
         };
-        let apres_drapeaux = apres_cle.saturating_add(1);
-        let nom = NomRange::lire(octets.get(apres_drapeaux..).unwrap_or_default())?;
+        let nom = NomRange::lire(reste.get(curseur..).unwrap_or_default())?;
         Ok(Self {
             provenance,
+            estampille: estampilles.estampille,
             proprietaire,
             cle,
             annonce: drapeaux & Self::BIT_ANNONCE != 0,
             lecture: drapeaux & Self::BIT_LECTURE != 0,
+            capacites_estampille: estampilles.capacites,
             nom,
+            nom_estampille: estampilles.nom,
         })
+    }
+}
+
+/// Les trois estampilles d'une machine qui ne dépendent pas de sa clé.
+struct Estampilles {
+    /// La dernière écriture.
+    estampille: Estampille,
+    /// Celle du nom.
+    nom: Estampille,
+    /// Celle des capacités.
+    capacites: Estampille,
+}
+
+/// D'où viennent les deux estampilles de la clé d'une machine.
+enum LiaisonRangee<'a> {
+    /// Lues sur le disque, dans la forme courante.
+    Lue {
+        /// Les octets de la liaison.
+        liaison: &'a [u8],
+        /// Les octets de l'émission du code.
+        code: &'a [u8],
+    },
+    /// Attribuées par la reprise, qui n'en a lu aucune.
+    Reprise(Estampille),
+}
+
+impl LiaisonRangee<'_> {
+    /// Sans clé, les deux places doivent être nulles.
+    fn est_nulle(&self) -> bool {
+        match self {
+            Self::Lue { liaison, code } => bourrage_nul(liaison) && bourrage_nul(code),
+            Self::Reprise(_) => true,
+        }
+    }
+
+    /// Avec une clé, les deux estampilles.
+    fn lire(&self) -> Result<(Estampille, Estampille), Faute> {
+        match self {
+            Self::Lue { liaison, code } => {
+                Ok((Estampille::lire(liaison)?, Estampille::lire(code)?))
+            }
+            Self::Reprise(estampille) => Ok((*estampille, *estampille)),
+        }
     }
 }
 
@@ -595,7 +970,7 @@ impl Machine {
 
 /// Ce qu'un appareil occupe.
 pub const APPAREIL_OCTETS: usize =
-    PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS + 1 + 1;
+    PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS + 1 + 1;
 
 /// Un téléphone enrôlé, tel qu'il est rangé.
 ///
@@ -621,6 +996,8 @@ pub const APPAREIL_OCTETS: usize =
 pub struct Appareil {
     /// D'où vient cet enregistrement.
     pub provenance: Provenance,
+    /// Sa dernière écriture.
+    pub estampille: Estampille,
     /// Le compte dont cet appareil est un justificatif.
     pub proprietaire: Identifiant,
     /// Sa clé publique P-256, SEC1 compressée.
@@ -657,29 +1034,32 @@ pub struct Appareil {
 impl Appareil {
     /// Écrit cet appareil.
     pub fn ecrire(&self, sortie: &mut [u8; APPAREIL_OCTETS]) {
+        let mut curseur = 0_usize;
+        let mut tranche = |combien: usize| {
+            let debut = curseur;
+            curseur = curseur.saturating_add(combien);
+            debut..curseur
+        };
+        let provenance = tranche(PROVENANCE_OCTETS);
         self.provenance
-            .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
-        let apres_provenance = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+            .ecrire(sortie.get_mut(provenance).unwrap_or_default());
+        let estampille = tranche(ESTAMPILLE_OCTETS);
+        self.estampille
+            .ecrire(sortie.get_mut(estampille).unwrap_or_default());
+        let proprietaire = tranche(IDENTIFIANT_OCTETS);
         ecrire_identifiant(
             self.proprietaire,
-            sortie
-                .get_mut(PROVENANCE_OCTETS..apres_provenance)
-                .unwrap_or_default(),
+            sortie.get_mut(proprietaire).unwrap_or_default(),
         );
-        let apres_cle = apres_provenance.saturating_add(CLE_APPAREIL_OCTETS);
-        poser(
-            sortie
-                .get_mut(apres_provenance..apres_cle)
-                .unwrap_or_default(),
-            &self.cle,
-        );
-        let apres_atteste = apres_cle.saturating_add(1);
+        let cle = tranche(CLE_APPAREIL_OCTETS);
+        poser(sortie.get_mut(cle).unwrap_or_default(), &self.cle);
+        let atteste = tranche(1);
         poser_un(
-            sortie.get_mut(apres_cle..apres_atteste).unwrap_or_default(),
+            sortie.get_mut(atteste).unwrap_or_default(),
             self.atteste.etiquette(),
         );
         poser_un(
-            sortie.get_mut(apres_atteste..).unwrap_or_default(),
+            sortie.get_mut(curseur..).unwrap_or_default(),
             u8::from(self.revoque),
         );
     }
@@ -691,30 +1071,63 @@ impl Appareil {
     /// [`Faute`] si les octets ne forment pas un appareil.
     pub fn lire(octets: &[u8; APPAREIL_OCTETS]) -> Result<Self, Faute> {
         let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
-        let apres_provenance = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+        let apres = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        let estampille =
+            Estampille::lire(octets.get(PROVENANCE_OCTETS..apres).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(apres..).unwrap_or_default(),
+        )
+    }
+
+    /// Relit un appareil de la forme d'avant l'estampille, et lui donne
+    /// celle-ci (`docs/replication.md` §11.4).
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un appareil ancien.
+    pub fn lire_ancien(
+        octets: &[u8; ancien::APPAREIL_OCTETS],
+        estampille: Estampille,
+    ) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(PROVENANCE_OCTETS..).unwrap_or_default(),
+        )
+    }
+
+    /// Ce qui suit l'estampille : le propriétaire, la clé, l'attestation, le
+    /// drapeau.
+    fn lire_corps(
+        provenance: Provenance,
+        estampille: Estampille,
+        reste: &[u8],
+    ) -> Result<Self, Faute> {
         let proprietaire = lire_identifiant(
-            octets
-                .get(PROVENANCE_OCTETS..apres_provenance)
-                .unwrap_or_default(),
+            reste.get(..IDENTIFIANT_OCTETS).unwrap_or_default(),
             Genre::Utilisateur,
         )?;
-        let apres_cle = apres_provenance.saturating_add(CLE_APPAREIL_OCTETS);
+        let apres_cle = IDENTIFIANT_OCTETS.saturating_add(CLE_APPAREIL_OCTETS);
         let mut cle = [0_u8; CLE_APPAREIL_OCTETS];
         poser(
             &mut cle,
-            octets.get(apres_provenance..apres_cle).unwrap_or_default(),
+            reste.get(IDENTIFIANT_OCTETS..apres_cle).unwrap_or_default(),
         );
-        let atteste = Attestation::depuis(octets.get(apres_cle).copied().unwrap_or(0))?;
+        let atteste = Attestation::depuis(reste.get(apres_cle).copied().unwrap_or(0))?;
         // **UN BOOLÉEN N'A QUE DEUX ÉCRITURES**, et `2` n'en est pas une : un
         // enregistrement relu se réécrirait alors différemment de lui-même.
         let apres_atteste = apres_cle.saturating_add(1);
-        let revoque = match octets.get(apres_atteste).copied().unwrap_or(0) {
+        let revoque = match reste.get(apres_atteste).copied().unwrap_or(0) {
             0 => false,
             1 => true,
             lue => return Err(Faute::Etiquette { lue }),
         };
         Ok(Self {
             provenance,
+            estampille,
             proprietaire,
             cle,
             atteste,
@@ -829,7 +1242,7 @@ impl Plateforme {
 }
 
 /// Ce qu'un jeton de poussée occupe.
-pub const POUSSEE_OCTETS: usize = PROVENANCE_OCTETS + 1 + 1 + JETON_OCTETS_MAX;
+pub const POUSSEE_OCTETS: usize = PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + 1 + 1 + JETON_OCTETS_MAX;
 
 /// Le jeton par lequel un appareil reçoit ses notifications.
 ///
@@ -853,6 +1266,8 @@ pub const POUSSEE_OCTETS: usize = PROVENANCE_OCTETS + 1 + 1 + JETON_OCTETS_MAX;
 pub struct JetonPoussee {
     /// D'où vient cet enregistrement.
     pub provenance: Provenance,
+    /// Sa dernière écriture. Entre deux jetons, le plus récent gagne.
+    pub estampille: Estampille,
     /// À qui le présenter.
     pub plateforme: Plateforme,
     /// Le jeton lui-même, tel que la plate-forme l'a donné.
@@ -869,11 +1284,17 @@ impl JetonPoussee {
     pub fn ecrire(&self, sortie: &mut [u8; POUSSEE_OCTETS]) {
         self.provenance
             .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
+        let apres_estampille = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        self.estampille.ecrire(
+            sortie
+                .get_mut(PROVENANCE_OCTETS..apres_estampille)
+                .unwrap_or_default(),
+        );
         poser_un(
-            sortie.get_mut(PROVENANCE_OCTETS..).unwrap_or_default(),
+            sortie.get_mut(apres_estampille..).unwrap_or_default(),
             self.plateforme.etiquette(),
         );
-        let apres = PROVENANCE_OCTETS.saturating_add(1);
+        let apres = apres_estampille.saturating_add(1);
         self.jeton
             .ecrire(sortie.get_mut(apres..).unwrap_or_default());
     }
@@ -885,9 +1306,42 @@ impl JetonPoussee {
     /// [`Faute`] si les octets ne forment pas un jeton.
     pub fn lire(octets: &[u8; POUSSEE_OCTETS]) -> Result<Self, Faute> {
         let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
-        let plateforme = Plateforme::depuis(octets.get(PROVENANCE_OCTETS).copied().unwrap_or(0))?;
-        let apres = PROVENANCE_OCTETS.saturating_add(1);
-        let jeton = JetonRange::lire(octets.get(apres..).unwrap_or_default())?;
+        let apres = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        let estampille =
+            Estampille::lire(octets.get(PROVENANCE_OCTETS..apres).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(apres..).unwrap_or_default(),
+        )
+    }
+
+    /// Relit un jeton de la forme d'avant l'estampille, et lui donne celle-ci
+    /// (`docs/replication.md` §11.4).
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un jeton ancien.
+    pub fn lire_ancien(
+        octets: &[u8; ancien::POUSSEE_OCTETS],
+        estampille: Estampille,
+    ) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(PROVENANCE_OCTETS..).unwrap_or_default(),
+        )
+    }
+
+    /// Ce qui suit l'estampille : la plate-forme, puis le jeton.
+    fn lire_corps(
+        provenance: Provenance,
+        estampille: Estampille,
+        reste: &[u8],
+    ) -> Result<Self, Faute> {
+        let plateforme = Plateforme::depuis(reste.first().copied().unwrap_or(0))?;
+        let jeton = JetonRange::lire(reste.get(1..).unwrap_or_default())?;
         // **LE SEUL CONTRÔLE DE CONTENU DE TOUT CE MODULE.** Voir
         // [`Faute::NonImprimable`] : à 255 octets de borne, la longueur ne peut
         // pas se dénoncer elle-même, et il n'y a que le texte pour le faire.
@@ -900,6 +1354,7 @@ impl JetonPoussee {
         }
         Ok(Self {
             provenance,
+            estampille,
             plateforme,
             jeton,
         })
@@ -961,7 +1416,8 @@ impl Systeme {
 }
 
 /// Ce qu'une description d'appareil occupe.
-pub const DESCRIPTION_OCTETS: usize = PROVENANCE_OCTETS + 1 + 1 + NOM_OCTETS_MAX;
+pub const DESCRIPTION_OCTETS: usize =
+    PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + 1 + 1 + NOM_OCTETS_MAX;
 
 /// Ce qu'un appareil dit de lui-même : son système, et son modèle.
 ///
@@ -998,6 +1454,8 @@ pub const DESCRIPTION_OCTETS: usize = PROVENANCE_OCTETS + 1 + 1 + NOM_OCTETS_MAX
 pub struct Description {
     /// D'où vient cet enregistrement.
     pub provenance: Provenance,
+    /// Sa dernière écriture. Entre deux descriptions, la plus récente gagne.
+    pub estampille: Estampille,
     /// Ce que l'appareil fait tourner.
     pub systeme: Systeme,
     /// Le modèle, tel que l'appareil se nomme — « MacBook Pro (2019) ».
@@ -1009,11 +1467,17 @@ impl Description {
     pub fn ecrire(&self, sortie: &mut [u8; DESCRIPTION_OCTETS]) {
         self.provenance
             .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
+        let apres_estampille = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        self.estampille.ecrire(
+            sortie
+                .get_mut(PROVENANCE_OCTETS..apres_estampille)
+                .unwrap_or_default(),
+        );
         poser_un(
-            sortie.get_mut(PROVENANCE_OCTETS..).unwrap_or_default(),
+            sortie.get_mut(apres_estampille..).unwrap_or_default(),
             self.systeme.etiquette(),
         );
-        let apres = PROVENANCE_OCTETS.saturating_add(1);
+        let apres = apres_estampille.saturating_add(1);
         self.modele
             .ecrire(sortie.get_mut(apres..).unwrap_or_default());
     }
@@ -1025,11 +1489,45 @@ impl Description {
     /// [`Faute`] si les octets ne forment pas une description.
     pub fn lire(octets: &[u8; DESCRIPTION_OCTETS]) -> Result<Self, Faute> {
         let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
-        let systeme = Systeme::depuis(octets.get(PROVENANCE_OCTETS).copied().unwrap_or(0))?;
-        let apres = PROVENANCE_OCTETS.saturating_add(1);
-        let modele = NomRange::lire(octets.get(apres..).unwrap_or_default())?;
+        let apres = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        let estampille =
+            Estampille::lire(octets.get(PROVENANCE_OCTETS..apres).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(apres..).unwrap_or_default(),
+        )
+    }
+
+    /// Relit une description de la forme d'avant l'estampille, et lui donne
+    /// celle-ci (`docs/replication.md` §11.4).
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas une description ancienne.
+    pub fn lire_ancien(
+        octets: &[u8; ancien::DESCRIPTION_OCTETS],
+        estampille: Estampille,
+    ) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(PROVENANCE_OCTETS..).unwrap_or_default(),
+        )
+    }
+
+    /// Ce qui suit l'estampille : le système, puis le modèle.
+    fn lire_corps(
+        provenance: Provenance,
+        estampille: Estampille,
+        reste: &[u8],
+    ) -> Result<Self, Faute> {
+        let systeme = Systeme::depuis(reste.first().copied().unwrap_or(0))?;
+        let modele = NomRange::lire(reste.get(1..).unwrap_or_default())?;
         Ok(Self {
             provenance,
+            estampille,
             systeme,
             modele,
         })
@@ -1039,7 +1537,7 @@ impl Description {
 // ── Le code d'enrôlement en attente ─────────────────────────────────────────
 
 /// Ce qu'un enrôlement en attente occupe.
-pub const ENROLEMENT_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + 8;
+pub const ENROLEMENT_OCTETS: usize = PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS + 8;
 
 /// Un code d'enrôlement émis et pas encore consommé.
 ///
@@ -1053,6 +1551,11 @@ pub const ENROLEMENT_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + 8;
 pub struct Enrolement {
     /// D'où vient cet enregistrement.
     pub provenance: Provenance,
+    /// L'émission du code.
+    ///
+    /// C'est elle que la clé liée emportera ([`CleLiee::code`]) : entre deux
+    /// clés liées par deux codes, celle du code le plus récemment émis gagne.
+    pub estampille: Estampille,
     /// La machine dont ce code liera la clé.
     pub machine: Identifiant,
     /// Quand il cesse de valoir, en millisecondes d'époque.
@@ -1069,15 +1572,21 @@ impl Enrolement {
     pub fn ecrire(&self, sortie: &mut [u8; ENROLEMENT_OCTETS]) {
         self.provenance
             .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
-        let apres_provenance = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+        let apres_estampille = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        self.estampille.ecrire(
+            sortie
+                .get_mut(PROVENANCE_OCTETS..apres_estampille)
+                .unwrap_or_default(),
+        );
+        let apres_machine = apres_estampille.saturating_add(IDENTIFIANT_OCTETS);
         ecrire_identifiant(
             self.machine,
             sortie
-                .get_mut(PROVENANCE_OCTETS..apres_provenance)
+                .get_mut(apres_estampille..apres_machine)
                 .unwrap_or_default(),
         );
         poser(
-            sortie.get_mut(apres_provenance..).unwrap_or_default(),
+            sortie.get_mut(apres_machine..).unwrap_or_default(),
             &self.expire_a.to_be_bytes(),
         );
     }
@@ -1089,20 +1598,52 @@ impl Enrolement {
     /// [`Faute`] si les octets ne forment pas un enrôlement.
     pub fn lire(octets: &[u8; ENROLEMENT_OCTETS]) -> Result<Self, Faute> {
         let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
-        let apres_provenance = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+        let apres = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        let estampille =
+            Estampille::lire(octets.get(PROVENANCE_OCTETS..apres).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(apres..).unwrap_or_default(),
+        )
+    }
+
+    /// Relit un enrôlement de la forme d'avant l'estampille, et lui donne
+    /// celle-ci (`docs/replication.md` §11.4).
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un enrôlement ancien.
+    pub fn lire_ancien(
+        octets: &[u8; ancien::ENROLEMENT_OCTETS],
+        estampille: Estampille,
+    ) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(PROVENANCE_OCTETS..).unwrap_or_default(),
+        )
+    }
+
+    /// Ce qui suit l'estampille : la machine, puis l'expiration.
+    fn lire_corps(
+        provenance: Provenance,
+        estampille: Estampille,
+        reste: &[u8],
+    ) -> Result<Self, Faute> {
         let machine = lire_identifiant(
-            octets
-                .get(PROVENANCE_OCTETS..apres_provenance)
-                .unwrap_or_default(),
+            reste.get(..IDENTIFIANT_OCTETS).unwrap_or_default(),
             Genre::Machine,
         )?;
         let mut quand = [0_u8; 8];
         poser(
             &mut quand,
-            octets.get(apres_provenance..).unwrap_or_default(),
+            reste.get(IDENTIFIANT_OCTETS..).unwrap_or_default(),
         );
         Ok(Self {
             provenance,
+            estampille,
             machine,
             expire_a: u64::from_be_bytes(quand),
         })
@@ -1112,7 +1653,8 @@ impl Enrolement {
 // ── Le service ──────────────────────────────────────────────────────────────
 
 /// Ce qu'un service occupe.
-pub const SERVICE_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + 1 + NOM_OCTETS_MAX;
+pub const SERVICE_OCTETS: usize =
+    PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS + 1 + NOM_OCTETS_MAX;
 
 /// Un service DÉCLARÉ sur une machine.
 ///
@@ -1130,6 +1672,9 @@ pub const SERVICE_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + 1 + N
 pub struct Service {
     /// D'où vient cet enregistrement.
     pub provenance: Provenance,
+    /// Sa déclaration. Entre deux services du même `(machine, nom)`, le plus
+    /// ancien reste (`docs/replication.md` §3.2).
+    pub estampille: Estampille,
     /// La machine qui le sert.
     pub machine: Identifiant,
     /// Son nom, tel que ses clients le demandent.
@@ -1141,11 +1686,17 @@ impl Service {
     pub fn ecrire(&self, sortie: &mut [u8; SERVICE_OCTETS]) {
         self.provenance
             .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
-        let apres_machine = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+        let apres_estampille = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        self.estampille.ecrire(
+            sortie
+                .get_mut(PROVENANCE_OCTETS..apres_estampille)
+                .unwrap_or_default(),
+        );
+        let apres_machine = apres_estampille.saturating_add(IDENTIFIANT_OCTETS);
         ecrire_identifiant(
             self.machine,
             sortie
-                .get_mut(PROVENANCE_OCTETS..apres_machine)
+                .get_mut(apres_estampille..apres_machine)
                 .unwrap_or_default(),
         );
         self.nom
@@ -1159,16 +1710,48 @@ impl Service {
     /// [`Faute`] si les octets ne forment pas un service.
     pub fn lire(octets: &[u8; SERVICE_OCTETS]) -> Result<Self, Faute> {
         let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
-        let apres_machine = PROVENANCE_OCTETS.saturating_add(IDENTIFIANT_OCTETS);
+        let apres = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        let estampille =
+            Estampille::lire(octets.get(PROVENANCE_OCTETS..apres).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(apres..).unwrap_or_default(),
+        )
+    }
+
+    /// Relit un service de la forme d'avant l'estampille, et lui donne
+    /// celle-ci (`docs/replication.md` §11.4).
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un service ancien.
+    pub fn lire_ancien(
+        octets: &[u8; ancien::SERVICE_OCTETS],
+        estampille: Estampille,
+    ) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(PROVENANCE_OCTETS..).unwrap_or_default(),
+        )
+    }
+
+    /// Ce qui suit l'estampille : la machine, puis le nom.
+    fn lire_corps(
+        provenance: Provenance,
+        estampille: Estampille,
+        reste: &[u8],
+    ) -> Result<Self, Faute> {
         let machine = lire_identifiant(
-            octets
-                .get(PROVENANCE_OCTETS..apres_machine)
-                .unwrap_or_default(),
+            reste.get(..IDENTIFIANT_OCTETS).unwrap_or_default(),
             Genre::Machine,
         )?;
-        let nom = NomRange::lire(octets.get(apres_machine..).unwrap_or_default())?;
+        let nom = NomRange::lire(reste.get(IDENTIFIANT_OCTETS..).unwrap_or_default())?;
         Ok(Self {
             provenance,
+            estampille,
             machine,
             nom,
         })
@@ -1243,6 +1826,7 @@ impl Portee {
 /// Le dernier `1 + NOM_OCTETS_MAX` est l'étiquette, un [`Court`] comme le nom
 /// d'une machine : un octet de longueur, puis ses octets.
 pub const AUTORISATION_OCTETS: usize = PROVENANCE_OCTETS
+    + ESTAMPILLE_OCTETS
     + IDENTIFIANT_OCTETS
     + IDENTIFIANT_OCTETS
     + PORTEE_OCTETS
@@ -1265,6 +1849,8 @@ pub const AUTORISATION_OCTETS: usize = PROVENANCE_OCTETS
 pub struct Autorisation {
     /// D'où vient cet enregistrement.
     pub provenance: Provenance,
+    /// Sa dernière écriture.
+    pub estampille: Estampille,
     /// Le compte qui accorde.
     pub par: Identifiant,
     /// Le compte qui reçoit.
@@ -1295,6 +1881,9 @@ impl Autorisation {
         let provenance = tranche(PROVENANCE_OCTETS);
         self.provenance
             .ecrire(sortie.get_mut(provenance).unwrap_or_default());
+        let estampille = tranche(ESTAMPILLE_OCTETS);
+        self.estampille
+            .ecrire(sortie.get_mut(estampille).unwrap_or_default());
         let par = tranche(IDENTIFIANT_OCTETS);
         ecrire_identifiant(self.par, sortie.get_mut(par).unwrap_or_default());
         let a = tranche(IDENTIFIANT_OCTETS);
@@ -1318,27 +1907,61 @@ impl Autorisation {
     ///
     /// [`Faute`] si les octets ne forment pas une autorisation.
     pub fn lire(octets: &[u8; AUTORISATION_OCTETS]) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        let apres = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        let estampille =
+            Estampille::lire(octets.get(PROVENANCE_OCTETS..apres).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(apres..).unwrap_or_default(),
+        )
+    }
+
+    /// Relit une autorisation de la forme d'avant l'estampille, et lui donne
+    /// celle-ci (`docs/replication.md` §11.4).
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas une autorisation ancienne.
+    pub fn lire_ancien(
+        octets: &[u8; ancien::AUTORISATION_OCTETS],
+        estampille: Estampille,
+    ) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(PROVENANCE_OCTETS..).unwrap_or_default(),
+        )
+    }
+
+    /// Ce qui suit l'estampille : les deux comptes, la portée, le drapeau,
+    /// l'étiquette.
+    fn lire_corps(
+        provenance: Provenance,
+        estampille: Estampille,
+        reste: &[u8],
+    ) -> Result<Self, Faute> {
         let mut curseur = 0_usize;
         let mut prendre = |combien: usize| {
             let debut = curseur;
             curseur = curseur.saturating_add(combien);
             debut..curseur
         };
-        let provenance =
-            Provenance::lire(octets.get(prendre(PROVENANCE_OCTETS)).unwrap_or_default())?;
         let par = lire_identifiant(
-            octets.get(prendre(IDENTIFIANT_OCTETS)).unwrap_or_default(),
+            reste.get(prendre(IDENTIFIANT_OCTETS)).unwrap_or_default(),
             Genre::Utilisateur,
         )?;
         let a = lire_identifiant(
-            octets.get(prendre(IDENTIFIANT_OCTETS)).unwrap_or_default(),
+            reste.get(prendre(IDENTIFIANT_OCTETS)).unwrap_or_default(),
             Genre::Utilisateur,
         )?;
-        let portee = Portee::lire(octets.get(prendre(PORTEE_OCTETS)).unwrap_or_default())?;
+        let portee = Portee::lire(reste.get(prendre(PORTEE_OCTETS)).unwrap_or_default())?;
         // **NI 0 NI 1 EST UNE CORRUPTION**, et non « vrai par défaut ». Un
         // booléen relu de travers sur une décision d'autorisation est
         // exactement ce qu'on ne veut pas deviner.
-        let revoquee = match octets
+        let revoquee = match reste
             .get(prendre(1))
             .and_then(<[u8]>::first)
             .copied()
@@ -1348,10 +1971,10 @@ impl Autorisation {
             1 => true,
             lue => return Err(Faute::Etiquette { lue }),
         };
-        let etiquette =
-            NomRange::lire(octets.get(prendre(1 + NOM_OCTETS_MAX)).unwrap_or_default())?;
+        let etiquette = NomRange::lire(reste.get(prendre(1 + NOM_OCTETS_MAX)).unwrap_or_default())?;
         Ok(Self {
             provenance,
+            estampille,
             par,
             a,
             portee,
@@ -1359,6 +1982,709 @@ impl Autorisation {
             etiquette,
         })
     }
+}
+
+// ── La forme d'avant l'estampille ───────────────────────────────────────────
+
+pub mod ancien {
+    //! Ce que les enregistrements occupaient AVANT l'estampille (≤ 0.4.3).
+    //!
+    //! # POURQUOI CES TAILLES SURVIVENT
+    //!
+    //! `docs/replication.md` §11.4 : les bancs tournent avec des bases sans
+    //! estampille ni journal, et elles portent de vrais comptes. Une base
+    //! ancienne est REPRISE à l'ouverture — chaque enregistrement reçoit une
+    //! estampille —, et pour la relire il faut savoir ce qu'il occupait.
+    //! `redb` range le type d'une table avec elle, taille comprise : la table
+    //! d'hier ne s'ouvre qu'avec la taille d'hier.
+    //!
+    //! Chaque enregistrement a son `lire_ancien`, qui prend ces octets-là et
+    //! l'estampille que la reprise lui attribue. **Il n'y a pas d'`ecrire`
+    //! ancien** : rien n'écrit plus dans cette forme, et un écrivain qu'on
+    //! garderait « pour les essais » serait un second format vivant.
+
+    use super::{
+        ALIAS_OCTETS_MAX, CLE_APPAREIL_OCTETS, CLE_OCTETS, IDENTIFIANT_OCTETS, JETON_OCTETS_MAX,
+        NOM_OCTETS_MAX, PORTEE_OCTETS, PROVENANCE_OCTETS,
+    };
+
+    /// Ce qu'un compte occupait.
+    pub const COMPTE_OCTETS: usize = PROVENANCE_OCTETS + 1 + 1 + ALIAS_OCTETS_MAX;
+    /// Ce qu'une machine occupait.
+    pub const MACHINE_OCTETS: usize =
+        PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS + 1 + 1 + NOM_OCTETS_MAX;
+    /// Ce qu'un appareil occupait.
+    pub const APPAREIL_OCTETS: usize =
+        PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS + 1 + 1;
+    /// Ce qu'un jeton de poussée occupait.
+    pub const POUSSEE_OCTETS: usize = PROVENANCE_OCTETS + 1 + 1 + JETON_OCTETS_MAX;
+    /// Ce qu'une description occupait.
+    pub const DESCRIPTION_OCTETS: usize = PROVENANCE_OCTETS + 1 + 1 + NOM_OCTETS_MAX;
+    /// Ce qu'un enrôlement occupait.
+    pub const ENROLEMENT_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + 8;
+    /// Ce qu'un service occupait.
+    pub const SERVICE_OCTETS: usize = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + 1 + NOM_OCTETS_MAX;
+    /// Ce qu'une autorisation occupait.
+    pub const AUTORISATION_OCTETS: usize = PROVENANCE_OCTETS
+        + IDENTIFIANT_OCTETS
+        + IDENTIFIANT_OCTETS
+        + PORTEE_OCTETS
+        + 1
+        + 1
+        + NOM_OCTETS_MAX;
+}
+
+// ── Les opérations (`docs/replication.md` §5) ───────────────────────────────
+
+/// Ce que l'en-tête d'une opération occupe : le genre, puis l'estampille.
+pub const OPERATION_ENTETE_OCTETS: usize = 1 + ESTAMPILLE_OCTETS;
+
+/// Ce que la plus grande charge occupe — celle d'un jeton de poussée.
+const CHARGE_OCTETS_MAX: usize = IDENTIFIANT_OCTETS + POUSSEE_OCTETS;
+
+/// Ce qu'une opération occupe, au plus. C'est la taille du tampon dans lequel
+/// [`Operation::ecrire`] écrit ; ce qu'elle a réellement occupé est rendu.
+pub const OPERATION_OCTETS_MAX: usize = OPERATION_ENTETE_OCTETS + CHARGE_OCTETS_MAX;
+
+/// Ce qu'une racine a écrit, tel que l'autre le tire.
+///
+/// # UN CADRE À CHAMPS FIXES, ET LA CHARGE EST L'ENREGISTREMENT
+///
+/// ```text
+/// genre (1) ‖ compteur (8) ‖ racine (17) ‖ charge (taille fixée par le genre)
+/// ```
+///
+/// **La charge est l'enregistrement dans le format de l'entrepôt** — ce codec,
+/// couvert à 100 % et fuzzé, qui sert déjà à le ranger. Le genre fixe la taille
+/// de la charge, donc **aucune longueur ne vient du réseau**, et il n'y a pas de
+/// second décodeur : ce qui se lit sur le fil est ce qui se lit sur le disque.
+///
+/// # LES QUATORZE GENRES SONT CEUX DE `replication.md` §5.2
+///
+/// Un par écriture locale possible, et aucun pour ce qui ne se réplique pas —
+/// l'expiration d'un code, le retrait d'un jeton par son appareil n'ont pas
+/// d'opération. Il n'y a pas non plus d'effacement d'un compte, d'une machine ou
+/// d'un service : l'API n'en a pas.
+///
+/// **L'estampille n'est pas dans la variante** : elle est celle de l'opération,
+/// et [`Operation::ecrire`] la prend à part. Une opération est un fait daté par
+/// la racine qui l'écrit, et le même fait peut être rejoué par un instantané
+/// avec l'estampille d'origine — c'est pourquoi les deux se séparent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    /// Un compte créé. Insérer si absent.
+    Compte {
+        /// Son identifiant.
+        compte: Identifiant,
+        /// L'enregistrement.
+        enregistrement: Compte,
+    },
+    /// La réclamation courante d'un compte : un alias, ou rien.
+    Alias {
+        /// Le compte qui réclame.
+        compte: Identifiant,
+        /// Ce qu'il réclame — rien, s'il lâche.
+        alias: Option<AliasRange>,
+    },
+    /// Un appareil enrôlé. Insérer si absent.
+    Appareil {
+        /// Son identifiant.
+        appareil: Identifiant,
+        /// L'enregistrement.
+        enregistrement: Appareil,
+    },
+    /// Un appareil révoqué. Marquer, retirer le jeton. Toujours.
+    AppareilRevoque {
+        /// Lequel.
+        appareil: Identifiant,
+    },
+    /// Ce qu'un appareil dit de lui-même. Le plus récent.
+    Description {
+        /// L'appareil.
+        appareil: Identifiant,
+        /// L'enregistrement.
+        enregistrement: Description,
+    },
+    /// Un jeton de poussée. Le plus récent ; refusé si l'appareil est révoqué.
+    Poussee {
+        /// L'appareil.
+        appareil: Identifiant,
+        /// L'enregistrement.
+        enregistrement: JetonPoussee,
+    },
+    /// Une machine déclarée, sans clé. Insérer si absent.
+    Machine {
+        /// Son identifiant.
+        machine: Identifiant,
+        /// L'enregistrement.
+        enregistrement: Machine,
+    },
+    /// Un `PATCH` de machine. Le plus récent, champ par champ.
+    MachineModifiee {
+        /// Laquelle.
+        machine: Identifiant,
+        /// Le nom, s'il change.
+        nom: Option<NomRange>,
+        /// Les capacités, si elles changent.
+        capacites: Option<Capacites>,
+    },
+    /// Un code d'enrôlement émis. Le code courant de la machine : le plus
+    /// récent ; le précédent s'efface.
+    Enrolement {
+        /// L'empreinte du code.
+        empreinte: [u8; EMPREINTE_OCTETS],
+        /// L'enregistrement.
+        enregistrement: Enrolement,
+    },
+    /// Une clé liée par un code. Supprimer le code s'il est là ; lier la clé
+    /// selon §3.2 — code le plus récent, puis première consommation.
+    CleMachine {
+        /// La machine.
+        machine: Identifiant,
+        /// La clé liée.
+        cle: [u8; CLE_OCTETS],
+        /// L'empreinte du code consommé.
+        empreinte: [u8; EMPREINTE_OCTETS],
+        /// L'émission de ce code.
+        code: Estampille,
+    },
+    /// Une clé révoquée. Retirer la clé si c'est bien celle-là ; fermer les
+    /// connexions.
+    CleMachineRevoquee {
+        /// La machine.
+        machine: Identifiant,
+        /// La clé révoquée.
+        cle: [u8; CLE_OCTETS],
+    },
+    /// Un service déclaré. Insérer ; si `(machine, nom)` est déjà tenu, le
+    /// plus ancien reste.
+    Service {
+        /// Son identifiant.
+        service: Identifiant,
+        /// L'enregistrement.
+        enregistrement: Service,
+    },
+    /// Une autorisation accordée. Insérer si absent.
+    Autorisation {
+        /// Son identifiant.
+        autorisation: Identifiant,
+        /// L'enregistrement.
+        enregistrement: Autorisation,
+    },
+    /// Une autorisation révoquée. Marquer. Toujours.
+    AutorisationRevoquee {
+        /// Laquelle.
+        autorisation: Identifiant,
+    },
+}
+
+/// Le genre d'une opération, tel qu'il s'écrit en tête du cadre.
+///
+/// **Aucun ne vaut zéro**, pour la raison écrite sur [`Attestation`] : un
+/// tampon réemployé vaut zéro, et ne doit désigner aucune opération.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenreOperation {
+    /// `compte`.
+    Compte,
+    /// `alias`.
+    Alias,
+    /// `appareil`.
+    Appareil,
+    /// `appareil-revoque`.
+    AppareilRevoque,
+    /// `description`.
+    Description,
+    /// `poussee`.
+    Poussee,
+    /// `machine`.
+    Machine,
+    /// `machine-modifiee`.
+    MachineModifiee,
+    /// `enrolement`.
+    Enrolement,
+    /// `cle-machine`.
+    CleMachine,
+    /// `cle-machine-revoquee`.
+    CleMachineRevoquee,
+    /// `service`.
+    Service,
+    /// `autorisation`.
+    Autorisation,
+    /// `autorisation-revoquee`.
+    AutorisationRevoquee,
+}
+
+impl GenreOperation {
+    /// Les quatorze, dans l'ordre de `replication.md` §5.2 — et l'ordre de
+    /// leurs étiquettes, de 1 à 14.
+    pub const TOUS: [Self; 14] = [
+        Self::Compte,
+        Self::Alias,
+        Self::Appareil,
+        Self::AppareilRevoque,
+        Self::Description,
+        Self::Poussee,
+        Self::Machine,
+        Self::MachineModifiee,
+        Self::Enrolement,
+        Self::CleMachine,
+        Self::CleMachineRevoquee,
+        Self::Service,
+        Self::Autorisation,
+        Self::AutorisationRevoquee,
+    ];
+
+    /// Son étiquette, en tête du cadre.
+    #[must_use]
+    pub const fn etiquette(self) -> u8 {
+        match self {
+            Self::Compte => 1,
+            Self::Alias => 2,
+            Self::Appareil => 3,
+            Self::AppareilRevoque => 4,
+            Self::Description => 5,
+            Self::Poussee => 6,
+            Self::Machine => 7,
+            Self::MachineModifiee => 8,
+            Self::Enrolement => 9,
+            Self::CleMachine => 10,
+            Self::CleMachineRevoquee => 11,
+            Self::Service => 12,
+            Self::Autorisation => 13,
+            Self::AutorisationRevoquee => 14,
+        }
+    }
+
+    /// Relit une étiquette.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Etiquette`] si l'octet ne désigne aucun genre — zéro compris.
+    pub const fn depuis(octet: u8) -> Result<Self, Faute> {
+        Ok(match octet {
+            1 => Self::Compte,
+            2 => Self::Alias,
+            3 => Self::Appareil,
+            4 => Self::AppareilRevoque,
+            5 => Self::Description,
+            6 => Self::Poussee,
+            7 => Self::Machine,
+            8 => Self::MachineModifiee,
+            9 => Self::Enrolement,
+            10 => Self::CleMachine,
+            11 => Self::CleMachineRevoquee,
+            12 => Self::Service,
+            13 => Self::Autorisation,
+            14 => Self::AutorisationRevoquee,
+            lue => return Err(Faute::Etiquette { lue }),
+        })
+    }
+
+    /// Ce que la charge de ce genre occupe.
+    ///
+    /// **C'est ici que la taille est fixée, et nulle part sur le fil.**
+    #[must_use]
+    pub const fn charge_octets(self) -> usize {
+        match self {
+            Self::Compte => IDENTIFIANT_OCTETS + COMPTE_OCTETS,
+            Self::Alias => IDENTIFIANT_OCTETS + 1 + 1 + ALIAS_OCTETS_MAX,
+            Self::Appareil => IDENTIFIANT_OCTETS + APPAREIL_OCTETS,
+            Self::AppareilRevoque | Self::AutorisationRevoquee => IDENTIFIANT_OCTETS,
+            Self::Description => IDENTIFIANT_OCTETS + DESCRIPTION_OCTETS,
+            Self::Poussee => IDENTIFIANT_OCTETS + POUSSEE_OCTETS,
+            Self::Machine => IDENTIFIANT_OCTETS + MACHINE_OCTETS,
+            Self::MachineModifiee => IDENTIFIANT_OCTETS + 1 + 1 + NOM_OCTETS_MAX + 1,
+            Self::Enrolement => EMPREINTE_OCTETS + ENROLEMENT_OCTETS,
+            Self::CleMachine => {
+                IDENTIFIANT_OCTETS + CLE_OCTETS + EMPREINTE_OCTETS + ESTAMPILLE_OCTETS
+            }
+            Self::CleMachineRevoquee => IDENTIFIANT_OCTETS + CLE_OCTETS,
+            Self::Service => IDENTIFIANT_OCTETS + SERVICE_OCTETS,
+            Self::Autorisation => IDENTIFIANT_OCTETS + AUTORISATION_OCTETS,
+        }
+    }
+
+    /// Ce que l'opération entière occupe : l'en-tête, puis la charge.
+    #[must_use]
+    pub const fn octets(self) -> usize {
+        OPERATION_ENTETE_OCTETS.saturating_add(self.charge_octets())
+    }
+}
+
+impl Operation {
+    /// Le bit qui dit qu'un `PATCH` porte le nom.
+    const PRESENT_NOM: u8 = 0b0000_0001;
+    /// Le bit qui dit qu'un `PATCH` porte les capacités.
+    const PRESENT_CAPACITES: u8 = 0b0000_0010;
+
+    /// Son genre.
+    #[must_use]
+    pub const fn genre(&self) -> GenreOperation {
+        match self {
+            Self::Compte { .. } => GenreOperation::Compte,
+            Self::Alias { .. } => GenreOperation::Alias,
+            Self::Appareil { .. } => GenreOperation::Appareil,
+            Self::AppareilRevoque { .. } => GenreOperation::AppareilRevoque,
+            Self::Description { .. } => GenreOperation::Description,
+            Self::Poussee { .. } => GenreOperation::Poussee,
+            Self::Machine { .. } => GenreOperation::Machine,
+            Self::MachineModifiee { .. } => GenreOperation::MachineModifiee,
+            Self::Enrolement { .. } => GenreOperation::Enrolement,
+            Self::CleMachine { .. } => GenreOperation::CleMachine,
+            Self::CleMachineRevoquee { .. } => GenreOperation::CleMachineRevoquee,
+            Self::Service { .. } => GenreOperation::Service,
+            Self::Autorisation { .. } => GenreOperation::Autorisation,
+            Self::AutorisationRevoquee { .. } => GenreOperation::AutorisationRevoquee,
+        }
+    }
+
+    /// Écrit cette opération sous cette estampille, et rend ce qu'elle occupe.
+    ///
+    /// **Le tampon fait toujours [`OPERATION_OCTETS_MAX`]**, et seuls les
+    /// premiers octets rendus comptent : c'est ce qui permet d'écrire sans
+    /// allouer, dans une crate qui n'alloue rien.
+    pub fn ecrire(&self, estampille: Estampille, sortie: &mut [u8; OPERATION_OCTETS_MAX]) -> usize {
+        let genre = self.genre();
+        // Le tampon est réemployé : ce que la charge ne couvre pas doit être
+        // nul, pour que le cadre soit canonique et qu'aucun octet de
+        // l'opération précédente ne survive dans le bourrage.
+        sortie.fill(0);
+        poser_un(sortie, genre.etiquette());
+        estampille.ecrire(sortie.get_mut(1..).unwrap_or_default());
+        let charge = sortie
+            .get_mut(OPERATION_ENTETE_OCTETS..)
+            .unwrap_or_default();
+        match self {
+            Self::Compte {
+                compte,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*compte, charge);
+                let mut octets = [0_u8; COMPTE_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::Alias { compte, alias } => {
+                ecrire_identifiant(*compte, charge);
+                let reste = charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default();
+                if let Some(alias) = alias {
+                    poser_un(reste, 1);
+                    alias.ecrire(reste.get_mut(1..).unwrap_or_default());
+                }
+            }
+            Self::Appareil {
+                appareil,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*appareil, charge);
+                let mut octets = [0_u8; APPAREIL_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::AppareilRevoque { appareil } => ecrire_identifiant(*appareil, charge),
+            Self::Description {
+                appareil,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*appareil, charge);
+                let mut octets = [0_u8; DESCRIPTION_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::Poussee {
+                appareil,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*appareil, charge);
+                let mut octets = [0_u8; POUSSEE_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::Machine {
+                machine,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*machine, charge);
+                let mut octets = [0_u8; MACHINE_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::MachineModifiee {
+                machine,
+                nom,
+                capacites,
+            } => {
+                ecrire_identifiant(*machine, charge);
+                let reste = charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default();
+                let mut presents = 0_u8;
+                if let Some(nom) = nom {
+                    presents |= Self::PRESENT_NOM;
+                    nom.ecrire(reste.get_mut(1..).unwrap_or_default());
+                }
+                if let Some(capacites) = capacites {
+                    presents |= Self::PRESENT_CAPACITES;
+                    poser_un(
+                        reste.get_mut(1 + 1 + NOM_OCTETS_MAX..).unwrap_or_default(),
+                        capacites.octet(),
+                    );
+                }
+                poser_un(reste, presents);
+            }
+            Self::Enrolement {
+                empreinte,
+                enregistrement,
+            } => {
+                poser(charge, empreinte);
+                let mut octets = [0_u8; ENROLEMENT_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(EMPREINTE_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::CleMachine {
+                machine,
+                cle,
+                empreinte,
+                code,
+            } => {
+                ecrire_identifiant(*machine, charge);
+                let apres_cle = IDENTIFIANT_OCTETS.saturating_add(CLE_OCTETS);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    cle,
+                );
+                poser(charge.get_mut(apres_cle..).unwrap_or_default(), empreinte);
+                code.ecrire(
+                    charge
+                        .get_mut(apres_cle.saturating_add(EMPREINTE_OCTETS)..)
+                        .unwrap_or_default(),
+                );
+            }
+            Self::CleMachineRevoquee { machine, cle } => {
+                ecrire_identifiant(*machine, charge);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    cle,
+                );
+            }
+            Self::Service {
+                service,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*service, charge);
+                let mut octets = [0_u8; SERVICE_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::Autorisation {
+                autorisation,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*autorisation, charge);
+                let mut octets = [0_u8; AUTORISATION_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::AutorisationRevoquee { autorisation } => {
+                ecrire_identifiant(*autorisation, charge);
+            }
+        }
+        genre.octets()
+    }
+
+    /// Relit une opération en tête de ces octets, et rend son estampille,
+    /// elle-même, et ce qu'elle a occupé.
+    ///
+    /// **Ce qui suit n'est pas regardé** : sur le fil, c'est l'opération
+    /// suivante ; sur le disque, il n'y a rien. C'est le genre qui dit où
+    /// celle-ci s'arrête, et c'est l'appelant qui avance.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Etiquette`] sur un genre inconnu, [`Faute::Tronquee`] si les
+    /// octets s'arrêtent avant la fin de la charge, et les fautes de
+    /// l'enregistrement porté.
+    pub fn lire(octets: &[u8]) -> Result<(Estampille, Self, usize), Faute> {
+        let genre = GenreOperation::depuis(octets.first().copied().unwrap_or(0))?;
+        let attendus = genre.octets();
+        if octets.len() < attendus {
+            return Err(Faute::Tronquee {
+                attendus,
+                obtenus: octets.len(),
+            });
+        }
+        let estampille =
+            Estampille::lire(octets.get(1..OPERATION_ENTETE_OCTETS).unwrap_or_default())?;
+        let charge = octets
+            .get(OPERATION_ENTETE_OCTETS..attendus)
+            .unwrap_or_default();
+        let apres_identifiant = charge.get(IDENTIFIANT_OCTETS..).unwrap_or_default();
+        let operation = match genre {
+            GenreOperation::Compte => Self::Compte {
+                compte: lire_identifiant(charge, Genre::Utilisateur)?,
+                enregistrement: Compte::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::Alias => Self::Alias {
+                compte: lire_identifiant(charge, Genre::Utilisateur)?,
+                alias: match apres_identifiant.first().copied().unwrap_or(0) {
+                    0 => {
+                        if !bourrage_nul(apres_identifiant.get(1..).unwrap_or_default()) {
+                            return Err(Faute::Bourrage);
+                        }
+                        None
+                    }
+                    1 => Some(AliasRange::lire(
+                        apres_identifiant.get(1..).unwrap_or_default(),
+                    )?),
+                    lue => return Err(Faute::Etiquette { lue }),
+                },
+            },
+            GenreOperation::Appareil => Self::Appareil {
+                appareil: lire_identifiant(charge, Genre::Appareil)?,
+                enregistrement: Appareil::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::AppareilRevoque => Self::AppareilRevoque {
+                appareil: lire_identifiant(charge, Genre::Appareil)?,
+            },
+            GenreOperation::Description => Self::Description {
+                appareil: lire_identifiant(charge, Genre::Appareil)?,
+                enregistrement: Description::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::Poussee => Self::Poussee {
+                appareil: lire_identifiant(charge, Genre::Appareil)?,
+                enregistrement: JetonPoussee::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::Machine => Self::Machine {
+                machine: lire_identifiant(charge, Genre::Machine)?,
+                enregistrement: Machine::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::MachineModifiee => {
+                let presents = apres_identifiant.first().copied().unwrap_or(0);
+                if presents & !(Self::PRESENT_NOM | Self::PRESENT_CAPACITES) != 0 {
+                    return Err(Faute::Etiquette { lue: presents });
+                }
+                let place_du_nom = apres_identifiant
+                    .get(1..1 + 1 + NOM_OCTETS_MAX)
+                    .unwrap_or_default();
+                let place_des_capacites = apres_identifiant
+                    .get(1 + 1 + NOM_OCTETS_MAX..)
+                    .unwrap_or_default();
+                let nom = if presents & Self::PRESENT_NOM == 0 {
+                    if !bourrage_nul(place_du_nom) {
+                        return Err(Faute::Bourrage);
+                    }
+                    None
+                } else {
+                    Some(NomRange::lire(place_du_nom)?)
+                };
+                let capacites = if presents & Self::PRESENT_CAPACITES == 0 {
+                    if !bourrage_nul(place_des_capacites) {
+                        return Err(Faute::Bourrage);
+                    }
+                    None
+                } else {
+                    let octet = place_des_capacites.first().copied().unwrap_or(0);
+                    if octet & !(Machine::BIT_ANNONCE | Machine::BIT_LECTURE) != 0 {
+                        return Err(Faute::Etiquette { lue: octet });
+                    }
+                    Some(Capacites {
+                        annonce: octet & Machine::BIT_ANNONCE != 0,
+                        lecture: octet & Machine::BIT_LECTURE != 0,
+                    })
+                };
+                Self::MachineModifiee {
+                    machine: lire_identifiant(charge, Genre::Machine)?,
+                    nom,
+                    capacites,
+                }
+            }
+            GenreOperation::Enrolement => {
+                let mut empreinte = [0_u8; EMPREINTE_OCTETS];
+                poser(&mut empreinte, charge);
+                Self::Enrolement {
+                    empreinte,
+                    enregistrement: Enrolement::lire(&copie(
+                        charge.get(EMPREINTE_OCTETS..).unwrap_or_default(),
+                    ))?,
+                }
+            }
+            GenreOperation::CleMachine => {
+                let mut cle = [0_u8; CLE_OCTETS];
+                poser(&mut cle, apres_identifiant);
+                let mut empreinte = [0_u8; EMPREINTE_OCTETS];
+                poser(
+                    &mut empreinte,
+                    apres_identifiant.get(CLE_OCTETS..).unwrap_or_default(),
+                );
+                Self::CleMachine {
+                    machine: lire_identifiant(charge, Genre::Machine)?,
+                    cle,
+                    empreinte,
+                    code: Estampille::lire(
+                        apres_identifiant
+                            .get(CLE_OCTETS.saturating_add(EMPREINTE_OCTETS)..)
+                            .unwrap_or_default(),
+                    )?,
+                }
+            }
+            GenreOperation::CleMachineRevoquee => {
+                let mut cle = [0_u8; CLE_OCTETS];
+                poser(&mut cle, apres_identifiant);
+                Self::CleMachineRevoquee {
+                    machine: lire_identifiant(charge, Genre::Machine)?,
+                    cle,
+                }
+            }
+            GenreOperation::Service => Self::Service {
+                service: lire_identifiant(charge, Genre::Service)?,
+                enregistrement: Service::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::Autorisation => Self::Autorisation {
+                autorisation: lire_identifiant(charge, Genre::Autorisation)?,
+                enregistrement: Autorisation::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::AutorisationRevoquee => Self::AutorisationRevoquee {
+                autorisation: lire_identifiant(charge, Genre::Autorisation)?,
+            },
+        };
+        Ok((estampille, operation, attendus))
+    }
+}
+
+/// Une tranche recopiée dans le tableau de taille fixe qu'un enregistrement
+/// lit.
+///
+/// **La tranche a TOUJOURS cette taille exacte** : elle est découpée dans une
+/// charge dont le genre a fixé la longueur, et [`Operation::lire`] a déjà
+/// refusé ce qui était trop court. Une conversion `try_from` ouvrirait une
+/// branche qu'aucun essai ne peut prendre ; la copie n'en ouvre aucune, et
+/// c'est l'idiome de tout ce module — `zip` s'arrête sur le plus court.
+fn copie<const N: usize>(tranche: &[u8]) -> [u8; N] {
+    let mut tableau = [0_u8; N];
+    poser(&mut tableau, tranche);
+    tableau
 }
 
 // ── Le journal (C18) ────────────────────────────────────────────────────────
@@ -1552,17 +2878,98 @@ mod tests {
 
     use super::{
         ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
-        Autorisation, CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Compte,
-        Court, DESCRIPTION_OCTETS, Description, ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement,
-        EntreeJournal, Faute, IDENTIFIANT_OCTETS, JETON_OCTETS_MAX, JetonPoussee, JetonRange,
-        MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, PORTEE_OCTETS, POUSSEE_OCTETS,
-        PROVENANCE_OCTETS, Plateforme, Portee, Provenance, SERVICE_OCTETS, Service, Systeme,
-        Verdict,
+        Autorisation, CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS,
+        Capacites, CleLiee, Compte, Court, DESCRIPTION_OCTETS, Description, EMPREINTE_OCTETS,
+        ENROLEMENT_OCTETS, ENTREE_OCTETS, ESTAMPILLE_OCTETS, Enrolement, EntreeJournal, Estampille,
+        Faute, GenreOperation, IDENTIFIANT_OCTETS, JETON_OCTETS_MAX, JetonPoussee, JetonRange,
+        MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, OPERATION_ENTETE_OCTETS,
+        OPERATION_OCTETS_MAX, Operation, PORTEE_OCTETS, POUSSEE_OCTETS, PROVENANCE_OCTETS,
+        Plateforme, Portee, Provenance, SERVICE_OCTETS, Service, Systeme, Verdict, ancien,
     };
 
     /// Un identifiant de ce genre, reproductible.
     fn un(genre: Genre, graine: u8) -> Identifiant {
         Identifiant::depuis_entropie(genre, [graine; 16])
+    }
+
+    /// Une estampille de cette racine-ci, à ce compteur.
+    fn e(compteur: u64) -> Estampille {
+        Estampille {
+            compteur,
+            racine: un(Genre::Annuaire, 0xEE),
+        }
+    }
+
+    /// Une clé liée, reproductible.
+    fn cle_liee(octet: u8) -> CleLiee {
+        CleLiee {
+            cle: [octet; CLE_OCTETS],
+            liaison: e(7),
+            code: e(6),
+        }
+    }
+
+    /// Un compte, reproductible.
+    fn un_compte(provenance: Provenance, alias: Option<&str>) -> Compte {
+        Compte {
+            provenance,
+            estampille: e(3),
+            alias: alias.map(|texte| AliasRange::nouveau(texte).expect("il tient")),
+            reclamation: e(3),
+        }
+    }
+
+    /// Une machine, reproductible.
+    fn une_machine(cle: Option<CleLiee>, annonce: bool, lecture: bool, nom: &str) -> Machine {
+        Machine {
+            provenance: Provenance::Ici,
+            estampille: e(9),
+            proprietaire: un(Genre::Utilisateur, 5),
+            cle,
+            annonce,
+            lecture,
+            capacites_estampille: e(8),
+            nom: nom_de_machine(nom),
+            nom_estampille: e(4),
+        }
+    }
+
+    /// Un appareil, reproductible.
+    fn un_appareil(atteste: Attestation, revoque: bool) -> Appareil {
+        Appareil {
+            provenance: Provenance::Ici,
+            estampille: e(2),
+            proprietaire: un(Genre::Utilisateur, 7),
+            cle: [0x33; CLE_APPAREIL_OCTETS],
+            atteste,
+            revoque,
+        }
+    }
+
+    /// Un enrôlement, reproductible.
+    fn un_enrolement(provenance: Provenance, expire_a: u64) -> Enrolement {
+        Enrolement {
+            provenance,
+            estampille: e(11),
+            machine: un(Genre::Machine, 4),
+            expire_a,
+        }
+    }
+
+    /// Les octets d'un enregistrement ancien : la provenance, puis le corps
+    /// que la forme courante range APRÈS ses estampilles.
+    ///
+    /// **C'est exactement ce que la reprise reçoit** : la forme d'avant est la
+    /// forme courante moins ses estampilles, et rien d'autre n'a bougé.
+    fn ancien<const NEUF: usize, const VIEUX: usize>(
+        neuf: &[u8; NEUF],
+        estampilles: usize,
+    ) -> [u8; VIEUX] {
+        let mut vieux = [0_u8; VIEUX];
+        vieux[..PROVENANCE_OCTETS].copy_from_slice(&neuf[..PROVENANCE_OCTETS]);
+        let corps = PROVENANCE_OCTETS.saturating_add(estampilles.saturating_mul(ESTAMPILLE_OCTETS));
+        vieux[PROVENANCE_OCTETS..].copy_from_slice(&neuf[corps..]);
+        vieux
     }
 
     // ── Court ───────────────────────────────────────────────────────────────
@@ -1743,14 +3150,69 @@ mod tests {
         assert_eq!(Provenance::lire(&octets), Err(Faute::Bourrage));
     }
 
+    // ── Estampille ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn une_estampille_se_relit() {
+        let mut sortie = [0_u8; ESTAMPILLE_OCTETS];
+        e(4_812).ecrire(&mut sortie);
+        assert_eq!(Estampille::lire(&sortie), Ok(e(4_812)));
+        // Le compteur est en gros-boutiste : les huit premiers octets.
+        assert_eq!(&sortie[..8], &4_812_u64.to_be_bytes());
+    }
+
+    #[test]
+    fn une_estampille_exige_une_racine() {
+        // Une machine n'estampille rien : seule une racine écrit.
+        let mut octets = [0_u8; ESTAMPILLE_OCTETS];
+        octets[8] = Genre::Machine.prefixe();
+        assert_eq!(
+            Estampille::lire(&octets),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+    }
+
+    #[test]
+    fn l_ordre_des_estampilles_est_le_compteur_puis_la_racine() {
+        // **C'EST L'ORDRE TOTAL DE `replication.md` §4**, et l'invariant de
+        // §3.1 en dépend : deux racines qui calculent « le plus ancien »
+        // doivent obtenir le même, quel que soit l'ordre d'arrivée.
+        let nitrogen = un(Genre::Annuaire, 0x01);
+        let argon = un(Genre::Annuaire, 0x02);
+        let a = |compteur, racine| Estampille { compteur, racine };
+
+        // Le compteur d'abord…
+        assert!(a(1, argon) < a(2, nitrogen));
+        assert!(a(2, nitrogen) > a(1, argon));
+        // …puis la racine, à compteur égal.
+        assert!(a(5, nitrogen) < a(5, argon));
+        assert_ne!(a(5, nitrogen), a(5, argon));
+        // Et une estampille est égale à elle-même, et à elle seule.
+        assert_eq!(a(5, nitrogen), a(5, nitrogen));
+        assert_eq!(
+            a(5, nitrogen).cmp(&a(5, nitrogen)),
+            core::cmp::Ordering::Equal
+        );
+
+        // L'ordre est total : un tri ne dépend pas de l'ordre de départ.
+        let mut une = [a(3, argon), a(1, nitrogen), a(3, nitrogen), a(2, argon)];
+        let mut autre = [a(2, argon), a(3, nitrogen), a(1, nitrogen), a(3, argon)];
+        une.sort();
+        autre.sort();
+        assert_eq!(une, autre);
+        assert_eq!(
+            une,
+            [a(1, nitrogen), a(2, argon), a(3, nitrogen), a(3, argon)]
+        );
+    }
+
     // ── Compte ──────────────────────────────────────────────────────────────
 
     #[test]
     fn un_compte_sans_alias_se_relit() {
-        let compte = Compte {
-            provenance: Provenance::Ici,
-            alias: None,
-        };
+        let compte = un_compte(Provenance::Ici, None);
         let mut sortie = [0_u8; COMPTE_OCTETS];
         compte.ecrire(&mut sortie);
         assert_eq!(Compte::lire(&sortie), Ok(compte));
@@ -1758,10 +3220,13 @@ mod tests {
 
     #[test]
     fn un_compte_avec_alias_se_relit() {
-        let compte = Compte {
-            provenance: Provenance::Annuaire(un(Genre::Annuaire, 3)),
-            alias: Some(AliasRange::nouveau("thierry").expect("il tient")),
-        };
+        let mut compte = un_compte(
+            Provenance::Annuaire(un(Genre::Annuaire, 3)),
+            Some("thierry"),
+        );
+        // La réclamation a sa propre estampille, distincte de la dernière
+        // écriture : c'est elle que la règle de l'alias compare.
+        compte.reclamation = e(1);
         let mut sortie = [0_u8; COMPTE_OCTETS];
         compte.ecrire(&mut sortie);
         assert_eq!(Compte::lire(&sortie), Ok(compte));
@@ -1769,17 +3234,11 @@ mod tests {
 
     #[test]
     fn un_compte_sans_alias_n_emporte_aucun_reste() {
-        let avec = Compte {
-            provenance: Provenance::Ici,
-            alias: Some(AliasRange::nouveau("visible").expect("il tient")),
-        };
+        let avec = un_compte(Provenance::Ici, Some("visible"));
         let mut sortie = [0_u8; COMPTE_OCTETS];
         avec.ecrire(&mut sortie);
 
-        let sans = Compte {
-            provenance: Provenance::Ici,
-            alias: None,
-        };
+        let sans = un_compte(Provenance::Ici, None);
         sans.ecrire(&mut sortie);
         assert!(
             !sortie.windows(7).any(|f| f == b"visible"),
@@ -1791,15 +3250,16 @@ mod tests {
     #[test]
     fn une_etiquette_d_alias_inconnue_est_refusee() {
         let mut octets = [0_u8; COMPTE_OCTETS];
-        octets[PROVENANCE_OCTETS] = 4;
+        un_compte(Provenance::Ici, None).ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 2 * ESTAMPILLE_OCTETS] = 4;
         assert_eq!(Compte::lire(&octets), Err(Faute::Etiquette { lue: 4 }));
     }
 
     #[test]
     fn un_alias_de_longueur_corrompue_refuse_le_compte_entier() {
         let mut octets = [0_u8; COMPTE_OCTETS];
-        octets[PROVENANCE_OCTETS] = 1;
-        octets[PROVENANCE_OCTETS + 1] = 250;
+        un_compte(Provenance::Ici, Some("x")).ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 2 * ESTAMPILLE_OCTETS + 1] = 250;
         assert_eq!(
             Compte::lire(&octets),
             Err(Faute::Longueur {
@@ -1820,67 +3280,104 @@ mod tests {
     }
 
     #[test]
+    fn une_estampille_corrompue_refuse_le_compte_entier() {
+        // Les deux estampilles, l'une après l'autre : sans l'une, la règle de
+        // conflit n'est plus calculable ; sans l'autre, l'alias n'a plus de
+        // rang dans la file.
+        let mut octets = [0_u8; COMPTE_OCTETS];
+        un_compte(Provenance::Ici, None).ecrire(&mut octets);
+        for place in [
+            PROVENANCE_OCTETS + 8,
+            PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + 8,
+        ] {
+            let mut corrompus = octets;
+            corrompus[place] = Genre::Service.prefixe();
+            assert_eq!(
+                Compte::lire(&corrompus),
+                Err(Faute::Genre {
+                    attendu: Genre::Annuaire
+                }),
+                "à l'octet {place}"
+            );
+        }
+    }
+
+    #[test]
     fn un_compte_sans_alias_au_bourrage_sale_est_refuse() {
         let mut octets = [0_u8; COMPTE_OCTETS];
-        octets[PROVENANCE_OCTETS + 4] = 0xAA;
+        un_compte(Provenance::Ici, None).ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 2 * ESTAMPILLE_OCTETS + 4] = 0xAA;
         assert_eq!(Compte::lire(&octets), Err(Faute::Bourrage));
+    }
+
+    #[test]
+    fn un_compte_ancien_se_reprend_avec_l_estampille_qu_on_lui_donne() {
+        // **C'EST LA REPRISE DE §11.4** : l'enregistrement d'avant, sans
+        // estampille, relu avec celle que la racine lui attribue — et la
+        // réclamation reçoit la même.
+        for alias in [None, Some("thierry")] {
+            let attendu = Compte {
+                estampille: e(40),
+                reclamation: e(40),
+                ..un_compte(Provenance::Annuaire(un(Genre::Annuaire, 3)), alias)
+            };
+            let mut neuf = [0_u8; COMPTE_OCTETS];
+            attendu.ecrire(&mut neuf);
+            let vieux: [u8; ancien::COMPTE_OCTETS] = ancien(&neuf, 2);
+            assert_eq!(Compte::lire_ancien(&vieux, e(40)), Ok(attendu), "{alias:?}");
+        }
+
+        // Et la corruption se voit dans la forme ancienne comme dans la neuve.
+        let mut vieux = [0_u8; ancien::COMPTE_OCTETS];
+        vieux[0] = 9;
+        assert_eq!(
+            Compte::lire_ancien(&vieux, e(1)),
+            Err(Faute::Etiquette { lue: 9 })
+        );
     }
 
     // ── Machine ─────────────────────────────────────────────────────────────
 
     #[test]
     fn une_machine_se_relit_entiere() {
-        let machine = Machine {
-            provenance: Provenance::Ici,
-            proprietaire: un(Genre::Utilisateur, 5),
-            cle: Some([0x42; 32]),
-            annonce: true,
-            lecture: false,
-            nom: nom_de_machine("grenier"),
-        };
+        let machine = une_machine(Some(cle_liee(0x42)), true, false, "grenier");
         let mut sortie = [0_u8; MACHINE_OCTETS];
         machine.ecrire(&mut sortie);
         assert_eq!(Machine::lire(&sortie), Ok(machine));
+        assert_eq!(
+            machine.capacites(),
+            Capacites {
+                annonce: true,
+                lecture: false
+            }
+        );
     }
 
     #[test]
     fn les_quatre_combinaisons_de_capacites_se_relisent() {
         for (annonce, lecture) in [(false, false), (true, false), (false, true), (true, true)] {
-            let machine = Machine {
-                provenance: Provenance::Ici,
-                proprietaire: un(Genre::Utilisateur, 1),
-                cle: Some([0; 32]),
-                annonce,
-                lecture,
-                nom: nom_de_machine("grenier"),
-            };
+            let machine = une_machine(Some(cle_liee(0)), annonce, lecture, "grenier");
             let mut sortie = [0_u8; MACHINE_OCTETS];
             machine.ecrire(&mut sortie);
             assert_eq!(Machine::lire(&sortie), Ok(machine), "{annonce} {lecture}");
         }
     }
 
+    /// Où l'octet des drapeaux se trouve dans une machine.
+    const DRAPEAUX: usize =
+        PROVENANCE_OCTETS + 5 * ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS;
+
     #[test]
     fn un_bit_de_capacite_inconnu_est_refuse() {
         // **UNE VERSION QUI EN SAIT PLUS QUE NOUS NE DOIT PAS ÊTRE RELUE À
         // MOITIÉ** : lui prêter des capacités qu'on ne comprend pas serait pire
         // que de refuser.
-        let machine = Machine {
-            provenance: Provenance::Ici,
-            proprietaire: un(Genre::Utilisateur, 1),
-            cle: Some([0; 32]),
-            annonce: true,
-            lecture: true,
-            nom: nom_de_machine("grenier"),
-        };
+        let machine = une_machine(Some(cle_liee(0)), true, true, "grenier");
         let mut octets = [0_u8; MACHINE_OCTETS];
         machine.ecrire(&mut octets);
-        // **L'OCTET DES DRAPEAUX N'EST PLUS LE DERNIER** : le nom le suit
-        // désormais. Le calculer depuis les constantes plutôt que de compter à
-        // rebours est ce qui empêche cet essai de viser à côté au prochain champ
-        // — il a visé à côté une fois, et il a rendu `Bourrage`.
-        let drapeaux = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS;
-        octets[drapeaux] |= 0b1000_0000;
+        // **L'OCTET DES DRAPEAUX SE CALCULE DEPUIS LES CONSTANTES**, et non à
+        // rebours : il a visé à côté une fois, et il a rendu `Bourrage`.
+        octets[DRAPEAUX] |= 0b1000_0000;
         assert_eq!(
             // `0b111` : annonce, lecture, et la clé posée.
             Machine::lire(&octets),
@@ -1892,14 +3389,7 @@ mod tests {
     fn une_machine_sans_cle_se_relit_sans_cle() {
         // C'est l'état d'une machine DÉCLARÉE et pas encore enrôlée, et il doit
         // faire l'aller-retour comme les autres.
-        let machine = Machine {
-            provenance: Provenance::Ici,
-            proprietaire: un(Genre::Utilisateur, 1),
-            cle: None,
-            annonce: false,
-            lecture: true,
-            nom: nom_de_machine("portable"),
-        };
+        let machine = une_machine(None, false, true, "portable");
         let mut octets = [0_u8; MACHINE_OCTETS];
         machine.ecrire(&mut octets);
         assert_eq!(Machine::lire(&octets), Ok(machine));
@@ -1908,25 +3398,61 @@ mod tests {
     #[test]
     fn une_machine_sans_cle_dont_la_place_n_est_pas_nulle_est_refusee() {
         // **DEUX ÉCRITURES POUR UNE MÊME VALEUR, ET C'EST NON.** Sans ce refus,
-        // un enregistrement relu ne se réécrirait pas comme il a été lu.
-        let machine = Machine {
-            provenance: Provenance::Ici,
-            proprietaire: un(Genre::Utilisateur, 1),
-            cle: None,
-            annonce: true,
-            lecture: false,
-            nom: nom_de_machine("grenier"),
-        };
-        let mut octets = [0_u8; MACHINE_OCTETS];
-        machine.ecrire(&mut octets);
-        octets[PROVENANCE_OCTETS + IDENTIFIANT_OCTETS] = 0x01;
-        assert_eq!(Machine::lire(&octets), Err(Faute::Bourrage));
+        // un enregistrement relu ne se réécrirait pas comme il a été lu. La
+        // place de la clé, et celles de ses deux estampilles.
+        let machine = une_machine(None, true, false, "grenier");
+        for place in [
+            PROVENANCE_OCTETS + 3 * ESTAMPILLE_OCTETS,
+            PROVENANCE_OCTETS + 4 * ESTAMPILLE_OCTETS,
+            PROVENANCE_OCTETS + 5 * ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS,
+        ] {
+            let mut octets = [0_u8; MACHINE_OCTETS];
+            machine.ecrire(&mut octets);
+            octets[place] = 0x01;
+            assert_eq!(
+                Machine::lire(&octets),
+                Err(Faute::Bourrage),
+                "à l'octet {place}"
+            );
+        }
+    }
+
+    #[test]
+    fn une_cle_dont_une_estampille_est_corrompue_est_refusee() {
+        let machine = une_machine(Some(cle_liee(1)), true, false, "grenier");
+        for place in [
+            PROVENANCE_OCTETS + 3 * ESTAMPILLE_OCTETS + 8,
+            PROVENANCE_OCTETS + 4 * ESTAMPILLE_OCTETS + 8,
+        ] {
+            let mut octets = [0_u8; MACHINE_OCTETS];
+            machine.ecrire(&mut octets);
+            octets[place] = Genre::Machine.prefixe();
+            assert_eq!(
+                Machine::lire(&octets),
+                Err(Faute::Genre {
+                    attendu: Genre::Annuaire
+                }),
+                "à l'octet {place}"
+            );
+        }
+    }
+
+    #[test]
+    fn une_cle_liee_ne_laisse_aucun_reste_derriere_elle() {
+        // Une machine enrôlée puis réécrite sans clé — une révocation — ne
+        // doit rien laisser de la clé ni de ses estampilles.
+        let mut octets = [0xFF_u8; MACHINE_OCTETS];
+        une_machine(Some(cle_liee(0x42)), true, true, "grenier").ecrire(&mut octets);
+        let sans = une_machine(None, true, true, "grenier");
+        sans.ecrire(&mut octets);
+        assert_eq!(Machine::lire(&octets), Ok(sans));
     }
 
     #[test]
     fn un_proprietaire_qui_n_est_pas_un_utilisateur_est_refuse() {
         let mut octets = [0_u8; MACHINE_OCTETS];
-        octets[PROVENANCE_OCTETS] = Genre::Service.prefixe();
+        une_machine(None, true, true, "grenier").ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 5 * ESTAMPILLE_OCTETS] = Genre::Service.prefixe();
         assert_eq!(
             Machine::lire(&octets),
             Err(Faute::Genre {
@@ -1936,21 +3462,71 @@ mod tests {
     }
 
     #[test]
-    fn une_provenance_corrompue_refuse_la_machine_entiere() {
+    fn une_provenance_ou_une_estampille_corrompue_refuse_la_machine_entiere() {
         let mut octets = [0_u8; MACHINE_OCTETS];
         octets[0] = 9;
         assert_eq!(Machine::lire(&octets), Err(Faute::Etiquette { lue: 9 }));
+
+        // Les trois estampilles hors clé, l'une après l'autre.
+        for rang in 0..3 {
+            let mut octets = [0_u8; MACHINE_OCTETS];
+            une_machine(None, true, true, "grenier").ecrire(&mut octets);
+            octets[PROVENANCE_OCTETS + rang * ESTAMPILLE_OCTETS + 8] = Genre::Machine.prefixe();
+            assert_eq!(
+                Machine::lire(&octets),
+                Err(Faute::Genre {
+                    attendu: Genre::Annuaire
+                }),
+                "estampille {rang}"
+            );
+        }
+    }
+
+    #[test]
+    fn une_machine_ancienne_se_reprend_avec_l_estampille_qu_on_lui_donne() {
+        // **TOUS LES CHAMPS REÇOIVENT LA MÊME** : le nom, les capacités, et la
+        // clé si elle est là — dont le code est réputé émis à la reprise.
+        for cle in [None, Some([0x42; CLE_OCTETS])] {
+            let attendue = Machine {
+                estampille: e(40),
+                capacites_estampille: e(40),
+                nom_estampille: e(40),
+                cle: cle.map(|cle| CleLiee {
+                    cle,
+                    liaison: e(40),
+                    code: e(40),
+                }),
+                ..une_machine(None, true, false, "grenier")
+            };
+            let mut neuf = [0_u8; MACHINE_OCTETS];
+            attendue.ecrire(&mut neuf);
+            let vieux: [u8; ancien::MACHINE_OCTETS] = ancien(&neuf, 5);
+            assert_eq!(Machine::lire_ancien(&vieux, e(40)), Ok(attendue), "{cle:?}");
+        }
+
+        let mut vieux = [0_u8; ancien::MACHINE_OCTETS];
+        vieux[0] = 9;
+        assert_eq!(
+            Machine::lire_ancien(&vieux, e(1)),
+            Err(Faute::Etiquette { lue: 9 })
+        );
     }
 
     // ── Service ─────────────────────────────────────────────────────────────
 
+    /// Un service, reproductible.
+    fn un_service(provenance: Provenance, nom: &str) -> Service {
+        Service {
+            provenance,
+            estampille: e(12),
+            machine: un(Genre::Machine, 4),
+            nom: NomRange::nouveau(nom).expect("il tient"),
+        }
+    }
+
     #[test]
     fn un_service_se_relit_entier() {
-        let service = Service {
-            provenance: Provenance::Ici,
-            machine: un(Genre::Machine, 4),
-            nom: NomRange::nouveau("depot-de-messages").expect("il tient"),
-        };
+        let service = un_service(Provenance::Ici, "depot-de-messages");
         let mut sortie = [0_u8; SERVICE_OCTETS];
         service.ecrire(&mut sortie);
         assert_eq!(Service::lire(&sortie), Ok(service));
@@ -1959,7 +3535,8 @@ mod tests {
     #[test]
     fn un_service_dont_la_machine_n_en_est_pas_une_est_refuse() {
         let mut octets = [0_u8; SERVICE_OCTETS];
-        octets[PROVENANCE_OCTETS] = Genre::Utilisateur.prefixe();
+        un_service(Provenance::Ici, "depot").ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + ESTAMPILLE_OCTETS] = Genre::Utilisateur.prefixe();
         assert_eq!(
             Service::lire(&octets),
             Err(Faute::Genre {
@@ -1971,8 +3548,8 @@ mod tests {
     #[test]
     fn un_service_au_nom_corrompu_est_refuse() {
         let mut octets = [0_u8; SERVICE_OCTETS];
-        octets[PROVENANCE_OCTETS] = Genre::Machine.prefixe();
-        octets[PROVENANCE_OCTETS + IDENTIFIANT_OCTETS] = 250;
+        un_service(Provenance::Ici, "depot").ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS] = 250;
         assert_eq!(
             Service::lire(&octets),
             Err(Faute::Longueur {
@@ -1983,10 +3560,38 @@ mod tests {
     }
 
     #[test]
-    fn une_provenance_corrompue_refuse_le_service_entier() {
+    fn une_provenance_ou_une_estampille_corrompue_refuse_le_service_entier() {
         let mut octets = [0_u8; SERVICE_OCTETS];
         octets[0] = 9;
         assert_eq!(Service::lire(&octets), Err(Faute::Etiquette { lue: 9 }));
+
+        un_service(Provenance::Ici, "depot").ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 8] = Genre::Machine.prefixe();
+        assert_eq!(
+            Service::lire(&octets),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+    }
+
+    #[test]
+    fn un_service_ancien_se_reprend_avec_l_estampille_qu_on_lui_donne() {
+        let attendu = Service {
+            estampille: e(40),
+            ..un_service(Provenance::Annuaire(un(Genre::Annuaire, 3)), "depot")
+        };
+        let mut neuf = [0_u8; SERVICE_OCTETS];
+        attendu.ecrire(&mut neuf);
+        let vieux: [u8; ancien::SERVICE_OCTETS] = ancien(&neuf, 1);
+        assert_eq!(Service::lire_ancien(&vieux, e(40)), Ok(attendu));
+
+        let mut vieux = [0_u8; ancien::SERVICE_OCTETS];
+        vieux[0] = 9;
+        assert_eq!(
+            Service::lire_ancien(&vieux, e(1)),
+            Err(Faute::Etiquette { lue: 9 })
+        );
     }
 
     // ── Portée et autorisation ──────────────────────────────────────────────
@@ -1995,6 +3600,7 @@ mod tests {
     fn une_autorisation(portee: Portee) -> Autorisation {
         Autorisation {
             provenance: Provenance::Ici,
+            estampille: e(13),
             par: un(Genre::Utilisateur, 1),
             a: un(Genre::Utilisateur, 2),
             portee,
@@ -2002,6 +3608,10 @@ mod tests {
             etiquette: NomRange::nouveau("le portable de Léa").unwrap(),
         }
     }
+
+    /// Où la portée commence dans une autorisation.
+    const PORTEE: usize =
+        PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS;
 
     #[test]
     fn une_autorisation_garde_son_etiquette() {
@@ -2054,8 +3664,7 @@ mod tests {
         let autorisation = une_autorisation(Portee::ToutLeCompte);
         let mut octets = [0_u8; AUTORISATION_OCTETS];
         autorisation.ecrire(&mut octets);
-        let place = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS;
-        octets[place] = 7;
+        octets[PORTEE] = 7;
         assert_eq!(
             Autorisation::lire(&octets),
             Err(Faute::Etiquette { lue: 7 })
@@ -2067,8 +3676,7 @@ mod tests {
         let autorisation = une_autorisation(Portee::ToutLeCompte);
         let mut octets = [0_u8; AUTORISATION_OCTETS];
         autorisation.ecrire(&mut octets);
-        let place = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS + 3;
-        octets[place] = 0xAA;
+        octets[PORTEE + 3] = 0xAA;
         assert_eq!(Autorisation::lire(&octets), Err(Faute::Bourrage));
     }
 
@@ -2077,8 +3685,7 @@ mod tests {
         let autorisation = une_autorisation(Portee::UnService(un(Genre::Service, 1)));
         let mut octets = [0_u8; AUTORISATION_OCTETS];
         autorisation.ecrire(&mut octets);
-        let place = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS;
-        octets[place] = Portee::MACHINE;
+        octets[PORTEE] = Portee::MACHINE;
         assert_eq!(
             Autorisation::lire(&octets),
             Err(Faute::Genre {
@@ -2092,8 +3699,7 @@ mod tests {
         let autorisation = une_autorisation(Portee::UneMachine(un(Genre::Machine, 1)));
         let mut octets = [0_u8; AUTORISATION_OCTETS];
         autorisation.ecrire(&mut octets);
-        let place = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS;
-        octets[place] = Portee::SERVICE;
+        octets[PORTEE] = Portee::SERVICE;
         assert_eq!(
             Autorisation::lire(&octets),
             Err(Faute::Genre {
@@ -2111,8 +3717,7 @@ mod tests {
         autorisation.ecrire(&mut octets);
         // Le drapeau de révocation est juste après la portée, avant l'étiquette
         // — ce n'est plus le dernier octet depuis que l'étiquette existe.
-        let drapeau = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS + PORTEE_OCTETS;
-        octets[drapeau] = 2;
+        octets[PORTEE + PORTEE_OCTETS] = 2;
         assert_eq!(
             Autorisation::lire(&octets),
             Err(Faute::Etiquette { lue: 2 })
@@ -2126,9 +3731,8 @@ mod tests {
         let autorisation = une_autorisation(Portee::ToutLeCompte);
         let mut octets = [0_u8; AUTORISATION_OCTETS];
         autorisation.ecrire(&mut octets);
-        let longueur =
-            PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS + PORTEE_OCTETS + 1;
-        octets[longueur] = u8::try_from(NOM_OCTETS_MAX + 1).expect("tient sur un octet");
+        octets[PORTEE + PORTEE_OCTETS + 1] =
+            u8::try_from(NOM_OCTETS_MAX + 1).expect("tient sur un octet");
         assert_eq!(
             Autorisation::lire(&octets),
             Err(Faute::Longueur {
@@ -2140,7 +3744,8 @@ mod tests {
 
     #[test]
     fn les_deux_comptes_d_une_autorisation_doivent_etre_des_utilisateurs() {
-        for place in [PROVENANCE_OCTETS, PROVENANCE_OCTETS + IDENTIFIANT_OCTETS] {
+        let apres_estampille = PROVENANCE_OCTETS + ESTAMPILLE_OCTETS;
+        for place in [apres_estampille, apres_estampille + IDENTIFIANT_OCTETS] {
             let autorisation = une_autorisation(Portee::ToutLeCompte);
             let mut octets = [0_u8; AUTORISATION_OCTETS];
             autorisation.ecrire(&mut octets);
@@ -2156,11 +3761,40 @@ mod tests {
     }
 
     #[test]
-    fn une_provenance_corrompue_refuse_l_autorisation_entiere() {
+    fn une_provenance_ou_une_estampille_corrompue_refuse_l_autorisation_entiere() {
         let mut octets = [0_u8; AUTORISATION_OCTETS];
         octets[0] = 9;
         assert_eq!(
             Autorisation::lire(&octets),
+            Err(Faute::Etiquette { lue: 9 })
+        );
+
+        une_autorisation(Portee::ToutLeCompte).ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 8] = Genre::Machine.prefixe();
+        assert_eq!(
+            Autorisation::lire(&octets),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+    }
+
+    #[test]
+    fn une_autorisation_ancienne_se_reprend_avec_l_estampille_qu_on_lui_donne() {
+        let attendue = Autorisation {
+            estampille: e(40),
+            revoquee: true,
+            ..une_autorisation(Portee::UnService(un(Genre::Service, 6)))
+        };
+        let mut neuf = [0_u8; AUTORISATION_OCTETS];
+        attendue.ecrire(&mut neuf);
+        let vieux: [u8; ancien::AUTORISATION_OCTETS] = ancien(&neuf, 1);
+        assert_eq!(Autorisation::lire_ancien(&vieux, e(40)), Ok(attendue));
+
+        let mut vieux = [0_u8; ancien::AUTORISATION_OCTETS];
+        vieux[0] = 9;
+        assert_eq!(
+            Autorisation::lire_ancien(&vieux, e(1)),
             Err(Faute::Etiquette { lue: 9 })
         );
     }
@@ -2300,10 +3934,14 @@ mod tests {
     fn un_jeton(plateforme: Plateforme, texte: &str) -> JetonPoussee {
         JetonPoussee {
             provenance: Provenance::Ici,
+            estampille: e(14),
             plateforme,
             jeton: JetonRange::nouveau(texte).expect("il tient"),
         }
     }
+
+    /// Où la plate-forme se trouve dans un jeton.
+    const PLATEFORME: usize = PROVENANCE_OCTETS + ESTAMPILLE_OCTETS;
 
     #[test]
     fn un_jeton_de_poussee_fait_l_aller_retour() {
@@ -2359,7 +3997,7 @@ mod tests {
         // réemployé vaut zéro, et le laisser désigner APNs ferait présenter à
         // Apple des jetons qu'on n'a jamais reçus.
         for lue in [0_u8, 3, 200] {
-            octets[PROVENANCE_OCTETS] = lue;
+            octets[PLATEFORME] = lue;
             assert_eq!(
                 JetonPoussee::lire(&octets),
                 Err(Faute::Etiquette { lue }),
@@ -2380,11 +4018,21 @@ mod tests {
             Err(Faute::Etiquette { lue: 9 })
         );
 
+        // L'estampille aussi.
+        jeton.ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 8] = Genre::Machine.prefixe();
+        assert_eq!(
+            JetonPoussee::lire(&octets),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+
         // **UNE LONGUEUR ALLONGÉE NE DÉPASSE JAMAIS 255**, donc `Court` ne peut
         // pas la refuser ; ce sont les zéros qu'elle fait entrer dans le texte
         // qui la dénoncent.
         jeton.ecrire(&mut octets);
-        octets[PROVENANCE_OCTETS + 1] = 255;
+        octets[PLATEFORME + 1] = 255;
         assert_eq!(
             JetonPoussee::lire(&octets),
             Err(Faute::NonImprimable { position: 6 })
@@ -2395,16 +4043,35 @@ mod tests {
         // sens dans lequel `Court` sache encore se défendre à 255 octets de
         // borne — l'autre, la longueur allongée, ne peut pas dépasser le tableau.
         jeton.ecrire(&mut octets);
-        octets[PROVENANCE_OCTETS + 1] = 3;
+        octets[PLATEFORME + 1] = 3;
         assert_eq!(JetonPoussee::lire(&octets), Err(Faute::Bourrage));
 
         // Et l'espace n'est pas imprimable au sens qui nous intéresse : un jeton
         // n'en porte pas, et en accepter un ferait passer un tampon mal rempli.
         jeton.ecrire(&mut octets);
-        octets[PROVENANCE_OCTETS + 2] = b' ';
+        octets[PLATEFORME + 2] = b' ';
         assert_eq!(
             JetonPoussee::lire(&octets),
             Err(Faute::NonImprimable { position: 0 })
+        );
+    }
+
+    #[test]
+    fn un_jeton_ancien_se_reprend_avec_l_estampille_qu_on_lui_donne() {
+        let attendu = JetonPoussee {
+            estampille: e(40),
+            ..un_jeton(Plateforme::Fcm, "d0d0")
+        };
+        let mut neuf = [0_u8; POUSSEE_OCTETS];
+        attendu.ecrire(&mut neuf);
+        let vieux: [u8; ancien::POUSSEE_OCTETS] = ancien(&neuf, 1);
+        assert_eq!(JetonPoussee::lire_ancien(&vieux, e(40)), Ok(attendu));
+
+        let mut vieux = [0_u8; ancien::POUSSEE_OCTETS];
+        vieux[0] = 9;
+        assert_eq!(
+            JetonPoussee::lire_ancien(&vieux, e(1)),
+            Err(Faute::Etiquette { lue: 9 })
         );
     }
 
@@ -2414,10 +4081,14 @@ mod tests {
     fn une_description(systeme: Systeme, modele: &str) -> Description {
         Description {
             provenance: Provenance::Ici,
+            estampille: e(15),
             systeme,
             modele: nom_de_machine(modele),
         }
     }
+
+    /// Où le système se trouve dans une description.
+    const SYSTEME: usize = PROVENANCE_OCTETS + ESTAMPILLE_OCTETS;
 
     #[test]
     fn une_description_fait_l_aller_retour() {
@@ -2464,7 +4135,7 @@ mod tests {
         // **ZÉRO EN FAIT PARTIE** : un tampon réemployé vaut zéro, et ne doit
         // désigner aucun système.
         for lue in [0_u8, 4, 200] {
-            octets[PROVENANCE_OCTETS] = lue;
+            octets[SYSTEME] = lue;
             assert_eq!(
                 Description::lire(&octets),
                 Err(Faute::Etiquette { lue }),
@@ -2482,10 +4153,20 @@ mod tests {
         octets[0] = 9;
         assert_eq!(Description::lire(&octets), Err(Faute::Etiquette { lue: 9 }));
 
+        // L'estampille aussi.
+        description.ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 8] = Genre::Machine.prefixe();
+        assert_eq!(
+            Description::lire(&octets),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+
         // Une longueur au-delà du tableau se voit : la borne du modèle est
         // celle d'un nom, et 64 tient dans un octet avec de la marge.
         description.ecrire(&mut octets);
-        octets[PROVENANCE_OCTETS + 1] = 250;
+        octets[SYSTEME + 1] = 250;
         assert_eq!(
             Description::lire(&octets),
             Err(Faute::Longueur {
@@ -2496,16 +4177,35 @@ mod tests {
 
         // Une longueur raccourcie laisse du texte dans le bourrage.
         description.ecrire(&mut octets);
-        octets[PROVENANCE_OCTETS + 1] = 3;
+        octets[SYSTEME + 1] = 3;
         assert_eq!(Description::lire(&octets), Err(Faute::Bourrage));
     }
 
     #[test]
     fn une_description_fait_la_taille_annoncee() {
-        // Provenance, système, longueur du modèle, modèle.
+        // Provenance, estampille, système, longueur du modèle, modèle.
         assert_eq!(
             DESCRIPTION_OCTETS,
-            PROVENANCE_OCTETS + 1 + 1 + NOM_OCTETS_MAX
+            PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + 1 + 1 + NOM_OCTETS_MAX
+        );
+    }
+
+    #[test]
+    fn une_description_ancienne_se_reprend_avec_l_estampille_qu_on_lui_donne() {
+        let attendue = Description {
+            estampille: e(40),
+            ..une_description(Systeme::Macos, "MacBook Pro (2019)")
+        };
+        let mut neuf = [0_u8; DESCRIPTION_OCTETS];
+        attendue.ecrire(&mut neuf);
+        let vieux: [u8; ancien::DESCRIPTION_OCTETS] = ancien(&neuf, 1);
+        assert_eq!(Description::lire_ancien(&vieux, e(40)), Ok(attendue));
+
+        let mut vieux = [0_u8; ancien::DESCRIPTION_OCTETS];
+        vieux[0] = 9;
+        assert_eq!(
+            Description::lire_ancien(&vieux, e(1)),
+            Err(Faute::Etiquette { lue: 9 })
         );
     }
 
@@ -2513,13 +4213,7 @@ mod tests {
 
     #[test]
     fn un_appareil_fait_l_aller_retour() {
-        let appareil = Appareil {
-            provenance: Provenance::Ici,
-            proprietaire: un(Genre::Utilisateur, 7),
-            cle: [0x33; CLE_APPAREIL_OCTETS],
-            atteste: Attestation::Apple,
-            revoque: false,
-        };
+        let appareil = un_appareil(Attestation::Apple, false);
         let mut octets = [0_u8; APPAREIL_OCTETS];
         appareil.ecrire(&mut octets);
         assert_eq!(Appareil::lire(&octets), Ok(appareil));
@@ -2531,12 +4225,10 @@ mod tests {
         // fédère un téléphone aujourd'hui.
         let appareil = Appareil {
             provenance: Provenance::Annuaire(un(Genre::Annuaire, 2)),
-            proprietaire: un(Genre::Utilisateur, 7),
             cle: [0; CLE_APPAREIL_OCTETS],
-            // **ENTRÉ SANS PREUVE**, sous une posture facultative.
-            atteste: Attestation::Aucune,
+            // **ENTRÉ SANS PREUVE**, sous une posture facultative, et
             // **RÉVOQUÉ**, pour que les deux états fassent l'aller-retour.
-            revoque: true,
+            ..un_appareil(Attestation::Aucune, true)
         };
         let mut octets = [0_u8; APPAREIL_OCTETS];
         appareil.ecrire(&mut octets);
@@ -2546,7 +4238,8 @@ mod tests {
     #[test]
     fn un_proprietaire_d_appareil_qui_n_est_pas_un_utilisateur_est_refuse() {
         let mut octets = [0_u8; APPAREIL_OCTETS];
-        octets[PROVENANCE_OCTETS] = Genre::Machine.prefixe();
+        un_appareil(Attestation::Apple, false).ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + ESTAMPILLE_OCTETS] = Genre::Machine.prefixe();
         assert_eq!(
             Appareil::lire(&octets),
             Err(Faute::Genre {
@@ -2556,12 +4249,27 @@ mod tests {
     }
 
     #[test]
-    fn un_enrolement_fait_l_aller_retour() {
-        let enrolement = Enrolement {
-            provenance: Provenance::Ici,
-            machine: un(Genre::Machine, 4),
-            expire_a: 1_757_000_000_000,
+    fn un_appareil_ancien_se_reprend_avec_l_estampille_qu_on_lui_donne() {
+        let attendu = Appareil {
+            estampille: e(40),
+            ..un_appareil(Attestation::Google, true)
         };
+        let mut neuf = [0_u8; APPAREIL_OCTETS];
+        attendu.ecrire(&mut neuf);
+        let vieux: [u8; ancien::APPAREIL_OCTETS] = ancien(&neuf, 1);
+        assert_eq!(Appareil::lire_ancien(&vieux, e(40)), Ok(attendu));
+
+        let mut vieux = [0_u8; ancien::APPAREIL_OCTETS];
+        vieux[0] = 9;
+        assert_eq!(
+            Appareil::lire_ancien(&vieux, e(1)),
+            Err(Faute::Etiquette { lue: 9 })
+        );
+    }
+
+    #[test]
+    fn un_enrolement_fait_l_aller_retour() {
+        let enrolement = un_enrolement(Provenance::Ici, 1_757_000_000_000);
         let mut octets = [0_u8; ENROLEMENT_OCTETS];
         enrolement.ecrire(&mut octets);
         assert_eq!(Enrolement::lire(&octets), Ok(enrolement));
@@ -2569,11 +4277,7 @@ mod tests {
 
     #[test]
     fn un_enrolement_venu_d_un_pair_fait_l_aller_retour() {
-        let enrolement = Enrolement {
-            provenance: Provenance::Annuaire(un(Genre::Annuaire, 9)),
-            machine: un(Genre::Machine, 4),
-            expire_a: 0,
-        };
+        let enrolement = un_enrolement(Provenance::Annuaire(un(Genre::Annuaire, 9)), 0);
         let mut octets = [0_u8; ENROLEMENT_OCTETS];
         enrolement.ecrire(&mut octets);
         assert_eq!(Enrolement::lire(&octets), Ok(enrolement));
@@ -2582,7 +4286,8 @@ mod tests {
     #[test]
     fn un_enrolement_qui_ne_designe_pas_une_machine_est_refuse() {
         let mut octets = [0_u8; ENROLEMENT_OCTETS];
-        octets[PROVENANCE_OCTETS] = Genre::Service.prefixe();
+        un_enrolement(Provenance::Ici, 1).ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + ESTAMPILLE_OCTETS] = Genre::Service.prefixe();
         assert_eq!(
             Enrolement::lire(&octets),
             Err(Faute::Genre {
@@ -2592,21 +4297,32 @@ mod tests {
     }
 
     #[test]
+    fn un_enrolement_ancien_se_reprend_avec_l_estampille_qu_on_lui_donne() {
+        let attendu = Enrolement {
+            estampille: e(40),
+            ..un_enrolement(Provenance::Ici, 1_800_000_000_000)
+        };
+        let mut neuf = [0_u8; ENROLEMENT_OCTETS];
+        attendu.ecrire(&mut neuf);
+        let vieux: [u8; ancien::ENROLEMENT_OCTETS] = ancien(&neuf, 1);
+        assert_eq!(Enrolement::lire_ancien(&vieux, e(40)), Ok(attendu));
+
+        let mut vieux = [0_u8; ancien::ENROLEMENT_OCTETS];
+        vieux[0] = 9;
+        assert_eq!(
+            Enrolement::lire_ancien(&vieux, e(1)),
+            Err(Faute::Etiquette { lue: 9 })
+        );
+    }
+
+    #[test]
     fn une_machine_dont_le_nom_est_illisible_est_refusee() {
         // La longueur annoncée du nom dépasse la place : c'est une corruption,
         // et elle se lit plutôt qu'elle ne se devine.
-        let machine = Machine {
-            provenance: Provenance::Ici,
-            proprietaire: un(Genre::Utilisateur, 1),
-            cle: Some([9; CLE_OCTETS]),
-            annonce: true,
-            lecture: true,
-            nom: nom_de_machine("grenier"),
-        };
+        let machine = une_machine(Some(cle_liee(9)), true, true, "grenier");
         let mut octets = [0_u8; MACHINE_OCTETS];
         machine.ecrire(&mut octets);
-        let longueur_du_nom = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS + 1;
-        octets[longueur_du_nom] = 200;
+        octets[DRAPEAUX + 1] = 200;
         assert_eq!(
             Machine::lire(&octets),
             Err(Faute::Longueur {
@@ -2617,13 +4333,21 @@ mod tests {
     }
 
     #[test]
-    fn une_provenance_illisible_est_refusee_sur_les_deux_enregistrements_neufs() {
+    fn une_provenance_ou_une_estampille_illisible_est_refusee_sur_l_appareil_et_l_enrolement() {
         // L'étiquette de provenance vient en tête : elle est le premier refus.
         let mut appareil = [0_u8; APPAREIL_OCTETS];
         appareil[0] = 0x7F;
         assert_eq!(
             Appareil::lire(&appareil),
             Err(Faute::Etiquette { lue: 0x7F })
+        );
+        un_appareil(Attestation::Aucune, false).ecrire(&mut appareil);
+        appareil[PROVENANCE_OCTETS + 8] = Genre::Machine.prefixe();
+        assert_eq!(
+            Appareil::lire(&appareil),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
         );
 
         let mut enrolement = [0_u8; ENROLEMENT_OCTETS];
@@ -2632,6 +4356,14 @@ mod tests {
             Enrolement::lire(&enrolement),
             Err(Faute::Etiquette { lue: 0x7F })
         );
+        un_enrolement(Provenance::Ici, 1).ecrire(&mut enrolement);
+        enrolement[PROVENANCE_OCTETS + 8] = Genre::Machine.prefixe();
+        assert_eq!(
+            Enrolement::lire(&enrolement),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
     }
 
     #[test]
@@ -2639,13 +4371,7 @@ mod tests {
         // **UN BOOLÉEN N'A QUE DEUX ÉCRITURES.** En accepter une troisième
         // rendrait l'encodage non canonique : un enregistrement relu se
         // réécrirait différemment de lui-même, et c'est le fuzz qui le dirait.
-        let appareil = Appareil {
-            provenance: Provenance::Ici,
-            proprietaire: un(Genre::Utilisateur, 7),
-            cle: [0x33; CLE_APPAREIL_OCTETS],
-            atteste: Attestation::Google,
-            revoque: false,
-        };
+        let appareil = un_appareil(Attestation::Google, false);
         let mut octets = [0_u8; APPAREIL_OCTETS];
         appareil.ecrire(&mut octets);
         let dernier = APPAREIL_OCTETS.saturating_sub(1);
@@ -2656,13 +4382,7 @@ mod tests {
     #[test]
     fn les_trois_attestations_font_l_aller_retour() {
         for atteste in [Attestation::Aucune, Attestation::Apple, Attestation::Google] {
-            let appareil = Appareil {
-                provenance: Provenance::Ici,
-                proprietaire: un(Genre::Utilisateur, 7),
-                cle: [0x33; CLE_APPAREIL_OCTETS],
-                atteste,
-                revoque: false,
-            };
+            let appareil = un_appareil(atteste, false);
             let mut octets = [0_u8; APPAREIL_OCTETS];
             appareil.ecrire(&mut octets);
             assert_eq!(Appareil::lire(&octets), Ok(appareil), "pour {atteste:?}");
@@ -2674,20 +4394,376 @@ mod tests {
         // **ZÉRO NE DÉSIGNE PERSONNE**, ici, à la différence du fil : un octet
         // oublié dans un tampon réemployé vaut zéro, et un appareil à demi
         // écrit ne doit pas se relire comme un appareil non attesté.
-        let appareil = Appareil {
-            provenance: Provenance::Ici,
-            proprietaire: un(Genre::Utilisateur, 7),
-            cle: [0x33; CLE_APPAREIL_OCTETS],
-            atteste: Attestation::Aucune,
-            revoque: false,
-        };
+        let appareil = un_appareil(Attestation::Aucune, false);
         let mut octets = [0_u8; APPAREIL_OCTETS];
         appareil.ecrire(&mut octets);
         // L'octet d'attestation est juste après la clé.
-        let place = PROVENANCE_OCTETS + IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS;
+        let place =
+            PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS;
         octets[place] = 0;
         assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 0 }));
         octets[place] = 4;
         assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 4 }));
+    }
+
+    // ── Les opérations ──────────────────────────────────────────────────────
+
+    /// Une opération de chaque genre, dans l'ordre de `replication.md` §5.2.
+    fn une_de_chaque() -> [Operation; 14] {
+        [
+            Operation::Compte {
+                compte: un(Genre::Utilisateur, 1),
+                enregistrement: un_compte(Provenance::Ici, Some("thierry")),
+            },
+            Operation::Alias {
+                compte: un(Genre::Utilisateur, 1),
+                alias: Some(AliasRange::nouveau("thierry").unwrap()),
+            },
+            Operation::Appareil {
+                appareil: un(Genre::Appareil, 2),
+                enregistrement: un_appareil(Attestation::Apple, false),
+            },
+            Operation::AppareilRevoque {
+                appareil: un(Genre::Appareil, 2),
+            },
+            Operation::Description {
+                appareil: un(Genre::Appareil, 2),
+                enregistrement: une_description(Systeme::Ios, "iPhone 17"),
+            },
+            Operation::Poussee {
+                appareil: un(Genre::Appareil, 2),
+                enregistrement: un_jeton(Plateforme::Apns, "c0ffee"),
+            },
+            Operation::Machine {
+                machine: un(Genre::Machine, 3),
+                enregistrement: une_machine(None, true, true, "grenier"),
+            },
+            Operation::MachineModifiee {
+                machine: un(Genre::Machine, 3),
+                nom: Some(nom_de_machine("cave")),
+                capacites: Some(Capacites {
+                    annonce: false,
+                    lecture: true,
+                }),
+            },
+            Operation::Enrolement {
+                empreinte: [0xC0; EMPREINTE_OCTETS],
+                enregistrement: un_enrolement(Provenance::Ici, 1_800_000_000_000),
+            },
+            Operation::CleMachine {
+                machine: un(Genre::Machine, 3),
+                cle: [0x42; CLE_OCTETS],
+                empreinte: [0xC0; EMPREINTE_OCTETS],
+                code: e(11),
+            },
+            Operation::CleMachineRevoquee {
+                machine: un(Genre::Machine, 3),
+                cle: [0x42; CLE_OCTETS],
+            },
+            Operation::Service {
+                service: un(Genre::Service, 4),
+                enregistrement: un_service(Provenance::Ici, "depot"),
+            },
+            Operation::Autorisation {
+                autorisation: un(Genre::Autorisation, 5),
+                enregistrement: une_autorisation(Portee::ToutLeCompte),
+            },
+            Operation::AutorisationRevoquee {
+                autorisation: un(Genre::Autorisation, 5),
+            },
+        ]
+    }
+
+    #[test]
+    fn chaque_genre_fait_l_aller_retour_et_dit_ce_qu_il_occupe() {
+        for (rang, operation) in une_de_chaque().into_iter().enumerate() {
+            let genre = operation.genre();
+            assert_eq!(genre, GenreOperation::TOUS[rang], "{operation:?}");
+            assert_eq!(
+                usize::from(genre.etiquette()),
+                rang + 1,
+                "les étiquettes suivent l'ordre de la table"
+            );
+            assert_eq!(GenreOperation::depuis(genre.etiquette()), Ok(genre));
+
+            let mut sortie = [0xFF_u8; OPERATION_OCTETS_MAX];
+            let combien = operation.ecrire(e(4_812), &mut sortie);
+            assert_eq!(combien, genre.octets(), "{genre:?}");
+            assert_eq!(sortie[0], genre.etiquette());
+            // Ce que la charge ne couvre pas est nul : le tampon était sale.
+            assert!(
+                sortie[combien..].iter().all(|octet| *octet == 0),
+                "{genre:?} laisse du bourrage derrière lui"
+            );
+
+            // Et ce qui suit n'est pas regardé : un second cadre, ou du bruit.
+            let mut avec_suite = sortie.to_vec();
+            avec_suite.extend_from_slice(&[0xAB; 3]);
+            assert_eq!(
+                Operation::lire(&avec_suite),
+                Ok((e(4_812), operation, combien)),
+                "{genre:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn un_alias_lache_et_un_patch_partiel_font_l_aller_retour() {
+        // Les deux genres qui portent un « ou rien » : chaque absence a sa
+        // forme, et chacune doit revenir.
+        let variantes = [
+            Operation::Alias {
+                compte: un(Genre::Utilisateur, 1),
+                alias: None,
+            },
+            Operation::MachineModifiee {
+                machine: un(Genre::Machine, 3),
+                nom: None,
+                capacites: Some(Capacites {
+                    annonce: true,
+                    lecture: false,
+                }),
+            },
+            Operation::MachineModifiee {
+                machine: un(Genre::Machine, 3),
+                nom: Some(nom_de_machine("cave")),
+                capacites: None,
+            },
+            Operation::MachineModifiee {
+                machine: un(Genre::Machine, 3),
+                nom: None,
+                capacites: None,
+            },
+        ];
+        for operation in variantes {
+            let mut sortie = [0xFF_u8; OPERATION_OCTETS_MAX];
+            let combien = operation.ecrire(e(1), &mut sortie);
+            assert_eq!(
+                Operation::lire(&sortie[..combien]),
+                Ok((e(1), operation, combien)),
+                "{operation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn un_genre_inconnu_est_refuse_zero_compris() {
+        for lue in [0_u8, 15, 200] {
+            let mut octets = [0_u8; OPERATION_OCTETS_MAX];
+            octets[0] = lue;
+            assert_eq!(Operation::lire(&octets), Err(Faute::Etiquette { lue }));
+            assert_eq!(GenreOperation::depuis(lue), Err(Faute::Etiquette { lue }));
+        }
+    }
+
+    #[test]
+    fn une_operation_tronquee_est_refusee_et_dit_ce_qui_manque() {
+        // **C'EST LA SEULE LONGUEUR DU FIL, ET ELLE VIENT DU GENRE.** Une
+        // tranche plus courte n'est pas une opération, et l'on ne devine pas
+        // ce qui manque.
+        for operation in une_de_chaque() {
+            let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+            let combien = operation.ecrire(e(1), &mut sortie);
+            assert_eq!(
+                Operation::lire(&sortie[..combien - 1]),
+                Err(Faute::Tronquee {
+                    attendus: combien,
+                    obtenus: combien - 1,
+                }),
+                "{operation:?}"
+            );
+        }
+        // Un seul octet — le genre — n'est pas une opération non plus.
+        assert_eq!(
+            Operation::lire(&[GenreOperation::AppareilRevoque.etiquette()]),
+            Err(Faute::Tronquee {
+                attendus: OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS,
+                obtenus: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn une_estampille_d_en_tete_corrompue_refuse_l_operation() {
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        une_de_chaque()[3].ecrire(e(1), &mut sortie);
+        sortie[1 + 8] = Genre::Machine.prefixe();
+        assert_eq!(
+            Operation::lire(&sortie),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+    }
+
+    #[test]
+    fn un_identifiant_d_un_autre_genre_refuse_l_operation() {
+        // Chaque genre exige le genre d'identifiant de ce qu'il porte : un
+        // `compte` qui nommerait une machine n'est pas un compte.
+        let attendus = [
+            Genre::Utilisateur,
+            Genre::Utilisateur,
+            Genre::Appareil,
+            Genre::Appareil,
+            Genre::Appareil,
+            Genre::Appareil,
+            Genre::Machine,
+            Genre::Machine,
+            Genre::Machine, // l'enrôlement : c'est l'enregistrement qui nomme
+            Genre::Machine,
+            Genre::Machine,
+            Genre::Service,
+            Genre::Autorisation,
+            Genre::Autorisation,
+        ];
+        for (operation, attendu) in une_de_chaque().into_iter().zip(attendus) {
+            let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+            operation.ecrire(e(1), &mut sortie);
+            let place = match operation {
+                // L'empreinte vient d'abord ; l'identifiant est dans
+                // l'enregistrement, après sa provenance et son estampille.
+                Operation::Enrolement { .. } => {
+                    OPERATION_ENTETE_OCTETS
+                        + EMPREINTE_OCTETS
+                        + PROVENANCE_OCTETS
+                        + ESTAMPILLE_OCTETS
+                }
+                _ => OPERATION_ENTETE_OCTETS,
+            };
+            sortie[place] = b'z';
+            assert_eq!(
+                Operation::lire(&sortie),
+                Err(Faute::Genre { attendu }),
+                "{operation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn un_enregistrement_corrompu_refuse_l_operation_qui_le_porte() {
+        // La provenance de l'enregistrement porté, mise à une étiquette
+        // inconnue : la faute de l'enregistrement est celle de l'opération.
+        for operation in une_de_chaque() {
+            let debut = match operation {
+                Operation::Compte { .. }
+                | Operation::Appareil { .. }
+                | Operation::Description { .. }
+                | Operation::Poussee { .. }
+                | Operation::Machine { .. }
+                | Operation::Service { .. }
+                | Operation::Autorisation { .. } => OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS,
+                Operation::Enrolement { .. } => OPERATION_ENTETE_OCTETS + EMPREINTE_OCTETS,
+                _ => continue,
+            };
+            let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+            operation.ecrire(e(1), &mut sortie);
+            sortie[debut] = 9;
+            assert_eq!(
+                Operation::lire(&sortie),
+                Err(Faute::Etiquette { lue: 9 }),
+                "{operation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn une_cle_liee_dont_l_estampille_du_code_est_corrompue_est_refusee() {
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        une_de_chaque()[9].ecrire(e(1), &mut sortie);
+        let place =
+            OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS + CLE_OCTETS + EMPREINTE_OCTETS + 8;
+        sortie[place] = Genre::Machine.prefixe();
+        assert_eq!(
+            Operation::lire(&sortie),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+    }
+
+    #[test]
+    fn une_reclamation_d_alias_corrompue_est_refusee() {
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        une_de_chaque()[1].ecrire(e(1), &mut sortie);
+        let present = OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS;
+
+        // Une étiquette qui n'est ni « rien » ni « un alias ».
+        let mut corrompue = sortie;
+        corrompue[present] = 2;
+        assert_eq!(
+            Operation::lire(&corrompue),
+            Err(Faute::Etiquette { lue: 2 })
+        );
+
+        // « Rien », mais du texte derrière.
+        corrompue[present] = 0;
+        assert_eq!(Operation::lire(&corrompue), Err(Faute::Bourrage));
+
+        // Un alias dont la longueur déborde.
+        let mut corrompue = sortie;
+        corrompue[present + 1] = 200;
+        assert_eq!(
+            Operation::lire(&corrompue),
+            Err(Faute::Longueur {
+                annoncee: 200,
+                maximum: ALIAS_OCTETS_MAX,
+            })
+        );
+    }
+
+    #[test]
+    fn un_patch_de_machine_corrompu_est_refuse() {
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        une_de_chaque()[7].ecrire(e(1), &mut sortie);
+        let presents = OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS;
+        let capacites = presents + 1 + 1 + NOM_OCTETS_MAX;
+
+        // Un champ qu'on ne connaît pas.
+        let mut corrompue = sortie;
+        corrompue[presents] = 0b0000_0100;
+        assert_eq!(
+            Operation::lire(&corrompue),
+            Err(Faute::Etiquette { lue: 0b0000_0100 })
+        );
+
+        // Un nom absent, mais du texte à sa place.
+        let mut corrompue = sortie;
+        corrompue[presents] = Operation::PRESENT_CAPACITES;
+        assert_eq!(Operation::lire(&corrompue), Err(Faute::Bourrage));
+
+        // Des capacités absentes, mais un octet à leur place.
+        let mut corrompue = sortie;
+        corrompue[presents] = Operation::PRESENT_NOM;
+        assert_eq!(Operation::lire(&corrompue), Err(Faute::Bourrage));
+
+        // Un nom dont la longueur déborde.
+        let mut corrompue = sortie;
+        corrompue[presents + 1] = 200;
+        assert_eq!(
+            Operation::lire(&corrompue),
+            Err(Faute::Longueur {
+                annoncee: 200,
+                maximum: NOM_OCTETS_MAX,
+            })
+        );
+
+        // Une capacité qu'on ne connaît pas — le bit de la clé n'en est pas
+        // une, et n'a rien à faire dans un `PATCH`.
+        let mut corrompue = sortie;
+        corrompue[capacites] = 0b0000_0100;
+        assert_eq!(
+            Operation::lire(&corrompue),
+            Err(Faute::Etiquette { lue: 0b0000_0100 })
+        );
+    }
+
+    #[test]
+    fn la_plus_grande_charge_est_celle_du_jeton_et_le_tampon_la_tient() {
+        // `OPERATION_OCTETS_MAX` est la taille du tampon d'écriture : si un
+        // genre l'excédait, `ecrire` tronquerait en silence.
+        for genre in GenreOperation::TOUS {
+            assert!(genre.octets() <= OPERATION_OCTETS_MAX, "{genre:?}");
+        }
+        assert_eq!(GenreOperation::Poussee.octets(), OPERATION_OCTETS_MAX);
     }
 }

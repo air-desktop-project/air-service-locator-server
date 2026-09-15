@@ -34,8 +34,14 @@
 //!    se croyant entier. `asl_registre::Faute::Bourrage` ferme les trois.
 //! 3. **CE QUI S'ÉCRIT SE RELIT.** L'autre sens, depuis des valeurs construites :
 //!    il attrape ce qu'un aller-retour depuis des octets ne peut pas atteindre.
-//! 4. **UN REFUS EST TOUJOURS L'UNE DES QUATRE FAUTES NOMMÉES**, jamais une
-//!    panique ni un enregistrement à moitié lu.
+//! 4. **UN REFUS EST TOUJOURS L'UNE DES FAUTES NOMMÉES**, jamais une panique
+//!    ni un enregistrement à moitié lu.
+//! 5. **UNE OPÉRATION EST UN CADRE, ET LE CADRE SE RELIT** — depuis des octets
+//!    quelconques (rien ne panique, et ce qui se relit se réécrit à
+//!    l'identique, sur exactement les octets que le genre annonce), et depuis
+//!    des valeurs construites. C'est ce que l'autre racine tirera sur le fil
+//!    (`docs/replication.md` §5), et **le fil ne porte aucune longueur** : le
+//!    genre dit tout, et une tranche trop courte est refusée, jamais devinée.
 
 #![no_main]
 
@@ -45,9 +51,10 @@ use libfuzzer_sys::fuzz_target;
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
     ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
-    Autorisation, COMPTE_OCTETS, Compte, DESCRIPTION_OCTETS, Description, ENROLEMENT_OCTETS,
-    ENTREE_OCTETS, Enrolement, EntreeJournal, Faute, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX,
-    NomRange, Portee, Provenance, SERVICE_OCTETS, Service, Systeme, Verdict,
+    Autorisation, COMPTE_OCTETS, Capacites, CleLiee, Compte, DESCRIPTION_OCTETS, Description,
+    ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement, EntreeJournal, Estampille, Faute, MACHINE_OCTETS,
+    Machine, NOM_OCTETS_MAX, NomRange, OPERATION_OCTETS_MAX, Operation, Portee, Provenance,
+    SERVICE_OCTETS, Service, Systeme, Verdict,
 };
 
 /// Ce qu'on soumet.
@@ -87,13 +94,25 @@ struct Entree {
     rang: u64,
     /// La provenance est-elle distante ?
     distante: bool,
+    /// Les octets d'une opération — un cadre, et ce qui le suit.
+    operation: Vec<u8>,
+    /// Le compteur d'une estampille.
+    compteur: u64,
+    /// Quelle opération construire, pour l'autre sens.
+    quelle_operation: u8,
 }
 
-/// Une faute est toujours l'une des quatre, et jamais une panique.
+/// Une faute d'enregistrement est toujours l'une des cinq, et jamais une
+/// panique. `Tronquee` n'en fait pas partie : un enregistrement se lit dans un
+/// tableau de sa taille, et ne peut pas l'être.
 fn nommee(faute: Faute) {
     assert!(matches!(
         faute,
-        Faute::Etiquette { .. } | Faute::Genre { .. } | Faute::Longueur { .. } | Faute::Bourrage
+        Faute::Etiquette { .. }
+            | Faute::Genre { .. }
+            | Faute::Longueur { .. }
+            | Faute::Bourrage
+            | Faute::NonImprimable { .. }
     ));
 }
 
@@ -226,12 +245,23 @@ fuzz_target!(|entree: Entree| {
     } else {
         Provenance::Ici
     };
+    // **L'ESTAMPILLE EST UNE HORLOGE DE LAMPORT** : un compteur et une racine,
+    // et rien d'autre ne la contraint. Tout compteur est une estampille.
+    let estampille = Estampille {
+        compteur: entree.compteur,
+        racine: Identifiant::depuis_entropie(Genre::Annuaire, [entree.graine ^ 0x5A; 16]),
+    };
 
     if let Ok(alias) = AliasRange::nouveau(&entree.alias) {
         assert!(alias.longueur() <= ALIAS_OCTETS_MAX);
         let compte = Compte {
             provenance,
+            estampille,
             alias: Some(alias),
+            reclamation: Estampille {
+                compteur: entree.quand,
+                ..estampille
+            },
         };
         let mut octets = [0_u8; COMPTE_OCTETS];
         compte.ecrire(&mut octets);
@@ -261,6 +291,7 @@ fuzz_target!(|entree: Entree| {
     if let Ok(nom) = NomRange::nouveau(&entree.service) {
         let service = Service {
             provenance,
+            estampille,
             machine: Identifiant::depuis_entropie(Genre::Machine, [entree.graine; 16]),
             nom,
         };
@@ -282,6 +313,7 @@ fuzz_target!(|entree: Entree| {
     };
     let autorisation = Autorisation {
         provenance,
+        estampille,
         par: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine; 16]),
         a: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine ^ 0xFF; 16]),
         portee,
@@ -299,19 +331,32 @@ fuzz_target!(|entree: Entree| {
 
     let machine = Machine {
         provenance,
+        estampille,
         proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine; 16]),
         // **LES DEUX ÉTATS D'UNE CLÉ**, et le second n'est pas cosmétique : une
         // machine déclarée et pas encore enrôlée n'en a pas, et l'absence doit
         // faire l'aller-retour aussi bien que la présence.
-        cle: (entree.graine & 8 != 0).then_some([entree.graine; 32]),
+        cle: (entree.graine & 8 != 0).then_some(CleLiee {
+            cle: [entree.graine; 32],
+            liaison: estampille,
+            code: Estampille {
+                compteur: entree.quand,
+                ..estampille
+            },
+        }),
         annonce: entree.graine & 1 != 0,
         lecture: entree.graine & 2 != 0,
+        capacites_estampille: estampille,
         // **UN NOM DE MACHINE EST DU TEXTE LIBRE**, donc n'importe quelle suite
         // d'octets valides en UTF-8 et assez courte. Le refus se prend ailleurs
         // (`asl-api`) ; ce qui est éprouvé ici est le RANGEMENT.
         nom: match NomRange::nouveau(&entree.nom_de_machine) {
             Ok(nom) => nom,
             Err(_) => return,
+        },
+        nom_estampille: Estampille {
+            compteur: entree.rang,
+            ..estampille
         },
     };
     let mut octets = [0_u8; MACHINE_OCTETS];
@@ -326,6 +371,7 @@ fuzz_target!(|entree: Entree| {
     };
     let appareil = Appareil {
         provenance,
+        estampille,
         proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine; 16]),
         cle: [entree.graine; 33],
         atteste,
@@ -337,6 +383,7 @@ fuzz_target!(|entree: Entree| {
 
     let enrolement = Enrolement {
         provenance,
+        estampille,
         machine: Identifiant::depuis_entropie(Genre::Machine, [entree.graine; 16]),
         expire_a: entree.quand,
     };
@@ -351,6 +398,7 @@ fuzz_target!(|entree: Entree| {
     if let Ok(modele) = NomRange::nouveau(&entree.nom_de_machine) {
         let description = Description {
             provenance,
+            estampille,
             systeme: match entree.graine % 3 {
                 0 => Systeme::Ios,
                 1 => Systeme::Android,
@@ -362,4 +410,78 @@ fuzz_target!(|entree: Entree| {
         description.ecrire(&mut octets);
         assert_eq!(Description::lire(&octets), Ok(description));
     }
+
+    // ── PROPRIÉTÉ 5 : une opération est un cadre, et le cadre se relit ─────
+    //
+    // Depuis des octets quelconques : rien ne panique, un refus est nommé, et
+    // ce qui se relit se réécrit à l'identique sur EXACTEMENT les octets que
+    // le genre annonce — ce qui suit n'est pas regardé.
+    match Operation::lire(&entree.operation) {
+        Ok((lue, operation, combien)) => {
+            assert_eq!(combien, operation.genre().octets());
+            let mut refait = [0_u8; OPERATION_OCTETS_MAX];
+            let ecrit = operation.ecrire(lue, &mut refait);
+            assert_eq!(ecrit, combien);
+            assert_eq!(
+                &refait[..ecrit],
+                &entree.operation[..combien],
+                "une opération relue ne se réécrit pas octet pour octet"
+            );
+        }
+        Err(Faute::Tronquee { attendus, obtenus }) => {
+            assert_eq!(obtenus, entree.operation.len());
+            assert!(obtenus < attendus);
+        }
+        Err(faute) => nommee(faute),
+    }
+
+    // Depuis des valeurs construites : une de chaque genre qui ne demande pas
+    // un enregistrement — ceux-là sont déjà éprouvés ci-dessus, et l'opération
+    // n'y ajoute qu'un identifiant.
+    let identifiant = |genre| Identifiant::depuis_entropie(genre, [entree.graine; 16]);
+    let operation = match entree.quelle_operation % 5 {
+        0 => Operation::Alias {
+            compte: identifiant(Genre::Utilisateur),
+            alias: AliasRange::nouveau(&entree.alias).ok(),
+        },
+        1 => Operation::MachineModifiee {
+            machine: identifiant(Genre::Machine),
+            nom: NomRange::nouveau(&entree.nom_de_machine).ok(),
+            capacites: (entree.graine & 32 != 0).then_some(Capacites {
+                annonce: entree.graine & 1 != 0,
+                lecture: entree.graine & 2 != 0,
+            }),
+        },
+        2 => Operation::CleMachine {
+            machine: identifiant(Genre::Machine),
+            cle: [entree.graine; 32],
+            empreinte: [entree.graine ^ 0xFF; 32],
+            code: Estampille {
+                compteur: entree.quand,
+                ..estampille
+            },
+        },
+        3 => Operation::AppareilRevoque {
+            appareil: identifiant(Genre::Appareil),
+        },
+        _ => Operation::Machine {
+            machine: identifiant(Genre::Machine),
+            enregistrement: machine,
+        },
+    };
+    let mut cadre = [0_u8; OPERATION_OCTETS_MAX];
+    let combien = operation.ecrire(estampille, &mut cadre);
+    assert_eq!(
+        Operation::lire(&cadre[..combien]),
+        Ok((estampille, operation, combien))
+    );
+    // Un octet de moins, et ce n'est plus une opération — jamais une
+    // opération plus courte relue avec ce qui manque deviné.
+    assert_eq!(
+        Operation::lire(&cadre[..combien - 1]),
+        Err(Faute::Tronquee {
+            attendus: combien,
+            obtenus: combien - 1,
+        })
+    );
 });

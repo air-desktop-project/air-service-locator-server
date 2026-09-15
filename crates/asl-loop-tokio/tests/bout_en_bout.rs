@@ -39,7 +39,7 @@ use asl_api::corps::{CreationDeCompte, PlateformeAttestation};
 use asl_id::{Genre, Identifiant};
 use asl_loop_tokio::h3::ConfigApple;
 use asl_loop_tokio::{Annuaire, Comptes, configuration_tls, servir_quic};
-use asl_registre::{AliasRange, Compte, Provenance};
+use asl_registre::{AliasRange, Provenance};
 use asl_store::Entrepot;
 
 /// La racine du dépôt, depuis ce paquet.
@@ -84,8 +84,43 @@ fn materiel(quoi: &str) -> (PathBuf, Vec<u8>, Vec<u8>, Vec<u8>) {
 fn entrepot(quoi: &str) -> (Entrepot, PathBuf) {
     let chemin = std::env::temp_dir().join(format!("asl-bout-{}-{quoi}.redb", std::process::id()));
     let _ = std::fs::remove_file(&chemin);
-    (Entrepot::ouvrir(&chemin).expect("un entrepôt neuf"), chemin)
+    let racine = Identifiant::depuis_entropie(Genre::Annuaire, [0xEE; 16]);
+    (
+        Entrepot::ouvrir(&chemin, racine).expect("un entrepôt neuf"),
+        chemin,
+    )
 }
+
+/// Une machine de ce compte, avec cette clé déjà liée — enrôlée sans code,
+/// comme le banc la veut.
+fn machine_enrolee(
+    base: &Entrepot,
+    quelle: Identifiant,
+    proprietaire: Identifiant,
+    cle: [u8; 32],
+    capacites: asl_registre::Capacites,
+) {
+    base.creer_machine(
+        quelle,
+        Provenance::Ici,
+        proprietaire,
+        nom_de_machine("grenier"),
+        capacites,
+    )
+    .expect("la machine est écrite");
+    let emission = asl_registre::Estampille {
+        compteur: 0,
+        racine: base.racine(),
+    };
+    base.lier_cle(quelle, cle, [0; 32], emission)
+        .expect("la clé est liée");
+}
+
+/// Les deux capacités.
+const TOUT: asl_registre::Capacites = asl_registre::Capacites {
+    annonce: true,
+    lecture: true,
+};
 
 /// Lance l'écoute sur une socket éphémère, et rend son adresse et de quoi
 /// l'arrêter.
@@ -373,12 +408,10 @@ async fn un_compte_ecrit_dans_l_entrepot_revient_par_son_alias() {
     let (base, fichier) = entrepot("alias");
 
     let qui = Identifiant::depuis_entropie(Genre::Utilisateur, [0x2A; 16]);
-    base.poser_compte(
+    base.creer_compte(
         qui,
-        &Compte {
-            provenance: Provenance::Ici,
-            alias: Some(AliasRange::nouveau("thierry").expect("il tient")),
-        },
+        Provenance::Ici,
+        Some(AliasRange::nouveau("thierry").expect("il tient")),
     )
     .expect("le compte est écrit");
 
@@ -463,18 +496,13 @@ async fn une_machine_s_authentifie_de_bout_en_bout() {
     let secrete = asl_cle::CleSecrete::depuis_entropie([0x33; 32]);
     let machine = Identifiant::depuis_entropie(Genre::Machine, [0x44; 16]);
     let proprietaire = Identifiant::depuis_entropie(Genre::Utilisateur, [0x55; 16]);
-    base.poser_machine(
+    machine_enrolee(
+        &base,
         machine,
-        &asl_registre::Machine {
-            provenance: Provenance::Ici,
-            proprietaire,
-            cle: Some(secrete.publique().octets()),
-            annonce: true,
-            lecture: true,
-            nom: nom_de_machine("grenier"),
-        },
-    )
-    .expect("la machine est écrite");
+        proprietaire,
+        secrete.publique().octets(),
+        TOUT,
+    );
 
     let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
     let mut client =
@@ -616,26 +644,13 @@ async fn une_autorisation_ouvre_le_service_d_un_autre_compte() {
         (machine_a, compte_a, [0_u8; 32]),
         (machine_b, compte_b, secrete_b.publique().octets()),
     ] {
-        base.poser_machine(
-            quelle,
-            &asl_registre::Machine {
-                provenance: Provenance::Ici,
-                proprietaire,
-                cle: Some(cle_publique),
-                annonce: true,
-                lecture: true,
-                nom: nom_de_machine("grenier"),
-            },
-        )
-        .expect("la machine est écrite");
+        machine_enrolee(&base, quelle, proprietaire, cle_publique, TOUT);
     }
-    base.poser_service(
+    base.declarer_service(
         Identifiant::depuis_entropie(Genre::Service, [0xA1; 16]),
-        &asl_registre::Service {
-            provenance: Provenance::Ici,
-            machine: machine_a,
-            nom: asl_registre::NomRange::nouveau("imap").expect("il tient"),
-        },
+        Provenance::Ici,
+        machine_a,
+        asl_registre::NomRange::nouveau("imap").expect("il tient"),
     )
     .expect("le service est écrit");
 
@@ -681,42 +696,26 @@ async fn avec_l_autorisation_le_meme_service_cesse_d_etre_introuvable() {
         (machine_a, compte_a, [0_u8; 32]),
         (machine_b, compte_b, secrete_b.publique().octets()),
     ] {
-        base.poser_machine(
-            quelle,
-            &asl_registre::Machine {
-                provenance: Provenance::Ici,
-                proprietaire,
-                cle: Some(cle_publique),
-                annonce: true,
-                lecture: true,
-                nom: nom_de_machine("grenier"),
-            },
-        )
-        .expect("écrite");
+        machine_enrolee(&base, quelle, proprietaire, cle_publique, TOUT);
     }
-    base.poser_service(
+    base.declarer_service(
         Identifiant::depuis_entropie(Genre::Service, [0xA1; 16]),
-        &asl_registre::Service {
-            provenance: Provenance::Ici,
-            machine: machine_a,
-            nom: asl_registre::NomRange::nouveau("imap").expect("il tient"),
-        },
+        Provenance::Ici,
+        machine_a,
+        asl_registre::NomRange::nouveau("imap").expect("il tient"),
     )
-    .expect("écrit");
+    .expect("le service est écrit");
 
     // **L'ARÊTE ENTRE LES DEUX COMPTES** : A autorise B, sur tout son compte.
-    base.poser_autorisation(
+    base.accorder_autorisation(
         Identifiant::depuis_entropie(Genre::Autorisation, [0x01; 16]),
-        &asl_registre::Autorisation {
-            provenance: Provenance::Ici,
-            par: compte_a,
-            a: compte_b,
-            portee: asl_registre::Portee::ToutLeCompte,
-            revoquee: false,
-            etiquette: asl_registre::NomRange::nouveau("essai").expect("court"),
-        },
+        Provenance::Ici,
+        compte_a,
+        compte_b,
+        asl_registre::Portee::ToutLeCompte,
+        asl_registre::NomRange::nouveau("essai").expect("court"),
     )
-    .expect("écrite");
+    .expect("l'autorisation est écrite");
 
     let cible = format!("/v1/ou/{}/imap", machine_a.texte());
     let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
@@ -757,18 +756,7 @@ async fn un_daemon_annonce_et_son_service_devient_trouvable() {
     let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xC1; 16]);
     let machine = Identifiant::depuis_entropie(Genre::Machine, [0xD1; 16]);
     let secrete = asl_cle::CleSecrete::depuis_entropie([0xD1; 32]);
-    base.poser_machine(
-        machine,
-        &asl_registre::Machine {
-            provenance: Provenance::Ici,
-            proprietaire: compte,
-            cle: Some(secrete.publique().octets()),
-            annonce: true,
-            lecture: true,
-            nom: nom_de_machine("grenier"),
-        },
-    )
-    .expect("la machine est écrite");
+    machine_enrolee(&base, machine, compte, secrete.publique().octets(), TOUT);
 
     let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
     let mut client =
@@ -860,18 +848,16 @@ async fn une_machine_sans_capacite_d_annonce_est_refusee() {
 
     let machine = Identifiant::depuis_entropie(Genre::Machine, [0xE1; 16]);
     let secrete = asl_cle::CleSecrete::depuis_entropie([0xE1; 32]);
-    base.poser_machine(
+    machine_enrolee(
+        &base,
         machine,
-        &asl_registre::Machine {
-            provenance: Provenance::Ici,
-            proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [0xE1; 16]),
-            cle: Some(secrete.publique().octets()),
+        Identifiant::depuis_entropie(Genre::Utilisateur, [0xE1; 16]),
+        secrete.publique().octets(),
+        asl_registre::Capacites {
             annonce: false,
             lecture: true,
-            nom: nom_de_machine("grenier"),
         },
-    )
-    .expect("écrite");
+    );
 
     let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
     let mut client =
@@ -931,31 +917,23 @@ async fn un_service_annonce_par_a_se_retrouve_chez_b_qui_y_a_droit() {
         (machine_a, compte_a, &secrete_a),
         (machine_b, compte_b, &secrete_b),
     ] {
-        base.poser_machine(
+        machine_enrolee(
+            &base,
             quelle,
-            &asl_registre::Machine {
-                provenance: Provenance::Ici,
-                proprietaire,
-                cle: Some(secrete.publique().octets()),
-                annonce: true,
-                lecture: true,
-                nom: nom_de_machine("grenier"),
-            },
-        )
-        .expect("écrite");
+            proprietaire,
+            secrete.publique().octets(),
+            TOUT,
+        );
     }
-    base.poser_autorisation(
+    base.accorder_autorisation(
         Identifiant::depuis_entropie(Genre::Autorisation, [0x01; 16]),
-        &asl_registre::Autorisation {
-            provenance: Provenance::Ici,
-            par: compte_a,
-            a: compte_b,
-            portee: asl_registre::Portee::ToutLeCompte,
-            revoquee: false,
-            etiquette: asl_registre::NomRange::nouveau("essai").expect("court"),
-        },
+        Provenance::Ici,
+        compte_a,
+        compte_b,
+        asl_registre::Portee::ToutLeCompte,
+        asl_registre::NomRange::nouveau("essai").expect("court"),
     )
-    .expect("écrite");
+    .expect("l'autorisation est écrite");
 
     let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
 
@@ -1038,18 +1016,7 @@ async fn la_sonde_mesure_la_joignabilite_et_le_verdict_bascule() {
     let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xF1; 16]);
     let machine = Identifiant::depuis_entropie(Genre::Machine, [0xF1; 16]);
     let secrete = asl_cle::CleSecrete::depuis_entropie([0xF1; 32]);
-    base.poser_machine(
-        machine,
-        &asl_registre::Machine {
-            provenance: Provenance::Ici,
-            proprietaire: compte,
-            cle: Some(secrete.publique().octets()),
-            annonce: true,
-            lecture: true,
-            nom: nom_de_machine("grenier"),
-        },
-    )
-    .expect("écrite");
+    machine_enrolee(&base, machine, compte, secrete.publique().octets(), TOUT);
 
     // **UN VRAI SERVICE QUI ÉCOUTE**, sur la boucle locale — c'est-à-dire
     // exactement l'adresse d'où l'annuaire verra le daemon venir, donc le
@@ -1145,18 +1112,13 @@ async fn un_port_ou_rien_n_ecoute_reste_injoignable() {
 
     let machine = Identifiant::depuis_entropie(Genre::Machine, [0xF2; 16]);
     let secrete = asl_cle::CleSecrete::depuis_entropie([0xF2; 32]);
-    base.poser_machine(
+    machine_enrolee(
+        &base,
         machine,
-        &asl_registre::Machine {
-            provenance: Provenance::Ici,
-            proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [0xF2; 16]),
-            cle: Some(secrete.publique().octets()),
-            annonce: true,
-            lecture: true,
-            nom: nom_de_machine("grenier"),
-        },
-    )
-    .expect("écrite");
+        Identifiant::depuis_entropie(Genre::Utilisateur, [0xF2; 16]),
+        secrete.publique().octets(),
+        TOUT,
+    );
 
     // Un port qu'on prend puis qu'on rend : plus personne n'écoute.
     let port = {

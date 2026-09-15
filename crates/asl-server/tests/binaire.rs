@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use asl_id::{Genre, Identifiant};
-use asl_registre::{AliasRange, Compte, Provenance};
+use asl_registre::{AliasRange, Provenance};
 use asl_store::Entrepot;
 
 /// La racine du dépôt, depuis ce paquet.
@@ -89,6 +89,18 @@ fn lancer(autorite: &Path, base: &Path) -> (Child, SocketAddr) {
         })
         .expect("le serveur annonce son adresse avant de servir");
 
+    // **LE TUYAU RESTE OUVERT TANT QUE LE SERVEUR VIT.** Le lâcher ici
+    // fermerait la lecture de sa sortie d'erreur, et sa PROCHAINE ligne — la
+    // posture, l'identité sous laquelle il estampille — tomberait sur un tuyau
+    // fermé : `eprintln!` panique alors, et le serveur meurt avant d'avoir
+    // servi. C'était une course, gagnée le plus souvent ; une ligne de plus au
+    // démarrage l'a fait perdre une fois sur deux.
+    std::thread::spawn(move || {
+        for ligne in lignes {
+            let _ = ligne;
+        }
+    });
+
     (enfant, annonce)
 }
 
@@ -102,14 +114,13 @@ async fn le_binaire_sert_un_compte_de_son_entrepot() {
     // prend le verrou exclusif, donc on n'y écrit plus une fois qu'il tourne.
     let qui = Identifiant::depuis_entropie(Genre::Utilisateur, [0x11; 16]);
     {
-        let entrepot = Entrepot::ouvrir(&base).expect("un entrepôt");
+        let racine = Identifiant::depuis_entropie(Genre::Annuaire, [0xEE; 16]);
+        let entrepot = Entrepot::ouvrir(&base, racine).expect("un entrepôt");
         entrepot
-            .poser_compte(
+            .creer_compte(
                 qui,
-                &Compte {
-                    provenance: Provenance::Ici,
-                    alias: Some(AliasRange::nouveau("nitrogen").expect("il tient")),
-                },
+                Provenance::Ici,
+                Some(AliasRange::nouveau("nitrogen").expect("il tient")),
             )
             .expect("le compte est écrit");
     }
