@@ -5,23 +5,33 @@
 //! Ce qu'on veut éprouver ici n'est pas une fonction, c'est **ce qui reste vrai
 //! après une écriture** : l'index d'alias d'accord avec son compte, une entrée
 //! de journal qui survit à sa transaction, une rupture de confiance qui n'efface
-//! pas plus qu'elle ne doit. Rien de cela n'a de sens sans un vrai fichier.
+//! pas plus qu'elle ne doit, une estampille par écriture et une opération par
+//! estampille. Rien de cela n'a de sens sans un vrai fichier.
 
 use std::path::PathBuf;
 
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
-    AliasRange, Compte, Description, EntreeJournal, JetonPoussee, JetonRange, Machine, NomRange,
-    Plateforme, Provenance, Systeme, Verdict,
+    AliasRange, Attestation, Capacites, Compte, EntreeJournal, Estampille, JetonRange, NomRange,
+    Operation, Plateforme, Portee, Provenance, Systeme, Verdict,
 };
-use asl_store::{Entrepot, Faute};
+use asl_store::{Entrepot, Faute, Rattrapage};
+
+/// La racine pour laquelle les essais écrivent.
+fn racine() -> Identifiant {
+    Identifiant::depuis_entropie(Genre::Annuaire, [0xEE; 16])
+}
 
 /// Un entrepôt neuf, dans un fichier à nous.
+///
+/// **LE NOM DU FICHIER EST LA CLÉ D'UNICITÉ**, et non le nom de l'essai :
+/// `cargo test` les fait tourner en parallèle, et deux essais qui ouvriraient
+/// le même fichier se verraient refuser par redb.
 fn entrepot(quoi: &str) -> (Entrepot, PathBuf) {
     let chemin =
         std::env::temp_dir().join(format!("asl-entrepot-{}-{quoi}.redb", std::process::id()));
     let _ = std::fs::remove_file(&chemin);
-    let ouvert = Entrepot::ouvrir(&chemin).expect("un entrepôt neuf");
+    let ouvert = Entrepot::ouvrir(&chemin, racine()).expect("un entrepôt neuf");
     (ouvert, chemin)
 }
 
@@ -30,11 +40,54 @@ fn un(genre: Genre, graine: u8) -> Identifiant {
     Identifiant::depuis_entropie(genre, [graine; 16])
 }
 
-/// Un compte avec cet alias, venu d'ici.
-fn compte(alias: Option<&str>) -> Compte {
-    Compte {
-        provenance: Provenance::Ici,
-        alias: alias.map(|texte| AliasRange::nouveau(texte).expect("il tient")),
+/// Un alias.
+fn alias(texte: &str) -> AliasRange {
+    AliasRange::nouveau(texte).expect("il tient")
+}
+
+/// Un nom, de machine ou de service.
+fn nom(texte: &str) -> NomRange {
+    NomRange::nouveau(texte).expect("un nom court se range")
+}
+
+/// Les deux capacités.
+const TOUT: Capacites = Capacites {
+    annonce: true,
+    lecture: true,
+};
+
+/// L'estampille de cette racine-ci, à ce compteur.
+fn e(compteur: u64) -> Estampille {
+    Estampille {
+        compteur,
+        racine: racine(),
+    }
+}
+
+/// L'empreinte de ce code.
+fn empreinte(texte: &str) -> [u8; 32] {
+    asl_cle::CodeEnrolement::analyser(texte)
+        .expect("un code")
+        .empreinte()
+}
+
+/// Les opérations du journal, relues, avec leur estampille.
+fn operations(base: &Entrepot, apres: u64) -> Vec<(Estampille, Operation)> {
+    match base.operations_apres(apres).expect("lisible") {
+        Rattrapage::Operations(cadres) => cadres
+            .iter()
+            .map(|cadre| {
+                let (estampille, operation, combien) =
+                    Operation::lire(cadre).expect("un cadre du journal se relit");
+                assert_eq!(
+                    combien,
+                    cadre.len(),
+                    "un cadre porte exactement son opération"
+                );
+                (estampille, operation)
+            })
+            .collect(),
+        hors => panic!("le journal ne remonte pas jusqu'à {apres} : {hors:?}"),
     }
 }
 
@@ -46,6 +99,8 @@ fn une_base_neuve_rend_rien_et_non_une_erreur() {
     // première écriture, cette lecture-ci échouerait avec « table inexistante »
     // — une base neuve rendrait une erreur là où elle doit rendre « rien ».
     let (base, chemin) = entrepot("neuve");
+    assert_eq!(base.racine(), racine());
+    assert_eq!(base.compteur().expect("lisible"), 0);
     assert_eq!(
         base.compte(un(Genre::Utilisateur, 1)).expect("lisible"),
         None
@@ -53,6 +108,14 @@ fn une_base_neuve_rend_rien_et_non_une_erreur() {
     assert_eq!(base.machine(un(Genre::Machine, 1)).expect("lisible"), None);
     assert_eq!(base.compte_par_alias("personne").expect("lisible"), None);
     assert_eq!(base.entrees_du_journal().expect("lisible"), 0);
+    assert_eq!(base.operations_gardees().expect("lisible"), 0);
+    assert_eq!(base.curseur(un(Genre::Annuaire, 2)).expect("lisible"), 0);
+    // Et son journal d'opérations remonte jusqu'au début : rien n'a été
+    // retiré, il n'y a rien.
+    assert_eq!(
+        base.operations_apres(0).expect("lisible"),
+        Rattrapage::Operations(Vec::new())
+    );
     let _ = std::fs::remove_file(&chemin);
 }
 
@@ -64,21 +127,731 @@ fn ce_qui_est_ecrit_survit_a_la_fermeture() {
     let qui = un(Genre::Utilisateur, 4);
 
     {
-        let base = Entrepot::ouvrir(&chemin).expect("un entrepôt");
-        base.poser_compte(qui, &compte(Some("thierry")))
+        let base = Entrepot::ouvrir(&chemin, racine()).expect("un entrepôt");
+        base.creer_compte(qui, Provenance::Ici, Some(alias("thierry")))
             .expect("écrit");
     }
     {
-        let base = Entrepot::ouvrir(&chemin).expect("le même entrepôt");
+        let base = Entrepot::ouvrir(&chemin, racine()).expect("le même entrepôt");
         assert_eq!(
             base.compte(qui).expect("lisible"),
-            Some(compte(Some("thierry")))
+            Some(Compte {
+                provenance: Provenance::Ici,
+                estampille: e(1),
+                alias: Some(alias("thierry")),
+                reclamation: e(1),
+            })
         );
         assert_eq!(
             base.compte_par_alias("thierry").expect("lisible"),
             Some(qui)
         );
+        // **LE COMPTEUR SURVIT AUSSI** : c'est lui qui rend les estampilles
+        // strictement croissantes d'un démarrage à l'autre.
+        assert_eq!(base.compteur().expect("lisible"), 1);
+        assert_eq!(base.operations_gardees().expect("lisible"), 1);
     }
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn une_base_d_un_format_futur_est_refusee() {
+    // **UNE VERSION FUTURE RELUE PAR UNE VERSION ANCIENNE** : le cas qui
+    // arrive à chaque retour arrière de déploiement. On refuse plutôt que de
+    // relire de travers.
+    let chemin =
+        std::env::temp_dir().join(format!("asl-entrepot-{}-futur.redb", std::process::id()));
+    let _ = std::fs::remove_file(&chemin);
+    {
+        let base = redb::Database::create(&chemin).expect("une base");
+        let ecriture = base.begin_write().expect("une transaction");
+        {
+            let mut table = ecriture
+                .open_table(redb::TableDefinition::<&str, u64>::new("racine"))
+                .expect("la table");
+            table.insert("format", 99).expect("écrit");
+        }
+        ecriture.commit().expect("commis");
+    }
+    let refus = Entrepot::ouvrir(&chemin, racine()).err();
+    assert!(matches!(refus, Some(Faute::Format { lu: 99 })), "{refus:?}");
+    let _ = std::fs::remove_file(&chemin);
+}
+
+// ── L'estampille et le journal d'opérations ─────────────────────────────────
+
+#[test]
+fn chaque_ecriture_avance_le_compteur_et_laisse_une_operation() {
+    // **C'EST `replication.md` §4 ET §5.1** : le compteur avance de un à
+    // chaque écriture locale, l'enregistrement porte l'estampille, et le
+    // journal porte l'opération — dans la même transaction.
+    let (base, chemin) = entrepot("estampilles");
+    let thierry = un(Genre::Utilisateur, 1);
+    let grenier = un(Genre::Machine, 2);
+    let iphone = un(Genre::Appareil, 3);
+    let depot = un(Genre::Service, 4);
+    let accordee = un(Genre::Autorisation, 5);
+    let code = empreinte("4K9M2P7R1T");
+
+    base.creer_compte(thierry, Provenance::Ici, None)
+        .expect("1");
+    base.reclamer_alias(thierry, Some(alias("thierry")))
+        .expect("2");
+    base.creer_appareil(
+        iphone,
+        Provenance::Ici,
+        thierry,
+        [7; 33],
+        Attestation::Apple,
+    )
+    .expect("3");
+    base.poser_description(iphone, Provenance::Ici, Systeme::Ios, nom("iPhone 17"))
+        .expect("4");
+    base.poser_jeton(
+        iphone,
+        Provenance::Ici,
+        Plateforme::Apns,
+        JetonRange::nouveau("c0ffee").expect("il tient"),
+    )
+    .expect("5");
+    base.creer_machine(grenier, Provenance::Ici, thierry, nom("grenier"), TOUT)
+        .expect("6");
+    base.modifier_machine(grenier, Some(nom("cave")), None)
+        .expect("7");
+    base.emettre_enrolement(&code, Provenance::Ici, grenier, 10_000)
+        .expect("8");
+    let enrolement = base
+        .consommer_enrolement(&code)
+        .expect("lisible")
+        .expect("le code");
+    base.lier_cle(grenier, [0x42; 32], code, enrolement.estampille)
+        .expect("9");
+    base.declarer_service(depot, Provenance::Ici, grenier, nom("depot"))
+        .expect("10");
+    base.accorder_autorisation(
+        accordee,
+        Provenance::Ici,
+        thierry,
+        un(Genre::Utilisateur, 6),
+        Portee::UneMachine(grenier),
+        nom("le grenier"),
+    )
+    .expect("11");
+    base.revoquer_autorisation(accordee).expect("12");
+    base.revoquer_cle(grenier).expect("13");
+    base.revoquer_appareil(iphone).expect("14");
+
+    assert_eq!(base.compteur().expect("lisible"), 14);
+    let journal = operations(&base, 0);
+    assert_eq!(journal.len(), 14);
+    for (rang, (estampille, _)) in journal.iter().enumerate() {
+        assert_eq!(*estampille, e(u64::try_from(rang).expect("petit") + 1));
+    }
+    // Un genre par verbe, dans l'ordre des verbes.
+    let genres: Vec<_> = journal
+        .iter()
+        .map(|(_, operation)| operation.genre())
+        .collect();
+    use asl_registre::GenreOperation as G;
+    assert_eq!(
+        genres,
+        [
+            G::Compte,
+            G::Alias,
+            G::Appareil,
+            G::Description,
+            G::Poussee,
+            G::Machine,
+            G::MachineModifiee,
+            G::Enrolement,
+            G::CleMachine,
+            G::Service,
+            G::Autorisation,
+            G::AutorisationRevoquee,
+            G::CleMachineRevoquee,
+            G::AppareilRevoque,
+        ]
+    );
+
+    // Et les enregistrements portent l'estampille de leur dernière écriture.
+    let compte = base.compte(thierry).expect("lisible").expect("il est là");
+    assert_eq!(compte.estampille, e(2));
+    assert_eq!(compte.reclamation, e(2));
+    let machine = base
+        .machine(grenier)
+        .expect("lisible")
+        .expect("elle est là");
+    assert_eq!(machine.estampille, e(13), "la révocation de la clé");
+    assert_eq!(machine.nom_estampille, e(7), "le renommage");
+    assert_eq!(
+        machine.capacites_estampille,
+        e(6),
+        "jamais changées : la création"
+    );
+    assert!(machine.cle.is_none());
+    let appareil = base.appareil(iphone).expect("lisible").expect("il est là");
+    assert_eq!(appareil.estampille, e(14));
+    assert!(appareil.revoque);
+    assert_eq!(
+        base.autorisation(accordee)
+            .expect("lisible")
+            .map(|quoi| quoi.estampille),
+        Some(e(12))
+    );
+    assert_eq!(
+        base.service(depot)
+            .expect("lisible")
+            .map(|quoi| quoi.estampille),
+        Some(e(10))
+    );
+
+    // Le rattrapage rend ce qui suit un compteur, et rien avant.
+    assert_eq!(operations(&base, 12).len(), 2);
+    assert_eq!(operations(&base, 14).len(), 0);
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn la_cle_liee_porte_l_estampille_d_emission_de_son_code() {
+    // **C'EST LA RÈGLE DE `replication.md` §3.2** : la liaison qui gagne est
+    // celle du code le plus récemment émis, puis la première consommation.
+    // Pour la calculer, la clé porte les deux.
+    let (base, chemin) = entrepot("cle-liee");
+    let grenier = un(Genre::Machine, 2);
+    let code = empreinte("4K9M2P7R1T");
+    base.creer_machine(
+        grenier,
+        Provenance::Ici,
+        un(Genre::Utilisateur, 1),
+        nom("grenier"),
+        TOUT,
+    )
+    .expect("1");
+    base.emettre_enrolement(&code, Provenance::Ici, grenier, 10_000)
+        .expect("2");
+    let enrolement = base
+        .consommer_enrolement(&code)
+        .expect("lisible")
+        .expect("le code");
+    assert_eq!(enrolement.estampille, e(2));
+
+    let avant = base
+        .lier_cle(grenier, [0x42; 32], code, enrolement.estampille)
+        .expect("3")
+        .expect("la machine");
+    assert!(avant.cle.is_none(), "ce qu'elle ÉTAIT");
+    let liee = base
+        .machine(grenier)
+        .expect("lisible")
+        .expect("elle est là")
+        .cle
+        .expect("liée");
+    assert_eq!(liee.cle, [0x42; 32]);
+    assert_eq!(liee.liaison, e(3));
+    assert_eq!(liee.code, e(2));
+
+    // L'opération porte l'empreinte, pour que l'autre racine retire le code,
+    // et l'estampille d'émission.
+    let (_, operation) = operations(&base, 2).remove(0);
+    assert_eq!(
+        operation,
+        Operation::CleMachine {
+            machine: grenier,
+            cle: [0x42; 32],
+            empreinte: code,
+            code: e(2),
+        }
+    );
+
+    // Lier une machine inconnue ne crée rien.
+    assert_eq!(
+        base.lier_cle(un(Genre::Machine, 9), [1; 32], code, e(2))
+            .expect("lisible"),
+        None
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn revoquer_une_cle_absente_ne_laisse_aucune_operation() {
+    // Sans clé, il n'y a rien à retirer : ni écriture, ni opération.
+    let (base, chemin) = entrepot("cle-absente");
+    let grenier = un(Genre::Machine, 2);
+    base.creer_machine(
+        grenier,
+        Provenance::Ici,
+        un(Genre::Utilisateur, 1),
+        nom("grenier"),
+        TOUT,
+    )
+    .expect("1");
+    assert!(base.revoquer_cle(grenier).expect("lisible").is_some());
+    assert_eq!(base.compteur().expect("lisible"), 1);
+    assert_eq!(base.operations_gardees().expect("lisible"), 1);
+    assert_eq!(
+        base.revoquer_cle(un(Genre::Machine, 9)).expect("lisible"),
+        None
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn un_patch_estampille_champ_par_champ() {
+    // **UNE RÈGLE PAR ENREGISTREMENT FERAIT PERDRE UN NOM PARCE QU'UNE
+    // CAPACITÉ A GAGNÉ** (`replication.md` §3.2) : le nom a son estampille,
+    // les capacités ont la leur.
+    let (base, chemin) = entrepot("patch");
+    let grenier = un(Genre::Machine, 2);
+    base.creer_machine(
+        grenier,
+        Provenance::Ici,
+        un(Genre::Utilisateur, 1),
+        nom("grenier"),
+        TOUT,
+    )
+    .expect("1");
+
+    let avant = base
+        .modifier_machine(
+            grenier,
+            None,
+            Some(Capacites {
+                annonce: false,
+                lecture: true,
+            }),
+        )
+        .expect("2")
+        .expect("la machine");
+    assert!(avant.annonce, "ce qu'elle ÉTAIT");
+    let apres = base
+        .machine(grenier)
+        .expect("lisible")
+        .expect("elle est là");
+    assert!(!apres.annonce);
+    assert_eq!(apres.capacites_estampille, e(2));
+    assert_eq!(apres.nom_estampille, e(1), "le nom n'a pas bougé");
+    assert_eq!(apres.estampille, e(2));
+
+    base.modifier_machine(grenier, Some(nom("cave")), None)
+        .expect("3");
+    let apres = base
+        .machine(grenier)
+        .expect("lisible")
+        .expect("elle est là");
+    assert_eq!(apres.nom.octets(), b"cave");
+    assert_eq!(apres.nom_estampille, e(3));
+    assert_eq!(
+        apres.capacites_estampille,
+        e(2),
+        "les capacités n'ont pas bougé"
+    );
+
+    // Rien de donné : rien d'écrit, pas d'opération, et la machine rendue.
+    assert!(
+        base.modifier_machine(grenier, None, None)
+            .expect("4")
+            .is_some()
+    );
+    assert_eq!(base.compteur().expect("lisible"), 3);
+    assert_eq!(
+        base.modifier_machine(un(Genre::Machine, 9), Some(nom("x")), None)
+            .expect("lisible"),
+        None
+    );
+
+    let journal = operations(&base, 1);
+    assert_eq!(
+        journal[0].1,
+        Operation::MachineModifiee {
+            machine: grenier,
+            nom: None,
+            capacites: Some(Capacites {
+                annonce: false,
+                lecture: true
+            }),
+        }
+    );
+    assert_eq!(
+        journal[1].1,
+        Operation::MachineModifiee {
+            machine: grenier,
+            nom: Some(nom("cave")),
+            capacites: None,
+        }
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn ce_qui_ne_vient_pas_d_ici_n_entre_pas_dans_le_journal_d_operations() {
+    // **C11, ENTRE RACINES** (`replication.md` §7) : la voie ne transporte que
+    // des enregistrements de provenance locale. Ce qu'on a reçu d'un annuaire
+    // rattaché est estampillé — c'est une écriture — mais pas journalisé.
+    let (base, chemin) = entrepot("provenance");
+    let pair = Provenance::Annuaire(un(Genre::Annuaire, 1));
+    base.creer_compte(un(Genre::Utilisateur, 1), pair, None)
+        .expect("1");
+    base.creer_compte(un(Genre::Utilisateur, 2), Provenance::Ici, None)
+        .expect("2");
+    assert_eq!(base.compteur().expect("lisible"), 2);
+    let journal = operations(&base, 0);
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].0, e(2));
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn le_compteur_se_hisse_au_dessus_de_ce_qu_on_recoit_et_ne_recule_jamais() {
+    // **L'HORLOGE DE LAMPORT** (`replication.md` §4) : `max(compteur, h)`.
+    let (base, chemin) = entrepot("hisser");
+    base.creer_compte(un(Genre::Utilisateur, 1), Provenance::Ici, None)
+        .expect("1");
+    base.hisser_le_compteur(4_812).expect("hissé");
+    assert_eq!(base.compteur().expect("lisible"), 4_812);
+    base.hisser_le_compteur(12).expect("ignoré");
+    assert_eq!(base.compteur().expect("lisible"), 4_812, "il ne recule pas");
+    // Et la prochaine écriture locale est au-dessus.
+    base.creer_compte(un(Genre::Utilisateur, 2), Provenance::Ici, None)
+        .expect("4813");
+    assert_eq!(
+        base.compte(un(Genre::Utilisateur, 2))
+            .expect("lisible")
+            .map(|quoi| quoi.estampille),
+        Some(e(4_813))
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn le_journal_d_operations_s_expire_et_dit_jusqu_ou() {
+    // **TRENTE JOURS** (`replication.md` §5.4) : ce qui est retiré ne se
+    // rattrape plus, et le rattrapage le dit — c'est le `410`.
+    let (base, chemin) = entrepot("retention");
+    for graine in 1..=3 {
+        base.creer_compte(un(Genre::Utilisateur, graine), Provenance::Ici, None)
+            .expect("écrit");
+    }
+    // Rien avant l'époque : rien n'expire.
+    assert_eq!(base.expirer_les_operations(0).expect("expiré"), 0);
+    assert_eq!(base.operations_gardees().expect("lisible"), 3);
+
+    // Tout ce qui précède demain : tout expire, et le journal ne remonte plus
+    // jusqu'à zéro — mais bien jusqu'au dernier retiré.
+    assert_eq!(base.expirer_les_operations(u64::MAX).expect("expiré"), 3);
+    assert_eq!(base.operations_gardees().expect("lisible"), 0);
+    assert_eq!(
+        base.operations_apres(0).expect("lisible"),
+        Rattrapage::HorsJournal {
+            retirees_jusqu_a: 3
+        }
+    );
+    assert_eq!(
+        base.operations_apres(2).expect("lisible"),
+        Rattrapage::HorsJournal {
+            retirees_jusqu_a: 3
+        }
+    );
+    assert_eq!(
+        base.operations_apres(3).expect("lisible"),
+        Rattrapage::Operations(Vec::new())
+    );
+    // Ce qui s'écrit ensuite se rattrape depuis là.
+    base.creer_compte(un(Genre::Utilisateur, 4), Provenance::Ici, None)
+        .expect("écrit");
+    assert_eq!(operations(&base, 3).len(), 1);
+    assert_eq!(
+        asl_store::RETENTION_DES_OPERATIONS_MS,
+        30 * 24 * 60 * 60 * 1_000
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn le_curseur_d_un_pair_avance_et_ne_recule_pas() {
+    // « Le tireur refuse ce qui recule » (`replication.md` §5.3).
+    let (base, chemin) = entrepot("curseur");
+    let argon = un(Genre::Annuaire, 2);
+    let autre = un(Genre::Annuaire, 3);
+    assert_eq!(base.curseur(argon).expect("lisible"), 0);
+    base.poser_curseur(argon, 4_790).expect("posé");
+    assert_eq!(base.curseur(argon).expect("lisible"), 4_790);
+    base.poser_curseur(argon, 4_000).expect("ignoré");
+    assert_eq!(
+        base.curseur(argon).expect("lisible"),
+        4_790,
+        "il ne recule pas"
+    );
+    base.poser_curseur(argon, 4_812).expect("posé");
+    assert_eq!(base.curseur(argon).expect("lisible"), 4_812);
+    assert_eq!(
+        base.curseur(autre).expect("lisible"),
+        0,
+        "un curseur PAR pair"
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+// ── La reprise d'une base ancienne (`replication.md` §11.4) ─────────────────
+
+/// Une copie de la base écrite par 0.4.3, avant l'estampille.
+///
+/// **LA FIXTURE A ÉTÉ ÉCRITE PAR LE CODE D'AVANT**, avec ses fonctions
+/// `poser_*`, puis compactée — et non fabriquée par le code d'aujourd'hui, qui
+/// ne sait plus écrire cette forme. C'est ce qui fait de cet essai une preuve :
+/// ce que les bancs portent est ce que ce fichier porte.
+fn base_ancienne(quoi: &str) -> PathBuf {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/entrepot-0.4.3.redb");
+    let copie =
+        std::env::temp_dir().join(format!("asl-entrepot-{}-{quoi}.redb", std::process::id()));
+    let _ = std::fs::remove_file(&copie);
+    std::fs::copy(&fixture, &copie).expect("la fixture se copie");
+    copie
+}
+
+#[test]
+fn une_base_ancienne_est_reprise_sans_rien_perdre() {
+    // **CE QUE LA FIXTURE CONTIENT** est ce que 0.4.3 y a écrit : trois
+    // comptes, deux machines, deux appareils, une description, un jeton, un
+    // code, deux services, deux autorisations, deux entrées de journal. Tout
+    // doit être là, avec une estampille de plus — et rien d'autre.
+    let chemin = base_ancienne("reprise");
+    let base = Entrepot::ouvrir(&chemin, racine()).expect("la base ancienne se reprend");
+    let pair = un(Genre::Annuaire, 0xA0);
+    let thierry = un(Genre::Utilisateur, 1);
+    let lea = un(Genre::Utilisateur, 2);
+    let du_pair = un(Genre::Utilisateur, 3);
+    let grenier = un(Genre::Machine, 10);
+    let portable = un(Genre::Machine, 11);
+    let iphone = un(Genre::Appareil, 20);
+    let pixel = un(Genre::Appareil, 21);
+    let depot = un(Genre::Service, 30);
+    let imap = un(Genre::Service, 31);
+    let accordee = un(Genre::Autorisation, 40);
+    let retiree = un(Genre::Autorisation, 41);
+
+    // ── LES COMPTES, ET LEUR ALIAS ──────────────────────────────────────────
+    let compte = base.compte(thierry).expect("lisible").expect("Thierry");
+    assert_eq!(compte.provenance, Provenance::Ici);
+    assert_eq!(compte.alias, Some(alias("thierry")));
+    assert_eq!(
+        compte.estampille.racine,
+        racine(),
+        "estampillé par la racine qui reprend"
+    );
+    assert_eq!(compte.reclamation, compte.estampille);
+    assert_eq!(
+        base.compte_par_alias("thierry").expect("lisible"),
+        Some(thierry)
+    );
+    let compte = base.compte(lea).expect("lisible").expect("Léa");
+    assert_eq!(compte.alias, None);
+    let compte = base.compte(du_pair).expect("lisible").expect("du pair");
+    assert_eq!(
+        compte.provenance,
+        Provenance::Annuaire(pair),
+        "la provenance survit"
+    );
+    assert_eq!(
+        base.compte_par_alias("ailleurs").expect("lisible"),
+        Some(du_pair)
+    );
+
+    // ── LES MACHINES, ET LEUR CLÉ ───────────────────────────────────────────
+    let machine = base.machine(grenier).expect("lisible").expect("le grenier");
+    assert_eq!(machine.proprietaire, thierry);
+    assert_eq!(machine.nom.octets(), b"grenier");
+    assert!(machine.annonce && machine.lecture);
+    let liee = machine.cle.expect("enrôlée");
+    assert_eq!(liee.cle, [0x42; 32]);
+    assert_eq!(
+        liee.liaison, machine.estampille,
+        "réputée liée à la reprise"
+    );
+    assert_eq!(
+        liee.code, machine.estampille,
+        "et son code réputé émis à la reprise"
+    );
+    assert_eq!(machine.nom_estampille, machine.estampille);
+    assert_eq!(machine.capacites_estampille, machine.estampille);
+    let machine = base
+        .machine(portable)
+        .expect("lisible")
+        .expect("le portable");
+    assert_eq!(machine.nom.octets(), "portable de Thierry".as_bytes());
+    assert!(!machine.annonce && machine.lecture);
+    assert!(machine.cle.is_none());
+    let miennes = base.machines_de_compte(thierry).expect("lisible");
+    assert_eq!(miennes.len(), 2, "l'index des machines est reconstruit");
+
+    // ── LES APPAREILS, LEUR DESCRIPTION, LEUR JETON ─────────────────────────
+    let appareil = base.appareil(iphone).expect("lisible").expect("l'iPhone");
+    assert_eq!(appareil.proprietaire, thierry);
+    assert_eq!(appareil.cle, [0x77; 33]);
+    assert_eq!(appareil.atteste, Attestation::Apple);
+    assert!(!appareil.revoque);
+    let appareil = base.appareil(pixel).expect("lisible").expect("le Pixel");
+    assert_eq!(appareil.proprietaire, lea);
+    assert_eq!(appareil.atteste, Attestation::Aucune);
+    assert!(appareil.revoque);
+    let description = base.description(iphone).expect("lisible").expect("décrit");
+    assert_eq!(description.systeme, Systeme::Ios);
+    assert_eq!(description.modele.octets(), b"iPhone 17");
+    let jeton = base.jeton(iphone).expect("lisible").expect("un jeton");
+    assert_eq!(jeton.plateforme, Plateforme::Apns);
+    assert_eq!(jeton.jeton.octets(), b"c0ffee-jeton-apns");
+    // **L'INDEX DES APPAREILS EST RECONSTRUIT** — celui-là n'existait pas
+    // quand des bases réelles ont commencé à écrire.
+    let siens = base.appareils_de_compte(thierry).expect("lisible");
+    assert_eq!(siens.len(), 1);
+    assert_eq!(siens[0].0, iphone);
+    assert_eq!(siens[0].2.map(|quoi| quoi.systeme), Some(Systeme::Ios));
+    assert_eq!(base.appareils_de_compte(lea).expect("lisible").len(), 1);
+
+    // ── LE CODE EN ATTENTE ──────────────────────────────────────────────────
+    let enrolement = base
+        .consommer_enrolement(&empreinte("4K9M2P7R1T"))
+        .expect("lisible")
+        .expect("le code est là");
+    assert_eq!(enrolement.machine, portable);
+    assert_eq!(enrolement.expire_a, 1_800_000_000_000);
+    assert_eq!(enrolement.estampille.racine, racine());
+
+    // ── LES SERVICES ────────────────────────────────────────────────────────
+    let service = base.service(depot).expect("lisible").expect("le dépôt");
+    assert_eq!(service.machine, grenier);
+    assert_eq!(service.nom.octets(), b"depot");
+    assert_eq!(
+        base.service_par_nom(grenier, "imap").expect("lisible"),
+        Some(imap)
+    );
+    assert_eq!(base.services_de_machine(grenier).expect("lisible").len(), 2);
+
+    // ── LES AUTORISATIONS, DANS LES DEUX SENS ───────────────────────────────
+    let autorisation = base
+        .autorisation(accordee)
+        .expect("lisible")
+        .expect("accordée");
+    assert_eq!(autorisation.par, thierry);
+    assert_eq!(autorisation.a, lea);
+    assert_eq!(autorisation.portee, Portee::UneMachine(grenier));
+    assert!(!autorisation.revoquee);
+    assert_eq!(
+        autorisation.etiquette.octets(),
+        "le grenier pour Léa".as_bytes()
+    );
+    let autorisation = base
+        .autorisation(retiree)
+        .expect("lisible")
+        .expect("retirée");
+    assert!(autorisation.revoquee);
+    assert_eq!(base.autorisations_recues(lea).expect("lisible").len(), 1);
+    assert_eq!(base.autorisations_accordees(lea).expect("lisible").len(), 1);
+    assert_eq!(
+        base.autorisations_recues_nommees(thierry)
+            .expect("lisible")
+            .len(),
+        1
+    );
+
+    // ── LE JOURNAL DES REQUÊTES NE BOUGE PAS ────────────────────────────────
+    assert_eq!(base.entrees_du_journal().expect("lisible"), 2);
+
+    // ── LES ESTAMPILLES SONT UNE SÉQUENCE, ET LE COMPTEUR EST AU-DESSUS ─────
+    //
+    // Quatorze enregistrements estampillés — trois comptes, deux machines, deux
+    // appareils, un jeton, une description, un code, deux services, deux
+    // autorisations —, donc le compteur vaut quatorze, et chacun a le sien.
+    assert_eq!(base.compteur().expect("lisible"), 14);
+    let mut compteurs: Vec<u64> = Vec::new();
+    for qui in [thierry, lea, du_pair] {
+        compteurs.push(
+            base.compte(qui)
+                .expect("lisible")
+                .expect("là")
+                .estampille
+                .compteur,
+        );
+    }
+    for quelle in [grenier, portable] {
+        compteurs.push(
+            base.machine(quelle)
+                .expect("lisible")
+                .expect("là")
+                .estampille
+                .compteur,
+        );
+    }
+    for quel in [iphone, pixel] {
+        compteurs.push(
+            base.appareil(quel)
+                .expect("lisible")
+                .expect("là")
+                .estampille
+                .compteur,
+        );
+    }
+    compteurs.push(jeton.estampille.compteur);
+    compteurs.push(description.estampille.compteur);
+    compteurs.push(enrolement.estampille.compteur);
+    for quel in [depot, imap] {
+        compteurs.push(
+            base.service(quel)
+                .expect("lisible")
+                .expect("là")
+                .estampille
+                .compteur,
+        );
+    }
+    for quelle in [accordee, retiree] {
+        compteurs.push(
+            base.autorisation(quelle)
+                .expect("lisible")
+                .expect("là")
+                .estampille
+                .compteur,
+        );
+    }
+    compteurs.sort_unstable();
+    assert_eq!(compteurs, (1..=14).collect::<Vec<u64>>());
+
+    // ── LE JOURNAL D'OPÉRATIONS DÉMARRE VIDE, ET PAS DEPUIS ZÉRO ────────────
+    //
+    // Une base reprise s'amorce chez l'autre par instantané, jamais par
+    // rattrapage : demander « tout depuis zéro » est refusé.
+    assert_eq!(base.operations_gardees().expect("lisible"), 0);
+    assert_eq!(
+        base.operations_apres(0).expect("lisible"),
+        Rattrapage::HorsJournal {
+            retirees_jusqu_a: 14
+        }
+    );
+    assert_eq!(
+        base.operations_apres(14).expect("lisible"),
+        Rattrapage::Operations(Vec::new())
+    );
+
+    // ── ET LA BASE REPRISE S'ÉCRIT COMME UNE NEUVE ──────────────────────────
+    base.reclamer_alias(lea, Some(alias("lea"))).expect("écrit");
+    assert_eq!(base.compteur().expect("lisible"), 15);
+    assert_eq!(operations(&base, 14).len(), 1);
+    assert_eq!(base.compte_par_alias("lea").expect("lisible"), Some(lea));
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn une_base_reprise_ne_se_reprend_pas_deux_fois() {
+    // La reprise a posé le format : la rouvrir est une ouverture ordinaire, et
+    // rien ne bouge — ni les estampilles, ni le compteur.
+    let chemin = base_ancienne("reprise-deux-fois");
+    let thierry = un(Genre::Utilisateur, 1);
+    let avant = {
+        let base = Entrepot::ouvrir(&chemin, racine()).expect("reprise");
+        base.compte(thierry).expect("lisible").expect("là")
+    };
+    let base = Entrepot::ouvrir(&chemin, racine()).expect("rouverte");
+    assert_eq!(base.compte(thierry).expect("lisible"), Some(avant));
+    assert_eq!(base.compteur().expect("lisible"), 14);
     let _ = std::fs::remove_file(&chemin);
 }
 
@@ -88,17 +861,22 @@ fn ce_qui_est_ecrit_survit_a_la_fermeture() {
 fn un_compte_se_relit_par_son_identifiant_et_par_son_alias() {
     let (base, chemin) = entrepot("compte");
     let qui = un(Genre::Utilisateur, 1);
-    base.poser_compte(qui, &compte(Some("thierry")))
+    base.creer_compte(qui, Provenance::Ici, Some(alias("thierry")))
         .expect("écrit");
 
     assert_eq!(
-        base.compte(qui).expect("lisible"),
-        Some(compte(Some("thierry")))
+        base.compte(qui).expect("lisible").map(|quoi| quoi.alias),
+        Some(Some(alias("thierry")))
     );
     assert_eq!(
         base.compte_par_alias("thierry").expect("lisible"),
         Some(qui)
     );
+    // Créer deux fois est refusé : « insérer si absent ».
+    assert!(matches!(
+        base.creer_compte(qui, Provenance::Ici, None),
+        Err(Faute::Existe)
+    ));
     let _ = std::fs::remove_file(&chemin);
 }
 
@@ -109,10 +887,12 @@ fn changer_d_alias_retire_l_ancien_de_l_index() {
     // revendique qu'un.
     let (base, chemin) = entrepot("changement");
     let qui = un(Genre::Utilisateur, 1);
-    base.poser_compte(qui, &compte(Some("avant")))
+    base.creer_compte(qui, Provenance::Ici, Some(alias("avant")))
         .expect("écrit");
-    base.poser_compte(qui, &compte(Some("apres")))
-        .expect("réécrit");
+    assert!(
+        base.reclamer_alias(qui, Some(alias("apres")))
+            .expect("réécrit")
+    );
 
     assert_eq!(base.compte_par_alias("apres").expect("lisible"), Some(qui));
     assert_eq!(
@@ -120,6 +900,8 @@ fn changer_d_alias_retire_l_ancien_de_l_index() {
         None,
         "l'ancien alias rend encore un identifiant"
     );
+    let compte = base.compte(qui).expect("lisible").expect("là");
+    assert_eq!(compte.reclamation, e(2), "une réclamation nouvelle");
     let _ = std::fs::remove_file(&chemin);
 }
 
@@ -127,12 +909,23 @@ fn changer_d_alias_retire_l_ancien_de_l_index() {
 fn retirer_son_alias_le_retire_aussi_de_l_index() {
     let (base, chemin) = entrepot("retrait");
     let qui = un(Genre::Utilisateur, 1);
-    base.poser_compte(qui, &compte(Some("visible")))
+    base.creer_compte(qui, Provenance::Ici, Some(alias("visible")))
         .expect("écrit");
-    base.poser_compte(qui, &compte(None)).expect("réécrit");
+    assert!(base.reclamer_alias(qui, None).expect("réécrit"));
 
-    assert_eq!(base.compte(qui).expect("lisible"), Some(compte(None)));
+    assert_eq!(
+        base.compte(qui).expect("lisible").map(|quoi| quoi.alias),
+        Some(None)
+    );
     assert_eq!(base.compte_par_alias("visible").expect("lisible"), None);
+    // L'opération dit « rien ».
+    assert_eq!(
+        operations(&base, 1)[0].1,
+        Operation::Alias {
+            compte: qui,
+            alias: None
+        }
+    );
     let _ = std::fs::remove_file(&chemin);
 }
 
@@ -141,9 +934,21 @@ fn un_alias_deja_pris_par_un_autre_est_refuse() {
     // Deux comptes qui répondraient au même alias le rendraient inutilisable
     // pour retrouver quelqu'un, ce qui est sa seule raison d'être.
     let (base, chemin) = entrepot("dispute");
-    base.poser_compte(un(Genre::Utilisateur, 1), &compte(Some("thierry")))
+    base.creer_compte(
+        un(Genre::Utilisateur, 1),
+        Provenance::Ici,
+        Some(alias("thierry")),
+    )
+    .expect("écrit");
+    let refus = base.creer_compte(
+        un(Genre::Utilisateur, 2),
+        Provenance::Ici,
+        Some(alias("thierry")),
+    );
+    assert!(matches!(refus, Err(Faute::AliasPris)), "{refus:?}");
+    base.creer_compte(un(Genre::Utilisateur, 2), Provenance::Ici, None)
         .expect("écrit");
-    let refus = base.poser_compte(un(Genre::Utilisateur, 2), &compte(Some("thierry")));
+    let refus = base.reclamer_alias(un(Genre::Utilisateur, 2), Some(alias("thierry")));
     assert!(matches!(refus, Err(Faute::AliasPris)), "{refus:?}");
 
     // Et le premier n'a pas bougé.
@@ -151,23 +956,65 @@ fn un_alias_deja_pris_par_un_autre_est_refuse() {
         base.compte_par_alias("thierry").expect("lisible"),
         Some(un(Genre::Utilisateur, 1))
     );
+    // Un refus n'est pas une écriture : ni estampille, ni opération.
+    assert_eq!(base.compteur().expect("lisible"), 2);
     let _ = std::fs::remove_file(&chemin);
 }
 
 #[test]
-fn reecrire_son_propre_compte_sans_changer_d_alias_est_permis() {
-    // Le refus ne doit porter que sur l'alias d'un AUTRE : sinon on ne pourrait
-    // plus réécrire un compte sans lui retirer son nom d'abord.
+fn reclamer_ce_qu_on_tient_deja_ne_rafraichit_pas_la_reclamation() {
+    // **LA PLUS ANCIENNE RÉCLAMATION TIENT** (`replication.md` §3.2) : la
+    // rafraîchir ferait perdre un alias qu'on gagnait. Réclamer ce qu'on a
+    // n'écrit rien.
     let (base, chemin) = entrepot("idempotent");
     let qui = un(Genre::Utilisateur, 1);
-    base.poser_compte(qui, &compte(Some("thierry")))
+    base.creer_compte(qui, Provenance::Ici, Some(alias("thierry")))
         .expect("écrit");
-    base.poser_compte(qui, &compte(Some("thierry")))
-        .expect("le même compte, le même alias");
-    assert_eq!(
-        base.compte_par_alias("thierry").expect("lisible"),
-        Some(qui)
+    assert!(
+        base.reclamer_alias(qui, Some(alias("thierry")))
+            .expect("le même alias")
     );
+    assert_eq!(base.compteur().expect("lisible"), 1, "rien n'a été écrit");
+    assert_eq!(
+        base.compte(qui)
+            .expect("lisible")
+            .map(|quoi| quoi.reclamation),
+        Some(e(1))
+    );
+    // Un compte qui n'existe pas ne réclame rien.
+    assert!(
+        !base
+            .reclamer_alias(un(Genre::Utilisateur, 9), Some(alias("x")))
+            .expect("lisible")
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn un_alias_qui_en_prefixe_un_autre_ne_le_confond_pas() {
+    // L'octet nul entre l'alias et l'estampille : `lea` n'est pas `leandre`.
+    let (base, chemin) = entrepot("prefixe");
+    base.creer_compte(
+        un(Genre::Utilisateur, 1),
+        Provenance::Ici,
+        Some(alias("lea")),
+    )
+    .expect("écrit");
+    base.creer_compte(
+        un(Genre::Utilisateur, 2),
+        Provenance::Ici,
+        Some(alias("leandre")),
+    )
+    .expect("écrit");
+    assert_eq!(
+        base.compte_par_alias("lea").expect("lisible"),
+        Some(un(Genre::Utilisateur, 1))
+    );
+    assert_eq!(
+        base.compte_par_alias("leandre").expect("lisible"),
+        Some(un(Genre::Utilisateur, 2))
+    );
+    assert_eq!(base.compte_par_alias("le").expect("lisible"), None);
     let _ = std::fs::remove_file(&chemin);
 }
 
@@ -176,17 +1023,33 @@ fn reecrire_son_propre_compte_sans_changer_d_alias_est_permis() {
 #[test]
 fn une_machine_se_relit_entiere() {
     let (base, chemin) = entrepot("machine");
-    let machine = Machine {
-        provenance: Provenance::Ici,
-        proprietaire: un(Genre::Utilisateur, 1),
-        cle: Some([0x42; 32]),
-        annonce: true,
-        lecture: false,
-        nom: nom_de_machine("grenier"),
-    };
     let qui = un(Genre::Machine, 9);
-    base.poser_machine(qui, &machine).expect("écrit");
-    assert_eq!(base.machine(qui).expect("lisible"), Some(machine));
+    base.creer_machine(
+        qui,
+        Provenance::Ici,
+        un(Genre::Utilisateur, 1),
+        nom("grenier"),
+        Capacites {
+            annonce: true,
+            lecture: false,
+        },
+    )
+    .expect("écrit");
+    let machine = base.machine(qui).expect("lisible").expect("là");
+    assert_eq!(machine.proprietaire, un(Genre::Utilisateur, 1));
+    assert!(machine.annonce && !machine.lecture);
+    assert!(machine.cle.is_none(), "déclarée, pas enrôlée");
+    assert_eq!(machine.nom.octets(), b"grenier");
+    assert!(matches!(
+        base.creer_machine(
+            qui,
+            Provenance::Ici,
+            un(Genre::Utilisateur, 1),
+            nom("x"),
+            TOUT
+        ),
+        Err(Faute::Existe)
+    ));
     let _ = std::fs::remove_file(&chemin);
 }
 
@@ -198,7 +1061,7 @@ fn entree(quand: u64) -> EntreeJournal {
         quand,
         demandeur: un(Genre::Machine, 1),
         visee: un(Genre::Machine, 2),
-        service: NomRange::nouveau("imap").expect("il tient"),
+        service: nom("imap"),
         verdict: Verdict::Servi,
         provenance: Provenance::Ici,
     }
@@ -212,6 +1075,9 @@ fn deux_entrees_de_la_meme_milliseconde_sont_toutes_deux_gardees() {
     base.journaliser(&entree(1_000)).expect("écrit");
     base.journaliser(&entree(1_000)).expect("écrit");
     assert_eq!(base.entrees_du_journal().expect("lisible"), 2);
+    // **LE JOURNAL NE SE RÉPLIQUE PAS** : ni estampille, ni opération.
+    assert_eq!(base.compteur().expect("lisible"), 0);
+    assert_eq!(base.operations_gardees().expect("lisible"), 0);
     let _ = std::fs::remove_file(&chemin);
 }
 
@@ -259,36 +1125,20 @@ fn rompre_efface_ce_qui_vient_du_pair_et_lui_seul() {
     let d_ailleurs = un(Genre::Utilisateur, 2);
     let d_ici = un(Genre::Utilisateur, 3);
 
-    base.poser_compte(
-        du_pair,
-        &Compte {
-            provenance: Provenance::Annuaire(pair),
-            alias: Some(AliasRange::nouveau("depair").expect("il tient")),
-        },
-    )
-    .expect("écrit");
-    base.poser_compte(
-        d_ailleurs,
-        &Compte {
-            provenance: Provenance::Annuaire(autre),
-            alias: None,
-        },
-    )
-    .expect("écrit");
-    base.poser_compte(d_ici, &compte(Some("chezmoi")))
+    base.creer_compte(du_pair, Provenance::Annuaire(pair), Some(alias("depair")))
+        .expect("écrit");
+    base.creer_compte(d_ailleurs, Provenance::Annuaire(autre), None)
+        .expect("écrit");
+    base.creer_compte(d_ici, Provenance::Ici, Some(alias("chezmoi")))
         .expect("écrit");
 
     let machine_du_pair = un(Genre::Machine, 1);
-    base.poser_machine(
+    base.creer_machine(
         machine_du_pair,
-        &Machine {
-            provenance: Provenance::Annuaire(pair),
-            proprietaire: du_pair,
-            cle: Some([1; 32]),
-            annonce: true,
-            lecture: true,
-            nom: nom_de_machine("grenier"),
-        },
+        Provenance::Annuaire(pair),
+        du_pair,
+        nom("grenier"),
+        TOUT,
     )
     .expect("écrit");
 
@@ -297,6 +1147,12 @@ fn rompre_efface_ce_qui_vient_du_pair_et_lui_seul() {
 
     assert_eq!(base.compte(du_pair).expect("lisible"), None);
     assert_eq!(base.machine(machine_du_pair).expect("lisible"), None);
+    assert!(
+        base.machines_de_compte(du_pair)
+            .expect("lisible")
+            .is_empty(),
+        "l'index des machines part avec la machine"
+    );
     assert!(
         base.compte(d_ailleurs).expect("lisible").is_some(),
         "ce qui vient d'un AUTRE annuaire a été effacé"
@@ -314,14 +1170,8 @@ fn rompre_emporte_l_index_d_alias_avec_le_compte() {
     let (base, chemin) = entrepot("rupture-alias");
     let pair = un(Genre::Annuaire, 1);
     let qui = un(Genre::Utilisateur, 1);
-    base.poser_compte(
-        qui,
-        &Compte {
-            provenance: Provenance::Annuaire(pair),
-            alias: Some(AliasRange::nouveau("orphelin").expect("il tient")),
-        },
-    )
-    .expect("écrit");
+    base.creer_compte(qui, Provenance::Annuaire(pair), Some(alias("orphelin")))
+        .expect("écrit");
 
     base.oublier_ce_qui_vient_de(pair).expect("rompu");
     assert_eq!(base.compte_par_alias("orphelin").expect("lisible"), None);
@@ -350,29 +1200,129 @@ fn rompre_ne_touche_jamais_au_journal() {
     let _ = std::fs::remove_file(&chemin);
 }
 
-// ── Les services ────────────────────────────────────────────────────────────
+#[test]
+fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
+    // C17 dit « aucun enregistrement ne doit subsister avec cette origine », et
+    // COMMENT elle tombe : « par un `INSERT` ajouté à la hâte, jamais par une
+    // décision. »
+    let (base, fichier) = entrepot("rupture-complete");
+    let pair = un(Genre::Annuaire, 1);
+    let venu = Provenance::Annuaire(pair);
 
-/// Un service de cette machine, sous ce nom.
-fn service(machine: Identifiant, nom: &str) -> asl_registre::Service {
-    asl_registre::Service {
-        provenance: Provenance::Ici,
-        machine,
-        nom: NomRange::nouveau(nom).expect("il tient"),
-    }
+    let compte = un(Genre::Utilisateur, 2);
+    let machine = un(Genre::Machine, 3);
+    let service = un(Genre::Service, 4);
+    let appareil = un(Genre::Appareil, 5);
+    let autorisation = un(Genre::Autorisation, 6);
+    let clef = empreinte("0123456789");
+
+    base.creer_compte(compte, venu, None).expect("écrit");
+    base.creer_machine(machine, venu, compte, nom("grenier"), TOUT)
+        .expect("écrit");
+    base.declarer_service(service, venu, machine, nom("depot"))
+        .expect("écrit");
+    base.creer_appareil(appareil, venu, compte, [2; 33], Attestation::Aucune)
+        .expect("écrit");
+    base.poser_jeton(
+        appareil,
+        venu,
+        Plateforme::Fcm,
+        JetonRange::nouveau("d0d0").expect("il tient"),
+    )
+    .expect("écrit");
+    base.accorder_autorisation(
+        autorisation,
+        venu,
+        compte,
+        un(Genre::Utilisateur, 7),
+        Portee::ToutLeCompte,
+        nom("essai"),
+    )
+    .expect("écrit");
+    base.emettre_enrolement(&clef, venu, machine, 10_000)
+        .expect("écrit");
+    base.poser_description(appareil, venu, Systeme::Ios, nom("iPhone 17"))
+        .expect("écrit");
+
+    // Et une ligne de journal, qui doit SURVIVRE — c'est la seule exception, et
+    // elle est écrite dans C17.
+    base.journaliser(&EntreeJournal {
+        quand: 1,
+        demandeur: compte,
+        visee: machine,
+        service: nom("depot"),
+        verdict: Verdict::Servi,
+        provenance: venu,
+    })
+    .expect("écrit");
+
+    // **RIEN DE TOUT CELA N'EST DANS LE JOURNAL D'OPÉRATIONS** : ce n'est pas
+    // de provenance locale.
+    assert_eq!(base.operations_gardees().expect("lisible"), 0);
+
+    let efface = base.oublier_ce_qui_vient_de(pair).expect("rompu");
+    assert_eq!(
+        efface, 7,
+        "un compte, une machine, un service, une autorisation, un appareil, un code, une description"
+    );
+
+    assert_eq!(base.compte(compte).expect("lisible"), None);
+    assert_eq!(base.machine(machine).expect("lisible"), None);
+    assert_eq!(base.service(service).expect("lisible"), None);
+    assert_eq!(base.appareil(appareil).expect("lisible"), None);
+    assert_eq!(base.description(appareil).expect("lisible"), None);
+    assert_eq!(
+        base.jeton(appareil).expect("lisible"),
+        None,
+        "le jeton part avec l'appareil"
+    );
+    assert!(base.consommer_enrolement(&clef).expect("lisible").is_none());
+    assert!(
+        base.service_par_nom(machine, "depot")
+            .expect("lisible")
+            .is_none(),
+        "l'index par nom part avec le service"
+    );
+    assert!(
+        base.autorisations_recues(un(Genre::Utilisateur, 7))
+            .expect("lisible")
+            .is_empty(),
+        "l'index des reçues part avec l'autorisation"
+    );
+    assert!(
+        base.autorisations_accordees(compte)
+            .expect("lisible")
+            .is_empty(),
+        "l'index des accordées aussi"
+    );
+    assert!(
+        base.appareils_de_compte(compte)
+            .expect("lisible")
+            .is_empty(),
+        "l'index des appareils part avec l'appareil"
+    );
+    assert_eq!(
+        base.entrees_du_journal().expect("lisible"),
+        1,
+        "LE JOURNAL SURVIT — c'est l'exception de C17, et la seule"
+    );
+
+    let _ = std::fs::remove_file(fichier);
 }
+
+// ── Les services ────────────────────────────────────────────────────────────
 
 #[test]
 fn un_service_se_relit_par_son_identifiant_et_par_son_nom() {
     let (base, chemin) = entrepot("service");
     let machine = un(Genre::Machine, 1);
     let quel = un(Genre::Service, 1);
-    base.poser_service(quel, &service(machine, "imap"))
+    base.declarer_service(quel, Provenance::Ici, machine, nom("imap"))
         .expect("écrit");
 
-    assert_eq!(
-        base.service(quel).expect("lisible"),
-        Some(service(machine, "imap"))
-    );
+    let service = base.service(quel).expect("lisible").expect("là");
+    assert_eq!(service.machine, machine);
+    assert_eq!(service.nom.octets(), b"imap");
     assert_eq!(
         base.service_par_nom(machine, "imap").expect("lisible"),
         Some(quel)
@@ -381,17 +1331,26 @@ fn un_service_se_relit_par_son_identifiant_et_par_son_nom() {
 }
 
 #[test]
-fn deux_machines_peuvent_servir_le_meme_nom() {
+fn deux_machines_peuvent_servir_le_meme_nom_mais_pas_une_machine_deux_fois() {
     // **C'EST LA RAISON DE LA CLÉ COMPOSÉE.** Un nom de service n'est unique que
     // sur SA machine ; deux machines qui servent toutes deux `imap` est le cas
-    // ordinaire, pas une collision.
+    // ordinaire, pas une collision. Sur la même machine, c'est un refus : « si
+    // `(machine, nom)` est déjà tenu, le plus ancien reste ».
     let (base, chemin) = entrepot("homonymes");
     let une = un(Genre::Machine, 1);
     let autre = un(Genre::Machine, 2);
-    base.poser_service(un(Genre::Service, 1), &service(une, "imap"))
+    base.declarer_service(un(Genre::Service, 1), Provenance::Ici, une, nom("imap"))
         .expect("écrit");
-    base.poser_service(un(Genre::Service, 2), &service(autre, "imap"))
+    base.declarer_service(un(Genre::Service, 2), Provenance::Ici, autre, nom("imap"))
         .expect("écrit");
+    assert!(matches!(
+        base.declarer_service(un(Genre::Service, 3), Provenance::Ici, une, nom("imap")),
+        Err(Faute::Existe)
+    ));
+    assert!(matches!(
+        base.declarer_service(un(Genre::Service, 1), Provenance::Ici, une, nom("pop")),
+        Err(Faute::Existe)
+    ));
 
     assert_eq!(
         base.service_par_nom(une, "imap").expect("lisible"),
@@ -400,28 +1359,6 @@ fn deux_machines_peuvent_servir_le_meme_nom() {
     assert_eq!(
         base.service_par_nom(autre, "imap").expect("lisible"),
         Some(un(Genre::Service, 2))
-    );
-    let _ = std::fs::remove_file(&chemin);
-}
-
-#[test]
-fn renommer_un_service_retire_l_ancien_nom_de_l_index() {
-    let (base, chemin) = entrepot("renomme");
-    let machine = un(Genre::Machine, 1);
-    let quel = un(Genre::Service, 1);
-    base.poser_service(quel, &service(machine, "avant"))
-        .expect("écrit");
-    base.poser_service(quel, &service(machine, "apres"))
-        .expect("réécrit");
-
-    assert_eq!(
-        base.service_par_nom(machine, "apres").expect("lisible"),
-        Some(quel)
-    );
-    assert_eq!(
-        base.service_par_nom(machine, "avant").expect("lisible"),
-        None,
-        "l'ancien nom rend encore un identifiant"
     );
     let _ = std::fs::remove_file(&chemin);
 }
@@ -440,22 +1377,6 @@ fn un_service_qu_aucune_machine_ne_sert_est_introuvable() {
 
 // ── Les autorisations ───────────────────────────────────────────────────────
 
-/// Une autorisation de `par` à `a`, de cette portée.
-fn autorisation(
-    par: Identifiant,
-    a: Identifiant,
-    portee: asl_registre::Portee,
-) -> asl_registre::Autorisation {
-    asl_registre::Autorisation {
-        provenance: Provenance::Ici,
-        par,
-        a,
-        portee,
-        revoquee: false,
-        etiquette: NomRange::nouveau("essai").expect("court"),
-    }
-}
-
 #[test]
 fn les_autorisations_recues_sont_celles_du_beneficiaire_et_pas_d_un_autre() {
     let (base, chemin) = entrepot("recues");
@@ -463,20 +1384,39 @@ fn les_autorisations_recues_sont_celles_du_beneficiaire_et_pas_d_un_autre() {
     let beneficiaire = un(Genre::Utilisateur, 2);
     let etranger = un(Genre::Utilisateur, 3);
 
-    base.poser_autorisation(
+    base.accorder_autorisation(
         un(Genre::Autorisation, 1),
-        &autorisation(donneur, beneficiaire, asl_registre::Portee::ToutLeCompte),
+        Provenance::Ici,
+        donneur,
+        beneficiaire,
+        Portee::ToutLeCompte,
+        nom("essai"),
     )
     .expect("écrit");
-    base.poser_autorisation(
+    base.accorder_autorisation(
         un(Genre::Autorisation, 2),
-        &autorisation(donneur, etranger, asl_registre::Portee::ToutLeCompte),
+        Provenance::Ici,
+        donneur,
+        etranger,
+        Portee::ToutLeCompte,
+        nom("essai"),
     )
     .expect("écrit");
 
     let siennes = base.autorisations_recues(beneficiaire).expect("lisible");
     assert_eq!(siennes.len(), 1, "{siennes:?}");
     assert_eq!(siennes.first().map(|quoi| quoi.a), Some(beneficiaire));
+    assert!(matches!(
+        base.accorder_autorisation(
+            un(Genre::Autorisation, 1),
+            Provenance::Ici,
+            donneur,
+            beneficiaire,
+            Portee::ToutLeCompte,
+            nom("essai"),
+        ),
+        Err(Faute::Existe)
+    ));
     let _ = std::fs::remove_file(&chemin);
 }
 
@@ -488,13 +1428,17 @@ fn un_meme_beneficiaire_peut_en_recevoir_plusieurs() {
     let (base, chemin) = entrepot("plusieurs");
     let beneficiaire = un(Genre::Utilisateur, 2);
     for (rang, portee) in [
-        (1_u8, asl_registre::Portee::ToutLeCompte),
-        (2, asl_registre::Portee::UneMachine(un(Genre::Machine, 1))),
-        (3, asl_registre::Portee::UnService(un(Genre::Service, 1))),
+        (1_u8, Portee::ToutLeCompte),
+        (2, Portee::UneMachine(un(Genre::Machine, 1))),
+        (3, Portee::UnService(un(Genre::Service, 1))),
     ] {
-        base.poser_autorisation(
+        base.accorder_autorisation(
             un(Genre::Autorisation, rang),
-            &autorisation(un(Genre::Utilisateur, 1), beneficiaire, portee),
+            Provenance::Ici,
+            un(Genre::Utilisateur, 1),
+            beneficiaire,
+            portee,
+            nom("essai"),
         )
         .expect("écrit");
     }
@@ -504,26 +1448,6 @@ fn un_meme_beneficiaire_peut_en_recevoir_plusieurs() {
             .len(),
         3
     );
-    let _ = std::fs::remove_file(&chemin);
-}
-
-#[test]
-fn une_autorisation_revoquee_reste_visible() {
-    // Elle est révoquée, jamais effacée : c'est `asl-auth` qui l'écarte, et la
-    // cacher ici priverait l'utilisateur de voir ce qu'il a retiré.
-    let (base, chemin) = entrepot("revoquee");
-    let beneficiaire = un(Genre::Utilisateur, 2);
-    let mut retiree = autorisation(
-        un(Genre::Utilisateur, 1),
-        beneficiaire,
-        asl_registre::Portee::ToutLeCompte,
-    );
-    retiree.revoquee = true;
-    base.poser_autorisation(un(Genre::Autorisation, 1), &retiree)
-        .expect("écrit");
-
-    let siennes = base.autorisations_recues(beneficiaire).expect("lisible");
-    assert_eq!(siennes.first().map(|quoi| quoi.revoquee), Some(true));
     let _ = std::fs::remove_file(&chemin);
 }
 
@@ -538,11 +1462,6 @@ fn un_compte_sans_autorisation_en_recoit_une_liste_vide() {
     let _ = std::fs::remove_file(&chemin);
 }
 
-/// Un nom de machine, pour les essais.
-fn nom_de_machine(texte: &str) -> asl_registre::NomRange {
-    asl_registre::NomRange::nouveau(texte).expect("un nom court se range")
-}
-
 // ── Les appareils ───────────────────────────────────────────────────────────
 
 #[test]
@@ -551,27 +1470,34 @@ fn un_appareil_se_pose_et_se_relit() {
     let quel = un(Genre::Appareil, 3);
     assert_eq!(base.appareil(quel).expect("lisible"), None, "base neuve");
 
-    let appareil = asl_registre::Appareil {
-        provenance: Provenance::Ici,
-        proprietaire: un(Genre::Utilisateur, 1),
-        cle: [0x77; 33],
-        atteste: asl_registre::Attestation::Aucune,
-        revoque: false,
-    };
-    base.poser_appareil(quel, &appareil).expect("écrit");
-    assert_eq!(base.appareil(quel).expect("lisible"), Some(appareil));
+    base.creer_appareil(
+        quel,
+        Provenance::Ici,
+        un(Genre::Utilisateur, 1),
+        [0x77; 33],
+        Attestation::Aucune,
+    )
+    .expect("écrit");
+    let appareil = base.appareil(quel).expect("lisible").expect("là");
+    assert_eq!(appareil.proprietaire, un(Genre::Utilisateur, 1));
+    assert_eq!(appareil.cle, [0x77; 33]);
+    assert_eq!(appareil.atteste, Attestation::Aucune);
+    assert!(!appareil.revoque);
+    assert!(matches!(
+        base.creer_appareil(
+            quel,
+            Provenance::Ici,
+            un(Genre::Utilisateur, 1),
+            [0; 33],
+            Attestation::Aucune
+        ),
+        Err(Faute::Existe)
+    ));
 
     let _ = std::fs::remove_file(fichier);
 }
 
 // ── Les codes d'enrôlement ──────────────────────────────────────────────────
-
-/// L'empreinte de ce code.
-fn empreinte(texte: &str) -> [u8; 32] {
-    asl_cle::CodeEnrolement::analyser(texte)
-        .expect("un code")
-        .empreinte()
-}
 
 #[test]
 fn un_code_se_pose_se_consomme_une_fois_et_pas_deux() {
@@ -579,15 +1505,8 @@ fn un_code_se_pose_se_consomme_une_fois_et_pas_deux() {
     let machine = un(Genre::Machine, 4);
     let clef = empreinte("0123456789");
 
-    base.poser_enrolement(
-        &clef,
-        &asl_registre::Enrolement {
-            provenance: Provenance::Ici,
-            machine,
-            expire_a: 1_000,
-        },
-    )
-    .expect("écrit");
+    base.emettre_enrolement(&clef, Provenance::Ici, machine, 1_000)
+        .expect("écrit");
 
     let pris = base.consommer_enrolement(&clef).expect("lisible");
     assert_eq!(pris.map(|quoi| quoi.machine), Some(machine));
@@ -600,6 +1519,9 @@ fn un_code_se_pose_se_consomme_une_fois_et_pas_deux() {
             .map(|quoi| quoi.machine),
         None
     );
+    // **CONSOMMER N'EST PAS UNE OPÉRATION** : seule l'émission l'était.
+    assert_eq!(base.compteur().expect("lisible"), 1);
+    assert_eq!(base.operations_gardees().expect("lisible"), 1);
 
     let _ = std::fs::remove_file(fichier);
 }
@@ -614,15 +1536,8 @@ fn emettre_un_code_tue_le_precedent() {
     let neuf = empreinte("9876543210");
 
     for clef in [&vieux, &neuf] {
-        base.poser_enrolement(
-            clef,
-            &asl_registre::Enrolement {
-                provenance: Provenance::Ici,
-                machine,
-                expire_a: 1_000,
-            },
-        )
-        .expect("écrit");
+        base.emettre_enrolement(clef, Provenance::Ici, machine, 1_000)
+            .expect("écrit");
     }
 
     assert!(
@@ -643,15 +1558,8 @@ fn les_codes_perimes_se_balaient_et_les_autres_restent() {
     let vivant = empreinte("9876543210");
 
     for (clef, machine, expire_a) in [(&perime, 4_u8, 100_u64), (&vivant, 5, 10_000)] {
-        base.poser_enrolement(
-            clef,
-            &asl_registre::Enrolement {
-                provenance: Provenance::Ici,
-                machine: un(Genre::Machine, machine),
-                expire_a,
-            },
-        )
-        .expect("écrit");
+        base.emettre_enrolement(clef, Provenance::Ici, un(Genre::Machine, machine), expire_a)
+            .expect("écrit");
     }
 
     assert_eq!(base.expirer_les_enrolements(1_000).expect("balayé"), 1);
@@ -665,143 +1573,8 @@ fn les_codes_perimes_se_balaient_et_les_autres_restent() {
             .expect("lisible")
             .is_some()
     );
-
-    let _ = std::fs::remove_file(fichier);
-}
-
-// ── C17 : la rupture atteint TOUT ce qui porte une origine ──────────────────
-
-#[test]
-fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
-    // **CETTE CONTRAINTE TOMBAIT.** C17 dit « aucun enregistrement ne doit
-    // subsister avec cette origine », et la rupture n'atteignait que les comptes
-    // et les machines — un service ou une autorisation venus d'un pair
-    // survivaient. C17 dit aussi COMMENT elle tombe : « par un `INSERT` ajouté à
-    // la hâte, jamais par une décision. »
-    let (base, fichier) = entrepot("rupture-complete");
-    let pair = un(Genre::Annuaire, 1);
-    let venu = Provenance::Annuaire(pair);
-
-    let compte = un(Genre::Utilisateur, 2);
-    let machine = un(Genre::Machine, 3);
-    let service = un(Genre::Service, 4);
-    let appareil = un(Genre::Appareil, 5);
-    let autorisation = un(Genre::Autorisation, 6);
-    let clef = empreinte("0123456789");
-
-    base.poser_compte(
-        compte,
-        &Compte {
-            provenance: venu,
-            alias: None,
-        },
-    )
-    .expect("écrit");
-    base.poser_machine(
-        machine,
-        &Machine {
-            provenance: venu,
-            proprietaire: compte,
-            cle: Some([1; 32]),
-            annonce: true,
-            lecture: true,
-            nom: nom_de_machine("grenier"),
-        },
-    )
-    .expect("écrit");
-    base.poser_service(
-        service,
-        &asl_registre::Service {
-            provenance: venu,
-            machine,
-            nom: NomRange::nouveau("depot").expect("un nom"),
-        },
-    )
-    .expect("écrit");
-    base.poser_appareil(
-        appareil,
-        &asl_registre::Appareil {
-            provenance: venu,
-            proprietaire: compte,
-            cle: [2; 33],
-            atteste: asl_registre::Attestation::Aucune,
-            revoque: false,
-        },
-    )
-    .expect("écrit");
-    base.poser_autorisation(
-        autorisation,
-        &asl_registre::Autorisation {
-            provenance: venu,
-            par: compte,
-            a: un(Genre::Utilisateur, 7),
-            portee: asl_registre::Portee::ToutLeCompte,
-            revoquee: false,
-            etiquette: NomRange::nouveau("essai").expect("court"),
-        },
-    )
-    .expect("écrit");
-    base.poser_enrolement(
-        &clef,
-        &asl_registre::Enrolement {
-            provenance: venu,
-            machine,
-            expire_a: 10_000,
-        },
-    )
-    .expect("écrit");
-    base.poser_description(
-        appareil,
-        &Description {
-            provenance: venu,
-            systeme: Systeme::Ios,
-            modele: NomRange::nouveau("iPhone 17").expect("un nom"),
-        },
-    )
-    .expect("écrit");
-
-    // Et une ligne de journal, qui doit SURVIVRE — c'est la seule exception, et
-    // elle est écrite dans C17 : ce qui motive une rupture est souvent ce que le
-    // journal a enregistré.
-    base.journaliser(&EntreeJournal {
-        quand: 1,
-        demandeur: compte,
-        visee: machine,
-        service: NomRange::nouveau("depot").expect("un nom"),
-        verdict: Verdict::Servi,
-        provenance: venu,
-    })
-    .expect("écrit");
-
-    let efface = base.oublier_ce_qui_vient_de(pair).expect("rompu");
-    assert_eq!(
-        efface, 7,
-        "un compte, une machine, un service, une autorisation, un appareil, un code, une description"
-    );
-
-    assert_eq!(base.compte(compte).expect("lisible"), None);
-    assert_eq!(base.machine(machine).expect("lisible"), None);
-    assert_eq!(base.service(service).expect("lisible"), None);
-    assert_eq!(base.appareil(appareil).expect("lisible"), None);
-    assert_eq!(base.description(appareil).expect("lisible"), None);
-    assert!(base.consommer_enrolement(&clef).expect("lisible").is_none());
-    assert!(
-        base.service_par_nom(machine, "depot")
-            .expect("lisible")
-            .is_none(),
-        "l'index par nom part avec le service"
-    );
-    assert!(
-        base.autorisations_recues(un(Genre::Utilisateur, 7))
-            .expect("lisible")
-            .is_empty(),
-        "l'index des reçues part avec l'autorisation"
-    );
-    assert_eq!(
-        base.entrees_du_journal().expect("lisible"),
-        1,
-        "LE JOURNAL SURVIT — c'est l'exception de C17, et la seule"
-    );
+    // Expirer n'est pas une opération non plus : chaque racine à son horloge.
+    assert_eq!(base.compteur().expect("lisible"), 2);
 
     let _ = std::fs::remove_file(fichier);
 }
@@ -811,14 +1584,7 @@ fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
 #[test]
 fn une_base_neuve_rend_des_listes_vides_et_non_des_fautes() {
     // **UNE TABLE QUE REDB N'A JAMAIS VUE N'EXISTE PAS**, et l'ouvrir en lecture
-    // rend `TableDoesNotExist` — pas un intervalle vide. Trois index créés après
-    // coup manquaient à `ouvrir`, et lister les machines d'un compte neuf
-    // échouait donc, ce que l'étage 3 traduisait en `404` là où le protocole
-    // promet `200` et un tableau vide.
-    // **LE NOM DU FICHIER EST LA CLÉ D'UNICITÉ**, et non le nom de l'essai :
-    // `cargo test` les fait tourner en parallèle, et deux essais qui ouvriraient
-    // le même fichier se verraient refuser par redb. Un « neuve » était déjà
-    // pris — localement, l'ordonnancement l'a caché ; la CI, non.
+    // rend `TableDoesNotExist` — pas un intervalle vide.
     let (base, fichier) = entrepot("neuve-listes");
     let compte = un(Genre::Utilisateur, 1);
     let appareil = un(Genre::Appareil, 2);
@@ -842,26 +1608,6 @@ fn une_base_neuve_rend_des_listes_vides_et_non_des_fautes() {
 
 // ── Les descriptions d'appareil ─────────────────────────────────────────────
 
-/// Une description d'essai, venue d'ici.
-fn description(systeme: Systeme, modele: &str) -> Description {
-    Description {
-        provenance: Provenance::Ici,
-        systeme,
-        modele: NomRange::nouveau(modele).expect("il tient"),
-    }
-}
-
-/// Un appareil d'essai, de ce compte.
-fn appareil_de(compte: Identifiant) -> asl_registre::Appareil {
-    asl_registre::Appareil {
-        provenance: Provenance::Ici,
-        proprietaire: compte,
-        cle: [0x77; 33],
-        atteste: asl_registre::Attestation::Aucune,
-        revoque: false,
-    }
-}
-
 #[test]
 fn une_description_se_pose_se_relit_et_se_remplace() {
     // **LA NEUVE REMPLACE L'ANCIENNE** : un appareil qui se redécrit est ce
@@ -870,7 +1616,7 @@ fn une_description_se_pose_se_relit_et_se_remplace() {
     let quel = un(Genre::Appareil, 3);
     assert!(base.description(quel).expect("lisible").is_none());
 
-    base.poser_description(quel, &description(Systeme::Ios, "iPhone 17"))
+    base.poser_description(quel, Provenance::Ici, Systeme::Ios, nom("iPhone 17"))
         .expect("écrit");
     let lue = base
         .description(quel)
@@ -878,15 +1624,22 @@ fn une_description_se_pose_se_relit_et_se_remplace() {
         .expect("elle est là");
     assert_eq!(lue.systeme, Systeme::Ios);
     assert_eq!(lue.modele.octets(), "iPhone 17".as_bytes());
+    assert_eq!(lue.estampille, e(1));
 
-    base.poser_description(quel, &description(Systeme::Macos, "MacBook Pro (2019)"))
-        .expect("écrit");
+    base.poser_description(
+        quel,
+        Provenance::Ici,
+        Systeme::Macos,
+        nom("MacBook Pro (2019)"),
+    )
+    .expect("écrit");
     let lue = base
         .description(quel)
         .expect("lisible")
         .expect("elle est là");
     assert_eq!(lue.systeme, Systeme::Macos, "le système change aussi");
     assert_eq!(lue.modele.octets(), "MacBook Pro (2019)".as_bytes());
+    assert_eq!(lue.estampille, e(2), "la plus récente");
 
     let _ = std::fs::remove_file(fichier);
 }
@@ -894,17 +1647,21 @@ fn une_description_se_pose_se_relit_et_se_remplace() {
 #[test]
 fn la_liste_des_appareils_porte_leur_description_quand_ils_en_ont_une() {
     // **C'EST L'ÉCRAN COMPTE** : deux appareils, dont un seul s'est décrit.
-    // L'autre reste dans la liste, sans description — « pas encore », et non
-    // « absent ».
     let (base, fichier) = entrepot("liste-decrite");
     let compte = un(Genre::Utilisateur, 1);
     let decrit = un(Genre::Appareil, 2);
     let muet = un(Genre::Appareil, 3);
-    base.poser_appareil(decrit, &appareil_de(compte))
+    for quel in [decrit, muet] {
+        base.creer_appareil(
+            quel,
+            Provenance::Ici,
+            compte,
+            [0x77; 33],
+            Attestation::Aucune,
+        )
         .expect("écrit");
-    base.poser_appareil(muet, &appareil_de(compte))
-        .expect("écrit");
-    base.poser_description(decrit, &description(Systeme::Android, "Pixel 9"))
+    }
+    base.poser_description(decrit, Provenance::Ici, Systeme::Android, nom("Pixel 9"))
         .expect("écrit");
 
     let liste = base.appareils_de_compte(compte).expect("lisible");
@@ -930,9 +1687,15 @@ fn revoquer_un_appareil_garde_sa_description() {
     let (base, fichier) = entrepot("revoque-description");
     let compte = un(Genre::Utilisateur, 1);
     let quel = un(Genre::Appareil, 3);
-    base.poser_appareil(quel, &appareil_de(compte))
-        .expect("écrit");
-    base.poser_description(quel, &description(Systeme::Ios, "iPhone 17"))
+    base.creer_appareil(
+        quel,
+        Provenance::Ici,
+        compte,
+        [0x77; 33],
+        Attestation::Aucune,
+    )
+    .expect("écrit");
+    base.poser_description(quel, Provenance::Ici, Systeme::Ios, nom("iPhone 17"))
         .expect("écrit");
 
     base.revoquer_appareil(quel).expect("révoqué");
@@ -950,15 +1713,6 @@ fn revoquer_un_appareil_garde_sa_description() {
 
 // ── Les jetons de poussée ───────────────────────────────────────────────────
 
-/// Un jeton d'essai.
-fn jeton(plateforme: Plateforme, texte: &str) -> JetonPoussee {
-    JetonPoussee {
-        provenance: Provenance::Ici,
-        plateforme,
-        jeton: JetonRange::nouveau(texte).expect("il tient"),
-    }
-}
-
 #[test]
 fn un_jeton_se_depose_se_relit_et_se_remplace() {
     // **LE NEUF REMPLACE L'ANCIEN**, il ne s'ajoute pas : Apple et Google font
@@ -968,14 +1722,24 @@ fn un_jeton_se_depose_se_relit_et_se_remplace() {
     let quel = un(Genre::Appareil, 3);
     assert!(base.jeton(quel).expect("lisible").is_none());
 
-    base.poser_jeton(quel, &jeton(Plateforme::Apns, "c0ffee"))
-        .expect("écrit");
+    base.poser_jeton(
+        quel,
+        Provenance::Ici,
+        Plateforme::Apns,
+        JetonRange::nouveau("c0ffee").expect("il tient"),
+    )
+    .expect("écrit");
     let lu = base.jeton(quel).expect("lisible").expect("il est là");
     assert_eq!(lu.plateforme, Plateforme::Apns);
     assert_eq!(lu.jeton.octets(), b"c0ffee");
 
-    base.poser_jeton(quel, &jeton(Plateforme::Fcm, "d0d0"))
-        .expect("écrit");
+    base.poser_jeton(
+        quel,
+        Provenance::Ici,
+        Plateforme::Fcm,
+        JetonRange::nouveau("d0d0").expect("il tient"),
+    )
+    .expect("écrit");
     let lu = base.jeton(quel).expect("lisible").expect("il est là");
     assert_eq!(
         lu.plateforme,
@@ -983,16 +1747,7 @@ fn un_jeton_se_depose_se_relit_et_se_remplace() {
         "la plate-forme change aussi"
     );
     assert_eq!(lu.jeton.octets(), b"d0d0");
-
-    assert!(
-        base.retirer_jeton(quel).expect("lisible"),
-        "il y en avait un"
-    );
-    assert!(base.jeton(quel).expect("lisible").is_none());
-    assert!(
-        !base.retirer_jeton(quel).expect("lisible"),
-        "retirer ce qui n'est plus là ne ment pas"
-    );
+    assert_eq!(lu.estampille, e(2), "le plus récent");
 
     let _ = std::fs::remove_file(fichier);
 }
@@ -1005,19 +1760,21 @@ fn revoquer_un_appareil_emporte_son_jeton() {
     // téléphone de qui l'a.
     let (base, fichier) = entrepot("revoque-jeton");
     let quel = un(Genre::Appareil, 3);
-    base.poser_appareil(
+    base.creer_appareil(
         quel,
-        &asl_registre::Appareil {
-            provenance: Provenance::Ici,
-            proprietaire: un(Genre::Utilisateur, 1),
-            cle: [0x77; 33],
-            atteste: asl_registre::Attestation::Aucune,
-            revoque: false,
-        },
+        Provenance::Ici,
+        un(Genre::Utilisateur, 1),
+        [0x77; 33],
+        Attestation::Aucune,
     )
     .expect("écrit");
-    base.poser_jeton(quel, &jeton(Plateforme::Apns, "c0ffee"))
-        .expect("écrit");
+    base.poser_jeton(
+        quel,
+        Provenance::Ici,
+        Plateforme::Apns,
+        JetonRange::nouveau("c0ffee").expect("il tient"),
+    )
+    .expect("écrit");
 
     base.revoquer_appareil(quel).expect("révoqué");
     assert!(
@@ -1048,15 +1805,12 @@ fn revoquer_un_appareil_le_marque_sans_l_effacer() {
         "révoquer ce qui n'existe pas ne crée rien"
     );
 
-    base.poser_appareil(
+    base.creer_appareil(
         quel,
-        &asl_registre::Appareil {
-            provenance: Provenance::Ici,
-            proprietaire: un(Genre::Utilisateur, 1),
-            cle: [0x77; 33],
-            atteste: asl_registre::Attestation::Aucune,
-            revoque: false,
-        },
+        Provenance::Ici,
+        un(Genre::Utilisateur, 1),
+        [0x77; 33],
+        Attestation::Aucune,
     )
     .expect("écrit");
 
@@ -1085,16 +1839,13 @@ fn revoquer_une_autorisation_la_marque_et_la_laisse_visible() {
             .is_none()
     );
 
-    base.poser_autorisation(
+    base.accorder_autorisation(
         quelle,
-        &asl_registre::Autorisation {
-            provenance: Provenance::Ici,
-            par: un(Genre::Utilisateur, 2),
-            a: beneficiaire,
-            portee: asl_registre::Portee::ToutLeCompte,
-            revoquee: false,
-            etiquette: NomRange::nouveau("essai").expect("court"),
-        },
+        Provenance::Ici,
+        un(Genre::Utilisateur, 2),
+        beneficiaire,
+        Portee::ToutLeCompte,
+        nom("essai"),
     )
     .expect("écrit");
 
@@ -1123,27 +1874,6 @@ fn revoquer_une_autorisation_la_marque_et_la_laisse_visible() {
 
 // ── Ce que les verbes de liste interrogent ──────────────────────────────────
 
-/// Une machine de ce compte, avec ce nom.
-fn une_machine(proprietaire: Identifiant, nom: &str) -> Machine {
-    Machine {
-        provenance: Provenance::Ici,
-        proprietaire,
-        nom: NomRange::nouveau(nom).expect("il tient"),
-        annonce: true,
-        lecture: true,
-        cle: None,
-    }
-}
-
-/// Un service de cette machine, avec ce nom.
-fn un_service(machine: Identifiant, nom: &str) -> asl_registre::Service {
-    asl_registre::Service {
-        provenance: Provenance::Ici,
-        machine,
-        nom: NomRange::nouveau(nom).expect("il tient"),
-    }
-}
-
 #[test]
 fn les_machines_d_un_compte_se_retrouvent_sans_balayer_l_annuaire() {
     // **L'INDEX EXISTE POUR CELA.** `MACHINES` porte le propriétaire à
@@ -1154,9 +1884,14 @@ fn les_machines_d_un_compte_se_retrouvent_sans_balayer_l_annuaire() {
     let autre = un(Genre::Utilisateur, 2);
 
     for (marque, proprietaire) in [(10, moi), (11, moi), (12, autre)] {
-        let quelle = un(Genre::Machine, marque);
         entrepot
-            .poser_machine(quelle, &une_machine(proprietaire, "grenier"))
+            .creer_machine(
+                un(Genre::Machine, marque),
+                Provenance::Ici,
+                proprietaire,
+                nom("grenier"),
+                TOUT,
+            )
             .expect("elle s'écrit");
     }
 
@@ -1195,9 +1930,14 @@ fn les_services_d_une_machine_se_retrouvent_par_intervalle() {
     let une = un(Genre::Machine, 10);
     let autre = un(Genre::Machine, 11);
 
-    for (marque, machine, nom) in [(20, une, "depot"), (21, une, "imap"), (22, autre, "depot")] {
+    for (marque, machine, texte) in [(20, une, "depot"), (21, une, "imap"), (22, autre, "depot")] {
         entrepot
-            .poser_service(un(Genre::Service, marque), &un_service(machine, nom))
+            .declarer_service(
+                un(Genre::Service, marque),
+                Provenance::Ici,
+                machine,
+                nom(texte),
+            )
             .expect("il s'écrit");
     }
 
@@ -1221,30 +1961,6 @@ fn les_services_d_une_machine_se_retrouvent_par_intervalle() {
 }
 
 #[test]
-fn un_service_renomme_ne_sort_qu_une_fois() {
-    // L'index suit le service, comme l'alias suit le compte : sans cela, un
-    // service renommé sortirait deux fois de sa propre machine.
-    let (entrepot, chemin) = entrepot("service-renomme");
-    let machine = un(Genre::Machine, 10);
-    let quel = un(Genre::Service, 20);
-
-    entrepot
-        .poser_service(quel, &un_service(machine, "depot"))
-        .expect("il s'écrit");
-    entrepot
-        .poser_service(quel, &un_service(machine, "archives"))
-        .expect("il se renomme");
-
-    let siens = entrepot
-        .services_de_machine(machine)
-        .expect("ils se lisent");
-    assert_eq!(siens.len(), 1, "l'ancien nom est resté dans l'index");
-    assert_eq!(siens[0].1.nom.octets(), b"archives");
-
-    let _ = std::fs::remove_file(chemin);
-}
-
-#[test]
 fn les_autorisations_sortent_dans_les_deux_sens_avec_leur_identifiant() {
     // **C'EST L'IDENTIFIANT QU'ON PASSE À `DELETE /v1/autorisations/{g}`.** Une
     // liste dont les éléments ne se désignent pas est une liste qu'on ne peut
@@ -1263,16 +1979,13 @@ fn les_autorisations_sortent_dans_les_deux_sens_avec_leur_identifiant() {
         (ailleurs, autre, autre),
     ] {
         entrepot
-            .poser_autorisation(
+            .accorder_autorisation(
                 quelle,
-                &asl_registre::Autorisation {
-                    provenance: Provenance::Ici,
-                    par,
-                    a,
-                    portee: asl_registre::Portee::ToutLeCompte,
-                    revoquee: false,
-                    etiquette: NomRange::nouveau("essai").expect("court"),
-                },
+                Provenance::Ici,
+                par,
+                a,
+                Portee::ToutLeCompte,
+                nom("essai"),
             )
             .expect("elle s'écrit");
     }
@@ -1316,16 +2029,13 @@ fn une_autorisation_revoquee_reste_dans_la_liste() {
     let quelle = un(Genre::Autorisation, 30);
 
     entrepot
-        .poser_autorisation(
+        .accorder_autorisation(
             quelle,
-            &asl_registre::Autorisation {
-                provenance: Provenance::Ici,
-                par: moi,
-                a: autre,
-                portee: asl_registre::Portee::ToutLeCompte,
-                revoquee: false,
-                etiquette: NomRange::nouveau("essai").expect("court"),
-            },
+            Provenance::Ici,
+            moi,
+            autre,
+            Portee::ToutLeCompte,
+            nom("essai"),
         )
         .expect("elle s'écrit");
     entrepot

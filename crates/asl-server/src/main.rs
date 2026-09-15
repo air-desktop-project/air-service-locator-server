@@ -32,6 +32,7 @@ mod socket;
 
 use std::sync::Arc;
 
+use asl_id::{Genre, Identifiant};
 use asl_loop_tokio::{Annuaire, configuration_tls, refuser_root, servir_quic};
 use asl_store::Entrepot;
 
@@ -43,6 +44,23 @@ use crate::reglages::{Reglages, USAGE};
 /// nettoyer qu'au lancement ferait de la rétention de quatre-vingt-dix jours une
 /// promesse que seul un redémarrage tiendrait — et C18 serait tenue par accident.
 const EXPIRATION_TOUTES_LES: core::time::Duration = core::time::Duration::from_secs(3_600);
+
+/// L'identifiant sous lequel cette racine estampille, TANT QU'ELLE N'A PAS DE
+/// CLÉ D'IDENTITÉ.
+///
+/// # SEIZE ZÉROS, ET C'EST DIT AU DÉMARRAGE
+///
+/// `docs/replication.md` §2.2 : l'identifiant `n-…` d'une racine SE DÉDUIT de
+/// sa clé d'identité Ed25519 (`asl_cle::identifiant_de_racine`), que
+/// `--identity-key` lui donne. **Ce réglage n'existe pas encore** — il vient
+/// avec la voie entre racines, dans une tranche suivante —, et l'entrepôt ne
+/// sait pas écrire sans racine : chaque écriture porte `(compteur, racine)`.
+///
+/// D'ici là, la racine écrit sous un identifiant qui ne se déduit d'aucune clé,
+/// et qui le dit : seize zéros. Il est visible dans le journal d'exploitation,
+/// et il ne sera jamais celui d'une racine réelle. Une clé générée en silence
+/// aurait été pire (§8) — une clé que personne n'a copiée nulle part.
+const RACINE_SANS_IDENTITE: Identifiant = Identifiant::depuis_entropie(Genre::Annuaire, [0; 16]);
 
 fn main() -> std::process::ExitCode {
     match demarrer() {
@@ -99,7 +117,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         .bail()
         .map_err(|quoi| format!("--keepalive et --idle ne forment pas un bail : {quoi}"))?;
 
-    let entrepot = Arc::new(Entrepot::ouvrir(&reglages.entrepot)?);
+    let entrepot = Arc::new(Entrepot::ouvrir(&reglages.entrepot, RACINE_SANS_IDENTITE)?);
     let chaine = std::fs::read(&reglages.certificat)?;
     let cle = std::fs::read(&reglages.cle)?;
     let tls = Arc::new(configuration_tls(&chaine, &cle)?);
@@ -119,6 +137,13 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
             bail.keepalive_secondes(),
             bail.inactivite_secondes(),
             reglages.retention_jours,
+        );
+
+        eprintln!(
+            "asl-server : sans clé d'identité (--identity-key n'existe pas encore), \
+             les écritures sont estampillées {} — compteur à {}.",
+            entrepot.racine(),
+            entrepot.compteur().unwrap_or(0),
         );
 
         let balayeur = tokio::spawn(expirer_sans_fin(
@@ -200,7 +225,13 @@ async fn arret() {
     eprintln!("asl-server : signal reçu, extinction en deux temps (§5.2).");
 }
 
-/// Efface du journal ce qui a passé l'âge, indéfiniment (C18).
+/// Efface des deux journaux ce qui a passé l'âge, indéfiniment.
+///
+/// **Deux journaux, deux rétentions.** Celui des requêtes suit `--retention`
+/// (C18, quatre-vingt-dix jours par défaut) ; celui des opérations suit
+/// `asl_store::RETENTION_DES_OPERATIONS_MS` — trente jours, décidés par
+/// `docs/replication.md` §5.4 et non réglables : au-delà, une racine absente
+/// se reconstruit par instantané, et ce chiffre est ce qui le rend vrai.
 ///
 /// # UNE FAUTE N'ARRÊTE PAS LE BALAYAGE
 ///
@@ -214,11 +245,19 @@ async fn expirer_sans_fin(entrepot: Arc<Entrepot>, retention_ms: u64) {
             .map_or(0, |ecoule| {
                 u64::try_from(ecoule.as_millis()).unwrap_or(u64::MAX)
             });
-        let avant = maintenant.saturating_sub(retention_ms);
-        match entrepot.expirer_le_journal(avant) {
+        match entrepot.expirer_le_journal(maintenant.saturating_sub(retention_ms)) {
             Ok(0) => {}
             Ok(combien) => eprintln!("asl-server : {combien} entrées de journal expirées."),
             Err(quoi) => eprintln!("asl-server : l'expiration du journal a échoué : {quoi}"),
+        }
+        match entrepot.expirer_les_operations(
+            maintenant.saturating_sub(asl_store::RETENTION_DES_OPERATIONS_MS),
+        ) {
+            Ok(0) => {}
+            Ok(combien) => eprintln!("asl-server : {combien} opérations retirées du journal."),
+            Err(quoi) => {
+                eprintln!("asl-server : l'expiration du journal d'opérations a échoué : {quoi}")
+            }
         }
         tokio::time::sleep(EXPIRATION_TOUTES_LES).await;
     }

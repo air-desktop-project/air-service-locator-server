@@ -462,6 +462,42 @@ const fn est_un_pair(genre: Genre) -> bool {
     matches!(genre, Genre::Machine | Genre::Appareil)
 }
 
+// ── L'identité d'une racine ─────────────────────────────────────────────────
+
+/// Le séparateur de domaine de l'identifiant d'une racine.
+///
+/// # POURQUOI UN DOMAINE, POUR UN SIMPLE CONDENSAT DE CLÉ
+///
+/// L'identifiant `n-…` d'une racine SE DÉDUIT de sa clé d'identité
+/// (`docs/replication.md` §2.2) : épingler la clé épingle l'identifiant, et il
+/// n'y a pas de table à tenir d'accord avec un fichier. Le domaine fait que ce
+/// condensat ne vaut jamais celui d'autre chose — l'empreinte d'un code, une
+/// liaison de canal — calculé sur les mêmes octets.
+pub const DOMAINE_IDENTITE_RACINE: &[u8] = b"air-service-locator/v1/identite-de-racine\x00";
+
+/// L'identifiant `n-…` que cette clé d'identité donne à une racine.
+///
+/// **Les seize premiers octets d'un SHA-256 à domaine séparé** de la clé
+/// publique. Seize, parce qu'un identifiant en porte seize ; les seize autres
+/// ne sont pas un secret, ils sont simplement inutiles.
+///
+/// C'est la même clé Ed25519 que celle d'une machine — [`ClePublique`] —, et
+/// c'est voulu : la racine prouve son identité exactement comme une machine
+/// prouve la sienne, avec un genre `n` de plus sur `POST /v1/defi`.
+#[must_use]
+pub fn identifiant_de_racine(cle: &ClePublique) -> Identifiant {
+    use sha2::Digest as _;
+    let mut condensat = sha2::Sha256::new();
+    condensat.update(DOMAINE_IDENTITE_RACINE);
+    condensat.update(cle.octets());
+    let entier = condensat.finalize();
+    let mut seize = [0_u8; 16];
+    for (place, octet) in seize.iter_mut().zip(entier.iter()) {
+        *place = *octet;
+    }
+    Identifiant::depuis_entropie(Genre::Annuaire, seize)
+}
+
 /// La clé secrète d'une machine.
 ///
 /// # L'ANNUAIRE N'EN DÉTIENT JAMAIS

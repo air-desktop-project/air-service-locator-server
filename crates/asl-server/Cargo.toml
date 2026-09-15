@@ -15,6 +15,9 @@ path = "src/main.rs"
 asl-apple.workspace = true
 asl-auth.workspace = true
 asl-cle.workspace = true
+# `asl-id` POUR L'IDENTIFIANT SOUS LEQUEL LA RACINE ESTAMPILLE — provisoire,
+# seize zéros, tant que `--identity-key` n'existe pas (voir `main.rs`).
+asl-id.workspace = true
 asl-loop-tokio.workspace = true
 asl-proto.workspace = true
 asl-store.workspace = true
@@ -26,7 +29,6 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 # Le harnais d'essai d'`air-mail-server` : un vrai client QUIC sur une vraie
 # socket. Voir `docs/transport.md` §3 pour ce qu'il est et ce qu'il n'est pas.
 ams-quic-client.workspace = true
-asl-id.workspace = true
 asl-registre.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
