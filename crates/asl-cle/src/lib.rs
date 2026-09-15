@@ -532,7 +532,7 @@ impl CleSecrete {
 // # POURQUOI IL VIT ICI, ET NON DANS `asl-auth`
 //
 // Il y a vécu, tant qu'il n'y avait qu'un camp pour le lire. **Le daemon doit
-// désormais le composer** : c'est lui qui tape `asl enrole <code>`, et c'est lui
+// désormais le composer** : c'est lui qui tape `asl enroll <code>`, et c'est lui
 // qui envoie `code ‖ clé ‖ preuve` sur `/v1/enrolement`.
 //
 // Il faut donc que les DEUX camps le canonisent identiquement — un `O` tapé pour

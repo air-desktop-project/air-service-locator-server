@@ -636,7 +636,7 @@ pub struct Appareil {
     /// Au moment de créer le compte, `asl-auth` a décidé si l'attestation
     /// suffisait. Une fois l'appareil rangé, cette décision est du passé — et
     /// c'est justement pourquoi il faut en garder la trace : **la posture d'un
-    /// annuaire change** (`--attestation facultative` un jour, `exigee` le
+    /// annuaire change** (`--attestation optional` un jour, `required` le
     /// lendemain), et sans ce champ on ne saurait plus, compte par compte,
     /// lesquels sont entrés sans preuve. C'est ce qu'on regarde le jour où l'on
     /// resserre, pour savoir qui prévenir.

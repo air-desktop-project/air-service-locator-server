@@ -131,7 +131,7 @@ fn main() {
             }
             println!();
             println!();
-            println!("On peut désormais tenir `--attestation exigee` pour sûre sur cet");
+            println!("On peut désormais tenir `--attestation required` pour sûre sur cet");
             println!("environnement. Mieux : commettre cette capture comme VECTEUR, pour que");
             println!("`asl-apple` soit éprouvé contre une attestation réelle et non seulement");
             println!("contre ce que la documentation décrit.");
