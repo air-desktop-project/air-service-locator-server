@@ -41,7 +41,7 @@
 //! certificats dans `x5c` : tout vient de la documentation. Ce qui est éprouvé
 //! ici est que la vérification fait ce qu'elle dit sur une chaîne fabriquée
 //! d'après cette documentation. **Le premier iPhone tranchera**, et jusque-là
-//! `--attestation exigee` refuserait peut-être des appareils légitimes.
+//! `--attestation required` refuserait peut-être des appareils légitimes.
 
 #![no_std]
 

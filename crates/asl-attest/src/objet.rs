@@ -40,7 +40,7 @@
 //! d'un objet qu'un iPhone m'aurait donné. Les essais qui suivent éprouvent que
 //! le lecteur lit ce qu'il croit lire — ils n'éprouvent pas que c'est bien ce
 //! qu'Apple envoie. Tant que ce dépôt n'aura pas vu une attestation réelle, la
-//! politique ne peut pas passer à `exigee`.
+//! politique ne peut pas passer à `required`.
 
 use crate::{Erreur, Lecteur};
 
