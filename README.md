@@ -162,7 +162,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.2.2_amd64.deb
+sudo dpkg -i asl-server_0.2.3_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
@@ -178,6 +178,29 @@ macOS (le vrai client, lui, passe). **Windows reste à faire** : l'entropie
 (`BCryptGenRandom`) et la socket y sont à écrire, et rien ne l'atteste encore.
 Les étages 1 et 2 ne touchent ni fichier, ni socket, ni horloge : ils sont
 portables par construction.
+
+**Deux choses apprises en faisant tourner l'annuaire sur un Mac**, qui ne
+sont pas des défauts du binaire mais que l'exploitant doit savoir — chacune a
+coûté une heure à comprendre, et la seconde vaut pour tout système :
+
+- **Le pare-feu de macOS ne laisse entrer l'UDP que vers un binaire SIGNÉ.**
+  Un `asl-server` sorti de `cargo build` n'est pas signé ; le pare-feu
+  l'inscrit bien dans sa liste (« Allow incoming connections ») et jette
+  quand même tout ce qui arrive du réseau — la boucle locale passe, ce qui
+  rend la panne trompeuse. Une signature ad hoc suffit :
+  `codesign -s - target/release/asl-server`, puis autoriser le binaire
+  (`socketfilterfw --add`, `--unblockapp`), **et le relancer** : le pare-feu
+  juge le processus, pas le fichier.
+- **Un hôte à deux adresses sur le même réseau répond par celle de sa route
+  par défaut.** L'annuaire se lie à toutes les adresses (`[::]`), et le noyau
+  choisit la source de chaque réponse d'après la route vers le client — pas
+  d'après l'adresse à laquelle le client a écrit. Un Mac en Wi-Fi ET en
+  Ethernet sur le même LAN, joint par son adresse Wi-Fi, répond par
+  l'Ethernet ; le client QUIC voit une réponse venue d'une autre adresse et
+  la jette, **à raison** — c'est ce que la validation de chemin existe pour
+  faire. Rien ne se journalise, ni d'un côté ni de l'autre. Joignez un tel
+  annuaire par l'adresse de sa route par défaut, ou liez-le à une adresse
+  précise. `asl diagnostic` sur la boucle locale ne révèle pas ce cas.
 
 **Le paquet n'active ni ne démarre le service**, et il lui manque exprès deux
 choses qu'un paquet ne peut pas décider :
