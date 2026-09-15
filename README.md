@@ -135,12 +135,16 @@ scripts/ca.sh racine
 scripts/ca.sh serveur banc localhost ::1 127.0.0.1
 
 cargo run -p asl-server -- \
-    --entrepot   local/annuaire.redb \
-    --certificat local/ca/banc/chaine.pem \
-    --cle        local/ca/banc/serveur.key
+    --store       local/annuaire.redb \
+    --certificate local/ca/banc/chaine.pem \
+    --key         local/ca/banc/serveur.key \
+    --attestation optional      # ou `required` : il n'y a pas de défaut
 ```
 
-`asl-server --aide` dit le reste. Trois choses qui surprendraient sinon :
+`asl-server --help` dit le reste. **La grammaire est en anglais** — options,
+valeurs, texte de l'aide — parce que c'est la langue universelle des outils en
+ligne de commande ; les messages d'exécution, eux, restent en français. Trois
+choses qui surprendraient sinon :
 
 - **Il refuse de démarrer en root** (C8). Il écoute au-dessus de 1024 et n'a
   besoin d'aucun privilège ; il refuse plutôt que d'en abandonner, parce qu'un
@@ -162,7 +166,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.3.0_amd64.deb
+sudo dpkg -i asl-server_0.4.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
@@ -200,14 +204,14 @@ coûté une heure à comprendre, et la seconde vaut pour tout système :
   la jette, **à raison** — c'est ce que la validation de chemin existe pour
   faire. Rien ne se journalise, ni d'un côté ni de l'autre. Joignez un tel
   annuaire par l'adresse de sa route par défaut, ou liez-le à une adresse
-  précise. `asl diagnostic` sur la boucle locale ne révèle pas ce cas.
+  précise. `asl diagnose` sur la boucle locale ne révèle pas ce cas.
 
 **Le paquet n'active ni ne démarre le service**, et il lui manque exprès deux
 choses qu'un paquet ne peut pas décider :
 
 1. **La posture d'attestation**, qui n'a pas de défaut (`protocole.md` §2.1).
-   `exigee` refuse TOUS les enrôlements tant que la vérification n'est pas
-   écrite ; `facultative` laisse n'importe qui créer un compte. Elle se pose par
+   `required` refuse TOUS les enrôlements tant que la vérification n'est pas
+   écrite ; `optional` laisse n'importe qui créer un compte. Elle se pose par
    `systemctl edit asl-server`, et le modèle est expédié sous
    `/usr/share/doc/asl-server/attestation.conf.exemple`.
 2. **Le certificat**, émis pour le nom sous lequel cet annuaire répond, à poser

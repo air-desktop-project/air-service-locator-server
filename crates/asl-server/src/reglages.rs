@@ -56,7 +56,7 @@ pub struct Reglages {
     /// donc refuser TOUS les enrôlements.
     ///
     /// Les deux postures sont défendables et aucune ne peut être le défaut :
-    /// `exigee` livrerait un annuaire qui ne crée aucun compte, `facultative`
+    /// `required` livrerait un annuaire qui ne crée aucun compte, `optional`
     /// livrerait en silence la posture faible. **L'exploitant dit laquelle il
     /// tient**, et l'annuaire ne démarre pas tant qu'il ne l'a pas dit.
     pub politique: asl_auth::Politique,
@@ -72,7 +72,7 @@ pub struct Reglages {
     ///
     /// **Sans ces deux réglages, aucune attestation Apple ne peut être
     /// vérifiée** : un compte qui en déclare une est alors refusé, faute de quoi
-    /// la comparer. Un annuaire `facultative` sans configuration Apple crée donc
+    /// la comparer. Un annuaire `optional` sans configuration Apple crée donc
     /// des comptes sans attestation, et refuse ceux qui en présentent une.
     pub apple: Option<ReglageApple>,
 }
@@ -102,13 +102,26 @@ pub enum Faute {
     },
     /// Un réglage obligatoire qui manque.
     Manque(&'static str),
-    /// `--attestation` a reçu autre chose que `exigee` ou `facultative`.
+    /// `--attestation` a reçu autre chose que `required` ou `optional`.
     AttestationInconnue(String),
-    /// `--apple-environnement` a reçu autre chose que `production` ou
-    /// `developpement`.
+    /// `--apple-environment` a reçu autre chose que `production` ou
+    /// `development`.
     EnvironnementInconnu(String),
-    /// `--apple-app` et `--apple-environnement` ne vont pas l'un sans l'autre.
+    /// `--apple-app` et `--apple-environment` ne vont pas l'un sans l'autre.
     AppleIncomplet,
+    /// Un drapeau de l'ancienne grammaire, en français, qui a son
+    /// équivalent en anglais.
+    ///
+    /// **ON LE DIT PLUTÔT QUE DE L'ACCEPTER.** Le tolérer ferait deux
+    /// grammaires, dont l'une vieillirait en silence dans les unités systemd
+    /// et les scripts ; le refuser en nommant la nouvelle rend le passage
+    /// immédiat pour qui tombe dessus.
+    Ancien {
+        /// Le drapeau tel qu'il était.
+        ancien: &'static str,
+        /// Celui qui l'a remplacé.
+        nouveau: &'static str,
+    },
 }
 
 impl core::fmt::Display for Faute {
@@ -119,7 +132,7 @@ impl core::fmt::Display for Faute {
             Self::AttestationInconnue(quoi) => {
                 write!(
                     sortie,
-                    "--attestation attend `exigee` ou `facultative`, et non « {quoi} »"
+                    "--attestation attend `required` ou `optional`, et non « {quoi} »"
                 )
             }
             Self::PasUnNombre { drapeau, donnee } => {
@@ -130,12 +143,15 @@ impl core::fmt::Display for Faute {
             }
             Self::EnvironnementInconnu(quoi) => write!(
                 sortie,
-                "--apple-environnement attend `production` ou `developpement`, et non « {quoi} »"
+                "--apple-environment attend `production` ou `development`, et non « {quoi} »"
             ),
             Self::AppleIncomplet => sortie.write_str(
-                "--apple-app et --apple-environnement se donnent ensemble, ou pas du tout",
+                "--apple-app et --apple-environment se donnent ensemble, ou pas du tout",
             ),
             Self::Manque(quoi) => write!(sortie, "il manque {quoi}"),
+            Self::Ancien { ancien, nouveau } => {
+                write!(sortie, "{ancien} n'existe plus : {nouveau}")
+            }
         }
     }
 }
@@ -144,29 +160,29 @@ impl std::error::Error for Faute {}
 
 /// Ce qu'on affiche quand on ne sait pas quoi faire.
 pub const USAGE: &str = "\
-asl-server — un annuaire de services air-service-locator.
+asl-server — an air-service-locator service directory.
 
-  --entrepot   <chemin>   le fichier de l'entrepôt          (obligatoire)
-  --certificat <chemin>   la chaîne de certificats, en PEM  (obligatoire)
-  --cle        <chemin>   la clé privée, en PEM             (obligatoire)
-  --port       <nombre>   le port d'écoute                  (défaut : 6630)
-  --connexions <nombre>   connexions simultanées au plus    (défaut : 1024)
-  --inactivite <secondes> l'inactivité annoncée aux pairs   (défaut : 30)
-  --keepalive  <secondes> la cadence de maintien demandée   (défaut : 10)
-  --retention  <jours>    la rétention du journal           (défaut : 90)
-  --attestation <exigee|facultative>                        (obligatoire)
-  --apple-app  <id>       l'identifiant de l'app Apple      (avec l'env.)
-  --apple-environnement <production|developpement>          (avec l'app)
-  --version               la version et le commit, puis s'arrête
-  --aide                  ceci
+  --store        <path>     the store file                       (required)
+  --certificate  <path>     the certificate chain, PEM           (required)
+  --key          <path>     the private key, PEM                 (required)
+  --port         <number>   the listening port                   (default: 6630)
+  --connections  <number>   concurrent connections, at most      (default: 1024)
+  --idle         <seconds>  the idle timeout announced to peers  (default: 30)
+  --keepalive    <seconds>  the keepalive cadence requested      (default: 10)
+  --retention    <days>     the journal retention                (default: 90)
+  --attestation  <required|optional>                             (required)
+  --apple-app    <id>       the Apple app identifier             (with the env.)
+  --apple-environment <production|development>                   (with the app)
+  --version                 print the version and commit, then exit
+  --help                    this
 
-`--attestation` N'A PAS DE DÉFAUT, ET C'EST DÉLIBÉRÉ. La vérification de
-l'attestation de plate-forme n'est pas écrite : `exigee` refuse donc TOUT
-enrôlement d'appareil, et `facultative` laisse n'importe qui créer un compte.
-Aucune des deux ne peut être choisie à votre place.
+`--attestation` HAS NO DEFAULT, AND THAT IS DELIBERATE. Platform attestation
+verification has never been confirmed against a real device: `required` may
+therefore refuse EVERY device enrollment, and `optional` lets anyone create an
+account. Neither can be chosen on your behalf.
 
-L'écoute est en DOUBLE PILE : IPv6 d'abord, IPv4 accepté sur la même socket.
-L'annuaire REFUSE de démarrer en root — il n'a besoin d'aucun privilège.
+The socket is DUAL-STACK: IPv6 first, IPv4 accepted on the same socket.
+The directory REFUSES to start as root — it needs no privilege at all.
 
   scripts/ca.sh racine
   scripts/ca.sh serveur nitrogen nitrogen.air-desktop.org 2001:41d0:20a:900::1dd4
@@ -228,39 +244,44 @@ impl Reglages {
             // `valeur` emprunte `arguments` : on la consomme tout de suite,
             // branche par branche, plutôt que de la garder vivante.
             match drapeau {
-                "--entrepot" => entrepot = Some(PathBuf::from(valeur()?.as_ref())),
-                "--certificat" => certificat = Some(PathBuf::from(valeur()?.as_ref())),
-                "--cle" => cle = Some(PathBuf::from(valeur()?.as_ref())),
+                "--store" => entrepot = Some(PathBuf::from(valeur()?.as_ref())),
+                "--certificate" => certificat = Some(PathBuf::from(valeur()?.as_ref())),
+                "--key" => cle = Some(PathBuf::from(valeur()?.as_ref())),
                 "--port" => port = nombre(drapeau, valeur()?.as_ref())?,
-                "--connexions" => connexions_max = nombre(drapeau, valeur()?.as_ref())?,
-                "--inactivite" => inactivite_s = nombre(drapeau, valeur()?.as_ref())?,
+                "--connections" => connexions_max = nombre(drapeau, valeur()?.as_ref())?,
+                "--idle" => inactivite_s = nombre(drapeau, valeur()?.as_ref())?,
                 "--keepalive" => keepalive_s = nombre(drapeau, valeur()?.as_ref())?,
                 "--retention" => retention_jours = nombre(drapeau, valeur()?.as_ref())?,
                 "--attestation" => {
                     let donnee = valeur()?;
                     politique = Some(match donnee.as_ref() {
-                        "exigee" => asl_auth::Politique::AttestationExigee,
-                        "facultative" => asl_auth::Politique::AttestationFacultative,
+                        "required" => asl_auth::Politique::AttestationExigee,
+                        "optional" => asl_auth::Politique::AttestationFacultative,
                         autre => return Err(Faute::AttestationInconnue(autre.to_owned())),
                     });
                 }
                 "--apple-app" => apple_app = Some(valeur()?.as_ref().to_owned()),
-                "--apple-environnement" => {
+                "--apple-environment" => {
                     let donnee = valeur()?;
                     apple_env = Some(match donnee.as_ref() {
                         "production" => asl_apple::Environnement::Production,
-                        "developpement" => asl_apple::Environnement::Developpement,
+                        "development" => asl_apple::Environnement::Developpement,
                         autre => return Err(Faute::EnvironnementInconnu(autre.to_owned())),
                     });
                 }
-                autre => return Err(Faute::Inconnu(autre.to_owned())),
+                autre => {
+                    return Err(match ancien(autre) {
+                        Some((ancien, nouveau)) => Faute::Ancien { ancien, nouveau },
+                        None => Faute::Inconnu(autre.to_owned()),
+                    });
+                }
             }
         }
 
         Ok(Self {
-            entrepot: entrepot.ok_or(Faute::Manque("--entrepot"))?,
-            certificat: certificat.ok_or(Faute::Manque("--certificat"))?,
-            cle: cle.ok_or(Faute::Manque("--cle"))?,
+            entrepot: entrepot.ok_or(Faute::Manque("--store"))?,
+            certificat: certificat.ok_or(Faute::Manque("--certificate"))?,
+            cle: cle.ok_or(Faute::Manque("--key"))?,
             port,
             connexions_max,
             inactivite_s,
@@ -291,7 +312,7 @@ impl Reglages {
     ///
     /// # LES DEUX INACTIVITÉS NE PEUVENT PLUS DIVERGER
     ///
-    /// Il y en a deux dans ce produit : `--inactivite` ferme la CONNEXION, et le
+    /// Il y en a deux dans ce produit : `--idle` ferme la CONNEXION, et le
     /// bail fait tomber l'ANNONCE. `protocole.md` §1.2 promet que les deux sont
     /// la même chose — « la connexion EST le bail ». Les laisser se régler
     /// séparément ouvrirait une fenêtre où un daemon est désannoncé sans être
@@ -316,6 +337,24 @@ impl Reglages {
     }
 }
 
+/// Les drapeaux d'avant 0.4.0, en français, et ce qui les a remplacés.
+///
+/// La grammaire des outils est passée en anglais (0.4.0) ; les messages
+/// d'exécution, eux, restent en français. Une unité systemd ou un script
+/// écrit pour l'ancienne grammaire tombe ici, et apprend le nouveau nom.
+fn ancien(drapeau: &str) -> Option<(&'static str, &'static str)> {
+    const TABLE: [(&str, &str); 7] = [
+        ("--entrepot", "--store"),
+        ("--certificat", "--certificate"),
+        ("--cle", "--key"),
+        ("--connexions", "--connections"),
+        ("--inactivite", "--idle"),
+        ("--apple-environnement", "--apple-environment"),
+        ("--aide", "--help"),
+    ];
+    TABLE.iter().copied().find(|(vieux, _)| *vieux == drapeau)
+}
+
 /// Lit un nombre, ou dit lequel n'en était pas un.
 fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute> {
     donnee.parse().map_err(|_| Faute::PasUnNombre {
@@ -331,14 +370,14 @@ mod tests {
     /// Les quatre réglages obligatoires, et rien d'autre.
     fn minimum() -> Vec<String> {
         [
-            "--entrepot",
+            "--store",
             "/a",
-            "--certificat",
+            "--certificate",
             "/b",
-            "--cle",
+            "--key",
             "/c",
             "--attestation",
-            "facultative",
+            "optional",
         ]
         .iter()
         .map(|quoi| (*quoi).to_owned())
@@ -362,7 +401,7 @@ mod tests {
         let lus = Reglages::depuis(avec(&[
             "--apple-app",
             "ABCDE12345.ch.narro.essai",
-            "--apple-environnement",
+            "--apple-environment",
             "production",
         ]))
         .expect("une configuration complète");
@@ -374,12 +413,12 @@ mod tests {
             })
         );
 
-        // Et `developpement` aussi.
+        // Et `development` aussi.
         let dev = Reglages::depuis(avec(&[
             "--apple-app",
             "ABCDE12345.ch.narro.essai",
-            "--apple-environnement",
-            "developpement",
+            "--apple-environment",
+            "development",
         ]))
         .expect("développement est un environnement");
         assert_eq!(
@@ -395,7 +434,7 @@ mod tests {
             Err(Faute::AppleIncomplet)
         );
         assert_eq!(
-            Reglages::depuis(avec(&["--apple-environnement", "production"])).map(|_| ()),
+            Reglages::depuis(avec(&["--apple-environment", "production"])).map(|_| ()),
             Err(Faute::AppleIncomplet)
         );
     }
@@ -405,7 +444,7 @@ mod tests {
         let faute = Reglages::depuis(avec(&[
             "--apple-app",
             "X.y",
-            "--apple-environnement",
+            "--apple-environment",
             "bac-a-sable",
         ]))
         .map(|_| ());
@@ -425,9 +464,9 @@ mod tests {
     #[test]
     fn l_attestation_n_a_pas_de_defaut() {
         // **AUCUNE DES DEUX POSTURES NE PEUT ÊTRE CHOISIE À LA PLACE DE
-        // L'EXPLOITANT** : `exigee` livre un annuaire qui ne crée aucun compte,
-        // `facultative` livre en silence la posture faible.
-        let sans: Vec<String> = ["--entrepot", "/a", "--certificat", "/b", "--cle", "/c"]
+        // L'EXPLOITANT** : `required` livre un annuaire qui ne crée aucun compte,
+        // `optional` livre en silence la posture faible.
+        let sans: Vec<String> = ["--store", "/a", "--certificate", "/b", "--key", "/c"]
             .iter()
             .map(|quoi| (*quoi).to_owned())
             .collect();
@@ -440,8 +479,8 @@ mod tests {
     #[test]
     fn les_deux_postures_se_lisent_et_les_autres_mots_sont_refuses() {
         for (mot, attendue) in [
-            ("exigee", asl_auth::Politique::AttestationExigee),
-            ("facultative", asl_auth::Politique::AttestationFacultative),
+            ("required", asl_auth::Politique::AttestationExigee),
+            ("optional", asl_auth::Politique::AttestationFacultative),
         ] {
             let mut arguments = minimum();
             arguments.pop();
@@ -461,7 +500,7 @@ mod tests {
         assert!(
             Faute::AttestationInconnue("peut-etre".to_owned())
                 .to_string()
-                .contains("facultative")
+                .contains("optional")
         );
     }
 
@@ -480,7 +519,7 @@ mod tests {
 
     #[test]
     fn chacun_des_trois_obligatoires_manque_avec_son_nom() {
-        for (retire, attendu) in [(0_usize, "--entrepot"), (2, "--certificat"), (4, "--cle")] {
+        for (retire, attendu) in [(0_usize, "--store"), (2, "--certificate"), (4, "--key")] {
             let mut sans = minimum();
             sans.drain(retire..retire + 2);
             assert_eq!(
@@ -499,6 +538,34 @@ mod tests {
             Reglages::depuis(avec),
             Err(Faute::Inconnu("--jesaispas".to_owned()))
         );
+    }
+
+    #[test]
+    fn un_drapeau_de_l_ancienne_grammaire_dit_le_nouveau() {
+        // **L'ANCIEN NOM N'EST PAS ACCEPTÉ, IL EST TRADUIT.** Une unité systemd
+        // écrite avant 0.4.0 échoue avec le nom à mettre à la place.
+        for (vieux, neuf) in [
+            ("--entrepot", "--store"),
+            ("--certificat", "--certificate"),
+            ("--cle", "--key"),
+            ("--connexions", "--connections"),
+            ("--inactivite", "--idle"),
+            ("--apple-environnement", "--apple-environment"),
+            ("--aide", "--help"),
+        ] {
+            let mut avec = minimum();
+            avec.push(vieux.to_owned());
+            let faute = Reglages::depuis(avec).expect_err("l'ancien nom est refusé");
+            assert_eq!(
+                faute,
+                Faute::Ancien {
+                    ancien: vieux,
+                    nouveau: neuf,
+                }
+            );
+            let dit = faute.to_string();
+            assert!(dit.contains(vieux) && dit.contains(neuf), "{dit}");
+        }
     }
 
     #[test]
@@ -540,7 +607,7 @@ mod tests {
     fn les_conversions_de_temps_sont_celles_qu_on_croit() {
         let mut avec = minimum();
         avec.extend([
-            "--inactivite".to_owned(),
+            "--idle".to_owned(),
             "45".to_owned(),
             "--retention".to_owned(),
             "90".to_owned(),
@@ -554,7 +621,7 @@ mod tests {
     fn des_valeurs_absurdes_ne_debordent_pas() {
         let mut avec = minimum();
         avec.extend([
-            "--inactivite".to_owned(),
+            "--idle".to_owned(),
             u64::MAX.to_string(),
             "--retention".to_owned(),
             u64::MAX.to_string(),
@@ -573,7 +640,11 @@ mod tests {
                 drapeau: "--port".to_owned(),
                 donnee: "x".to_owned(),
             },
-            Faute::Manque("--cle"),
+            Faute::Manque("--key"),
+            Faute::Ancien {
+                ancien: "--cle",
+                nouveau: "--key",
+            },
         ] {
             let dit = format!("{faute}");
             assert!(!dit.is_empty(), "{faute:?}");

@@ -20,8 +20,8 @@
 # ── `--attestation` N'A PAS DE VALEUR ICI, ET LE SERVICE NE DÉMARRE PAS SANS ─
 #
 # `protocole.md` §2.1 : la v1 refuse un enrôlement sans attestation de
-# plate-forme, mais la vérification n'est pas écrite. `exigee` refuse donc TOUS
-# les enrôlements, et `facultative` laisse n'importe qui créer un compte.
+# plate-forme, mais la vérification n'est pas écrite. `required` refuse donc TOUS
+# les enrôlements, et `optional` laisse n'importe qui créer un compte.
 #
 # **Aucune des deux ne peut être choisie par un paquet.** `$ASL_ATTESTATION`
 # n'est défini nulle part : systemd retire l'argument, `asl-server` dit qu'il
@@ -29,8 +29,8 @@
 # nomme exactement ce qu'il faut décider.
 #
 # Les accolades sont ABSENTES à dessein : `${ASL_ATTESTATION}` non défini
-# donnerait un argument VIDE, et l'annuaire dirait « attend `exigee` ou
-# `facultative`, et non «  » ». Sans accolades, l'argument disparaît, et le
+# donnerait un argument VIDE, et l'annuaire dirait « attend `required` ou
+# `optional`, et non «  » ». Sans accolades, l'argument disparaît, et le
 # message est celui qu'on veut lire.
 
 [Unit]
@@ -48,9 +48,9 @@ Group=asl-server
 # de lire quoi que ce soit. Ces deux lignes sont la ceinture ; son refus est
 # les bretelles.
 ExecStart=/usr/bin/asl-server \
-    --entrepot /var/lib/asl-server/annuaire.redb \
-    --certificat /etc/asl-server/certificat.pem \
-    --cle /etc/asl-server/cle.pem \
+    --store /var/lib/asl-server/annuaire.redb \
+    --certificate /etc/asl-server/certificat.pem \
+    --key /etc/asl-server/cle.pem \
     --attestation $ASL_ATTESTATION
 
 # **PAS DE `Restart=always`.** Les fautes qui empêchent cet annuaire de démarrer

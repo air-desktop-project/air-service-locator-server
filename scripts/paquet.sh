@@ -117,15 +117,15 @@ cat > "$arbre/usr/share/doc/asl-server/attestation.conf.exemple" <<'EXEMPLE'
 # À copier sous /etc/systemd/system/asl-server.service.d/attestation.conf,
 # APRÈS avoir choisi laquelle des deux postures vous tenez.
 #
-#   exigee       — conforme à protocole.md §2.1, et AUCUN appareil ne pourra
-#                  s'enrôler tant que la vérification n'est pas écrite.
-#   facultative  — n'importe qui peut créer un compte sur cet annuaire.
+#   required  — conforme à protocole.md §2.1, et AUCUN appareil ne pourra
+#               s'enrôler tant que la vérification n'est pas écrite.
+#   optional  — n'importe qui peut créer un compte sur cet annuaire.
 #
 # Aucune des deux ne peut être choisie à votre place ; c'est pourquoi le
 # service ne démarre pas tant que ce fragment n'existe pas.
 
 [Service]
-Environment=ASL_ATTESTATION=facultative
+Environment=ASL_ATTESTATION=optional
 EXEMPLE
 chmod 0644 "$arbre/usr/share/doc/asl-server/attestation.conf.exemple"
 dit "binaire, unité, /etc/asl-server, table d'exemple, documentation"
@@ -208,13 +208,13 @@ if [ "$1" = "configure" ] && [ -z "${2-}" ]; then
 asl-server est installé, mais NI ACTIVÉ NI DÉMARRÉ : il lui manque deux choses
 qu'un paquet ne peut pas décider.
 
-  1. la posture d'attestation — `exigee` refuse tous les enrôlements tant que la
-     vérification n'est pas écrite ; `facultative` laisse n'importe qui créer un
+  1. la posture d'attestation — `required` refuse tous les enrôlements tant que
+     la vérification n'est pas écrite ; `optional` laisse n'importe qui créer un
      compte. Choisissez, puis :
 
          systemctl edit asl-server
          # [Service]
-         # Environment=ASL_ATTESTATION=facultative
+         # Environment=ASL_ATTESTATION=optional
 
      Le modèle : /usr/share/doc/asl-server/attestation.conf.exemple
 
