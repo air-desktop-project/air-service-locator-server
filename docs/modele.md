@@ -456,9 +456,9 @@ s'affiche sur un écran verrouillé, devant qui se trouve là.
 
 | Champ | Ce que c'est |
 |---|---|
-| `identifiant` | `n-` + 26 caractères. |
+| `identifiant` | `n-` + 26 caractères. **Se déduit de la clé d'identité** — les seize premiers octets d'un SHA-256 à domaine séparé —, pour qu'épingler la clé épingle l'identifiant (`replication.md` §2.2 ; proposé, à confirmer). |
 | `propriétaire` | Un utilisateur. Les deux annuaires racines appartiennent à air-desktop-project. |
-| `clé de signature` | Ce avec quoi il signe les enregistrements dont il est l'autorité. |
+| `clé de signature` | Ce avec quoi il signe les enregistrements dont il est l'autorité, et ce avec quoi il PROUVE qui il est à l'autre racine. **Ed25519, distincte de la clé TLS** : celle-ci tourne avec le certificat, celle-là est ce que l'autre épingle et ce que les estampilles nomment (§2.10). |
 | `rôle` | `racine` ou `ordinaire`. |
 | `pairs` | Les annuaires avec qui une relation de confiance est établie, et ce qui se réplique dans chaque sens. |
 
@@ -540,6 +540,35 @@ d'un autre est un champ qui se trompera le jour où cet invariant bougera.
 **Il n'y a pas de réplication transitive**, et donc pas de cascade à gérer : Y
 n'est pas l'autorité des comptes de X et ne peut rien en dire à Z. Une rupture
 X↔Y ne se propage nulle part, parce que rien ne s'est propagé.
+
+**Entre les deux racines, la provenance reste `locale`** (`replication.md` §7 ;
+proposé, à confirmer). Une relation de confiance se rompt, et la rupture
+efface ; entre racines il n'y a rien à rompre — une seule autorité, en deux
+exemplaires — et rompre la réplication n'efface rien. Qui a écrit est dit par
+l'estampille (§2.10), et c'est là que cette information sert.
+
+### 2.10 L'estampille — une colonne de plus, sur le modèle de l'origine
+
+**Chaque enregistrement porte l'estampille de sa dernière écriture** : le
+compteur de la racine qui a écrit, et son identifiant. C'est une horloge de
+Lamport, pas une date — les deux racines n'ont pas la même heure, et une règle
+de conflit à l'heure murale changerait de gagnant quand un exploitant recale un
+NTP (`replication.md` §4).
+
+| Valeur | Ce que ça veut dire |
+|---|---|
+| `(compteur, racine)` | La `compteur`-ième écriture de cette racine ; son compteur se hisse au-dessus de tout ce qu'elle reçoit. |
+
+Là où un `PATCH` change un champ sans toucher aux autres — le nom et les
+capacités d'une machine —, **chaque champ a la sienne**, sans quoi un nom
+perdrait parce qu'une capacité a gagné. La réclamation d'alias d'un compte en
+porte une ; la clé d'une machine en porte deux, la sienne et celle de
+l'émission du code qui l'a liée.
+
+**Elle ne dit pas l'heure, et c'est une qualité** : répliquer n'ajoute aucune
+ligne de temps à ce que l'entrepôt porte déjà (C13, C18). Les dates que ce
+modèle porte — `enrôlé le`, `révoqué le` — restent celles de la racine qui a
+écrit, et se répliquent telles quelles.
 
 ---
 
@@ -637,6 +666,12 @@ les applique.** Rien n'est figé dans `asl-client`.
 Sans cela, changer le delta après la campagne de mesure exigerait de mettre à
 jour tous les daemons installés chez des tiers — ce qui ne se produira jamais.
 C'est la seule raison, et elle suffit.
+
+**La voie entre les deux racines se tient de la même façon** — mêmes valeurs,
+mêmes réglages, même reprise (`replication.md` §2.3). Deux machines dans le
+même centre n'ont pas besoin de dix secondes, mais une troisième valeur serait
+une troisième chose à mesurer, et rien ici ne souffre d'un keepalive trop
+fréquent.
 
 ### 4.2 Les trois états, et le mot qui est banni
 

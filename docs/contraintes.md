@@ -326,6 +326,13 @@ test qui affirme être l'autorité d'un compte qui ne lui appartient pas. Sans c
 essai, la contrainte n'est qu'une intention, et elle tombera le jour où quelqu'un
 optimisera le chemin de vérification.
 
+**Entre les deux racines, l'autorité est la même, et la contrainte se réduit à
+une vérification** (`replication.md` §7) : la voie ne transporte que des
+enregistrements de provenance `locale`. Ce qu'une racine aura reçu d'un
+annuaire rattaché n'est pas à elle et ne passe pas — c'est « pas de
+réplication transitive », tenu par le même refus journalisé qu'une assertion
+hors périmètre.
+
 ## C12 — La surface publique d'`asl-client` traverse une ABI C, et elle est stable
 
 Les liaisons Python, Ruby, C++, Kotlin et Swift passent toutes par là. Cela
@@ -603,6 +610,16 @@ pas le temps d'une archive.
 **L'origine ne se déduit pas de l'autorité**, même si C11 fait aujourd'hui
 coïncider les deux. Un champ qui repose sur l'invariant d'un autre se trompera le
 jour où cet invariant bougera.
+
+### Entre les deux racines, l'origine reste `locale` — et rompre n'efface rien
+
+`Annuaire(n-…)` désigne une RELATION de confiance, qui se rompt et dont la
+rupture efface. Entre racines il n'y a pas de relation à rompre : une seule
+autorité, en deux exemplaires. Un enregistrement répliqué depuis l'autre racine
+porte donc `locale`, et couper la réplication arrête le flux sans rien effacer
+— l'effacer fermerait les comptes de gens qui n'ont rien fait. Qui a écrit est
+dit par l'estampille (`modele.md` §2.10). **Proposé, à confirmer**
+(`replication.md` §7, §10).
 
 ### L'anti-rejeu, qui est une exigence distincte et plus faible
 

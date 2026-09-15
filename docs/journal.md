@@ -55,6 +55,14 @@ qui permet de constater qu'un pair a essayé. Sans lui, un refus est un incident
 isolé qu'on ne peut ni corréler ni prouver — et une rupture de relation se
 décide sur des faits, pas sur une impression.
 
+**Entre les deux racines, « quoi » est un NOMBRE, pas une liste**
+(`replication.md` §8) : l'ouverture et la fermeture de la voie, un rattrapage
+avec son nombre d'opérations, un amorçage avec sa taille, et chaque refus avec
+son genre et son compteur. Jamais une ligne par opération — le journal
+d'opérations est déjà la trace, et la doubler ici doublerait ce que C18 veut
+voir jeté. **Et le journal lui-même ne se réplique pas** : il dit ce que CETTE
+racine a servi, et c'est vrai là seulement.
+
 ### 2.3 Deux champs qui ne sont PAS décidés
 
 **L'adresse source.** L'annuaire la voit — c'est une connexion. La CONSERVER est
