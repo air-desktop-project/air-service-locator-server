@@ -110,6 +110,16 @@ pub enum Exigence {
     Appareil,
     /// Une machine portant la capacité `lecture`.
     MachineLecture,
+    /// **Une machine, quelle que soit sa capacité** : ce qu'elle demande ne
+    /// porte que sur elle-même. Une seule ressource, `/v1/moi`.
+    Machine,
+    /// **Un appareil du compte, OU une machine portant `lecture`.**
+    ///
+    /// C'est la forme d'une LECTURE inter-comptes servie sur les deux voies :
+    /// l'application qui regarde ce qu'un ami lui a ouvert, et le programme de
+    /// B qui part d'un `u-…` pour arriver à un port (`protocole.md` §3). Les
+    /// deux passent par les arêtes du compte qui demande, et rien d'autre.
+    AppareilOuMachineLecture,
     /// **Rien.** Trois ressources seulement, et chacune pour une raison écrite.
     Aucune,
 }
@@ -231,6 +241,17 @@ pub enum Ressource<'a> {
         /// Le compte visé.
         compte: Identifiant,
     },
+    /// `/v1/utilisateurs/{u}/machines` — **les machines de `u` que le demandeur
+    /// a le droit de voir** : les siennes si `u` est lui, sinon ce que les
+    /// arêtes de `u` vers lui couvrent (`modele.md` §2.5). Une liste vide à qui
+    /// n'a rien — jamais un refus qui dirait quelque chose (C9).
+    MachinesUtilisateur {
+        /// Le compte dont on demande les machines.
+        compte: Identifiant,
+    },
+    /// `/v1/moi` — **qui je suis, et à qui j'appartiens**, sur la voie machine :
+    /// `{"machine": "m-…", "proprietaire": "u-…"}`.
+    Moi,
     /// `/v1/appareils` — enrôler un appareil de plus.
     Appareils,
     /// `/v1/appareils/{a}` — révoquer.
@@ -321,6 +342,8 @@ impl Ressource<'_> {
             Self::Defi => &[Methode::Get, Methode::Post],
             Self::Comptes | Self::Enrolement => &[Methode::Post],
             Self::Utilisateur { .. }
+            | Self::MachinesUtilisateur { .. }
+            | Self::Moi
             | Self::Vu
             | Self::Version
             | Self::Poussees
@@ -380,6 +403,8 @@ impl Ressource<'_> {
             | Self::Utilisateur { .. } => Exigence::Aucune,
             Self::Annonce | Self::Poussees => Exigence::MachineAnnonce,
             Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
+            Self::Moi => Exigence::Machine,
+            Self::MachinesUtilisateur { .. } => Exigence::AppareilOuMachineLecture,
             _ => Exigence::Appareil,
         }
     }
@@ -630,6 +655,10 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "utilisateurs", compte] => Ok(Ressource::Utilisateur {
             compte: identifiant(compte, Genre::Utilisateur)?,
         }),
+        ["v1", "utilisateurs", compte, "machines"] => Ok(Ressource::MachinesUtilisateur {
+            compte: identifiant(compte, Genre::Utilisateur)?,
+        }),
+        ["v1", "moi"] => Ok(Ressource::Moi),
         ["v1", "appareils"] => Ok(Ressource::Appareils),
         ["v1", "appareils", appareil] => Ok(Ressource::Appareil {
             appareil: identifiant(appareil, Genre::Appareil)?,

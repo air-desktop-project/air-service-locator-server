@@ -233,6 +233,8 @@ impl Service<'_> {
             Besoin::MesMachines => self.rassembler_les_machines(),
             Besoin::MesAppareils => self.rassembler_les_appareils(),
             Besoin::MesAutorisations => self.rassembler_les_autorisations(),
+            Besoin::MachinesDe { compte } => self.rassembler_les_machines_de(*compte),
+            Besoin::Moi => self.qui_je_suis(),
             // **RIEN À CHERCHER** : ouvrir le flux ne dépend d'aucun état, et
             // ce qui s'y écrira ensuite n'est pas une réponse à une requête.
             Besoin::EcouterLesPoussees => Trouvaille::Rien,
@@ -646,8 +648,117 @@ impl Service<'_> {
                 ..rangee
             },
         ) {
-            Ok(()) => Trouvaille::Enrolee(enrolement.machine),
+            Ok(()) => Trouvaille::Enrolee {
+                machine: enrolement.machine,
+                proprietaire: rangee.proprietaire,
+            },
             Err(_) => Trouvaille::Rien,
+        }
+    }
+
+    /// Qui est la machine de cette connexion, et à qui elle appartient.
+    fn qui_je_suis(&self) -> Trouvaille {
+        let Some(machine) = self.session.machine() else {
+            return Trouvaille::Rien;
+        };
+        match self.entrepot.machine(machine) {
+            Ok(Some(rangee)) => Trouvaille::Moi {
+                machine,
+                proprietaire: rangee.proprietaire,
+            },
+            _ => Trouvaille::Rien,
+        }
+    }
+
+    /// Les machines d'un utilisateur, TOUTES, avec de quoi décider pour chacune.
+    ///
+    /// # ON RASSEMBLE TOUT, ET L'ÉTAGE 2 ÉCARTE
+    ///
+    /// Le demandeur est le compte de l'appareil, ou le propriétaire de la
+    /// machine qui a prouvé sa clé — jamais ce que la requête nomme (C10). Ses
+    /// arêtes reçues, révoquées comprises, partent avec ; c'est
+    /// `asl_auth::decider_machine_visible` qui les examine, machine par machine.
+    ///
+    /// # LE MÊME TRAVAIL, QU'IL Y AIT UNE ARÊTE OU NON (C9)
+    ///
+    /// Les machines de `u` et leurs services se lisent AVANT qu'on sache si le
+    /// demandeur en verra une : un tiers sans arête coûte à l'annuaire ce que
+    /// coûte un ami, et reçoit la même liste vide après le même délai.
+    fn rassembler_les_machines_de(&self, proprietaire: Identifiant) -> Trouvaille {
+        let (demandeur, lecture) = if let Some(appareil) = self.session.appareil() {
+            let Ok(Some(rangee)) = self.entrepot.appareil(appareil) else {
+                return Trouvaille::Rien;
+            };
+            if rangee.revoque {
+                return Trouvaille::Rien;
+            }
+            (rangee.proprietaire, true)
+        } else if let Some(machine) = self.session.machine() {
+            let Ok(Some(rangee)) = self.entrepot.machine(machine) else {
+                return Trouvaille::Rien;
+            };
+            (rangee.proprietaire, rangee.lecture)
+        } else {
+            return Trouvaille::Rien;
+        };
+
+        let Ok(rangees) = self.entrepot.machines_de_compte(proprietaire) else {
+            return Trouvaille::Rien;
+        };
+        let machines = rangees
+            .into_iter()
+            .filter_map(|(quelle, machine)| {
+                let nom = core::str::from_utf8(machine.nom.octets()).ok()?;
+                let vue = asl_api::corps::MachineVue {
+                    machine: quelle,
+                    nom,
+                };
+                let mut encodee = alloc_reponse();
+                let combien = vue.encoder(&mut encodee).ok()?;
+                encodee.truncate(combien);
+                let services = self
+                    .entrepot
+                    .services_de_machine(quelle)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(service, _)| service)
+                    .collect();
+                Some(asl_session::MachineRassemblee {
+                    machine: quelle,
+                    services,
+                    encodee,
+                })
+            })
+            .collect();
+
+        let autorisations = self
+            .entrepot
+            .autorisations_recues(demandeur)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|quoi| {
+                asl_auth::Autorisation::nouvelle(
+                    quoi.par,
+                    quoi.a,
+                    match quoi.portee {
+                        asl_registre::Portee::ToutLeCompte => asl_auth::Portee::ToutLeCompte,
+                        asl_registre::Portee::UneMachine(quelle) => {
+                            asl_auth::Portee::UneMachine(quelle)
+                        }
+                        asl_registre::Portee::UnService(quel) => asl_auth::Portee::UnService(quel),
+                    },
+                    quoi.revoquee,
+                )
+                .ok()
+            })
+            .collect();
+
+        Trouvaille::MachinesDe {
+            demandeur,
+            lecture,
+            proprietaire,
+            machines,
+            autorisations,
         }
     }
 

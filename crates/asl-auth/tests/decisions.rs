@@ -9,8 +9,8 @@
 
 use asl_auth::{
     Autorisation, Capacites, Cible, Decision, EtatCode, Faute, Machine, Politique, Portee,
-    decider_annonce, decider_attestation, decider_enrolement, decider_gestion, decider_resolution,
-    decider_revocation_d_appareil,
+    decider_annonce, decider_attestation, decider_enrolement, decider_gestion,
+    decider_machine_visible, decider_resolution, decider_revocation_d_appareil,
 };
 use asl_id::{Genre, Identifiant};
 
@@ -414,4 +414,108 @@ fn un_compte_ne_peut_pas_se_retrouver_sans_appareil() {
     // de se révoquer lui-même — et c'est refusé.
     let seul = ident(Genre::Appareil, 1);
     assert_eq!(decider_revocation_d_appareil(seul, seul), Decision::Refuser);
+}
+
+// ── Ce qu'une autorisation donne à voir : les machines ──────────────────────
+
+/// Une arête d'Alice vers Bob, de cette portée.
+fn arete(portee: Portee, revoquee: bool) -> Autorisation {
+    Autorisation::nouvelle(alice(), bob(), portee, revoquee).expect("une arête")
+}
+
+#[test]
+fn ses_propres_machines_se_voient_sans_arete() {
+    let m = ident(Genre::Machine, 0x10);
+    assert_eq!(
+        decider_machine_visible(alice(), true, alice(), m, &[], &[]),
+        Decision::Servir
+    );
+    // Et pas celles d'un autre, sans arête : la liste sera vide (C9).
+    assert_eq!(
+        decider_machine_visible(bob(), true, alice(), m, &[], &[]),
+        Decision::Refuser
+    );
+}
+
+#[test]
+fn sans_lecture_rien_ne_se_voit_pas_meme_les_siennes() {
+    let m = ident(Genre::Machine, 0x10);
+    let tout = arete(Portee::ToutLeCompte, false);
+    assert_eq!(
+        decider_machine_visible(alice(), false, alice(), m, &[], &[]),
+        Decision::Refuser
+    );
+    assert_eq!(
+        decider_machine_visible(bob(), false, alice(), m, &[], &[tout]),
+        Decision::Refuser
+    );
+}
+
+#[test]
+fn tout_le_compte_donne_chaque_machine() {
+    // **« TOUT MON COMPTE » VEUT DIRE TOUT** — même une machine qui ne sert rien.
+    let tout = arete(Portee::ToutLeCompte, false);
+    for marque in [0x10, 0x11, 0x12] {
+        let m = ident(Genre::Machine, marque);
+        assert_eq!(
+            decider_machine_visible(bob(), true, alice(), m, &[], &[tout]),
+            Decision::Servir,
+            "{marque:#x}"
+        );
+    }
+}
+
+#[test]
+fn une_machine_ne_donne_qu_elle_et_un_service_sa_machine() {
+    let m1 = ident(Genre::Machine, 0x10);
+    let m2 = ident(Genre::Machine, 0x11);
+    let s = ident(Genre::Service, 0x50);
+
+    let une = arete(Portee::UneMachine(m1), false);
+    assert_eq!(
+        decider_machine_visible(bob(), true, alice(), m1, &[], &[une]),
+        Decision::Servir
+    );
+    assert_eq!(
+        decider_machine_visible(bob(), true, alice(), m2, &[], &[une]),
+        Decision::Refuser
+    );
+
+    let un = arete(Portee::UnService(s), false);
+    assert_eq!(
+        decider_machine_visible(bob(), true, alice(), m1, &[s], &[un]),
+        Decision::Servir,
+        "la machine qui porte le service se voit"
+    );
+    assert_eq!(
+        decider_machine_visible(bob(), true, alice(), m2, &[], &[un]),
+        Decision::Refuser,
+        "pas celle qui ne le porte pas"
+    );
+}
+
+#[test]
+fn une_arete_revoquee_ou_d_un_autre_bout_ne_donne_rien() {
+    let m = ident(Genre::Machine, 0x10);
+    let morte = arete(Portee::ToutLeCompte, true);
+    assert_eq!(
+        decider_machine_visible(bob(), true, alice(), m, &[], &[morte]),
+        Decision::Refuser
+    );
+    // **LES DEUX BOUTS SONT VÉRIFIÉS** : une arête d'Alice vers Carole n'ouvre
+    // rien à Bob, et une arête de Carole vers Bob n'ouvre rien chez Alice.
+    let vers_carole =
+        Autorisation::nouvelle(alice(), carole(), Portee::ToutLeCompte, false).expect("arête");
+    let de_carole =
+        Autorisation::nouvelle(carole(), bob(), Portee::ToutLeCompte, false).expect("arête");
+    assert_eq!(
+        decider_machine_visible(bob(), true, alice(), m, &[], &[vers_carole, de_carole]),
+        Decision::Refuser
+    );
+    // Et une vivante au milieu des mortes suffit.
+    let vivante = arete(Portee::UneMachine(m), false);
+    assert_eq!(
+        decider_machine_visible(bob(), true, alice(), m, &[], &[morte, de_carole, vivante]),
+        Decision::Servir
+    );
 }

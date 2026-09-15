@@ -1048,6 +1048,95 @@ impl<'a> MachineRendue<'a> {
     }
 }
 
+// ── Ce qu'une autorisation donne à voir : une machine ───────────────────────
+
+/// Une machine telle que `GET /v1/utilisateurs/{u}/machines` la rend.
+///
+/// # L'IDENTIFIANT ET LE NOM, ET RIEN D'AUTRE
+///
+/// Ce n'est pas [`MachineRendue`] : celle-là est l'écran du PROPRIÉTAIRE, avec
+/// les capacités et l'état de la clé, qui n'appartiennent qu'à lui. Un
+/// bénéficiaire voit de quoi reconnaître une machine et la nommer dans
+/// `GET /v1/ou/{m}/{s}` — le `m-…`, public par construction, et le nom que son
+/// propriétaire lui a donné (`modele.md` §2.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineVue<'a> {
+    /// L'identifiant de la machine.
+    pub machine: Identifiant,
+    /// Son nom, du texte libre.
+    pub nom: &'a str,
+}
+
+impl<'a> MachineVue<'a> {
+    /// Encode une machine vue.
+    ///
+    /// ```jsonc
+    /// {"machine":"m-…","nom":"grenier"}
+    /// ```
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`].
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{\"machine\":\"");
+        ecrivain.pousser(self.machine.texte().as_str().as_bytes());
+        ecrivain.pousser(b"\",\"nom\":\"");
+        // Sans échappement, comme [`MachineRendue::encoder`] : le nom est entré
+        // par [`Lecteur::texte_libre`].
+        ecrivain.pousser(self.nom.as_bytes());
+        ecrivain.pousser(b"\"}");
+        ecrivain.achever()
+    }
+
+    /// Décode une machine vue.
+    ///
+    /// **ELLE EXISTE POUR LES ESSAIS ET POUR LES LIAISONS**, comme
+    /// [`MachineRendue::decoder`].
+    ///
+    /// # Erreurs
+    ///
+    /// Celles du cadrage, plus [`Erreur::NomVide`] et [`Erreur::NomTropLong`].
+    pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
+        let mut lecteur = asl_proto::cadrage::Lecteur::nouveau(octets);
+        lecteur.attendre(b'{', "un objet")?;
+
+        let mut machine = None;
+        let mut nom: Option<&str> = None;
+
+        loop {
+            lecteur.sauter_blancs();
+            let position = lecteur.position();
+            let champ = lecteur.chaine()?;
+            lecteur.attendre(b':', "deux-points")?;
+
+            match champ {
+                "machine" => poser(
+                    &mut machine,
+                    lire_genre(&mut lecteur, Genre::Machine)?,
+                    position,
+                )?,
+                "nom" => poser(&mut nom, lire_modele(&mut lecteur)?, position)?,
+                _ => return Err(Erreur::ChampInconnu { position }),
+            }
+
+            lecteur.sauter_blancs();
+            match lecteur.regarder() {
+                Some(b',') => lecteur.avancer(),
+                _ => break,
+            }
+        }
+
+        lecteur.attendre(b'}', "la fin de l'objet")?;
+        lecteur.fin()?;
+
+        Ok(Self {
+            machine: machine.ok_or(Erreur::ChampManquant { nom: "machine" })?,
+            nom: nom.ok_or(Erreur::ChampManquant { nom: "nom" })?,
+        })
+    }
+}
+
 // ── Ce qu'une liste d'appareils rend ────────────────────────────────────────
 
 /// Le mot JSON d'une attestation, tel qu'une liste le rend.
@@ -1657,7 +1746,8 @@ fn systeme_du_mot(texte: &str, position: usize) -> Result<Systeme, Erreur> {
     })
 }
 
-/// Lit un modèle : du texte libre, non vide, d'au plus [`NOM_MACHINE_MAX`].
+/// Lit un modèle d'appareil — ou un nom de machine vu — : du texte libre, non
+/// vide, d'au plus [`NOM_MACHINE_MAX`].
 ///
 /// **LES MÊMES RÈGLES QUE LE NOM D'UNE MACHINE**, et le même lecteur : c'est un
 /// texte d'affichage, comparé à rien, qui porte les accents de qui l'écrit et

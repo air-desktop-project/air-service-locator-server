@@ -49,6 +49,11 @@ fn chaque_chemin_designe_sa_ressource() {
         Ressource::Utilisateur { .. }
     ));
     assert!(matches!(
+        resoudre_get(&format!("/v1/utilisateurs/{u}/machines")).unwrap(),
+        Ressource::MachinesUtilisateur { .. }
+    ));
+    assert_eq!(resoudre_get("/v1/moi").unwrap(), Ressource::Moi);
+    assert!(matches!(
         resoudre_get(&format!("/v1/appareils/{a}")).unwrap(),
         Ressource::Appareil { .. }
     ));
@@ -493,7 +498,8 @@ fn chaque_route_qui_porte_un_identifiant_verifie_son_genre() {
     let mauvais = ident(Genre::Utilisateur);
     let m = ident(Genre::Machine);
 
-    let cas: [(String, Genre); 9] = [
+    let cas: [(String, Genre); 10] = [
+        (format!("/v1/utilisateurs/{m}/machines"), Genre::Utilisateur),
         (format!("/v1/appareils/{mauvais}/poussee"), Genre::Appareil),
         (
             format!("/v1/appareils/{mauvais}/description"),
@@ -703,5 +709,42 @@ fn la_version_se_lit_et_ne_se_lit_que_par_get() {
             !resoudre(methode, b"/v1/version").unwrap().sert,
             "{methode:?}"
         );
+    }
+}
+
+// ── Ce qu'une autorisation donne à voir, et qui je suis ─────────────────────
+
+#[test]
+fn les_machines_d_un_utilisateur_se_lisent_sur_les_deux_voies() {
+    // **UN APPAREIL DU COMPTE, OU UNE MACHINE PORTANT `lecture`** : la liste se
+    // calcule depuis les arêtes du demandeur, et les deux voies en ont.
+    let u = ident(Genre::Utilisateur);
+    let cible = format!("/v1/utilisateurs/{u}/machines");
+    let resolu = resoudre(Methode::Get, cible.as_bytes()).expect("elle se route");
+    assert_eq!(resolu.exigence, Exigence::AppareilOuMachineLecture);
+    assert!(resolu.sert);
+    for methode in [Methode::Post, Methode::Put, Methode::Patch, Methode::Delete] {
+        assert!(
+            !resoudre(methode, cible.as_bytes()).unwrap().sert,
+            "{methode:?}"
+        );
+    }
+    // Et le booléen d'existence, lui, n'exige toujours rien.
+    assert_eq!(
+        resoudre_get(&format!("/v1/utilisateurs/{u}"))
+            .unwrap()
+            .exigence(),
+        Exigence::Aucune
+    );
+}
+
+#[test]
+fn moi_exige_une_machine_quelle_que_soit_sa_capacite() {
+    let resolu = resoudre(Methode::Get, b"/v1/moi").expect("elle se route");
+    assert_eq!(resolu.ressource, Ressource::Moi);
+    assert_eq!(resolu.exigence, Exigence::Machine);
+    assert!(resolu.sert);
+    for methode in [Methode::Post, Methode::Put, Methode::Patch, Methode::Delete] {
+        assert!(!resoudre(methode, b"/v1/moi").unwrap().sert, "{methode:?}");
     }
 }
