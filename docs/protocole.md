@@ -999,7 +999,7 @@ POST /v1/pair/preuve défi (32)  →  n-… (17) ‖ signature (64)
                                                 la racine tirée prouve la sienne en retour
 GET  /v1/pair/operations?apres=<compteur>       tout ce qu'elle a écrit après, puis la suite — SANS FIN
 GET  /v1/pair/instantane                        l'état entier, puis le compteur de coupe — fini
-GET  /v1/replication                            l'état de la voie, sans exigence (proposé)
+GET  /v1/replication                            l'état de la voie, sur la voie machine (`Exigence::Machine`)
 ```
 
 **Chaque racine OUVRE vers l'autre, et y LIT.** Deux connexions, une par sens,

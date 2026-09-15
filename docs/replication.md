@@ -472,7 +472,7 @@ l'inverse : un entrepôt perdu se reconstruit depuis l'autre.
 ## 8. La configuration et l'exploitation
 
 ```
-asl-server … --identity <fichier>            # la clé d'identité Ed25519 de cette racine
+asl-server … --identity-key <fichier>        # la clé d'identité Ed25519 de cette racine
               --peer <hôte:port>             # l'autre racine
               --peer-key <fichier>           # sa clé d'identité publique
 ```
@@ -482,12 +482,13 @@ parce qu'une adresse seule n'est pas une racine (`annuaires.md` §2). Sans
 `--peer`, la racine tourne seule et le journal d'exploitation le dit au
 démarrage — ce n'est pas un défaut, c'est un banc.
 
-**`--identity` ne se génère pas tout seul.** `asl-server --new-identity
+**`--identity-key` ne se génère pas tout seul.** `asl-server --new-identity-key
 <fichier>` écrit la paire, imprime la clé publique et l'identifiant `n-…`
 qu'elle donne, et s'arrête ; c'est cette clé publique qu'on porte chez l'autre
 racine. Une clé générée en silence au premier démarrage serait une clé que
 personne n'a copiée nulle part, et deux racines qui ne se connaissent pas.
-(Proposé, à confirmer — §10.)
+`--identity-key` et non `--identity` : c'est une clé PRIVÉE, et son nom le
+dit — comme `--key` le dit pour celle de TLS.
 
 **Ce qui se journalise, dans le journal d'exploitation (`stderr`)** :
 l'ouverture et la fermeture de chaque sens, avec l'identifiant du pair ; un
@@ -504,15 +505,15 @@ GET /v1/replication
 {"pair": "n-…", "voie": "ouverte", "compteur": 4812, "applique": 4790}
 ```
 
-Sans exigence — la septième ressource dans ce cas, et **proposée, à
-confirmer** (§10). L'exploitant n'a pas de clé, et la vérification de
-déploiement — « un compte créé chez l'une est lu chez l'autre » — demande une
-réponse au présent, qu'un journal ne donne qu'au passé. Elle ne nomme personne.
-**Ce qu'elle révèle** : que la voie est coupée, à qui le demande — un inconnu
-qui voudrait jouer une course d'alias pendant une coupure l'apprend là. Ce
-qu'il y gagne est une réclamation en file (§3.2), et le journal d'exploitation
-dit la même chose à qui sait lire la machine. Si c'est trop, la ligne de
-journal suffit, et le verbe tombe.
+**Sur la voie machine (`Exigence::Machine`), et non sans exigence.** La
+vérification de déploiement — « un compte créé chez l'une est lu chez
+l'autre » — demande une réponse au présent, qu'un journal ne donne qu'au
+passé ; l'exploitant la pose avec `asl`, depuis une machine enrôlée, ce qu'il
+a toujours sous la main. **Elle ne se rend pas à un inconnu**, et la raison a
+tranché : dire à qui le demande que la voie est coupée, c'est lui dire l'heure
+exacte où une unicité — un alias — se gagne sur une racine isolée (§3.2).
+Une réclamation en file n'est pas rien quand c'est un inconnu qui la pose. Le
+journal d'exploitation dit la même chose, à qui sait lire la machine.
 
 ---
 
@@ -529,7 +530,7 @@ journal suffit, et le verbe tombe.
 | `modele.md` §2.10 (neuf) | L'estampille — une colonne de plus, sur le modèle de l'origine. |
 | `journal.md` §2.2 | Ce qui se journalise d'une réplication entre racines. |
 | `contraintes.md` C11, C17 | Ce que chacune devient entre racines (§7). |
-| L'entrepôt | Trois choses de plus : l'estampille sur les enregistrements, le journal d'opérations, le curseur par pair. **C'est un changement de format d'enregistrement**, et `CLAUDE.md` en fait un cran majeur — à porter par la PR de code, pas par celle-ci. |
+| L'entrepôt | Trois choses de plus : l'estampille sur les enregistrements, le journal d'opérations, le curseur par pair. **C'est un changement de format d'enregistrement** — une rupture, et en 0.x une rupture est un cran MINEUR, comme la grammaire des outils l'a été ; le cran majeur est réservé au jour où la version dira « prêt ». À porter par la PR de code, avec la reprise des entrepôts existants (§11.4), pas par celle-ci. |
 
 ---
 
@@ -539,24 +540,24 @@ journal suffit, et le verbe tombe.
 |---|---|---|
 | 1 | Le périmètre de §1 — y compris les codes d'enrôlement, les descriptions et les jetons ; le journal exclu. | **Décidé** |
 | 2 | HTTP/3 sur QUIC, même port ; deux connexions, chacune ouverte par la racine qui tire. | **Décidé** |
-| 3 | Une clé d'identité Ed25519 par racine, distincte de la clé TLS ; l'identifiant `n-…` se déduit de la clé. | Proposé, à confirmer |
-| 4 | Les deux prouvent — `POST /v1/defi` avec un genre `n` dans un sens, `POST /v1/pair/preuve` dans l'autre. | Proposé, à confirmer |
+| 3 | Une clé d'identité Ed25519 par racine, distincte de la clé TLS ; l'identifiant `n-…` se déduit de la clé. | **Décidé** (2026-09-15) |
+| 4 | Les deux prouvent — `POST /v1/defi` avec un genre `n` dans un sens, `POST /v1/pair/preuve` dans l'autre. | **Décidé** (2026-09-15) |
 | 5 | Keepalive et inactivité du daemon, reconnexion d'`asl-client`. | **Décidé** |
 | 6 | Une écriture est acquittée par une racine, sans attendre l'autre. | **Décidé** |
 | 7 | Les règles de conflit de §3.2 : révocation toujours, remplaçable au plus récent, unique au plus ancien. | **Décidé** |
-| 8 | L'alias est une réclamation, et la file reste — plutôt qu'un perdant effacé. | Proposé, à confirmer |
+| 8 | L'alias est une réclamation, et la file reste — plutôt qu'un perdant effacé. **Les applications relisent l'alias après un `PUT` et disent si le titulaire n'est pas elles.** | **Décidé** (2026-09-15) |
 | 9 | Les effets vivants se rejouent, les notifications ne repartent pas. | **Décidé** |
-| 10 | **Pas de témoin en v1** ; `annuaires.md` §6 devient une suite nommée. | Proposé, à confirmer |
+| 10 | **Pas de témoin en v1** ; `annuaires.md` §6 devient une suite nommée. | **Décidé** (2026-09-15) |
 | 11 | Horloge de Lamport `(compteur, racine)`, et non l'heure murale ; un seul nombre pour l'estampille et le curseur. | **Décidé** |
 | 12 | Une estampille par enregistrement, et par champ là où `PATCH` est champ par champ. | **Décidé** |
 | 13 | Le journal d'opérations dans l'entrepôt, dans la transaction d'écriture ; le format d'`asl-registre` sur le fil. | **Décidé** |
-| 14 | Rétention du journal d'opérations : trente jours. | Proposé, à confirmer |
+| 14 | Rétention du journal d'opérations : trente jours. | **Décidé** (2026-09-15) |
 | 15 | `410` puis instantané pour l'amorçage ; l'instantané est une suite d'opérations et fusionne. | **Décidé** |
 | 16 | Les règles client de §6 — la connexion est la session ; `asl enroll` et le daemon essaient l'autre racine avant de conclure. | **Décidé** |
-| 17 | La provenance d'un enregistrement répliqué entre racines reste `locale`. | Proposé, à confirmer |
+| 17 | La provenance d'un enregistrement répliqué entre racines reste `locale`. | **Décidé** (2026-09-15) |
 | 18 | Rompre la réplication n'efface rien. | **Décidé** |
-| 19 | `--identity`, `--peer`, `--peer-key` ; `--new-identity` pour générer. | Proposé, à confirmer |
-| 20 | `GET /v1/replication`, sans exigence. | Proposé, à confirmer |
+| 19 | `--identity-key`, `--peer`, `--peer-key` ; `--new-identity-key` pour générer. | **Décidé** (2026-09-15) — `--identity-key`, parce que c'est une clé privée |
+| 20 | `GET /v1/replication`, **sur la voie machine** — pas sans exigence : l'état de la voie dit à un inconnu quand une unicité se gagne. | **Décidé** (2026-09-15), amendé |
 
 ---
 
