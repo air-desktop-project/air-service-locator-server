@@ -138,6 +138,15 @@ met dedans. **Un nom libre saisi par l'utilisateur et rangé sur l'annuaire est
 exactement la « commodité » par laquelle C13 dit qu'elle tombera** ; s'il en
 faut un, il vit dans le carnet local de l'application, et n'en sort pas.
 
+**Les machines d'un compte voient ses appareils, sans rien pouvoir dessus.**
+`asl devices`, sur une machine, rend la même liste que l'écran Compte —
+identifiants, modèles, révoqués marqués (`protocole.md` §3,
+`GET /v1/moi/appareils`). C'est une décision de produit : l'administrateur
+d'une machine doit pouvoir répondre depuis un terminal à « quels appareils
+administrent ce compte ? ». Ce qu'elle abaisse est dit là-bas — une clé de
+machine compromise voit désormais qui administre le compte, sans pouvoir y
+toucher.
+
 **Un compte à un seul appareil est un compte qu'un téléphone perdu ferme
 définitivement.** L'application le dit à l'enrôlement et pousse à en enrôler un
 second ; elle ne l'impose pas.
