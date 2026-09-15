@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "asl-annuaire"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "asl-id",
  "asl-proto",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "asl-api"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "asl-id",
  "asl-proto",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "asl-apple"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "asl-attest",
  "p256",
@@ -176,18 +176,18 @@ dependencies = [
 
 [[package]]
 name = "asl-attest"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "asl-auth"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "asl-id",
 ]
 
 [[package]]
 name = "asl-cle"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "asl-id",
  "ed25519-dalek",
@@ -197,15 +197,15 @@ dependencies = [
 
 [[package]]
 name = "asl-id"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "asl-jwt"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "asl-loop-tokio"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ams-h3",
  "ams-proto-h3",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "asl-play"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -243,21 +243,21 @@ dependencies = [
 
 [[package]]
 name = "asl-proto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "asl-id",
 ]
 
 [[package]]
 name = "asl-registre"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "asl-id",
 ]
 
 [[package]]
 name = "asl-server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ams-quic-client",
  "asl-apple",
@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "asl-session"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ams-h3",
  "ams-proto-http",
@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "asl-store"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "asl-cle",
  "asl-id",

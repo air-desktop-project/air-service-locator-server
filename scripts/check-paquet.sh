@@ -141,7 +141,7 @@ conclure "aucune capacité, aucun privilège à regagner, deux familles d'adress
 
 titre "6. LA POSTURE D'ATTESTATION N'EST PAS CHOISIE PAR LE PAQUET"
 commencer
-# **C'EST LA PROMESSE QUI COMPTE LE PLUS APRÈS LE PURGE.** `facultative` laisse
+# **C'EST LA PROMESSE QUI COMPTE LE PLUS APRÈS LE PURGE.** `optional` laisse
 # n'importe qui créer un compte sur cet annuaire. Un paquet qui la poserait par
 # commodité livrerait la posture faible en silence.
 # **ON NE REGARDE QUE CE QUI S'EXÉCUTE.** L'unité EXPLIQUE en commentaire
@@ -224,7 +224,7 @@ conclure "installé, ni activé ni démarré"
 titre "10. ce qu'on déballe s'exécute, et connaît les options de la SOURCE"
 commencer
 # UN PAQUET QUI S'INSTALLE ET DONT LE BINAIRE NE PART PAS n'a rien installé.
-if ! "$essai/deballe/usr/bin/asl-server" --aide > "$essai/aide" 2>&1; then
+if ! "$essai/deballe/usr/bin/asl-server" --help > "$essai/aide" 2>&1; then
     rate "le binaire empaqueté ne s'exécute pas :
 $(cat "$essai/aide")"
 fi
@@ -233,7 +233,7 @@ fi
 # vieux de quelques heures s'exécute très bien et ignore les options ajoutées
 # depuis. On confronte donc les bras de `match` de l'analyseur à son aide.
 #
-# **L'AIDE SE LIT UNE FOIS** : un `--aide | grep -q` par option est une course au
+# **L'AIDE SE LIT UNE FOIS** : un `--help | grep -q` par option est une course au
 # `SIGPIPE`, qui rend un faux échec sous charge.
 for drapeau in $(grep -oE '"--[a-z]+" =>' crates/asl-server/src/reglages.rs \
         | tr -d '">=' | tr -d ' '); do

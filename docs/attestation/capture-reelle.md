@@ -2,7 +2,7 @@
 
 `asl-apple` vérifie une attestation d'Apple, et il est écrit **d'après la
 documentation d'Apple, pas d'après un appareil**. Aucun iPhone n'a jamais parlé
-à ce dépôt. Tant que c'est vrai, `--attestation exigee` ne peut pas être tenue
+à ce dépôt. Tant que c'est vrai, `--attestation required` ne peut pas être tenue
 pour sûre : le premier appareil légitime serait peut-être le premier refusé,
 parce qu'une constante — la forme de l'extension, la façon de hacher la clé,
 l'ordre des certificats — diffère de ce que la documentation laisse croire.
@@ -78,7 +78,7 @@ cargo run --example verifier-une-capture -- capture/
 Il dit l'un ou l'autre :
 
 - **✔ VÉRIFIÉE** — notre lecture du format d'Apple est la bonne. On peut tenir
-  `--attestation exigee` pour sûre sur cet environnement, et — mieux — commettre
+  `--attestation required` pour sûre sur cet environnement, et — mieux — commettre
   la capture comme VECTEUR : `asl-apple` serait alors éprouvé contre une
   attestation réelle, et non seulement contre ce que la documentation décrit.
 - **✘ REFUSÉE : `<raison>`** — et là, c'est une DÉCOUVERTE, pas un échec de

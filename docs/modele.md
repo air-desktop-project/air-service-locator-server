@@ -252,7 +252,7 @@ l'annuaire que **cette** clé est bien celle d'une machine de **cet** utilisateu
 1. L'application affiche un **code d'enrôlement** — dix symboles de l'alphabet de
    Crockford, groupés pour l'œil (`4K9M2-P7R1T`), à usage unique, valable dix
    minutes.
-2. L'administrateur le saisit sur la machine : `asl enrole <code>`.
+2. L'administrateur le saisit sur la machine : `asl enroll <code>`.
 3. La machine **génère sa paire de clés**, et présente sa clé publique avec le
    code.
 4. La machine POSTE le tout sur `/v1/enrolement` (`protocole.md` §2.0) ;
@@ -598,7 +598,7 @@ tolérance que le réseau ne rend pas : le chemin meurt à 30 s, donc une connex
 ne pouvait de toute façon jamais rester inactive 45 s puis reprendre. Le rapport
 de trois pour un est celui de la politique, et il est retrouvé.
 
-**Les DEUX inactivités doivent s'accorder.** Celle du transport (`--inactivite`)
+**Les DEUX inactivités doivent s'accorder.** Celle du transport (`--idle`)
 ferme la CONNEXION ; celle du bail fait tomber l'ANNONCE. §1.2 de
 `protocole.md` promet que les deux sont la même chose : les laisser diverger
 ouvrirait une fenêtre où un daemon est désannoncé sans être déconnecté, donc sans

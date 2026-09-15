@@ -77,7 +77,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments
         .iter()
-        .any(|quoi| quoi == "--aide" || quoi == "-h")
+        .any(|quoi| quoi == "--help" || quoi == "-h")
     {
         print!("{USAGE}");
         return Ok(());
@@ -97,7 +97,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
     // trente daemons ce dont un binaire a besoin. On la met en mots ici.
     let bail = reglages
         .bail()
-        .map_err(|quoi| format!("--keepalive et --inactivite ne forment pas un bail : {quoi}"))?;
+        .map_err(|quoi| format!("--keepalive et --idle ne forment pas un bail : {quoi}"))?;
 
     let entrepot = Arc::new(Entrepot::ouvrir(&reglages.entrepot)?);
     let chaine = std::fs::read(&reglages.certificat)?;
@@ -144,7 +144,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         } else if reglages.apple.is_none() {
             eprintln!(
                 "asl-server : l'attestation est exigée, mais aucune app Apple n'est \
-                 configurée (--apple-app / --apple-environnement) : AUCUN appareil ne \
+                 configurée (--apple-app / --apple-environment) : AUCUN appareil ne \
                  pourra s'enrôler."
             );
         }

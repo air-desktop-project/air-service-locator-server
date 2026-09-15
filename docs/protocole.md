@@ -348,7 +348,7 @@ n'a donc rien à en dire.
 `{"machine": "m-…", "proprietaire": "u-…"}`. La machine ne connaissait ni l'un
 ni l'autre — le code désignait tout —, et elle doit pouvoir dire pour qui elle
 agit sans repasser par l'annuaire : l'utilitaire range les deux dans son fichier
-d'identité, et `asl identite` les rend hors ligne. Une machine enrôlée avant
+d'identité, et `asl identity` les rend hors ligne. Une machine enrôlée avant
 cette ligne les apprend par `GET /v1/moi` (§3).
 
 ### 2.1 Enrôler un appareil
@@ -434,7 +434,7 @@ Ce qui manque encore, et qui n'est pas une formalité :
      envoie — ni la forme exacte de l'extension, ni la présence d'un
      `extendedKeyUsage` (on n'en exige aucun, faute de savoir), ni l'ordre des
      certificats dans `x5c`. **Tant qu'une attestation réelle
-     n'aura pas été lue, `exigee` ne peut pas être tenue pour sûre** : le premier
+     n'aura pas été lue, `required` ne peut pas être tenue pour sûre** : le premier
      appareil légitime serait aussi le premier refusé.
 
 Les deux postures sont défendables et **aucune ne peut être le défaut** : exiger
@@ -443,17 +443,17 @@ posture faible. `asl-server` n'a donc **pas de valeur par défaut** — il refus
 démarrer tant qu'on ne lui a pas dit laquelle il tient :
 
 ```
-asl-server --attestation exigee       # la posture de ce document, et rien ne passe
-asl-server --attestation facultative  # n'importe qui crée un compte, et c'est dit
-                                      # au démarrage, dans le journal d'exploitation
+asl-server --attestation required   # la posture de ce document, et rien ne passe
+asl-server --attestation optional   # n'importe qui crée un compte, et c'est dit
+                                    # au démarrage, dans le journal d'exploitation
 ```
 
 **Depuis le 2026-09-11, elle est écrite et branchée.** `POST /v1/comptes` porte
 une attestation (§2.1 bis), `asl_apple::verifier` la vérifie contre la racine
 d'Apple, et `asl_auth::decider_attestation` reçoit enfin un `atteste` qui n'est
 plus toujours faux. L'annuaire a besoin de deux réglages pour une attestation
-Apple — `--apple-app <équipe.bundle>` et `--apple-environnement
-<production|developpement>` —, parce que le `rpIdHash` se compare à l'empreinte
+Apple — `--apple-app <équipe.bundle>` et `--apple-environment
+<production|development>` —, parce que le `rpIdHash` se compare à l'empreinte
 de l'app et que l'environnement sépare la production du développement. La racine,
 elle, est la même pour tous et vit dans le binaire.
 
@@ -469,7 +469,7 @@ forme (un jeton JWS signé par Google) — `POST /v1/comptes` lui réserve déj�
 case de plate-forme, mais sa vérification n'est pas écrite, et une attestation
 Google est aujourd'hui refusée. Et toujours : **aucune capture réelle.** La
 chaîne, la forme de l'extension et l'environnement viennent de la documentation
-d'Apple ; `--attestation exigee` ne peut pas être tenue pour sûre tant qu'un vrai
+d'Apple ; `--attestation required` ne peut pas être tenue pour sûre tant qu'un vrai
 iPhone n'a pas été lu — le premier appareil légitime serait sinon le premier
 refusé.
 
@@ -865,7 +865,7 @@ GET /v1/moi
 **Une machine peut demander qui elle est et à qui elle appartient**, sur sa
 connexion authentifiée, sans rien d'autre. Les deux identifiants sont publics ;
 ce que la réponse prouve est que l'annuaire tient bien cette clé pour cette
-machine de ce compte. C'est ce qu'`asl diagnostic` affiche, et ce qui remplit
+machine de ce compte. C'est ce qu'`asl diagnose` affiche, et ce qui remplit
 le fichier d'identité d'une machine enrôlée avant que l'enrôlement ne rende le
 propriétaire (§2.0).
 

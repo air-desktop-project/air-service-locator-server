@@ -78,7 +78,7 @@ matériel Apple réel — pas de l'attestation.
 
 ## Rappels du parc et des conventions
 
-- Les bancs sont en **`ASL_ATTESTATION=facultative`** : n'importe qui peut créer un
+- Les bancs sont en **`ASL_ATTESTATION=optional`** : n'importe qui peut créer un
   compte, donc `attestation = Aucune` est **accepté**. C'est ce qui rend ce test
   possible sans iPhone. Le jour où ces annuaires deviennent racines pour de vrai,
   cette posture se resserre et un compte `Aucune` sera refusé — ce test macOS

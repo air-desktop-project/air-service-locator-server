@@ -65,16 +65,16 @@ fn materiel(quoi: &str) -> (PathBuf, Vec<u8>) {
 /// exécution.
 fn lancer(autorite: &Path, base: &Path) -> (Child, SocketAddr) {
     let mut enfant = Command::new(env!("CARGO_BIN_EXE_asl-server"))
-        .arg("--entrepot")
+        .arg("--store")
         .arg(base)
-        .arg("--certificat")
+        .arg("--certificate")
         .arg(autorite.join("banc/chaine.pem"))
-        .arg("--cle")
+        .arg("--key")
         .arg(autorite.join("banc/serveur.key"))
         .args(["--port", "0"])
         // Le banc crée des comptes : il tient donc la posture faible, et le
         // binaire l'annonce dans son journal.
-        .args(["--attestation", "facultative"])
+        .args(["--attestation", "optional"])
         .stderr(Stdio::piped())
         .spawn()
         .expect("le binaire se lance");
@@ -157,22 +157,39 @@ fn sans_arguments_il_refuse_et_montre_comment_faire() {
 
     let dit = String::from_utf8_lossy(&sortie.stderr);
     assert!(
-        dit.contains("--entrepot"),
+        dit.contains("--store"),
         "il doit nommer ce qui manque : {dit}"
     );
     assert!(
-        dit.contains("--certificat"),
+        dit.contains("--certificate"),
         "et montrer l'usage complet : {dit}"
+    );
+}
+
+#[test]
+fn l_ancienne_grammaire_est_refusee_et_traduite() {
+    // **UNE UNITÉ SYSTEMD D'AVANT 0.4.0 DOIT APPRENDRE LE NOUVEAU NOM**, et non
+    // seulement « drapeau inconnu » : la grammaire est passée en anglais, et
+    // le message reste en français.
+    let sortie = Command::new(env!("CARGO_BIN_EXE_asl-server"))
+        .args(["--entrepot", "/tmp/x"])
+        .output()
+        .expect("le binaire se lance");
+    assert!(!sortie.status.success(), "il aurait dû refuser");
+    let dit = String::from_utf8_lossy(&sortie.stderr);
+    assert!(
+        dit.contains("--entrepot n'existe plus : --store"),
+        "il doit dire le nouveau nom : {dit}"
     );
 }
 
 #[test]
 fn l_aide_sort_sans_erreur() {
     let sortie = Command::new(env!("CARGO_BIN_EXE_asl-server"))
-        .arg("--aide")
+        .arg("--help")
         .output()
         .expect("le binaire se lance");
-    assert!(sortie.status.success(), "`--aide` n'est pas une faute");
+    assert!(sortie.status.success(), "`--help` n'est pas une faute");
     let dit = String::from_utf8_lossy(&sortie.stdout);
     assert!(
         dit.contains("6630"),
