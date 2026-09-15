@@ -606,6 +606,7 @@ l'empêcherait de comprendre.
 | `GET /v1/vu` | **D'où l'annuaire voit cette connexion**, sans rien annoncer ni prouver. Voir ci-dessous. |
 | `GET /v1/version` | **La version de l'annuaire qui répond**, `{"version": "0.2.0"}`, sans rien prouver. Voir ci-dessous. |
 | `GET /v1/utilisateurs/{u}` | **Confirme qu'un identifiant existe**, et rien d'autre : ni nom, ni machines, ni services. Sert à ce qu'une faute de frappe ne produise pas une autorisation muette. |
+| `GET /v1/moi/appareils` | **Les appareils du compte de la machine qui demande**, révoqués compris — lecture seule, voie machine. Voir §3. |
 | `GET /v1/utilisateurs/{u}/machines` | **Les machines de `u` que le demandeur a le droit de voir** — les siennes si `u` est lui, sinon celles que les autorisations de `u` envers lui couvrent (`modele.md` §2.5). Voir ci-dessous. Servi aussi sur la voie machine (§3). |
 | `POST /v1/autorisations` | Accorde. Bénéficiaire `u-…`, portée, étiquette. Déclenche la notification. |
 | `GET /v1/autorisations` | Les deux sens : ce que j'ai accordé, ce qu'on m'a accordé. |
@@ -875,6 +876,29 @@ nom que le propriétaire a le droit de voir — et `GET /v1/utilisateurs/{u}/mac
 machine qui demande. C'est ce qui permet à un programme de B de partir d'un
 `u-…` que A lui a donné et d'arriver à un port, sans qu'un humain ait à
 recopier des `m-…`.
+
+```
+GET /v1/moi/appareils
+[{"appareil": "a-…", "attestation": "aucune", "revoque": false,
+  "plateforme": "macos", "modele": "MacBookPro15,2"}]
+```
+
+**Une machine peut voir les appareils du compte qui la possède** — la même
+liste que `GET /v1/appareils` rend à un appareil, révoqués compris et marqués,
+avec la description quand elle a été posée — **et rien faire dessus.** C'est
+une décision de produit, et elle abaisse à dessein la frontière entre les deux
+rôles : l'administrateur d'une machine, dans un terminal, doit pouvoir répondre
+à « quels appareils administrent ce compte ? » sans sortir un téléphone — c'est
+`asl devices`. Ce qu'elle coûte est dit : une clé de machine compromise, qui
+signe sans témoin, apprend désormais *qui* administre le compte — les `a-…`,
+les modèles. Ce qu'elle ne peut toujours pas : enrôler, révoquer, décrire —
+tout ce qui change le compte reste sur la voie appareil, sous biométrie. Une
+machine compromise ne donne pas le compte ; elle le voit.
+
+**Pour soi seulement, comme `/v1/moi`** : la liste est celle du propriétaire
+de la clé qui demande, jamais d'un compte désigné. Une machine dont la clé est
+révoquée n'a plus de propriétaire à qui poser la question — `401`, comme tout
+le reste de la voie.
 
 **L'authentification est portée par la CONNEXION, pas par la requête**, et c'est
 un effet direct du transport tenu : la clé est prouvée une fois à
