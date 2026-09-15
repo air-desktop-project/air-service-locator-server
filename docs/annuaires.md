@@ -134,12 +134,21 @@ sélective et relève du §5.
 
 | | Se synchronise ? |
 |---|---|
-| Comptes, clés publiques des appareils | Oui |
-| Machines, leurs capacités, l'empreinte de leur secret | Oui |
+| Comptes, alias publics, clés publiques des appareils | Oui |
+| Descriptions d'appareils, jetons de poussée, révocations | Oui |
+| Machines, leurs capacités, leur clé publique | Oui |
+| **Codes d'enrôlement en attente** | Oui |
 | Services **déclarés** (nom, machine, propriétaire) | Oui |
-| Autorisations accordées | Oui |
+| Autorisations accordées, et leurs révocations | Oui |
 | **Le bail — la connexion tenue, l'état `annoncé`** | **NON** |
 | **La joignabilité mesurée, les candidats d'adresse** | **NON** |
+| **Le journal** | **NON** |
+
+**Le COMMENT a son propre document : [`replication.md`](replication.md)** — le
+transport, les deux racines qui écrivent et la règle de conflit, l'horloge, le
+rattrapage, ce que le client voit pendant la propagation, et ce que chaque
+contrainte devient. Ce tableau y est repris ligne à ligne, avec la raison de
+chaque ligne.
 
 ### Pourquoi l'état vivant ne se réplique pas
 
@@ -451,6 +460,20 @@ la seconde racine y annonce, et cette écriture n'a à être ordonnée avec rien
 quorum ne sert qu'à des écritures rares et humaines — ce qui rend son coût
 négligeable et sa latence sans importance.
 
+### Le témoin n'est PAS la v1 — c'est une suite nommée
+
+**[`replication.md`](replication.md) §3.4 s'en passe, et dit pourquoi** : les
+écritures rares n'ont pas besoin d'un ordre — un identifiant à 128 bits les
+rend indépendantes —, et les seules qui touchent une unicité (l'alias, le
+couple `(machine, nom)`, la clé d'une machine) reçoivent un PERDANT plutôt
+qu'une attente, par une règle que les deux racines calculent pareil. Ce que le
+témoin achèterait est qu'un `204` sur un alias soit définitif à la seconde ; ce
+qu'il coûterait est une racine seule qui ne crée plus de compte. Le tableau
+ci-dessus reste juste sur ce qui demande un ordre ; ce qui a changé est qu'on
+le DÉPARTAGE au lieu de l'attendre. Le témoin redevient la réponse le jour où
+une unicité devra être garantie plutôt que départagée. **Proposé, à
+confirmer** (`replication.md` §10).
+
 ---
 
 ## 7. Ce qui n'est pas décidé
@@ -463,9 +486,12 @@ Rassemblé, plutôt que dispersé.
    (`modele.md` §2.1), à l'échelle des annuaires.
 2. **Les racines sont-elles joignables en IPv4 ?** Deux adresses IPv6 dans le
    code excluent un annuaire sur un réseau IPv4 (§2).
-3. **Le transport de la synchronisation.** QUIC comme le reste, probablement.
-   Un flux entre pairs de confiance n'a pas les mêmes besoins qu'une requête de
-   client.
+3. **Le transport de la synchronisation.** ~~QUIC comme le reste,
+   probablement.~~ **Fermé entre les racines** ([`replication.md`](replication.md)
+   §2) : HTTP/3 sur QUIC, sur le même port, deux connexions dont chacune est
+   ouverte par la racine qui tire, authentifiées par les clés d'identité des
+   deux. Reste ouvert entre pairs de confiance (§5), où l'autorité diffère et
+   où la sélection s'ajoute au flux.
 4. **La migration d'un compte d'un annuaire à un autre.**
 5. **L'utilisateur est-il notifié d'une exposition nouvelle qui le couvre ?**
    (§5.2) — proposé, parce qu'un droit de retrait qu'on ignore n'en est pas un.

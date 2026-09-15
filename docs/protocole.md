@@ -2,6 +2,8 @@
 
 Trois conversations, trois publics, trois rythmes. Elles partagent un transport
 en v1 — HTTPS — et ce document dit pourquoi, et à quelle condition cela cessera.
+Une quatrième, entre les deux racines, n'a qu'un public et tient ici en une
+section (§3 bis) ; son fond est dans [`replication.md`](replication.md).
 
 Le vocabulaire (candidat, bail, `annoncé` / `joignable` / `expiré`) est défini
 dans [`modele.md`](modele.md). Ce document ne le redéfinit pas.
@@ -973,6 +975,60 @@ appartiennent pas.
 C'est la raison pour laquelle les capacités ne sont pas cumulées par défaut
 (`modele.md` §2.3), et pourquoi le remplacement du secret d'une machine est une
 opération visible dans l'application plutôt qu'enfouie dans un menu.
+
+---
+
+## 3 bis. La voie entre racines — spécifiée, pas écrite
+
+Le quatrième public : **l'autre racine.** Elle n'est ni un daemon, ni une
+application, ni une machine qui cherche un port — elle est la même autorité,
+sur une autre machine, et ce qu'elle veut est TOUT ce que celle-ci a écrit.
+[`replication.md`](replication.md) porte le fond : le périmètre, la règle de
+conflit, l'horloge, le rattrapage, la sécurité. Ce qui tient ici est ce qui se
+voit sur le fil.
+
+**Le même port, le même transport.** La voie est une ressource de plus sous
+`/v1`, avec une exigence que seule une clé d'identité de racine satisfait ; il
+n'y a pas de second serveur.
+
+```
+GET  /v1/defi                                   la racine qui tire prend un défi
+POST /v1/defi        genre `n` ‖ n-… (17) ‖ signature (64)
+                                                … et prouve sa clé d'identité, comme une machine
+POST /v1/pair/preuve défi (32)  →  n-… (17) ‖ signature (64)
+                                                la racine tirée prouve la sienne en retour
+GET  /v1/pair/operations?apres=<compteur>       tout ce qu'elle a écrit après, puis la suite — SANS FIN
+GET  /v1/pair/instantane                        l'état entier, puis le compteur de coupe — fini
+GET  /v1/replication                            l'état de la voie, sur la voie machine (`Exigence::Machine`)
+```
+
+**Chaque racine OUVRE vers l'autre, et y LIT.** Deux connexions, une par sens,
+et le même code des deux côtés : c'est le lecteur qui tient son curseur, parce
+que c'est lui qui sait ce qu'il a appliqué. Elles se tiennent comme la voie du
+daemon — keepalive et inactivité de `modele.md` §4.1, reprise de §1.5.
+
+**`GET /v1/pair/operations` ne se termine jamais**, exactement comme
+`GET /v1/poussees` (§1.4) : pas de `content-length`, des cadres qui se suivent
+sans enveloppe, et le premier octet est la première opération. Une opération
+est un cadre à champs fixes — `genre (1) ‖ compteur (8) ‖ racine (17) ‖
+charge` —, dont la charge est l'enregistrement **dans le format de l'entrepôt**
+(`asl-registre`). Le genre fixe la taille de la charge ; aucune longueur ne
+vient du réseau (§2.1 bis), et il n'y a pas de second décodeur.
+
+**`410` sur `operations` veut dire « mon journal ne remonte plus jusque-là »**,
+et la réponse du tireur est `instantane`, puis `operations` à partir du compteur
+de coupe. Un instantané est une suite d'opérations, pas un autre format.
+
+**Un genre `n` sur `POST /v1/defi`, et rien d'autre ne change à ce verbe.**
+L'identifiant présenté est celui que la clé d'identité de l'autre racine donne
+(`replication.md` §2.2), et la signature se vérifie contre la clé lue de
+`--peer-key`, pas contre l'entrepôt. Un `n-…` qui n'est pas celui du pair
+configuré rend le refus d'une clé inconnue.
+
+**Une opération illisible ferme la connexion ; elle ne se saute pas.** Sauter,
+c'est diverger en silence. Le curseur n'avance pas, l'exploitant le lit dans son
+journal, et la reprise réessaie la même opération — qui échouera pareil, et se
+verra pareil, jusqu'à ce qu'un humain regarde.
 
 ---
 
