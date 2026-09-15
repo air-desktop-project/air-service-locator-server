@@ -1591,6 +1591,148 @@ fn un_tampon_trop_petit_se_dit_pour_une_machine_rendue() {
     );
 }
 
+// ── Ce qu'une autorisation donne à voir : une machine ───────────────────────
+
+use asl_api::corps::MachineVue;
+
+/// Encode une machine vue, et rend les octets.
+fn encoder_vue(quoi: &MachineVue<'_>) -> Vec<u8> {
+    let mut sortie = vec![0_u8; CORPS_MAX];
+    let combien = quoi.encoder(&mut sortie).expect("elle s'encode");
+    sortie.truncate(combien);
+    sortie
+}
+
+/// Une machine vue, reproductible.
+fn une_machine_vue(nom: &str) -> MachineVue<'_> {
+    MachineVue {
+        machine: Identifiant::depuis_entropie(Genre::Machine, [0x66; 16]),
+        nom,
+    }
+}
+
+#[test]
+fn une_machine_vue_fait_l_aller_et_le_retour() {
+    for nom in ["grenier", "nas", "Mac « du bureau » 🖥"] {
+        let avant = une_machine_vue(nom);
+        let octets = encoder_vue(&avant);
+        let texte = core::str::from_utf8(&octets).unwrap();
+        assert!(
+            texte.ends_with(&format!(r#","nom":"{nom}"}}"#))
+                && texte.starts_with(r#"{"machine":"m-"#),
+            "{texte}"
+        );
+        // **L'IDENTIFIANT ET LE NOM, ET RIEN D'AUTRE** : ni capacités, ni clé.
+        assert!(
+            !texte.contains("capacites") && !texte.contains("cle"),
+            "{texte}"
+        );
+        let apres = MachineVue::decoder(&octets).expect("elle se relit");
+        assert_eq!(apres, avant, "{nom}");
+        assert_eq!(encoder_vue(&apres), octets, "écriture non canonique");
+    }
+}
+
+#[test]
+fn une_machine_vue_refuse_ce_qu_il_faut() {
+    let bon = encoder_vue(&une_machine_vue("grenier"));
+    let texte = core::str::from_utf8(&bon).unwrap().to_owned();
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0x66; 16]);
+
+    // Champs manquants, nommés.
+    assert_eq!(
+        MachineVue::decoder(texte.replacen(r#","nom":"grenier""#, "", 1).as_bytes()),
+        Err(Erreur::ChampManquant { nom: "nom" })
+    );
+    assert_eq!(
+        MachineVue::decoder(
+            texte
+                .replacen(
+                    &format!(r#""machine":"{}","#, machine.texte().as_str()),
+                    "",
+                    1
+                )
+                .as_bytes()
+        ),
+        Err(Erreur::ChampManquant { nom: "machine" })
+    );
+    // En double — chacun des deux champs —, inconnu, mauvais genre, nom vide,
+    // nom trop long.
+    for morceau in [
+        format!(r#""machine":"{}""#, machine.texte().as_str()),
+        r#""nom":"grenier""#.to_owned(),
+    ] {
+        let double = texte.replacen(&morceau, &format!("{morceau},{morceau}"), 1);
+        assert!(
+            matches!(
+                MachineVue::decoder(double.as_bytes()),
+                Err(Erreur::ChampEnDouble { .. })
+            ),
+            "{double}"
+        );
+    }
+    assert!(matches!(
+        MachineVue::decoder(
+            texte
+                .replacen(r#"{"machine":"#, r#"{"cle":"x","machine":"#, 1)
+                .as_bytes()
+        ),
+        Err(Erreur::ChampInconnu { .. })
+    ));
+    let appareil = Identifiant::depuis_entropie(Genre::Appareil, [0x66; 16]);
+    assert!(matches!(
+        MachineVue::decoder(
+            texte
+                .replacen(machine.texte().as_str(), appareil.texte().as_str(), 1)
+                .as_bytes()
+        ),
+        Err(Erreur::IdentifiantInvalide { .. })
+    ));
+    assert_eq!(
+        MachineVue::decoder(
+            texte
+                .replacen(r#""nom":"grenier""#, r#""nom":"""#, 1)
+                .as_bytes()
+        ),
+        Err(Erreur::NomVide)
+    );
+    let trop = "n".repeat(NOM_MACHINE_MAX + 1);
+    assert_eq!(
+        MachineVue::decoder(
+            texte
+                .replacen(r#""nom":"grenier""#, &format!(r#""nom":"{trop}""#), 1)
+                .as_bytes()
+        ),
+        Err(Erreur::NomTropLong {
+            obtenue: NOM_MACHINE_MAX + 1
+        })
+    );
+    // Les formes cassées.
+    for brut in [
+        b"".as_slice(),
+        b"[]",
+        b"{",
+        br#"{"machine":}"#,
+        br#"{"machine" "x"}"#,
+    ] {
+        assert!(MachineVue::decoder(brut).is_err(), "{brut:?}");
+    }
+    let mut trop = bon.clone();
+    trop.extend_from_slice(b"!!!");
+    assert!(MachineVue::decoder(&trop).is_err());
+    let mal_ferme = texte.replacen(r#""nom":"grenier"}"#, r#""nom":"grenier" x"#, 1);
+    assert!(
+        MachineVue::decoder(mal_ferme.as_bytes()).is_err(),
+        "{mal_ferme}"
+    );
+    // Un tampon trop petit se dit.
+    let mut sortie = [0_u8; 8];
+    assert_eq!(
+        une_machine_vue("grenier").encoder(&mut sortie),
+        Err(Erreur::TamponTropPetit)
+    );
+}
+
 // ── Ce qu'une liste d'appareils rend ────────────────────────────────────────
 
 /// Encode un appareil rendu, et rend les octets.

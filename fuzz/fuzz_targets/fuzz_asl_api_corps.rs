@@ -32,7 +32,7 @@ use libfuzzer_sys::fuzz_target;
 use asl_api::corps::{
     AppareilRendu, AutorisationRendue, CLE_APPAREIL_OCTETS, COMPTE_CORPS_MAX, CORPS_MAX,
     CreationDeCompte, DeclarationMachine, DemandeAlias, DemandeAutorisation, DescriptionAppareil,
-    MachineRendue, NOM_MACHINE_MAX, PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
+    MachineRendue, MachineVue, NOM_MACHINE_MAX, PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
 };
 
 /// Ce caractère change-t-il l'affichage de ce qui l'entoure ?
@@ -183,6 +183,34 @@ fuzz_target!(|octets: &[u8]| {
         let ecrit = &sortie[..combien];
         let relue = MachineRendue::decoder(ecrit).expect("ce qu'on écrit se relit");
         assert_eq!(relue, machine, "l'aller-retour a changé la machine");
+        let mut encore = [0_u8; CORPS_MAX];
+        let deux = relue.encoder(&mut encore).expect("elle se réécrit");
+        assert_eq!(&encore[..deux], ecrit, "l'écriture n'est pas canonique");
+    }
+
+    // ── CE QU'UNE AUTORISATION DONNE À VOIR : UNE MACHINE ───────────────────
+    if let Ok(vue) = MachineVue::decoder(octets) {
+        for caractere in vue.nom.chars() {
+            assert!(
+                caractere != '"'
+                    && caractere != '\\'
+                    && !caractere.is_control()
+                    && !invisible(caractere),
+                "un nom vu porte {caractere:?}, que l'encodeur ne saurait pas écrire"
+            );
+        }
+        assert!(
+            !vue.nom.is_empty() && vue.nom.len() <= NOM_MACHINE_MAX,
+            "un nom vu de {} octets a été accepté",
+            vue.nom.len()
+        );
+        let mut sortie = [0_u8; CORPS_MAX];
+        let combien = vue
+            .encoder(&mut sortie)
+            .expect("ce qui a été compris se réécrit");
+        let ecrit = &sortie[..combien];
+        let relue = MachineVue::decoder(ecrit).expect("ce qu'on écrit se relit");
+        assert_eq!(relue, vue, "l'aller-retour a changé la machine vue");
         let mut encore = [0_u8; CORPS_MAX];
         let deux = relue.encoder(&mut encore).expect("elle se réécrit");
         assert_eq!(&encore[..deux], ecrit, "l'écriture n'est pas canonique");

@@ -1608,7 +1608,156 @@ async fn enroler(
     )
     .await;
     assert_eq!(statut, b"200", "{}", String::from_utf8_lossy(&rendu));
+    // **LA MACHINE ET SON PROPRIÉTAIRE** (`protocole.md` §2.0) : la machine ne
+    // connaissait que le code, et repart en sachant pour qui elle agit.
+    let proprietaire =
+        Identifiant::analyser(&valeur_json(&rendu, "proprietaire")).expect("un propriétaire");
+    assert_eq!(proprietaire.genre(), Genre::Utilisateur);
     Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine")
+}
+
+#[tokio::test]
+async fn une_autorisation_donne_a_voir_les_machines_et_une_machine_sait_qui_elle_est() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // `modele.md` §2.5 : « tout mon compte » veut dire tout, les machines
+    // comprises. Bob ne voit rien des machines d'Alice — une liste vide, pas un
+    // refus — tant qu'elle ne lui a rien accordé ; avec « tout », il les voit
+    // toutes, par son téléphone comme par sa machine de lecture. Et une machine
+    // sait dire qui elle est et à qui elle appartient.
+    let (autorite, racine, chaine, cle) = materiel("machines-vues");
+    let (base, fichier) = entrepot("machines-vues");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    // ── ALICE : DEUX MACHINES, DONT UNE QUI NE SERT RIEN ────────────────────
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA3).await;
+    let mut machines_a = Vec::new();
+    for (flux, corps) in [
+        (8_u64, &br#"{"nom":"grenier","capacites":["annonce"]}"#[..]),
+        (12, &br#"{"nom":"nas","capacites":[]}"#[..]),
+    ] {
+        let (statut, rendu) = poster(
+            &mut alice,
+            flux,
+            b"/v1/machines",
+            corps,
+            b"application/json",
+        )
+        .await;
+        assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+        machines_a
+            .push(Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine"));
+    }
+
+    // ── BOB : UN COMPTE, UNE MACHINE DE LECTURE ENRÔLÉE ─────────────────────
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, _, _) = creer_un_compte(&mut bob, 0, 0xB3).await;
+    let (statut, rendu) = poster(
+        &mut bob,
+        8,
+        b"/v1/machines",
+        br#"{"nom":"portable","capacites":["lecture"]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let machine_b = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let code_b = valeur_json(&rendu, "code");
+    let mut chercheur = connecter(&racine, adresse).await;
+    let secrete_b = asl_cle::CleSecrete::depuis_entropie([0xD3; 32]);
+    assert_eq!(
+        enroler(&mut chercheur, 0, &code_b, &secrete_b).await,
+        machine_b
+    );
+    authentifier(&mut chercheur, machine_b, &secrete_b, 12, 16).await;
+
+    // ── LA MACHINE SAIT QUI ELLE EST ────────────────────────────────────────
+    ams_quic_client::envoyer_une_requete(&mut chercheur, 20, 17, b"/v1/moi", None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut chercheur, 20).await;
+    assert_eq!(
+        champ(&champs(chercheur.recu(20)), b":status"),
+        Some(&b"200"[..])
+    );
+    assert_eq!(
+        rendu,
+        format!(
+            r#"{{"machine":"{}","proprietaire":"{}"}}"#,
+            machine_b.texte(),
+            compte_b.texte()
+        )
+        .into_bytes()
+    );
+    // Et un appareil, lui, n'a pas ce verbe : il sait déjà qui il est.
+    ams_quic_client::envoyer_une_requete(&mut bob, 12, 17, b"/v1/moi", None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut bob, 12).await;
+    assert_eq!(champ(&champs(bob.recu(12)), b":status"), Some(&b"401"[..]));
+
+    // ── SANS ARÊTE : UNE LISTE VIDE, ET NON UN REFUS (C9) ───────────────────
+    let cible = format!("/v1/utilisateurs/{}/machines", compte_a.texte());
+    for (client, flux) in [(&mut bob, 16_u64), (&mut chercheur, 24)] {
+        ams_quic_client::envoyer_une_requete(client, flux, 17, cible.as_bytes(), None, b"").await;
+        let rendu = ams_quic_client::attendre_la_reponse(client, flux).await;
+        assert_eq!(
+            champ(&champs(client.recu(flux)), b":status"),
+            Some(&b"200"[..])
+        );
+        assert_eq!(
+            rendu, b"[]",
+            "sans arête, Bob n'apprend rien du parc d'Alice"
+        );
+    }
+
+    // ── ALICE ACCORDE « TOUT LE COMPTE » ────────────────────────────────────
+    let demande = format!(
+        r#"{{"a":"{}","portee":"tout","etiquette":"bob"}}"#,
+        compte_b.texte()
+    );
+    let (statut, _) = poster(
+        &mut alice,
+        16,
+        b"/v1/autorisations",
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+
+    // ── ET BOB VOIT LES DEUX MACHINES, SUR LES DEUX VOIES ───────────────────
+    for (client, flux) in [(&mut bob, 20_u64), (&mut chercheur, 28)] {
+        ams_quic_client::envoyer_une_requete(client, flux, 17, cible.as_bytes(), None, b"").await;
+        let rendu = ams_quic_client::attendre_la_reponse(client, flux).await;
+        assert_eq!(
+            champ(&champs(client.recu(flux)), b":status"),
+            Some(&b"200"[..])
+        );
+        let texte = String::from_utf8_lossy(&rendu).into_owned();
+        for (machine, nom) in machines_a.iter().zip(["grenier", "nas"]) {
+            assert!(
+                texte.contains(&format!(
+                    r#"{{"machine":"{}","nom":"{nom}"}}"#,
+                    machine.texte()
+                )),
+                "{texte}"
+            );
+        }
+        // **L'IDENTIFIANT ET LE NOM, ET RIEN D'AUTRE** : ni capacités, ni clé.
+        assert!(
+            !texte.contains("capacites") && !texte.contains("\"cle\""),
+            "{texte}"
+        );
+    }
+
+    // ── ALICE VOIT LES SIENNES, SANS ARÊTE ──────────────────────────────────
+    ams_quic_client::envoyer_une_requete(&mut alice, 20, 17, cible.as_bytes(), None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut alice, 20).await;
+    let texte = String::from_utf8_lossy(&rendu).into_owned();
+    assert_eq!(texte.matches("\"machine\":").count(), 2, "{texte}");
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
 }
 
 #[tokio::test]

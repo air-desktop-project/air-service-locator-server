@@ -253,6 +253,22 @@ pub enum Besoin<'a> {
     ///
     /// `protocole.md` §2.2 : « ce que j'ai accordé, ce qu'on m'a accordé ».
     MesAutorisations,
+    /// Les machines de cet utilisateur que le demandeur a le droit de voir.
+    ///
+    /// # CE QU'UNE AUTORISATION DONNE À VOIR — `modele.md` §2.5
+    ///
+    /// L'étage 3 rassemble TOUTES les machines de `u` et les arêtes reçues par
+    /// le compte qui demande ; c'est ici, par
+    /// `asl_auth::decider_machine_visible`, que chacune est gardée ou
+    /// écartée. Sans arête, la liste est vide — vide, pas `403` ni `404` : un
+    /// tiers n'apprend ni le parc, ni qu'il n'y a pas droit (C9). Servi sur la
+    /// voie appareil et sur la voie machine.
+    MachinesDe {
+        /// Le compte dont on demande les machines.
+        compte: Identifiant,
+    },
+    /// Qui je suis, et à qui j'appartiens — sur la voie machine.
+    Moi,
     /// Ouvrir le flux par lequel les verdicts arriveront.
     ///
     /// # IL NE DEMANDE RIEN À L'ÉTAGE 3, ET C'EST POURQUOI IL EST ICI
@@ -472,6 +488,19 @@ pub struct Resolution {
     pub annonce: Option<alloc::vec::Vec<u8>>,
 }
 
+/// Une machine rassemblée pour `GET /v1/utilisateurs/{u}/machines`, telle que
+/// l'étage 3 la remonte : de quoi décider, et de quoi rendre.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineRassemblee {
+    /// La machine.
+    pub machine: Identifiant,
+    /// Les services qu'elle porte — ce qu'une portée « un service » nomme.
+    pub services: alloc::vec::Vec<Identifiant>,
+    /// Son objet `{"machine":…,"nom":…}`, déjà encodé par l'étage 3, qui tient
+    /// le nom.
+    pub encodee: alloc::vec::Vec<u8>,
+}
+
 /// Ce que l'étage 3 a trouvé.
 /// **ELLE N'EST PLUS `Copy`**, et c'est la résolution qui l'en a privée : ses
 /// La clé d'un pair, de la courbe que son genre impose.
@@ -610,8 +639,40 @@ pub enum Trouvaille {
         /// Quand il cesse de valoir, en millisecondes d'époque.
         expire_a: u64,
     },
-    /// La clé a été liée à cette machine.
-    Enrolee(Identifiant),
+    /// La clé a été liée à cette machine, qui appartient à ce compte.
+    ///
+    /// **Le propriétaire est rendu avec** (`protocole.md` §2.0) : la machine
+    /// ne connaissait ni l'un ni l'autre, et elle doit pouvoir dire pour qui
+    /// elle agit sans repasser par l'annuaire.
+    Enrolee {
+        /// La machine.
+        machine: Identifiant,
+        /// Son propriétaire.
+        proprietaire: Identifiant,
+    },
+    /// Les machines d'un utilisateur, telles que l'étage 3 les a rassemblées,
+    /// **avant toute décision** — c'est [`repondre`] qui écarte.
+    MachinesDe {
+        /// Le compte qui demande : celui de l'appareil, ou le propriétaire de
+        /// la machine, selon la voie.
+        demandeur: Identifiant,
+        /// Le demandeur peut-il lire ? Toujours vrai pour un appareil ; la
+        /// capacité `lecture` pour une machine.
+        lecture: bool,
+        /// Le compte dont on a rassemblé les machines.
+        proprietaire: Identifiant,
+        /// Chacune de ses machines, avec ses services et son objet déjà encodé.
+        machines: alloc::vec::Vec<MachineRassemblee>,
+        /// Les arêtes reçues par le demandeur, révoquées comprises.
+        autorisations: alloc::vec::Vec<asl_auth::Autorisation>,
+    },
+    /// Qui est cette machine, et à qui elle appartient.
+    Moi {
+        /// La machine de cette connexion.
+        machine: Identifiant,
+        /// Son propriétaire.
+        proprietaire: Identifiant,
+    },
     /// Une autorisation a été accordée.
     AutorisationCreee(Identifiant),
     /// C'est fait, et il n'y a rien à rendre.
@@ -831,8 +892,16 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         // **`MachineLecture` EST TENUE DÈS MAINTENANT** : la connexion sait si
         // une machine a prouvé sa clé. Sans preuve, c'est `401` — et cette
         // fois le mot est juste, puisque `/v1/defi` attend bel et bien derrière.
-        Exigence::MachineLecture | Exigence::MachineAnnonce => {
+        Exigence::MachineLecture | Exigence::MachineAnnonce | Exigence::Machine => {
             if session.machine().is_none() {
+                return Besoin::Deja(StatusCode::UNAUTHORIZED);
+            }
+        }
+        // **L'UNE OU L'AUTRE VOIE**, et rien d'autre : la capacité de lecture
+        // d'une machine se lit à l'étage 3, et la décision l'exige
+        // (`asl_auth::decider_machine_visible`).
+        Exigence::AppareilOuMachineLecture => {
+            if session.appareil().is_none() && session.machine().is_none() {
                 return Besoin::Deja(StatusCode::UNAUTHORIZED);
             }
         }
@@ -851,6 +920,8 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
     match resolu.ressource {
         Ressource::AliasResolu { alias } => Besoin::CompteParAlias(alias.as_str()),
         Ressource::Utilisateur { compte } => Besoin::Compte(compte),
+        Ressource::MachinesUtilisateur { compte } => Besoin::MachinesDe { compte },
+        Ressource::Moi => Besoin::Moi,
         Ressource::Annonce => Besoin::Annoncer,
         Ressource::Ou { machine, service } => Besoin::Ou {
             machine,
@@ -1305,6 +1376,59 @@ pub fn repondre<'o>(
             Trouvaille::Autorisations(quoi) => composer_une_liste(quoi, sortie),
             _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
         },
+        // **ON RASSEMBLE TOUT, ET C'EST ICI QU'ON ÉCARTE**, machine par
+        // machine. Ce qui reste est une liste — vide si rien ne passe, et
+        // vide aussi si rien n'a été trouvé : les deux se ressemblent parce
+        // qu'elles doivent (C9).
+        Besoin::MachinesDe { .. } => match trouvaille {
+            Trouvaille::MachinesDe {
+                demandeur,
+                lecture,
+                proprietaire,
+                machines,
+                autorisations,
+            } => {
+                let visibles: alloc::vec::Vec<alloc::vec::Vec<u8>> = machines
+                    .iter()
+                    .filter(|quelle| {
+                        asl_auth::decider_machine_visible(
+                            *demandeur,
+                            *lecture,
+                            *proprietaire,
+                            quelle.machine,
+                            &quelle.services,
+                            autorisations,
+                        ) == asl_auth::Decision::Servir
+                    })
+                    .map(|quelle| quelle.encodee.clone())
+                    .collect();
+                composer_une_liste(&visibles, sortie)
+            }
+            _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
+        },
+        Besoin::Moi => match trouvaille {
+            Trouvaille::Moi {
+                machine,
+                proprietaire,
+            } => {
+                let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
+                corps.pousser(br#"{"machine":""#);
+                corps.pousser(machine.texte().as_str().as_bytes());
+                corps.pousser(br#"","proprietaire":""#);
+                corps.pousser(proprietaire.texte().as_str().as_bytes());
+                corps.pousser(br#""}"#);
+                composer(StatusCode::OK, JSON_MEDIA, corps.rendu(), sortie)
+            }
+            // Une machine authentifiée que l'entrepôt ne retrouve pas : c'est
+            // une panne de notre côté, et `500` est le mot juste — cette
+            // ressource exige une preuve, un inconnu ne l'atteint pas.
+            _ => composer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::INTERNAL_SERVER_ERROR),
+                sortie,
+            ),
+        },
 
         // ── CE QUI CRÉE, ET CE QUI DÉPENSE UN DÉFI ──────────────────────
         //
@@ -1353,10 +1477,15 @@ pub fn repondre<'o>(
         Besoin::Enroler { .. } => {
             session.consommer_le_defi();
             match trouvaille {
-                Trouvaille::Enrolee(machine) => {
+                Trouvaille::Enrolee {
+                    machine,
+                    proprietaire,
+                } => {
                     let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
                     corps.pousser(br#"{"machine":""#);
                     corps.pousser(machine.texte().as_str().as_bytes());
+                    corps.pousser(br#"","proprietaire":""#);
+                    corps.pousser(proprietaire.texte().as_str().as_bytes());
                     corps.pousser(br#""}"#);
                     // **`200`, ET NON `201`** : rien n'a été créé. La machine
                     // existait ; ce qui a changé est qu'elle a désormais une clé.
@@ -3776,9 +3905,11 @@ mod creations {
     };
     use asl_id::{Genre, Identifiant};
 
+    use alloc::vec;
+
     use super::{
-        Besoin, CLE_SEULE_OCTETS, CleTrouvee, ENROLEMENT_CORPS_OCTETS, POSSESSION_APPAREIL_OCTETS,
-        Session, Trouvaille, besoin, repondre,
+        Besoin, CLE_SEULE_OCTETS, CleTrouvee, ENROLEMENT_CORPS_OCTETS, MachineRassemblee,
+        POSSESSION_APPAREIL_OCTETS, Session, Trouvaille, besoin, repondre,
     };
 
     fn liaison() -> LiaisonDeCanal {
@@ -4406,6 +4537,170 @@ mod creations {
         }
     }
 
+    // ── Ce qu'une autorisation donne à voir : les machines d'un utilisateur ─
+
+    /// Une session dont une machine a prouvé la clé.
+    fn session_de_machine() -> Session {
+        let mut session = Session::new(liaison());
+        session.pair = Some(un(Genre::Machine, 8));
+        session
+    }
+
+    /// Une machine rassemblée, avec ces services.
+    fn rassemblee(graine: u8, services: &[Identifiant]) -> MachineRassemblee {
+        let machine = un(Genre::Machine, graine);
+        MachineRassemblee {
+            machine,
+            services: services.to_vec(),
+            encodee: alloc::format!(
+                r#"{{"machine":"{}","nom":"m{graine}"}}"#,
+                machine.texte().as_str()
+            )
+            .into_bytes(),
+        }
+    }
+
+    #[test]
+    fn les_machines_d_un_utilisateur_se_demandent_sur_les_deux_voies() {
+        let u = un(Genre::Utilisateur, 4);
+        let cible = alloc::format!("/v1/utilisateurs/{}/machines", u.texte());
+        // Un appareil, une machine : les deux passent.
+        for session in [session_d_appareil(), session_de_machine()] {
+            assert_eq!(
+                besoin(&session, &tete(b"GET", cible.as_bytes()), b""),
+                Besoin::MachinesDe { compte: u }
+            );
+        }
+        // Une connexion nue, non.
+        assert_eq!(
+            besoin(
+                &Session::new(liaison()),
+                &tete(b"GET", cible.as_bytes()),
+                b""
+            ),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn la_liste_des_machines_est_ecartee_ici_machine_par_machine() {
+        // **ON RASSEMBLE TOUT, ET C'EST ICI QU'ON ÉCARTE.** Alice a trois
+        // machines ; Bob tient une arête « un service » qui n'en nomme qu'une.
+        let alice = un(Genre::Utilisateur, 1);
+        let bob = un(Genre::Utilisateur, 2);
+        let service = un(Genre::Service, 5);
+        let machines = vec![
+            rassemblee(0x10, &[service]),
+            rassemblee(0x11, &[]),
+            rassemblee(0x12, &[un(Genre::Service, 6)]),
+        ];
+        let arete = asl_auth::Autorisation::nouvelle(
+            alice,
+            bob,
+            asl_auth::Portee::UnService(service),
+            false,
+        )
+        .expect("une arête");
+        let mut session = session_d_appareil();
+        let quoi = Besoin::MachinesDe { compte: alice };
+
+        let (statut, rendu) = rendre(
+            &mut session,
+            &quoi,
+            &Trouvaille::MachinesDe {
+                demandeur: bob,
+                lecture: true,
+                proprietaire: alice,
+                machines: machines.clone(),
+                autorisations: vec![arete],
+            },
+        );
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(
+            rendu,
+            alloc::format!("[{}]", core::str::from_utf8(&machines[0].encodee).unwrap())
+                .into_bytes(),
+            "seule la machine qui porte le service"
+        );
+
+        // Alice elle-même les voit toutes, sans arête.
+        let (_, rendu) = rendre(
+            &mut session,
+            &quoi,
+            &Trouvaille::MachinesDe {
+                demandeur: alice,
+                lecture: true,
+                proprietaire: alice,
+                machines: machines.clone(),
+                autorisations: vec![],
+            },
+        );
+        let texte = alloc::string::String::from_utf8_lossy(&rendu).into_owned();
+        assert_eq!(texte.matches("\"machine\":").count(), 3, "{texte}");
+
+        // **SANS ARÊTE, UNE LISTE VIDE — ET NON UN REFUS** (C9). Et une machine
+        // sans lecture ne voit rien non plus.
+        for (demandeur, lecture) in [(bob, true), (alice, false)] {
+            let (statut, rendu) = rendre(
+                &mut session,
+                &quoi,
+                &Trouvaille::MachinesDe {
+                    demandeur,
+                    lecture,
+                    proprietaire: alice,
+                    machines: machines.clone(),
+                    autorisations: vec![],
+                },
+            );
+            assert_eq!(statut, StatusCode::OK);
+            assert_eq!(rendu, b"[]");
+        }
+        // Et rien trouvé : la même liste vide.
+        assert_eq!(rendre(&mut session, &quoi, &Trouvaille::Rien).1, b"[]");
+    }
+
+    #[test]
+    fn moi_exige_une_machine_et_rend_qui_elle_est() {
+        assert_eq!(
+            besoin(&session_de_machine(), &tete(b"GET", b"/v1/moi"), b""),
+            Besoin::Moi
+        );
+        // **UN APPAREIL N'EST PAS UNE MACHINE** : lui, il sait déjà qui il est.
+        for session in [session_d_appareil(), Session::new(liaison())] {
+            assert_eq!(
+                besoin(&session, &tete(b"GET", b"/v1/moi"), b""),
+                Besoin::Deja(StatusCode::UNAUTHORIZED)
+            );
+        }
+
+        let machine = un(Genre::Machine, 8);
+        let proprietaire = un(Genre::Utilisateur, 4);
+        let mut session = session_de_machine();
+        let (statut, rendu) = rendre(
+            &mut session,
+            &Besoin::Moi,
+            &Trouvaille::Moi {
+                machine,
+                proprietaire,
+            },
+        );
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(
+            rendu,
+            alloc::format!(
+                r#"{{"machine":"{}","proprietaire":"{}"}}"#,
+                machine.texte().as_str(),
+                proprietaire.texte().as_str()
+            )
+            .into_bytes()
+        );
+        // Une machine authentifiée que l'entrepôt ne retrouve pas : une panne.
+        assert_eq!(
+            rendre(&mut session, &Besoin::Moi, &Trouvaille::Rien).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
     // ── Modifier une machine ────────────────────────────────────────────────
 
     #[test]
@@ -4642,9 +4937,27 @@ mod creations {
         let quoi = besoin(&session, &tete(b"POST", b"/v1/enrolement"), &corps);
         let machine = un(Genre::Machine, 7);
 
-        let (statut, rendu) = rendre(&mut session, &quoi, &Trouvaille::Enrolee(machine));
+        let proprietaire = un(Genre::Utilisateur, 4);
+        let (statut, rendu) = rendre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Enrolee {
+                machine,
+                proprietaire,
+            },
+        );
         assert_eq!(statut, StatusCode::OK);
-        assert!(alloc::string::String::from_utf8_lossy(&rendu).contains(machine.texte().as_str()));
+        // **LA MACHINE ET SON PROPRIÉTAIRE** : elle ne connaissait ni l'un ni
+        // l'autre, et doit pouvoir dire pour qui elle agit.
+        assert_eq!(
+            rendu,
+            alloc::format!(
+                r#"{{"machine":"{}","proprietaire":"{}"}}"#,
+                machine.texte().as_str(),
+                proprietaire.texte().as_str()
+            )
+            .into_bytes()
+        );
 
         // Et le défi est dépensé, comme pour toute preuve.
         assert_eq!(

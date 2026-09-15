@@ -340,9 +340,10 @@ impl Cible {
 /// inter-comptes est `GET /v1/ou`, qui passe par [`decider_resolution`] et ses
 /// autorisations.
 ///
-/// Les confondre donnerait à une autorisation de LECTURE — accordée pour joindre
-/// un service — le droit d'énumérer le parc de celui qui l'a accordée. **Ce n'est
-/// pas ce qu'il a accordé.**
+/// Les confondre donnerait à une autorisation de LECTURE le droit de lire les
+/// services d'une machine par la porte de l'administration. **Ce qu'une
+/// autorisation donne à voir a son propre verbe et sa propre décision** :
+/// `GET /v1/utilisateurs/{u}/machines` et [`decider_machine_visible`].
 // `const fn` serait plus joli, et `PartialEq` ne l'est pas encore : la
 // comparaison de deux identifiants passe par un `==` ordinaire.
 #[must_use]
@@ -352,6 +353,59 @@ pub fn decider_services_de_machine(demandeur: Identifiant, proprietaire: Identif
     } else {
         Decision::Refuser
     }
+}
+
+/// Ce demandeur peut-il voir cette machine dans la liste d'un utilisateur ?
+///
+/// # CE QU'UNE AUTORISATION DONNE À VOIR — `modele.md` §2.5
+///
+/// « Tout mon compte » veut dire tout : les services, et les machines qui les
+/// portent. La liste `GET /v1/utilisateurs/{u}/machines` se calcule ICI, machine
+/// par machine, depuis les arêtes du demandeur — jamais depuis l'identifiant
+/// qu'il désigne (C10) :
+///
+/// 1. **Ses propres machines passent** : `u` égal au demandeur rend ses
+///    machines, comme `GET /v1/machines` mais sous une autre forme.
+/// 2. **Une arête vivante de `u` vers le demandeur ouvre ce qu'elle nomme** :
+///    « tout le compte » → chaque machine ; « une machine » → elle ; « un
+///    service » → la machine qui le porte, et c'est pourquoi les services de la
+///    machine examinée sont passés en fait.
+/// 3. **Sinon, non** — et l'appelant rend une liste vide, jamais un refus qui
+///    dirait quelque chose (C9).
+///
+/// # LA LECTURE EST EXIGÉE DU DEMANDEUR, COMME POUR UNE RÉSOLUTION
+///
+/// Sur la voie machine, une machine sans capacité `lecture` ne voit rien, pas
+/// même les machines de son propre compte : elle n'a aucune raison d'interroger
+/// l'annuaire. Sur la voie appareil, l'application lit toujours ; l'appelant
+/// passe `lecture = true`.
+///
+/// # Ce que la liste d'autorisations doit être
+///
+/// Celles que le MAGASIN a trouvées pour ce bénéficiaire. Cette fonction ne les
+/// cherche pas : elle les examine, et une autorisation révoquée qui s'y
+/// trouverait est refusée ici.
+#[must_use]
+pub fn decider_machine_visible(
+    demandeur: Identifiant,
+    lecture: bool,
+    proprietaire: Identifiant,
+    machine: Identifiant,
+    services: &[Identifiant],
+    autorisations: &[Autorisation],
+) -> Decision {
+    if !lecture {
+        return Decision::Refuser;
+    }
+    if demandeur == proprietaire {
+        return Decision::Servir;
+    }
+    for autorisation in autorisations {
+        if autorisation.couvre_la_machine(demandeur, proprietaire, machine, services) {
+            return Decision::Servir;
+        }
+    }
+    Decision::Refuser
 }
 
 /// Cette machine peut-elle annoncer un service ?
@@ -424,6 +478,27 @@ impl Autorisation {
             Portee::ToutLeCompte => true,
             Portee::UneMachine(machine) => machine == cible.machine,
             Portee::UnService(service) => service == cible.service,
+        }
+    }
+
+    /// Cette autorisation donne-t-elle à voir cette machine à ce bénéficiaire ?
+    ///
+    /// Les deux bouts sont vérifiés, comme dans [`Autorisation::couvre`] ; puis
+    /// la portée : tout le compte, cette machine, ou un service qu'elle porte.
+    fn couvre_la_machine(
+        &self,
+        beneficiaire: Identifiant,
+        proprietaire: Identifiant,
+        machine: Identifiant,
+        services: &[Identifiant],
+    ) -> bool {
+        if self.revoquee || self.a != beneficiaire || self.par != proprietaire {
+            return false;
+        }
+        match self.portee {
+            Portee::ToutLeCompte => true,
+            Portee::UneMachine(quelle) => quelle == machine,
+            Portee::UnService(quel) => services.contains(&quel),
         }
     }
 }
