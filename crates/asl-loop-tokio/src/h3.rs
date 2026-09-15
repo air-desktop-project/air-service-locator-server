@@ -37,10 +37,10 @@ use ams_proto_http::RequestHead;
 use ams_proto_quic::StreamId;
 use ams_quic_tls::Connection;
 use asl_api::corps::PlateformeAttestation;
-use asl_cle::{CleAppareil, ClePublique, Defi};
+use asl_cle::{CleAppareil, ClePublique, CleSecrete, Defi};
 use asl_id::Identifiant;
 use asl_session::{Besoin, CleTrouvee, Resolution, Session, Trouvaille};
-use asl_store::Entrepot;
+use asl_store::{Entrepot, Rattrapage};
 
 use crate::sonde::{self, Verdict};
 use crate::vivier::Vivier;
@@ -54,6 +54,128 @@ struct ParConnexion {
     conducteur: Http3,
     /// Ce qui décide des réponses de CETTE connexion.
     session: Session,
+    /// Le flux que l'autre racine tient sur cette connexion, s'il y en a un.
+    ///
+    /// **UN SEUL**, et `asl-session` rend `409` au second : ce qui est poussé
+    /// sur une connexion va à SON flux, et deux flux avec deux curseurs y
+    /// liraient la même chose.
+    flux_pair: Option<FluxPair>,
+}
+
+/// Un flux de la voie entre racines, tenu sur une connexion : les opérations
+/// sans fin, ou l'instantané jusqu'à son cadre de fin.
+///
+/// # CE QUI EST EN ATTENTE, ET POURQUOI IL Y A UNE ATTENTE
+///
+/// `ams_quic_tls::Connection::write` ne prend pas forcément tout : ce qui
+/// attend d'être émis est borné (C3), et le reste se réécrit quand la place
+/// se libère. `ams_h3::Http3::pousser` ignore ce reste — une poussée de
+/// verdict tient dans la place —, mais un rattrapage ou un instantané ne
+/// tiennent pas. On cadre donc la trame `DATA` nous-mêmes, on écrit ce qui
+/// entre, et on garde le reste ici pour le tour suivant. **Tant qu'il reste
+/// quelque chose, on ne relit pas le journal** : c'est la contre-pression,
+/// et c'est ce qui borne la mémoire à un instantané, jamais plus.
+struct FluxPair {
+    /// Le flux, tel que la réponse tenue l'a laissé ouvert.
+    flux: StreamId,
+    /// Des trames `DATA` déjà cadrées, pas encore prises par le transport.
+    en_attente: Vec<u8>,
+    /// Le compteur de la dernière opération poussée — `None` pour un
+    /// instantané, qui ne suit rien.
+    curseur: Option<u64>,
+    /// Jusqu'où le journal a été regardé (`Entrepot::derniere_operation`).
+    ///
+    /// C'est ce que chaque tour compare : tant que rien n'a été journalisé
+    /// depuis, il n'y a rien à relire, et le tour ne coûte qu'une lecture
+    /// d'entier.
+    vu_jusqu_a: u64,
+    /// Fermer le flux une fois l'attente vidée : l'instantané est fini, ou le
+    /// journal s'est expiré sous le lecteur.
+    a_clore: bool,
+}
+
+/// Ce qu'une requête de la voie a préparé, et que la boucle poussera sur le
+/// flux de cette requête juste après la réponse.
+///
+/// `asl_session::Service::serve` ne connaît pas le flux qu'il sert ; la boucle,
+/// elle, le connaît (`a_la_lecture`). Le service dépose donc ici, et la boucle
+/// ramasse.
+struct SuiteAuPair {
+    /// Les cadres à écrire, chacun tel que le fil le porte.
+    cadres: Vec<Vec<u8>>,
+    /// Le curseur à partir duquel suivre le journal, ou `None` pour un
+    /// instantané qui se ferme après ses cadres.
+    curseur: Option<u64>,
+    /// Ce que le journal portait quand les cadres ont été lus.
+    vu_jusqu_a: u64,
+}
+
+/// La voie entre racines, telle que l'exploitant l'a réglée.
+///
+/// # DEUX CLÉS, CONNUES D'AVANCE, ET AUCUNE LISTE (`replication.md` §2.2)
+///
+/// Notre clé d'identité signe la preuve de racine que le tireur demande ; la
+/// clé de l'autre racine est celle contre laquelle sa preuve se vérifie. L'une
+/// sans l'autre a un sens : un annuaire peut avoir une identité et pas de
+/// pair — il tourne seul —, et c'est `asl-server` qui refuse un pair sans
+/// identité.
+#[derive(Clone, Copy)]
+pub struct Voie<'a> {
+    /// Notre clé d'identité Ed25519, si l'exploitant en a donné une.
+    pub identite: Option<&'a CleSecrete>,
+    /// La clé d'identité de l'autre racine (`--peer-key`), si elle est réglée.
+    pub pair: Option<ClePublique>,
+    /// Où dire l'ouverture et la fermeture de chaque flux, un rattrapage avec
+    /// son nombre d'opérations, un amorçage avec sa taille — le journal
+    /// d'exploitation de `replication.md` §8. **Jamais une opération par
+    /// ligne.**
+    pub journal: &'a (dyn Fn(&str) + Send + Sync),
+}
+
+impl Voie<'static> {
+    /// Aucune identité, aucun pair, et rien à dire : un annuaire seul.
+    pub const AUCUNE: Self = Self {
+        identite: None,
+        pair: None,
+        journal: &taire,
+    };
+}
+
+/// Ne dit rien.
+fn taire(_: &str) {}
+
+/// Une trame `DATA` qui porte ces cadres à la suite, sans enveloppe.
+///
+/// Vide si rien n'est à porter : une trame de zéro octet ne dit rien de plus
+/// que son absence.
+fn trame_de_donnees(cadres: &[Vec<u8>]) -> Vec<u8> {
+    let combien: usize = cadres.iter().map(Vec::len).sum();
+    if combien == 0 {
+        return Vec::new();
+    }
+    let mut entete = [0_u8; 16];
+    let pose = ams_proto_h3::write_header(
+        ams_proto_h3::FrameKind::Data,
+        u64::try_from(combien).unwrap_or(u64::MAX),
+        &mut entete,
+    )
+    .unwrap_or(0);
+    let mut trame = Vec::with_capacity(pose.saturating_add(combien));
+    trame.extend_from_slice(entete.get(..pose).unwrap_or_default());
+    for cadre in cadres {
+        trame.extend_from_slice(cadre);
+    }
+    trame
+}
+
+/// Le compteur du dernier cadre, tel que son estampille le porte.
+///
+/// `None` si un cadre ne se relit pas — le journal est corrompu, et le flux se
+/// ferme plutôt que de pousser ce qu'on ne sait pas lire.
+fn dernier_compteur(cadres: &[Vec<u8>]) -> Option<u64> {
+    let dernier = cadres.last()?;
+    let (estampille, _, _) = asl_registre::Operation::lire(dernier).ok()?;
+    Some(estampille.compteur)
 }
 
 /// Ce qui sert une requête : la session décide, l'entrepôt fournit.
@@ -123,6 +245,14 @@ struct Service<'a> {
     /// défi prévisible ne défie personne, et se replier en silence serait pire
     /// que de rendre l'erreur. `asl-session` répond alors `500`.
     defi: Option<Defi>,
+    /// La voie entre racines : nos clés, et où dire ce qui s'y passe.
+    voie: Voie<'a>,
+    /// L'identifiant `n-…` que la clé du pair donne — `None` sans pair.
+    pair_attendu: Option<Identifiant>,
+    /// Cette connexion tient-elle déjà un flux de la voie ?
+    flux_pair_tenu: bool,
+    /// Ce que la requête a préparé pour son flux, que la boucle poussera.
+    suite: &'a mut Option<SuiteAuPair>,
 }
 
 impl ams_h3::Service for Service<'_> {
@@ -177,6 +307,16 @@ impl Service<'_> {
             // chercher, et il vient de la SIGNATURE — `asl-session` l'a lu du
             // corps, mais c'est le message signé qui le rend contraignant.
             Besoin::ClePourPreuve { machine: qui, .. } => match qui.genre() {
+                // **L'AUTRE RACINE NE VIENT PAS DE L'ENTREPÔT** : sa clé est
+                // celle de `--peer-key`, une seule, et `asl_auth::decider_pair`
+                // dit si le `n-…` présenté est le sien. Un autre rend le refus
+                // d'une clé inconnue (`protocole.md` §3 bis).
+                asl_id::Genre::Annuaire => match self.voie.pair {
+                    Some(cle) if asl_auth::decider_pair(*qui, self.pair_attendu).permet() => {
+                        Trouvaille::Cle(CleTrouvee::Racine(cle))
+                    }
+                    _ => Trouvaille::Rien,
+                },
                 // **UN APPAREIL SIGNE EN P-256**, et sa clé rangée fait 33
                 // octets. La lire comme un Ed25519 échouerait, et une panne de
                 // courbe se lirait comme une clé fausse.
@@ -285,6 +425,21 @@ impl Service<'_> {
             }
             Besoin::PoserAlias { alias } => self.poser_l_alias(Some(alias)),
             Besoin::RetirerAlias => self.poser_l_alias(None),
+
+            // ── LA VOIE ENTRE RACINES ───────────────────────────────────
+            //
+            // **LA CLÉ D'IDENTITÉ VIT ICI, ET C'EST ICI QU'ON SIGNE.** Sous
+            // le domaine propre de la preuve de racine, avec la liaison de
+            // CETTE connexion — celle que le tireur a dérivée de son côté.
+            Besoin::ProuverLaRacine { defi } => match self.voie.identite {
+                Some(cle) => {
+                    let (racine, signature) = cle.prouver_la_racine(defi, self.session.liaison());
+                    Trouvaille::PreuveDeRacine { racine, signature }
+                }
+                None => Trouvaille::Rien,
+            },
+            Besoin::LireLesOperations { apres } => self.ouvrir_les_operations(*apres),
+            Besoin::LireLInstantane => self.ouvrir_l_instantane(),
 
             Besoin::CompteParAlias(alias) => match self.entrepot.compte_par_alias(alias) {
                 Ok(Some(qui)) => match self.entrepot.compte(qui) {
@@ -1028,6 +1183,88 @@ impl Service<'_> {
         }
     }
 
+    /// Ouvre le flux des opérations après ce compteur (`replication.md` §5.3).
+    ///
+    /// # LE RATTRAPAGE EST LU MAINTENANT, ET POUSSÉ JUSTE APRÈS LA RÉPONSE
+    ///
+    /// C'est la même lecture qui dit `410` : le journal remonte jusqu'à
+    /// `apres`, ou non. Ce qu'il porte après est déposé dans `suite`, et la
+    /// boucle l'écrit sur le flux de cette requête dès que la réponse tenue
+    /// est partie — puis chaque opération nouvelle, à mesure (`au_tour`).
+    fn ouvrir_les_operations(&mut self, apres: u64) -> Trouvaille {
+        if self.flux_pair_tenu {
+            return Trouvaille::Conflit;
+        }
+        // **LA BORNE EST LUE AVANT LE JOURNAL.** Une opération journalisée
+        // entre les deux serait relue au tour suivant : le curseur avance
+        // sur ce qu'on a poussé, et la borne ne dit que « regarde ».
+        let vu_jusqu_a = self.entrepot.derniere_operation();
+        match self.entrepot.operations_apres(apres) {
+            Ok(Rattrapage::Operations(cadres)) => {
+                (self.voie.journal)(&format!(
+                    "{} tire les opérations après {apres} : {} en rattrapage",
+                    self.session
+                        .racine()
+                        .map_or_else(String::new, |qui| qui.texte().as_str().to_owned()),
+                    cadres.len()
+                ));
+                let curseur = if cadres.is_empty() {
+                    Some(apres)
+                } else {
+                    dernier_compteur(&cadres)
+                };
+                // Un journal illisible ne se pousse pas : `500`, et
+                // l'exploitant le lit.
+                let Some(curseur) = curseur else {
+                    (self.voie.journal)("une opération du journal ne se relit pas");
+                    return Trouvaille::Rien;
+                };
+                *self.suite = Some(SuiteAuPair {
+                    cadres,
+                    curseur: Some(curseur),
+                    vu_jusqu_a,
+                });
+                Trouvaille::FluxOuvert
+            }
+            Ok(Rattrapage::HorsJournal { retirees_jusqu_a }) => {
+                (self.voie.journal)(&format!(
+                    "le journal ne remonte plus jusqu'à {apres} (retiré jusqu'à \
+                     {retirees_jusqu_a}) : 410, l'autre racine s'amorce par instantané"
+                ));
+                Trouvaille::HorsJournal
+            }
+            Err(_) => Trouvaille::Rien,
+        }
+    }
+
+    /// Ouvre le flux de l'instantané (`replication.md` §5.4) : tout l'état,
+    /// lu dans une seule transaction, puis le cadre de fin — et le flux se
+    /// ferme derrière.
+    fn ouvrir_l_instantane(&mut self) -> Trouvaille {
+        if self.flux_pair_tenu {
+            return Trouvaille::Conflit;
+        }
+        match self.entrepot.instantane() {
+            Ok(cadres) => {
+                let octets: usize = cadres.iter().map(Vec::len).sum();
+                (self.voie.journal)(&format!(
+                    "{} s'amorce par instantané : {} cadres, {octets} octets",
+                    self.session
+                        .racine()
+                        .map_or_else(String::new, |qui| qui.texte().as_str().to_owned()),
+                    cadres.len()
+                ));
+                *self.suite = Some(SuiteAuPair {
+                    cadres,
+                    curseur: None,
+                    vu_jusqu_a: 0,
+                });
+                Trouvaille::FluxOuvert
+            }
+            Err(_) => Trouvaille::Rien,
+        }
+    }
+
     /// Prend une annonce, ouvre sa session vivante, et compose la réponse.
     ///
     /// # POURQUOI TOUT CECI EST À L'ÉTAGE 3
@@ -1612,6 +1849,15 @@ pub struct Annuaire<'a> {
     dernier_balayage: u64,
     /// Les pairs révoqués dont il reste des connexions à fermer.
     revoques: Vec<Identifiant>,
+    /// La voie entre racines : nos clés, et où dire ce qui s'y passe.
+    voie: Voie<'a>,
+    /// L'identifiant `n-…` que la clé du pair donne, calculé une fois.
+    pair_attendu: Option<Identifiant>,
+    /// Ce que la requête en cours a préparé pour son flux de la voie.
+    ///
+    /// Vivant le temps d'un `a_la_lecture` : déposé par le service, ramassé
+    /// par la boucle juste après, jamais gardé d'un tour à l'autre.
+    suite: Option<SuiteAuPair>,
 }
 
 impl<'a> Annuaire<'a> {
@@ -1623,6 +1869,8 @@ impl<'a> Annuaire<'a> {
     ///
     /// `tirer_un_defi` rend trente-deux octets imprévisibles, ou `None` si le noyau
     /// a refusé — auquel cas la réponse sera `500`, jamais un défi de repli.
+    ///
+    /// `voie` porte les clés de la voie entre racines, ou [`Voie::AUCUNE`].
     #[must_use]
     pub fn new(
         entrepot: &'a Entrepot,
@@ -1631,8 +1879,10 @@ impl<'a> Annuaire<'a> {
         politique: asl_auth::Politique,
         apple: Option<ConfigApple<'a>>,
         bail: asl_proto::Bail,
+        voie: Voie<'a>,
     ) -> Self {
         let (rapports, verdicts) = tokio::sync::mpsc::unbounded_channel();
+        let pair_attendu = voie.pair.as_ref().map(asl_cle::identifiant_de_racine);
         Self {
             connexions: HashMap::new(),
             entrepot,
@@ -1648,7 +1898,90 @@ impl<'a> Annuaire<'a> {
             bail,
             dernier_balayage: 0,
             revoques: Vec::new(),
+            voie,
+            pair_attendu,
+            suite: None,
         }
+    }
+
+    /// Écrit ce qui attend sur le flux de la voie, et le ferme s'il est fini.
+    ///
+    /// Rend `true` quand le flux n'a plus rien à faire ici — fermé, ou
+    /// refusé par le transport — et doit être oublié.
+    fn vidanger(conducteur: &mut Http3, connexion: &mut Connection, flux: &mut FluxPair) -> bool {
+        if !flux.en_attente.is_empty() {
+            match connexion.write(flux.flux, &flux.en_attente) {
+                Ok(pris) => {
+                    flux.en_attente.drain(..pris.min(flux.en_attente.len()));
+                }
+                // Le flux n'émet plus — le pair l'a annulé, ou la connexion
+                // se ferme. Ce qui restait est perdu, et le tireur reprendra
+                // depuis son curseur : c'est ce que le curseur existe pour
+                // permettre.
+                Err(_) => return true,
+            }
+        }
+        if flux.en_attente.is_empty() && flux.a_clore {
+            let _ = conducteur.clore(&mut Pont(connexion), flux.flux);
+            return true;
+        }
+        false
+    }
+
+    /// Ce que chaque flux de la voie a de neuf à pousser, ce tour-ci.
+    ///
+    /// # UNE LECTURE D'ENTIER PAR TOUR, ET LE JOURNAL SEULEMENT S'IL A BOUGÉ
+    ///
+    /// `Entrepot::derniere_operation` est posé après chaque commit qui
+    /// journalise ; tant qu'il n'a pas dépassé ce que le flux a vu, il n'y a
+    /// rien à relire. Et tant qu'un flux a de l'attente, il ne relit pas non
+    /// plus : c'est la contre-pression de `FluxPair`.
+    fn suivre_le_journal(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let derniere = self.entrepot.derniere_operation();
+        let mut a_pousser = Vec::new();
+        for (clef, etat) in &mut self.connexions {
+            let Some(flux) = &mut etat.flux_pair else {
+                continue;
+            };
+            if flux.en_attente.is_empty()
+                && !flux.a_clore
+                && let Some(curseur) = flux.curseur
+                && flux.vu_jusqu_a < derniere
+            {
+                match self.entrepot.operations_apres(curseur) {
+                    Ok(Rattrapage::Operations(cadres)) => {
+                        flux.vu_jusqu_a = derniere;
+                        if !cadres.is_empty() {
+                            match dernier_compteur(&cadres) {
+                                Some(compteur) => {
+                                    flux.curseur = Some(compteur);
+                                    flux.en_attente = trame_de_donnees(&cadres);
+                                }
+                                None => {
+                                    (self.voie.journal)(
+                                        "une opération du journal ne se relit pas : le flux se ferme",
+                                    );
+                                    flux.a_clore = true;
+                                }
+                            }
+                        }
+                    }
+                    // Le journal s'est expiré sous le lecteur, ou la base
+                    // refuse : on ferme, et le tireur rouvre depuis son
+                    // curseur — il recevra le `410`, et s'amorcera.
+                    Ok(Rattrapage::HorsJournal { .. }) | Err(_) => {
+                        (self.voie.journal)(
+                            "le journal ne remonte plus jusqu'au curseur d'un flux ouvert : il se ferme",
+                        );
+                        flux.a_clore = true;
+                    }
+                }
+            }
+            if !flux.en_attente.is_empty() || flux.a_clore {
+                a_pousser.push((clef.clone(), Vec::new()));
+            }
+        }
+        a_pousser
     }
 
     /// Combien d'annonces vivent.
@@ -1769,6 +2102,10 @@ impl Application for Annuaire<'_> {
         // tombée sans qu'on l'apprenne n'a personne pour la retirer.
         self.vivier.oublier_les_expirees(instant());
         self.balayer_les_codes();
+        // **LA VOIE ENTRE RACINES SUIT LE JOURNAL ICI** : c'est le seul
+        // rendez-vous qui n'appartienne à aucune connexion, et une écriture
+        // faite sur une connexion se pousse sur une autre.
+        a_pousser.extend(self.suivre_le_journal());
         let mut consignes = self.consignes_de_fermeture();
         consignes.a_pousser = a_pousser;
         consignes
@@ -1783,6 +2120,21 @@ impl Application for Annuaire<'_> {
         let Some(etat) = self.connexions.get_mut(&clef) else {
             return;
         };
+        // **UNE CONNEXION DE LA VOIE N'A QU'UN FLUX, ET C'EST LE SIEN.** Ce
+        // qui s'y écrit est ce que `suivre_le_journal` y a mis en attente ;
+        // la consigne ne porte rien, elle dit « écris ce que tu tiens ».
+        if let Some(flux) = &mut etat.flux_pair {
+            if Self::vidanger(&mut etat.conducteur, connexion, flux) {
+                (self.voie.journal)(&format!(
+                    "flux de la voie fermé{}",
+                    etat.session
+                        .racine()
+                        .map_or_else(String::new, |qui| format!(" ({})", qui.texte()))
+                ));
+                etat.flux_pair = None;
+            }
+            return;
+        }
         let tenus: Vec<StreamId> = etat.conducteur.tenus().to_vec();
         for flux in tenus {
             // **UNE ÉCRITURE QUI ÉCHOUE NE FERME RIEN.** Le pair a peut-être
@@ -1812,6 +2164,7 @@ impl Application for Annuaire<'_> {
         let etat = self.connexions.entry(clef).or_insert_with(|| ParConnexion {
             conducteur: Http3::default(),
             session: Session::new(liaison),
+            flux_pair: None,
         });
         self.servies = self.servies.saturating_add(1);
         // §6.2.1 : notre flux de contrôle et nos réglages, tout de suite — puis
@@ -1849,6 +2202,7 @@ impl Application for Annuaire<'_> {
         let ParConnexion {
             conducteur,
             session,
+            flux_pair,
         } = etat;
         let mut service = Service {
             session,
@@ -1870,9 +2224,31 @@ impl Application for Annuaire<'_> {
                 port: asl_proto::Port::depuis_u16(pair.port()).unwrap_or(PORT_DE_SECOURS),
             },
             defi: (self.tirer_un_defi)(),
+            voie: self.voie,
+            pair_attendu: self.pair_attendu,
+            flux_pair_tenu: flux_pair.is_some(),
+            suite: &mut self.suite,
         };
         if let Err(faute) = conducteur.on_readable(&mut Pont(connexion), &mut service, flux) {
             Self::condamner(connexion, &faute);
+            self.suite = None;
+            return;
+        }
+        // **CE QUE LA REQUÊTE A PRÉPARÉ PART SUR SON PROPRE FLUX**, tout de
+        // suite : la réponse tenue vient d'y être écrite, et les cadres la
+        // suivent dans le même tour. Ce qui n'entre pas attend, et
+        // `au_tour` fera le reste.
+        if let Some(suite) = self.suite.take() {
+            let mut neuf = FluxPair {
+                flux,
+                en_attente: trame_de_donnees(&suite.cadres),
+                curseur: suite.curseur,
+                vu_jusqu_a: suite.vu_jusqu_a,
+                a_clore: suite.curseur.is_none(),
+            };
+            if !Self::vidanger(conducteur, connexion, &mut neuf) {
+                *flux_pair = Some(neuf);
+            }
         }
     }
 

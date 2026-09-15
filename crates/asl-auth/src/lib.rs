@@ -611,6 +611,38 @@ pub fn decider_revocation_d_appareil(demandeur: Identifiant, vise: Identifiant) 
     }
 }
 
+// ── L'autre racine ──────────────────────────────────────────────────────────
+
+/// Celui qui se présente comme une racine est-il LA racine qu'on attend ?
+///
+/// # UNE SEULE CLÉ, AUCUNE LISTE — `replication.md` §2.2
+///
+/// La racine tirée compare ce qu'on lui prouve à LA clé qu'elle a en réglage
+/// (`--peer-key`), et l'identifiant `n-…` se déduit de cette clé. Il n'y a ni
+/// liste de pairs, ni découverte : `attendu` est l'identifiant que la clé
+/// épinglée donne, ou rien si l'annuaire n'a pas de pair — et sans pair, aucun
+/// `n-…` n'est le bon.
+///
+/// **Elle prend l'identifiant PRÉSENTÉ, et non la clé** : c'est
+/// `asl-session` qui vérifiera la signature, avec la clé épinglée. Ce qui se
+/// décide ici est plus tôt et plus simple — faut-il seulement chercher à
+/// vérifier ? —, et un `n-…` qui n'est pas celui du pair configuré rend le
+/// refus d'une clé inconnue, comme une machine qu'on ne connaît pas (C9).
+///
+/// Un identifiant d'un autre genre n'est jamais une racine, quel que soit ce
+/// qu'on attend.
+#[must_use]
+pub fn decider_pair(presente: Identifiant, attendu: Option<Identifiant>) -> Decision {
+    if presente.genre() != Genre::Annuaire {
+        return Decision::Refuser;
+    }
+    if attendu == Some(presente) {
+        Decision::Servir
+    } else {
+        Decision::Refuser
+    }
+}
+
 // ── L'attestation de plate-forme ────────────────────────────────────────────
 
 /// Ce que l'annuaire exige d'un appareil qui s'enrôle.

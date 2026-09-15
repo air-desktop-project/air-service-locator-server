@@ -29,6 +29,10 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 # Le harnais d'essai d'`air-mail-server` : un vrai client QUIC sur une vraie
 # socket. Voir `docs/transport.md` §3 pour ce qu'il est et ce qu'il n'est pas.
 ams-quic-client.workspace = true
+# Pour DÉCODER les réponses — le statut est une entrée de la table statique de
+# QPACK, il ne voyage pas en clair — et découper les trames `DATA` d'un flux
+# tenu, celui de la voie entre racines.
+ams-proto-h3.workspace = true
 asl-registre.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 

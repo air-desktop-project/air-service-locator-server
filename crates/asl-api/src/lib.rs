@@ -120,6 +120,16 @@ pub enum Exigence {
     /// B qui part d'un `u-…` pour arriver à un port (`protocole.md` §3). Les
     /// deux passent par les arêtes du compte qui demande, et rien d'autre.
     AppareilOuMachineLecture,
+    /// **L'autre racine**, qui a prouvé sa clé d'identité — le genre `n` sur
+    /// `POST /v1/defi` (`docs/replication.md` §2.2).
+    ///
+    /// # AUCUNE CLÉ DE MACHINE NI D'APPAREIL NE LA SATISFAIT
+    ///
+    /// C10 : la voie entre racines transporte TOUT, sans que le lecteur
+    /// choisisse. Une exigence que seule une clé d'identité de racine
+    /// satisfait est ce qui la ferme à tout le reste — et il n'y a qu'une
+    /// clé qui la satisfasse, celle de `--peer-key`.
+    Racine,
     /// **Rien.** Trois ressources seulement, et chacune pour une raison écrite.
     Aucune,
 }
@@ -331,6 +341,29 @@ pub enum Ressource<'a> {
         /// Le nom cherché.
         service: NomService<'a>,
     },
+    /// `/v1/pair/preuve` — **la racine tirée prouve sa clé d'identité en
+    /// retour** (`docs/replication.md` §2.2, second temps).
+    ///
+    /// # ELLE EXIGE UNE RACINE, ET C'EST L'ORDRE DES DEUX TEMPS
+    ///
+    /// Le tireur prouve d'abord (`POST /v1/defi`, genre `n`), puis pose son
+    /// défi ici. Sans cette exigence, n'importe qui obtiendrait du serveur une
+    /// signature sur des octets de son choix — sous un domaine propre, donc
+    /// sans conséquence, mais un oracle qu'on n'ouvre pas pour rien.
+    PairPreuve,
+    /// `/v1/pair/operations?apres=<compteur>` — **tout ce que cette racine a
+    /// écrit après ce compteur, puis la suite, SANS FIN** (`replication.md`
+    /// §5.3).
+    ///
+    /// Le compteur est le curseur du tireur : c'est lui qui sait ce qu'il a
+    /// appliqué. `410` quand le journal ne remonte plus jusque-là.
+    PairOperations {
+        /// Le compteur après lequel on veut tout.
+        apres: u64,
+    },
+    /// `/v1/pair/instantane` — **l'état entier en suite d'opérations, puis le
+    /// compteur de coupe** (`replication.md` §5.4). Fini, lui.
+    PairInstantane,
 }
 
 impl Ressource<'_> {
@@ -351,7 +384,10 @@ impl Ressource<'_> {
             | Self::Expositions
             | Self::AliasResolu { .. }
             | Self::Ou { .. }
-            | Self::OuParNom { .. } => &[Methode::Get],
+            | Self::OuParNom { .. }
+            | Self::PairOperations { .. }
+            | Self::PairInstantane => &[Methode::Get],
+            Self::PairPreuve => &[Methode::Post],
             Self::Appareil { .. }
             | Self::CleMachine { .. }
             | Self::Autorisation { .. }
@@ -405,6 +441,9 @@ impl Ressource<'_> {
             Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
             Self::Moi => Exigence::Machine,
             Self::MachinesUtilisateur { .. } => Exigence::AppareilOuMachineLecture,
+            Self::PairPreuve | Self::PairOperations { .. } | Self::PairInstantane => {
+                Exigence::Racine
+            }
             _ => Exigence::Appareil,
         }
     }
@@ -543,7 +582,9 @@ pub enum Erreur {
     AliasBordInvalide,
     /// L'alias a la forme d'un identifiant.
     AliasRessembleAUnIdentifiant,
-    /// La chaîne de requête est mal formée, ou porte autre chose que `service`.
+    /// La chaîne de requête est mal formée, ou porte autre chose que ce que
+    /// la ressource attend — `service` pour `/v1/ou`, `apres` pour
+    /// `/v1/pair/operations`.
     RequeteInvalide,
 }
 
@@ -645,6 +686,36 @@ fn service_de_la_requete(requete: &[u8]) -> Result<NomService<'_>, Erreur> {
     NomService::analyser(texte).map_err(|_| Erreur::NomInvalide)
 }
 
+/// Le compteur que porte la chaîne de requête, pour `/v1/pair/operations`.
+///
+/// **Un seul paramètre, `apres`, et une seule écriture par nombre** : des
+/// chiffres décimaux, sans signe, sans zéro de tête — `apres=007` serait une
+/// seconde écriture de `apres=7`, et ce module refuse plutôt que de
+/// normaliser (voir l'en-tête). Vingt chiffres au plus, ce qu'un `u64` tient,
+/// et rien n'est calculé qui puisse déborder.
+fn compteur_de_la_requete(requete: &[u8]) -> Result<u64, Erreur> {
+    let chiffres = requete
+        .strip_prefix(b"apres=")
+        .ok_or(Erreur::RequeteInvalide)?;
+    if chiffres.is_empty() || chiffres.len() > 20 {
+        return Err(Erreur::RequeteInvalide);
+    }
+    if chiffres.len() > 1 && chiffres.first() == Some(&b'0') {
+        return Err(Erreur::RequeteInvalide);
+    }
+    let mut valeur: u64 = 0;
+    for octet in chiffres {
+        if !octet.is_ascii_digit() {
+            return Err(Erreur::RequeteInvalide);
+        }
+        valeur = valeur
+            .checked_mul(10)
+            .and_then(|dix| dix.checked_add(u64::from(octet.saturating_sub(b'0'))))
+            .ok_or(Erreur::RequeteInvalide)?;
+    }
+    Ok(valeur)
+}
+
 /// La table des chemins.
 fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, Erreur> {
     match segments {
@@ -704,6 +775,11 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
             machine: identifiant(machine, Genre::Machine)?,
             service: NomService::analyser(service).map_err(|_| Erreur::NomInvalide)?,
         }),
+        ["v1", "pair", "preuve"] => Ok(Ressource::PairPreuve),
+        ["v1", "pair", "operations"] => Ok(Ressource::PairOperations {
+            apres: compteur_de_la_requete(requete)?,
+        }),
+        ["v1", "pair", "instantane"] => Ok(Ressource::PairInstantane),
         _ => Err(Erreur::RessourceInconnue),
     }
 }

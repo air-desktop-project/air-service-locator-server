@@ -354,11 +354,12 @@ pub enum Faute {
         /// La position du symbole fautif.
         position: usize,
     },
-    /// Un identifiant de machine ou d'appareil était attendu.
+    /// Un identifiant de machine, d'appareil ou de racine était attendu.
     ///
-    /// **Ce sont les deux seuls genres qui SIGNENT.** Un compte ne signe pas —
+    /// **Ce sont les trois seuls genres qui SIGNENT.** Un compte ne signe pas —
     /// il n'a pas de clé, il n'est qu'un jeu d'appareils enrôlés ; un service
     /// n'en a pas davantage — c'est la machine qui le porte qui signe pour lui.
+    /// Une racine, elle, signe avec sa clé d'identité (`replication.md` §2.2).
     PasUnPair {
         /// Le genre fourni.
         obtenu: Genre,
@@ -458,8 +459,14 @@ impl ClePublique {
 }
 
 /// Ce genre signe-t-il ?
+///
+/// **TROIS GENRES, ET LE TROISIÈME EST UNE RACINE.** `docs/replication.md`
+/// §2.2 : la racine qui tire prouve sa clé d'identité « exactement comme une
+/// machine prouve la sienne », avec un genre `n` de plus sur `POST /v1/defi`.
+/// Le genre entre dans le message signé, donc une preuve de racine ne vaut
+/// jamais pour une machine, ni l'inverse.
 const fn est_un_pair(genre: Genre) -> bool {
-    matches!(genre, Genre::Machine | Genre::Appareil)
+    matches!(genre, Genre::Machine | Genre::Appareil | Genre::Annuaire)
 }
 
 // ── L'identité d'une racine ─────────────────────────────────────────────────
@@ -496,6 +503,90 @@ pub fn identifiant_de_racine(cle: &ClePublique) -> Identifiant {
         *place = *octet;
     }
     Identifiant::depuis_entropie(Genre::Annuaire, seize)
+}
+
+/// Le séparateur de domaine de la **preuve de racine** — le second temps de
+/// `docs/replication.md` §2.2.
+///
+/// # POURQUOI UN TROISIÈME DOMAINE, ET NON [`DOMAINE`] AVEC LE GENRE `n`
+///
+/// Les deux temps ne prouvent pas la même chose, et pas dans le même sens.
+/// [`DOMAINE`] sert à la racine qui TIRE : elle signe le défi que l'annuaire
+/// lui a rendu, comme une machine. Celui-ci sert à la racine TIRÉE : c'est le
+/// tireur qui pose le défi (`POST /v1/pair/preuve`), et c'est le serveur qui
+/// signe. **Un serveur qui signerait sous [`DOMAINE`] ce qu'un client lui
+/// présente serait un oracle** : la signature obtenue vaudrait preuve
+/// d'authentification sur une autre connexion, s'il s'y trouvait le même
+/// défi et la même liaison. Un domaine propre ferme cela sans avoir à y
+/// penser.
+pub const DOMAINE_PREUVE_DE_RACINE: &[u8] = b"air-service-locator/v1/preuve-de-racine\x00";
+
+/// La taille du message d'une preuve de racine.
+///
+/// La même forme que [`MESSAGE_OCTETS`] : le domaine, le genre, l'identifiant,
+/// le défi, la liaison. Tous fixes.
+pub const MESSAGE_PREUVE_DE_RACINE_OCTETS: usize =
+    DOMAINE_PREUVE_DE_RACINE.len() + 1 + 16 + DEFI_OCTETS + LIAISON_OCTETS;
+
+/// Compose le message que la racine tirée signe pour prouver son identité.
+///
+/// **L'identifiant `n-…` y est, bien qu'il se déduise de la clé** : c'est ce
+/// que le corps de la réponse porte (`n-… ‖ signature`, `protocole.md` §3
+/// bis), et signer ce qu'on rend fait que le tireur vérifie EXACTEMENT ce
+/// qu'il a reçu. Le défi vient du tireur — c'est lui qui veut la fraîcheur —
+/// et la liaison est celle de la connexion, dérivée des deux côtés : sans
+/// elle, un intermédiaire ferait signer le vrai serveur pour le compte du
+/// faux.
+#[must_use]
+pub fn message_de_preuve_de_racine(
+    racine: Identifiant,
+    defi: &Defi,
+    liaison: &LiaisonDeCanal,
+) -> [u8; MESSAGE_PREUVE_DE_RACINE_OCTETS] {
+    const _: () = assert!(
+        MESSAGE_PREUVE_DE_RACINE_OCTETS
+            == DOMAINE_PREUVE_DE_RACINE.len() + 1 + 16 + DEFI_OCTETS + LIAISON_OCTETS,
+        "la taille du message de preuve de racine ne correspond plus à la somme de ses champs"
+    );
+
+    let genre = [racine.genre().prefixe()];
+    let source = DOMAINE_PREUVE_DE_RACINE
+        .iter()
+        .chain(genre.iter())
+        .chain(racine.octets().iter())
+        .chain(defi.octets().iter())
+        .chain(liaison.octets().iter());
+
+    let mut message = [0_u8; MESSAGE_PREUVE_DE_RACINE_OCTETS];
+    for (place, octet) in message.iter_mut().zip(source) {
+        *place = *octet;
+    }
+    message
+}
+
+impl ClePublique {
+    /// Cette signature prouve-t-elle que la racine tirée détient la clé
+    /// d'identité dont cet identifiant se déduit ?
+    ///
+    /// **L'identifiant est recalculé depuis la clé, jamais pris du fil** : le
+    /// tireur a lu `n-… ‖ signature`, et un `n-…` qui ne serait pas celui de
+    /// la clé épinglée (`--peer-key`) ne vérifie pas — quel que soit ce qui a
+    /// été signé.
+    #[must_use]
+    pub fn prouve_la_racine(
+        &self,
+        racine: Identifiant,
+        defi: &Defi,
+        liaison: &LiaisonDeCanal,
+        signature: &Signature,
+    ) -> bool {
+        if racine != identifiant_de_racine(self) {
+            return false;
+        }
+        let message = message_de_preuve_de_racine(racine, defi, liaison);
+        let signature = SignatureDalek::from_bytes(signature.octets());
+        self.0.verify(&message, &signature).is_ok()
+    }
 }
 
 /// La clé secrète d'une machine.
@@ -560,6 +651,25 @@ impl CleSecrete {
     pub fn prouver_la_possession(&self, defi: &Defi, liaison: &LiaisonDeCanal) -> Signature {
         let message = message_de_possession(&self.publique(), defi, liaison);
         Signature(self.0.sign(&message).to_bytes())
+    }
+
+    /// Signe la preuve de racine — le second temps de `replication.md` §2.2 —
+    /// et rend l'identifiant signé avec elle.
+    ///
+    /// **C'est la clé d'IDENTITÉ d'une racine qui appelle ceci**, pas celle
+    /// d'une machine : même courbe, même type, autre emploi. L'identifiant est
+    /// déduit de la clé ([`identifiant_de_racine`]), donc il ne peut pas être
+    /// faux ; il est rendu pour que l'appelant compose `n-… ‖ signature` sans
+    /// le recalculer.
+    #[must_use]
+    pub fn prouver_la_racine(
+        &self,
+        defi: &Defi,
+        liaison: &LiaisonDeCanal,
+    ) -> (Identifiant, Signature) {
+        let racine = identifiant_de_racine(&self.publique());
+        let message = message_de_preuve_de_racine(racine, defi, liaison);
+        (racine, Signature(self.0.sign(&message).to_bytes()))
     }
 }
 

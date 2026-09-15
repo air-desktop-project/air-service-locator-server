@@ -2,7 +2,7 @@
 //!
 //! # POURQUOI PAS DE BIBLIOTHÈQUE D'ARGUMENTS
 //!
-//! Il y a six réglages, tous de la forme `--nom valeur`. Une bibliothèque
+//! Il y a une douzaine de réglages, tous de la forme `--nom valeur`. Une bibliothèque
 //! apporterait une grammaire complète — sous-commandes, formes courtes,
 //! complétion — dont rien ici ne se sert, et une vingtaine d'unités dans un
 //! graphe que C4 borne à cent vingt.
@@ -75,6 +75,38 @@ pub struct Reglages {
     /// la comparer. Un annuaire `optional` sans configuration Apple crée donc
     /// des comptes sans attestation, et refuse ceux qui en présentent une.
     pub apple: Option<ReglageApple>,
+    /// Le fichier de la clé d'identité Ed25519 de cette racine
+    /// (`--identity-key`), si elle en a une.
+    ///
+    /// # SANS ELLE, LA RACINE TOURNE COMME AVANT — ET LE DIT
+    ///
+    /// `docs/replication.md` §2.2 : l'identifiant `n-…` d'une racine se
+    /// déduit de sa clé d'identité. Sans clé, elle estampille sous seize
+    /// zéros, et le journal d'exploitation le dit au démarrage. **Une clé ne
+    /// se génère jamais en silence** (§8) : `--new-identity-key` l'écrit, et
+    /// s'arrête.
+    pub identite: Option<PathBuf>,
+    /// L'autre racine — son adresse et sa clé publique —, si l'exploitant
+    /// l'a réglée.
+    ///
+    /// **Les trois vont ensemble** (§8) : `--peer` sans `--peer-key` refuse de
+    /// démarrer, parce qu'une adresse seule n'est pas une racine
+    /// (`annuaires.md` §2) ; et l'un ou l'autre sans `--identity-key` aussi,
+    /// parce qu'une racine sans identité ne peut ni prouver ni être prouvée.
+    pub pair: Option<ReglagePair>,
+}
+
+/// L'autre racine, telle qu'on la joint et telle qu'on la reconnaît.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReglagePair {
+    /// Où elle écoute : `hôte:port`, un nom ou une adresse — une adresse
+    /// IPv6 entre crochets.
+    ///
+    /// **Lue et validée ici, mais pas encore jointe** : la connexion sortante
+    /// est la tranche suivante de `docs/replication.md`.
+    pub adresse: String,
+    /// Le fichier de sa clé d'identité publique (`--peer-key`).
+    pub cle: PathBuf,
 }
 
 /// De quoi vérifier une attestation Apple App Attest.
@@ -109,6 +141,13 @@ pub enum Faute {
     EnvironnementInconnu(String),
     /// `--apple-app` et `--apple-environment` ne vont pas l'un sans l'autre.
     AppleIncomplet,
+    /// `--peer` et `--peer-key` ne vont pas l'un sans l'autre.
+    PairIncomplet,
+    /// `--peer` sans `--identity-key` : une racine sans identité ne peut ni
+    /// prouver ni être prouvée.
+    PairSansIdentite,
+    /// `--peer` n'a pas la forme `hôte:port`.
+    PairInvalide(String),
     /// Un drapeau de l'ancienne grammaire, en français, qui a son
     /// équivalent en anglais.
     ///
@@ -148,6 +187,17 @@ impl core::fmt::Display for Faute {
             Self::AppleIncomplet => sortie.write_str(
                 "--apple-app et --apple-environment se donnent ensemble, ou pas du tout",
             ),
+            Self::PairIncomplet => {
+                sortie.write_str("--peer et --peer-key se donnent ensemble, ou pas du tout")
+            }
+            Self::PairSansIdentite => sortie.write_str(
+                "--peer demande --identity-key : une racine sans identité ne peut ni \
+                 prouver ni être prouvée (docs/replication.md §8)",
+            ),
+            Self::PairInvalide(quoi) => write!(
+                sortie,
+                "--peer attend `hôte:port` (une adresse IPv6 entre crochets), et non « {quoi} »"
+            ),
             Self::Manque(quoi) => write!(sortie, "il manque {quoi}"),
             Self::Ancien { ancien, nouveau } => {
                 write!(sortie, "{ancien} n'existe plus : {nouveau}")
@@ -173,6 +223,11 @@ asl-server — an air-service-locator service directory.
   --attestation  <required|optional>                             (required)
   --apple-app    <id>       the Apple app identifier             (with the env.)
   --apple-environment <production|development>                   (with the app)
+  --identity-key <path>     this root's Ed25519 identity key, 32 raw bytes
+  --peer         <host:port> the other root                      (with --peer-key)
+  --peer-key     <path>     the other root's public identity key, 32 raw bytes
+  --new-identity-key <path> write a new identity key there (0600), print the
+                            public key and the `n-…` it gives, then exit
   --version                 print the version and commit, then exit
   --help                    this
 
@@ -183,6 +238,11 @@ account. Neither can be chosen on your behalf.
 
 The socket is DUAL-STACK: IPv6 first, IPv4 accepted on the same socket.
 The directory REFUSES to start as root — it needs no privilege at all.
+
+Without `--identity-key`, the root runs alone and stamps its writes under
+sixteen zeros, and says so. `--peer`, `--peer-key` and `--identity-key` go
+together; `--new-identity-key` writes `<path>` (the private key) and
+`<path>.pub` (the public key, to carry to the other root as its `--peer-key`).
 
   scripts/ca.sh racine
   scripts/ca.sh serveur nitrogen nitrogen.air-desktop.org 2001:41d0:20a:900::1dd4
@@ -232,6 +292,9 @@ impl Reglages {
         let mut politique = None;
         let mut apple_app: Option<String> = None;
         let mut apple_env: Option<asl_apple::Environnement> = None;
+        let mut identite = None;
+        let mut pair_adresse: Option<String> = None;
+        let mut pair_cle: Option<PathBuf> = None;
 
         let mut arguments = arguments.into_iter();
         while let Some(drapeau) = arguments.next() {
@@ -269,6 +332,9 @@ impl Reglages {
                         autre => return Err(Faute::EnvironnementInconnu(autre.to_owned())),
                     });
                 }
+                "--identity-key" => identite = Some(PathBuf::from(valeur()?.as_ref())),
+                "--peer" => pair_adresse = Some(adresse_de_pair(valeur()?.as_ref())?),
+                "--peer-key" => pair_cle = Some(PathBuf::from(valeur()?.as_ref())),
                 autre => {
                     return Err(match ancien(autre) {
                         Some((ancien, nouveau)) => Faute::Ancien { ancien, nouveau },
@@ -299,6 +365,20 @@ impl Reglages {
                 (None, None) => None,
                 _ => return Err(Faute::AppleIncomplet),
             },
+            // **LES TROIS VONT ENSEMBLE** (`replication.md` §8) : une adresse
+            // seule n'est pas une racine, une clé seule ne se joint pas, et
+            // sans identité on ne prouve rien.
+            pair: match (pair_adresse, pair_cle) {
+                (Some(adresse), Some(cle)) => {
+                    if identite.is_none() {
+                        return Err(Faute::PairSansIdentite);
+                    }
+                    Some(ReglagePair { adresse, cle })
+                }
+                (None, None) => None,
+                _ => return Err(Faute::PairIncomplet),
+            },
+            identite,
         })
     }
 
@@ -355,6 +435,30 @@ fn ancien(drapeau: &str) -> Option<(&'static str, &'static str)> {
     TABLE.iter().copied().find(|(vieux, _)| *vieux == drapeau)
 }
 
+/// Lit `hôte:port`, ou dit ce qui n'en a pas la forme.
+///
+/// **Validée, pas résolue** : un nom reste un nom, une adresse une adresse. Une
+/// adresse IPv6 se donne entre crochets, comme partout où un port la suit —
+/// `2001:db8::1:6630` ne dit pas où l'adresse finit. Le port est un nombre de
+/// un à 65535 : zéro n'est pas un port qu'on joint.
+fn adresse_de_pair(donnee: &str) -> Result<String, Faute> {
+    let invalide = || Faute::PairInvalide(donnee.to_owned());
+    let (hote, port) = donnee.rsplit_once(':').ok_or_else(invalide)?;
+    let port: u16 = port.parse().map_err(|_| invalide())?;
+    if port == 0 || hote.is_empty() {
+        return Err(invalide());
+    }
+    if let Some(entre) = hote.strip_prefix('[') {
+        let adresse = entre.strip_suffix(']').ok_or_else(invalide)?;
+        adresse
+            .parse::<std::net::Ipv6Addr>()
+            .map_err(|_| invalide())?;
+    } else if hote.contains(':') {
+        return Err(invalide());
+    }
+    Ok(donnee.to_owned())
+}
+
 /// Lit un nombre, ou dit lequel n'en était pas un.
 fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute> {
     donnee.parse().map_err(|_| Faute::PasUnNombre {
@@ -365,7 +469,7 @@ fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute
 
 #[cfg(test)]
 mod tests {
-    use super::{Faute, ReglageApple, Reglages};
+    use super::{Faute, ReglageApple, ReglagePair, Reglages};
 
     /// Les quatre réglages obligatoires, et rien d'autre.
     fn minimum() -> Vec<String> {
@@ -629,6 +733,111 @@ mod tests {
         let lus = Reglages::depuis(avec).expect("lisible");
         assert_eq!(lus.inactivite_us(), u64::MAX, "la saturation, pas le tour");
         assert_eq!(lus.retention_ms(), u64::MAX);
+    }
+
+    #[test]
+    fn sans_identite_ni_pair_la_racine_tourne_seule() {
+        let lus = Reglages::depuis(minimum()).expect("le minimum suffit");
+        assert_eq!(lus.identite, None);
+        assert_eq!(lus.pair, None);
+        // Une identité seule a un sens : une racine qui tourne seule, mais
+        // qui estampille sous SON identifiant.
+        let seule = Reglages::depuis(avec(&["--identity-key", "/id"])).expect("une identité");
+        assert_eq!(seule.identite, Some(std::path::PathBuf::from("/id")));
+        assert_eq!(seule.pair, None);
+    }
+
+    #[test]
+    fn les_trois_reglages_de_la_voie_vont_ensemble() {
+        // **`replication.md` §8** : `--peer` sans `--peer-key` refuse de
+        // démarrer, et l'un ou l'autre sans `--identity-key` aussi.
+        let lus = Reglages::depuis(avec(&[
+            "--identity-key",
+            "/id",
+            "--peer",
+            "argon.air-desktop.org:6630",
+            "--peer-key",
+            "/argon.pub",
+        ]))
+        .expect("les trois");
+        assert_eq!(
+            lus.pair,
+            Some(ReglagePair {
+                adresse: "argon.air-desktop.org:6630".to_owned(),
+                cle: std::path::PathBuf::from("/argon.pub"),
+            })
+        );
+
+        assert_eq!(
+            Reglages::depuis(avec(&["--identity-key", "/id", "--peer", "argon:6630"])).map(|_| ()),
+            Err(Faute::PairIncomplet)
+        );
+        assert_eq!(
+            Reglages::depuis(avec(&["--identity-key", "/id", "--peer-key", "/argon.pub"]))
+                .map(|_| ()),
+            Err(Faute::PairIncomplet)
+        );
+        assert_eq!(
+            Reglages::depuis(avec(&["--peer", "argon:6630", "--peer-key", "/argon.pub"]))
+                .map(|_| ()),
+            Err(Faute::PairSansIdentite)
+        );
+        for faute in [Faute::PairIncomplet, Faute::PairSansIdentite] {
+            assert!(!faute.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn l_adresse_du_pair_a_la_forme_hote_port() {
+        for bonne in [
+            "argon.air-desktop.org:6630",
+            "178.32.16.249:6630",
+            "[2001:41d0:20a:900::1d32]:6630",
+            "[::1]:1",
+            "localhost:65535",
+        ] {
+            let lus = Reglages::depuis(avec(&[
+                "--identity-key",
+                "/id",
+                "--peer",
+                bonne,
+                "--peer-key",
+                "/argon.pub",
+            ]))
+            .unwrap_or_else(|faute| panic!("{bonne} : {faute}"));
+            assert_eq!(lus.pair.map(|pair| pair.adresse), Some(bonne.to_owned()));
+        }
+        for mauvaise in [
+            "argon",
+            "argon:",
+            ":6630",
+            "argon:0",
+            "argon:65536",
+            "argon:six",
+            "2001:41d0:20a:900::1d32:6630",
+            "[2001:41d0:20a:900::1d32:6630",
+            "[argon]:6630",
+            "",
+        ] {
+            assert_eq!(
+                Reglages::depuis(avec(&[
+                    "--identity-key",
+                    "/id",
+                    "--peer",
+                    mauvaise,
+                    "--peer-key",
+                    "/argon.pub",
+                ]))
+                .map(|_| ()),
+                Err(Faute::PairInvalide(mauvaise.to_owned())),
+                "{mauvaise}"
+            );
+        }
+        assert!(
+            Faute::PairInvalide("x".to_owned())
+                .to_string()
+                .contains("hôte:port")
+        );
     }
 
     #[test]

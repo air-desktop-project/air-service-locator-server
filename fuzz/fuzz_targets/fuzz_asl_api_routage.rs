@@ -28,7 +28,10 @@
 //!    quelle que soit la méthode ; sinon un `GET` ouvrirait ce qu'un `POST`
 //!    ferme.
 //! 7. **LA CHAÎNE DE REQUÊTE NE CHANGE JAMAIS LA RESSOURCE**, sauf là où elle la
-//!    définit (`/v1/ou`).
+//!    définit (`/v1/ou`, `/v1/pair/operations`).
+//! 8. **LA VOIE ENTRE RACINES N'EST OUVERTE QU'À UNE RACINE.** Les trois
+//!    ressources sous `/v1/pair` exigent `Racine`, et aucune autre ne l'exige :
+//!    une clé de machine ou d'appareil ne doit jamais l'atteindre (C10).
 
 #![no_main]
 
@@ -89,6 +92,9 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Exposition { annuaire } => format!("/v1/expositions/{annuaire}"),
         Ressource::Ou { machine, service } => format!("/v1/ou/{machine}/{service}"),
         Ressource::OuParNom { service } => format!("/v1/ou?service={service}"),
+        Ressource::PairPreuve => "/v1/pair/preuve".to_owned(),
+        Ressource::PairOperations { apres } => format!("/v1/pair/operations?apres={apres}"),
+        Ressource::PairInstantane => "/v1/pair/instantane".to_owned(),
     }
 }
 
@@ -189,6 +195,16 @@ fuzz_target!(|entree: Entree| {
             "une ressource inattendue n'exige rien : {ressource:?}"
         );
     }
+
+    // ── PROPRIÉTÉ 8 : la voie entre racines, et rien d'autre ────────────────
+    assert_eq!(
+        resolu.exigence == Exigence::Racine,
+        matches!(
+            ressource,
+            Ressource::PairPreuve | Ressource::PairOperations { .. } | Ressource::PairInstantane
+        ),
+        "l'exigence `Racine` et les ressources de la voie ne coïncident pas : {ressource:?}"
+    );
 
     // Et une faute de chemin ne se déguise jamais en autre chose.
     if let Err(faute) = resoudre(methode, entree.cible) {
