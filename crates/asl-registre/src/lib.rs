@@ -2687,6 +2687,114 @@ fn copie<const N: usize>(tranche: &[u8]) -> [u8; N] {
     tableau
 }
 
+// ── Le cadre de fin d'un instantané (`docs/replication.md` §5.4) ────────────
+
+/// L'étiquette du cadre de fin : la quinzième, juste après les quatorze genres
+/// d'opération, et **ce n'est pas un genre d'opération**.
+///
+/// [`GenreOperation::depuis`] la refuse, et c'est voulu : une opération est un
+/// fait à appliquer, le cadre de fin est un signal de coupe. Le lecteur qui
+/// applique ne doit jamais le prendre pour un fait, et celui qui lit un
+/// instantané doit savoir le reconnaître AVANT de demander une opération.
+pub const ETIQUETTE_DE_FIN: u8 = 15;
+
+/// Ce qu'un cadre de fin occupe : l'en-tête seul, sans charge.
+///
+/// `fin (1) ‖ compteur (8) ‖ racine (17)` — le compteur est celui auquel
+/// l'instantané a été coupé, la racine est celle qui l'a émis. C'est là que le
+/// tireur reprend `GET /v1/pair/operations`.
+pub const CADRE_DE_FIN_OCTETS: usize = OPERATION_ENTETE_OCTETS;
+
+/// Ce qu'une racine met sur le fil : une opération, ou la fin d'un instantané.
+///
+/// # POURQUOI UN TYPE DE PLUS, ET NON UNE VARIANTE D'[`Operation`]
+///
+/// Un instantané « est une suite d'opérations, pas un second format » (§5.4),
+/// et il se termine par un cadre qui porte le compteur de coupe. Ce cadre a la
+/// forme d'une opération sans charge, et il se lit dans le même flux. Mais il
+/// ne S'APPLIQUE pas : en faire une variante d'[`Operation`] obligerait tout ce
+/// qui applique à porter un bras « ne rien faire », c'est-à-dire un fait qui
+/// n'en est pas un. Le lecteur du fil décode un [`Cadre`], et ne passe à
+/// l'application que ce qui en est une.
+///
+/// **Les deux variantes n'ont pas la même taille, et c'est accepté** : un
+/// cadre vit le temps d'être lu puis appliqué, sur la pile du lecteur, et
+/// cette crate n'alloue pas — mettre l'opération dans une boîte pour que la
+/// fin soit petite coûterait une allocation à chaque opération pour épargner
+/// trois cents octets à un cadre qui ne passe qu'une fois par instantané.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "un cadre vit sur la pile le temps d'une lecture, et la crate n'alloue pas"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cadre {
+    /// Une opération, sous son estampille.
+    Operation {
+        /// Quand, et par quelle racine.
+        estampille: Estampille,
+        /// Quoi.
+        operation: Operation,
+    },
+    /// La fin d'un instantané.
+    Fin {
+        /// Le compteur auquel l'instantané a été coupé, et la racine qui l'a
+        /// émis : le tireur reprend le flux à partir de là.
+        coupe: Estampille,
+    },
+}
+
+impl Cadre {
+    /// Écrit ce cadre, et rend ce qu'il occupe.
+    ///
+    /// Le tampon fait toujours [`OPERATION_OCTETS_MAX`], comme pour
+    /// [`Operation::ecrire`], et pour la même raison : écrire sans allouer.
+    pub fn ecrire(&self, sortie: &mut [u8; OPERATION_OCTETS_MAX]) -> usize {
+        match self {
+            Self::Operation {
+                estampille,
+                operation,
+            } => operation.ecrire(*estampille, sortie),
+            Self::Fin { coupe } => {
+                sortie.fill(0);
+                poser_un(sortie, ETIQUETTE_DE_FIN);
+                coupe.ecrire(sortie.get_mut(1..).unwrap_or_default());
+                CADRE_DE_FIN_OCTETS
+            }
+        }
+    }
+
+    /// Relit un cadre en tête de ces octets, et rend ce qu'il a occupé.
+    ///
+    /// **Le premier octet dit lequel des deux**, et rien d'autre n'est regardé
+    /// avant : un cadre de fin est reconnu sans passer par
+    /// [`GenreOperation::depuis`], qui le refuserait.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Tronquee`] si les octets s'arrêtent avant la fin du cadre, et
+    /// les fautes d'[`Operation::lire`] pour une opération.
+    pub fn lire(octets: &[u8]) -> Result<(Self, usize), Faute> {
+        if octets.first().copied() == Some(ETIQUETTE_DE_FIN) {
+            if octets.len() < CADRE_DE_FIN_OCTETS {
+                return Err(Faute::Tronquee {
+                    attendus: CADRE_DE_FIN_OCTETS,
+                    obtenus: octets.len(),
+                });
+            }
+            let coupe = Estampille::lire(octets.get(1..CADRE_DE_FIN_OCTETS).unwrap_or_default())?;
+            return Ok((Self::Fin { coupe }, CADRE_DE_FIN_OCTETS));
+        }
+        let (estampille, operation, combien) = Operation::lire(octets)?;
+        Ok((
+            Self::Operation {
+                estampille,
+                operation,
+            },
+            combien,
+        ))
+    }
+}
+
 // ── Le journal (C18) ────────────────────────────────────────────────────────
 
 /// Ce qu'une requête a obtenu.
@@ -2878,13 +2986,14 @@ mod tests {
 
     use super::{
         ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
-        Autorisation, CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS,
-        Capacites, CleLiee, Compte, Court, DESCRIPTION_OCTETS, Description, EMPREINTE_OCTETS,
-        ENROLEMENT_OCTETS, ENTREE_OCTETS, ESTAMPILLE_OCTETS, Enrolement, EntreeJournal, Estampille,
-        Faute, GenreOperation, IDENTIFIANT_OCTETS, JETON_OCTETS_MAX, JetonPoussee, JetonRange,
-        MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, OPERATION_ENTETE_OCTETS,
-        OPERATION_OCTETS_MAX, Operation, PORTEE_OCTETS, POUSSEE_OCTETS, PROVENANCE_OCTETS,
-        Plateforme, Portee, Provenance, SERVICE_OCTETS, Service, Systeme, Verdict, ancien,
+        Autorisation, CADRE_DE_FIN_OCTETS, CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS,
+        COMPTE_OCTETS, Cadre, Capacites, CleLiee, Compte, Court, DESCRIPTION_OCTETS, Description,
+        EMPREINTE_OCTETS, ENROLEMENT_OCTETS, ENTREE_OCTETS, ESTAMPILLE_OCTETS, ETIQUETTE_DE_FIN,
+        Enrolement, EntreeJournal, Estampille, Faute, GenreOperation, IDENTIFIANT_OCTETS,
+        JETON_OCTETS_MAX, JetonPoussee, JetonRange, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX,
+        NomRange, OPERATION_ENTETE_OCTETS, OPERATION_OCTETS_MAX, Operation, PORTEE_OCTETS,
+        POUSSEE_OCTETS, PROVENANCE_OCTETS, Plateforme, Portee, Provenance, SERVICE_OCTETS, Service,
+        Systeme, Verdict, ancien,
     };
 
     /// Un identifiant de ce genre, reproductible.
@@ -4765,5 +4874,99 @@ mod tests {
             assert!(genre.octets() <= OPERATION_OCTETS_MAX, "{genre:?}");
         }
         assert_eq!(GenreOperation::Poussee.octets(), OPERATION_OCTETS_MAX);
+    }
+
+    // ── Le cadre de fin d'un instantané ─────────────────────────────────────
+
+    #[test]
+    fn le_cadre_de_fin_se_relit_et_n_est_pas_une_operation() {
+        // **LA QUINZIÈME ÉTIQUETTE N'EST PAS UN GENRE** : ce qui applique ne
+        // doit jamais la prendre pour un fait.
+        assert_eq!(
+            GenreOperation::depuis(ETIQUETTE_DE_FIN),
+            Err(Faute::Etiquette {
+                lue: ETIQUETTE_DE_FIN
+            })
+        );
+        for genre in GenreOperation::TOUS {
+            assert_ne!(genre.etiquette(), ETIQUETTE_DE_FIN);
+        }
+
+        let fin = Cadre::Fin { coupe: e(4_812) };
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        let combien = fin.ecrire(&mut sortie);
+        assert_eq!(combien, CADRE_DE_FIN_OCTETS);
+        assert_eq!(sortie[0], ETIQUETTE_DE_FIN);
+        assert_eq!(&sortie[1..9], &4_812_u64.to_be_bytes());
+        assert_eq!(sortie[9], b'n');
+        // Le bourrage derrière est nul : le tampon est réemployé.
+        assert!(sortie[combien..].iter().all(|octet| *octet == 0));
+
+        assert_eq!(
+            Cadre::lire(&sortie[..combien]),
+            Ok((fin, CADRE_DE_FIN_OCTETS))
+        );
+        // Ce qui suit n'est pas regardé : sur le fil, c'est le cadre suivant.
+        assert_eq!(Cadre::lire(&sortie), Ok((fin, CADRE_DE_FIN_OCTETS)));
+        // Et une opération ne sait pas le lire.
+        assert_eq!(
+            Operation::lire(&sortie[..combien]),
+            Err(Faute::Etiquette {
+                lue: ETIQUETTE_DE_FIN
+            })
+        );
+    }
+
+    #[test]
+    fn un_cadre_de_fin_tronque_ou_a_la_racine_fausse_est_refuse() {
+        let fin = Cadre::Fin { coupe: e(1) };
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        let combien = fin.ecrire(&mut sortie);
+        assert_eq!(
+            Cadre::lire(&sortie[..combien - 1]),
+            Err(Faute::Tronquee {
+                attendus: CADRE_DE_FIN_OCTETS,
+                obtenus: combien - 1,
+            })
+        );
+        assert_eq!(
+            Cadre::lire(&[ETIQUETTE_DE_FIN]),
+            Err(Faute::Tronquee {
+                attendus: CADRE_DE_FIN_OCTETS,
+                obtenus: 1,
+            })
+        );
+        // La racine de coupe est un annuaire, et rien d'autre.
+        let mut corrompue = sortie;
+        corrompue[9] = b'm';
+        assert_eq!(
+            Cadre::lire(&corrompue[..combien]),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire,
+            })
+        );
+    }
+
+    #[test]
+    fn un_cadre_qui_porte_une_operation_est_l_operation_meme() {
+        // Le cadre d'une opération est exactement ce qu'`Operation::ecrire`
+        // écrit : un seul format sur le fil, et le lecteur d'un instantané lit
+        // ce que le lecteur du flux lit.
+        let operation = Operation::AppareilRevoque {
+            appareil: un(Genre::Appareil, 3),
+        };
+        let cadre = Cadre::Operation {
+            estampille: e(2),
+            operation,
+        };
+        let mut par_le_cadre = [0_u8; OPERATION_OCTETS_MAX];
+        let mut par_l_operation = [0_u8; OPERATION_OCTETS_MAX];
+        let combien = cadre.ecrire(&mut par_le_cadre);
+        assert_eq!(operation.ecrire(e(2), &mut par_l_operation), combien);
+        assert_eq!(par_le_cadre, par_l_operation);
+        assert_eq!(Cadre::lire(&par_le_cadre[..combien]), Ok((cadre, combien)));
+        // Et une faute d'opération remonte telle quelle.
+        assert_eq!(Cadre::lire(&[0]), Err(Faute::Etiquette { lue: 0 }));
+        assert_eq!(Cadre::lire(&[]), Err(Faute::Etiquette { lue: 0 }));
     }
 }

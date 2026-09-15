@@ -6,11 +6,15 @@
 //!    arguments : ce qui est refusé doit l'être avant d'avoir ouvert quoi que ce
 //!    soit.
 //! 2. Il lit ses réglages.
-//! 3. Il ouvre l'entrepôt, **puis** lit le certificat et la clé. Dans cet ordre
-//!    parce qu'une base verrouillée par une autre instance est la panne la plus
-//!    probable, et qu'on préfère l'apprendre avant d'avoir lu des secrets.
-//! 4. Il ouvre la socket en double pile.
-//! 5. Il lance l'expiration du journal, puis l'écoute.
+//! 3. Il lit sa clé d'identité et celle de l'autre racine, s'il en a : c'est
+//!    l'identité qui dit sous quel `n-…` l'entrepôt estampille, donc elle
+//!    passe avant lui.
+//! 4. Il ouvre l'entrepôt, **puis** lit le certificat et la clé TLS. Dans cet
+//!    ordre parce qu'une base verrouillée par une autre instance est la panne
+//!    la plus probable, et qu'on préfère l'apprendre avant d'avoir lu des
+//!    secrets.
+//! 5. Il ouvre la socket en double pile.
+//! 6. Il lance l'expiration du journal, puis l'écoute.
 //!
 //! # IL N'AJOUTE AUCUNE DÉCISION, ET C'EST LA PROPRIÉTÉ QU'IL FAUT GARDER
 //!
@@ -27,12 +31,14 @@
 //! sa rotation, ses droits et ses pannes propres.
 
 mod entropie;
+mod identite;
 mod reglages;
 mod socket;
 
 use std::sync::Arc;
 
 use asl_id::{Genre, Identifiant};
+use asl_loop_tokio::h3::Voie;
 use asl_loop_tokio::{Annuaire, configuration_tls, refuser_root, servir_quic};
 use asl_store::Entrepot;
 
@@ -52,11 +58,9 @@ const EXPIRATION_TOUTES_LES: core::time::Duration = core::time::Duration::from_s
 ///
 /// `docs/replication.md` §2.2 : l'identifiant `n-…` d'une racine SE DÉDUIT de
 /// sa clé d'identité Ed25519 (`asl_cle::identifiant_de_racine`), que
-/// `--identity-key` lui donne. **Ce réglage n'existe pas encore** — il vient
-/// avec la voie entre racines, dans une tranche suivante —, et l'entrepôt ne
-/// sait pas écrire sans racine : chaque écriture porte `(compteur, racine)`.
-///
-/// D'ici là, la racine écrit sous un identifiant qui ne se déduit d'aucune clé,
+/// `--identity-key` lui donne. Sans ce réglage, la racine tourne comme avant
+/// — l'entrepôt ne sait pas écrire sans racine, chaque écriture porte
+/// `(compteur, racine)` — sous un identifiant qui ne se déduit d'aucune clé,
 /// et qui le dit : seize zéros. Il est visible dans le journal d'exploitation,
 /// et il ne sera jamais celui d'une racine réelle. Une clé générée en silence
 /// aurait été pire (§8) — une clé que personne n'a copiée nulle part.
@@ -104,6 +108,18 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", version());
         return Ok(());
     }
+    // **FRAPPER UNE CLÉ EST UN GESTE, PAS UN RÉGLAGE** : on l'écrit, on
+    // l'imprime, on s'arrête — sans entrepôt, sans certificat, sans socket.
+    if let Some(rang) = arguments
+        .iter()
+        .position(|quoi| quoi == "--new-identity-key")
+    {
+        let Some(chemin) = arguments.get(rang.saturating_add(1)) else {
+            eprint!("{USAGE}");
+            return Err("--new-identity-key attend un chemin".into());
+        };
+        return nouvelle_identite(std::path::Path::new(chemin));
+    }
     let reglages = Reglages::depuis(&arguments).inspect_err(|_| eprint!("{USAGE}"))?;
 
     // **LE BAIL SE VALIDE AVANT D'OUVRIR QUOI QUE CE SOIT.** Un `--keepalive`
@@ -117,7 +133,24 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         .bail()
         .map_err(|quoi| format!("--keepalive et --idle ne forment pas un bail : {quoi}"))?;
 
-    let entrepot = Arc::new(Entrepot::ouvrir(&reglages.entrepot, RACINE_SANS_IDENTITE)?);
+    // **L'IDENTITÉ AVANT L'ENTREPÔT** : c'est elle qui dit sous quel `n-…`
+    // il estampille. Et la clé de l'autre racine tout de suite après — un
+    // fichier qui manque doit se dire avant d'avoir verrouillé une base.
+    let identite = reglages
+        .identite
+        .as_ref()
+        .map(|chemin| identite::lire_secrete(chemin))
+        .transpose()?;
+    let cle_du_pair = reglages
+        .pair
+        .as_ref()
+        .map(|pair| identite::lire_publique(&pair.cle))
+        .transpose()?;
+    let racine = identite.as_ref().map_or(RACINE_SANS_IDENTITE, |cle| {
+        asl_cle::identifiant_de_racine(&cle.publique())
+    });
+
+    let entrepot = Arc::new(Entrepot::ouvrir(&reglages.entrepot, racine)?);
     let chaine = std::fs::read(&reglages.certificat)?;
     let cle = std::fs::read(&reglages.cle)?;
     let tls = Arc::new(configuration_tls(&chaine, &cle)?);
@@ -139,12 +172,33 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
             reglages.retention_jours,
         );
 
-        eprintln!(
-            "asl-server : sans clé d'identité (--identity-key n'existe pas encore), \
-             les écritures sont estampillées {} — compteur à {}.",
-            entrepot.racine(),
-            entrepot.compteur().unwrap_or(0),
-        );
+        // **L'IDENTITÉ SE DIT AU DÉMARRAGE** — et son absence aussi, fort :
+        // une racine qui estampille sous seize zéros ne se réplique avec
+        // personne, et l'exploitant doit le lire là où il relit ses réglages.
+        match &identite {
+            Some(cle) => eprintln!(
+                "asl-server : identité {}, clé publique {} — compteur à {}.",
+                entrepot.racine(),
+                identite::en_hexadecimal(&cle.publique().octets()),
+                entrepot.compteur().unwrap_or(0),
+            ),
+            None => eprintln!(
+                "asl-server : SANS CLÉ D'IDENTITÉ (--identity-key) : les écritures sont \
+                 estampillées {} — compteur à {} —, et aucune autre racine ne peut \
+                 tirer d'ici.",
+                entrepot.racine(),
+                entrepot.compteur().unwrap_or(0),
+            ),
+        }
+        match (&reglages.pair, &cle_du_pair) {
+            (Some(pair), Some(cle)) => eprintln!(
+                "asl-server : pair {} à {} — il peut tirer d'ici ; la connexion \
+                 sortante vers lui n'est pas écrite (docs/replication.md, tranche 3).",
+                asl_cle::identifiant_de_racine(cle),
+                pair.adresse,
+            ),
+            _ => eprintln!("asl-server : sans pair (--peer) : cette racine tourne seule."),
+        }
 
         let balayeur = tokio::spawn(expirer_sans_fin(
             Arc::clone(&entrepot),
@@ -182,8 +236,23 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                 identifiant_app: reglage.identifiant_app.as_str(),
                 environnement: reglage.environnement,
             });
-        let mut application =
-            Annuaire::new(&entrepot, &tirer, &nommer, reglages.politique, apple, bail);
+        // Le journal d'exploitation de la voie entre racines
+        // (`replication.md` §8) : la même sortie que le reste.
+        let dire = |ligne: &str| eprintln!("asl-server : {ligne}");
+        let voie = Voie {
+            identite: identite.as_ref(),
+            pair: cle_du_pair,
+            journal: &dire,
+        };
+        let mut application = Annuaire::new(
+            &entrepot,
+            &tirer,
+            &nommer,
+            reglages.politique,
+            apple,
+            bail,
+            voie,
+        );
         let comptes = servir_quic(
             socket,
             tls,
@@ -202,6 +271,25 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         );
         Ok::<(), Box<dyn std::error::Error>>(())
     })
+}
+
+/// Frappe une clé d'identité, imprime ce que l'autre racine doit en savoir,
+/// et s'arrête.
+///
+/// **C'est la clé PUBLIQUE qu'on porte chez l'autre racine** — le fichier
+/// `<chemin>.pub`, à donner en `--peer-key` —, et l'identifiant `n-…` est ce
+/// qu'on compare à l'œil : il se déduit de la clé, et deux racines qui
+/// impriment le même parlent de la même clé.
+fn nouvelle_identite(chemin: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let publique = identite::generer(chemin)?;
+    println!(
+        "clé privée   : {} (0600)\nclé publique : {} — {}\nidentifiant  : {}",
+        chemin.display(),
+        identite::chemin_public(chemin).display(),
+        identite::en_hexadecimal(&publique.octets()),
+        asl_cle::identifiant_de_racine(&publique),
+    );
+    Ok(())
 }
 
 /// Attend le signal d'arrêt.

@@ -12,8 +12,8 @@ use std::path::PathBuf;
 
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
-    AliasRange, Attestation, Capacites, Compte, EntreeJournal, Estampille, JetonRange, NomRange,
-    Operation, Plateforme, Portee, Provenance, Systeme, Verdict,
+    AliasRange, Attestation, Cadre, Capacites, Compte, EntreeJournal, Estampille, JetonRange,
+    NomRange, Operation, Plateforme, Portee, Provenance, Systeme, Verdict,
 };
 use asl_store::{Entrepot, Faute, Rattrapage};
 
@@ -563,6 +563,346 @@ fn le_journal_d_operations_s_expire_et_dit_jusqu_ou() {
         asl_store::RETENTION_DES_OPERATIONS_MS,
         30 * 24 * 60 * 60 * 1_000
     );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+/// Les cadres d'un instantané, relus.
+fn instantane(base: &Entrepot) -> Vec<Cadre> {
+    base.instantane()
+        .expect("lisible")
+        .iter()
+        .map(|cadre| {
+            let (lu, combien) = Cadre::lire(cadre).expect("un cadre d'instantané se relit");
+            assert_eq!(
+                combien,
+                cadre.len(),
+                "un cadre porte exactement son contenu"
+            );
+            lu
+        })
+        .collect()
+}
+
+#[test]
+fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine() {
+    // **C'EST `replication.md` §5.4** : l'état entier, en suite d'opérations,
+    // avec les estampilles de l'écriture d'origine — champ par champ là où la
+    // règle de conflit est champ par champ —, puis le cadre de fin.
+    let (base, chemin) = entrepot("instantane");
+    let thierry = un(Genre::Utilisateur, 1);
+    let grenier = un(Genre::Machine, 2);
+    let iphone = un(Genre::Appareil, 3);
+    let depot = un(Genre::Service, 4);
+    let accordee = un(Genre::Autorisation, 5);
+    let code = empreinte("4K9M2P7R1T");
+    let en_attente = empreinte("ABCDEFGH23");
+
+    base.creer_compte(thierry, Provenance::Ici, None)
+        .expect("1");
+    base.reclamer_alias(thierry, Some(alias("thierry")))
+        .expect("2");
+    base.creer_appareil(
+        iphone,
+        Provenance::Ici,
+        thierry,
+        [7; 33],
+        Attestation::Apple,
+    )
+    .expect("3");
+    base.poser_description(iphone, Provenance::Ici, Systeme::Ios, nom("iPhone 17"))
+        .expect("4");
+    base.poser_jeton(
+        iphone,
+        Provenance::Ici,
+        Plateforme::Apns,
+        JetonRange::nouveau("c0ffee").expect("il tient"),
+    )
+    .expect("5");
+    base.creer_machine(grenier, Provenance::Ici, thierry, nom("grenier"), TOUT)
+        .expect("6");
+    base.modifier_machine(grenier, Some(nom("cave")), None)
+        .expect("7");
+    base.emettre_enrolement(&code, Provenance::Ici, grenier, 10_000)
+        .expect("8");
+    let enrolement = base
+        .consommer_enrolement(&code)
+        .expect("lisible")
+        .expect("le code");
+    base.lier_cle(grenier, [0x42; 32], code, enrolement.estampille)
+        .expect("9");
+    base.declarer_service(depot, Provenance::Ici, grenier, nom("depot"))
+        .expect("10");
+    base.accorder_autorisation(
+        accordee,
+        Provenance::Ici,
+        thierry,
+        un(Genre::Utilisateur, 6),
+        Portee::UneMachine(grenier),
+        nom("le grenier"),
+    )
+    .expect("11");
+    base.revoquer_autorisation(accordee).expect("12");
+    base.revoquer_appareil(iphone).expect("13");
+    base.emettre_enrolement(&en_attente, Provenance::Ici, grenier, 20_000)
+        .expect("14");
+    // **CE QUI NE VIENT PAS D'ICI NE SORT PAS** (C11) : une écriture de
+    // provenance distante est estampillée — c'est une écriture —, mais elle
+    // n'entre ni dans le journal, ni dans l'instantané.
+    base.creer_compte(
+        un(Genre::Utilisateur, 9),
+        Provenance::Annuaire(un(Genre::Annuaire, 1)),
+        None,
+    )
+    .expect("15");
+    assert_eq!(base.compteur().expect("lisible"), 15);
+
+    let cadres = instantane(&base);
+    let (fin, operations) = cadres.split_last().expect("au moins la fin");
+    assert_eq!(*fin, Cadre::Fin { coupe: e(15) }, "le compteur de coupe");
+    assert!(
+        operations
+            .iter()
+            .all(|cadre| matches!(cadre, Cadre::Operation { .. })),
+        "un seul cadre de fin, en dernier"
+    );
+    let operations: Vec<(Estampille, Operation)> = operations
+        .iter()
+        .map(|cadre| match cadre {
+            Cadre::Operation {
+                estampille,
+                operation,
+            } => (*estampille, *operation),
+            Cadre::Fin { .. } => unreachable!(),
+        })
+        .collect();
+
+    // Le compte : l'enregistrement, puis sa réclamation courante.
+    let compte = base.compte(thierry).expect("lisible").expect("il est là");
+    assert_eq!(
+        &operations[..2],
+        [
+            (
+                e(2),
+                Operation::Compte {
+                    compte: thierry,
+                    enregistrement: compte,
+                },
+            ),
+            (
+                e(2),
+                Operation::Alias {
+                    compte: thierry,
+                    alias: Some(alias("thierry")),
+                },
+            ),
+        ]
+    );
+
+    // La machine : sans clé, puis le nom sous SON estampille, les capacités
+    // sous la leur, et la clé sous celle de la liaison — l'empreinte du code
+    // consommé est nulle, il n'existe plus.
+    let machine = base
+        .machine(grenier)
+        .expect("lisible")
+        .expect("elle est là");
+    assert_eq!(
+        &operations[2..6],
+        [
+            (
+                e(9),
+                Operation::Machine {
+                    machine: grenier,
+                    enregistrement: asl_registre::Machine {
+                        cle: None,
+                        ..machine
+                    },
+                },
+            ),
+            (
+                e(7),
+                Operation::MachineModifiee {
+                    machine: grenier,
+                    nom: Some(nom("cave")),
+                    capacites: None,
+                },
+            ),
+            (
+                e(6),
+                Operation::MachineModifiee {
+                    machine: grenier,
+                    nom: None,
+                    capacites: Some(TOUT),
+                },
+            ),
+            (
+                e(9),
+                Operation::CleMachine {
+                    machine: grenier,
+                    cle: [0x42; 32],
+                    empreinte: [0; 32],
+                    code: e(8),
+                },
+            ),
+        ]
+    );
+
+    // L'appareil révoqué : l'enregistrement, puis la révocation ; puis ce qu'il
+    // dit de lui. Le jeton est parti avec la révocation.
+    let appareil = base.appareil(iphone).expect("lisible").expect("il est là");
+    assert!(appareil.revoque);
+    assert_eq!(
+        &operations[6..9],
+        [
+            (
+                e(13),
+                Operation::Appareil {
+                    appareil: iphone,
+                    enregistrement: appareil,
+                },
+            ),
+            (e(13), Operation::AppareilRevoque { appareil: iphone }),
+            (
+                e(4),
+                Operation::Description {
+                    appareil: iphone,
+                    enregistrement: base
+                        .description(iphone)
+                        .expect("lisible")
+                        .expect("elle est là"),
+                },
+            ),
+        ]
+    );
+    assert!(
+        !operations
+            .iter()
+            .any(|(_, operation)| matches!(operation, Operation::Poussee { .. })),
+        "le jeton est parti avec l'appareil"
+    );
+
+    // Le code en attente, le service, l'autorisation révoquée.
+    assert_eq!(
+        &operations[9..],
+        [
+            (
+                e(14),
+                Operation::Enrolement {
+                    empreinte: en_attente,
+                    enregistrement: asl_registre::Enrolement {
+                        provenance: Provenance::Ici,
+                        estampille: e(14),
+                        machine: grenier,
+                        expire_a: 20_000,
+                    },
+                },
+            ),
+            (
+                e(10),
+                Operation::Service {
+                    service: depot,
+                    enregistrement: base.service(depot).expect("lisible").expect("il est là"),
+                },
+            ),
+            (
+                e(12),
+                Operation::Autorisation {
+                    autorisation: accordee,
+                    enregistrement: base
+                        .autorisation(accordee)
+                        .expect("lisible")
+                        .expect("elle est là"),
+                },
+            ),
+            (
+                e(12),
+                Operation::AutorisationRevoquee {
+                    autorisation: accordee,
+                },
+            ),
+        ]
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn un_entrepot_vide_a_un_instantane_qui_ne_porte_que_sa_fin() {
+    let (base, chemin) = entrepot("instantane-vide");
+    assert_eq!(instantane(&base), [Cadre::Fin { coupe: e(0) }]);
+
+    // Une machine dont le nom et les capacités ont la même estampille — celle
+    // de sa création — sort en UNE opération de modification, pas deux.
+    let grenier = un(Genre::Machine, 2);
+    base.creer_machine(
+        grenier,
+        Provenance::Ici,
+        un(Genre::Utilisateur, 1),
+        nom("grenier"),
+        TOUT,
+    )
+    .expect("écrite");
+    let cadres = instantane(&base);
+    assert_eq!(cadres.len(), 3, "la machine, sa modification, la fin");
+    assert_eq!(
+        cadres[1],
+        Cadre::Operation {
+            estampille: e(1),
+            operation: Operation::MachineModifiee {
+                machine: grenier,
+                nom: Some(nom("grenier")),
+                capacites: Some(TOUT),
+            },
+        }
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn la_derniere_operation_previent_sans_transaction_et_apres_le_commit() {
+    // **C'EST CE QUE LA VOIE COMPARE À SON CURSEUR** à chaque tour : un entier
+    // en mémoire, qui ne bouge que sur les écritures journalisées.
+    let (base, chemin) = entrepot("derniere-operation");
+    assert_eq!(base.derniere_operation(), 0);
+    base.creer_compte(un(Genre::Utilisateur, 1), Provenance::Ici, None)
+        .expect("1");
+    assert_eq!(base.derniere_operation(), 1);
+
+    // Une écriture qui n'ajoute pas d'opération ne prévient pas : hisser le
+    // compteur, journaliser une requête, poser un curseur.
+    base.hisser_le_compteur(100).expect("hissé");
+    base.poser_curseur(un(Genre::Annuaire, 2), 50)
+        .expect("posé");
+    base.journaliser(&EntreeJournal {
+        quand: 1,
+        demandeur: un(Genre::Machine, 1),
+        visee: un(Genre::Machine, 2),
+        service: nom("depot"),
+        verdict: Verdict::Servi,
+        provenance: Provenance::Ici,
+    })
+    .expect("journalisé");
+    assert_eq!(base.derniere_operation(), 1);
+    assert_eq!(base.compteur().expect("lisible"), 100);
+
+    // Une écriture de provenance distante avance le compteur, mais n'est pas
+    // journalisée : elle ne prévient pas non plus.
+    base.creer_compte(
+        un(Genre::Utilisateur, 2),
+        Provenance::Annuaire(un(Genre::Annuaire, 1)),
+        None,
+    )
+    .expect("101");
+    assert_eq!(base.derniere_operation(), 1);
+    // La suivante, locale, est journalisée sous 102 : c'est ce qu'on lit.
+    base.creer_compte(un(Genre::Utilisateur, 3), Provenance::Ici, None)
+        .expect("102");
+    assert_eq!(base.derniere_operation(), 102);
+    assert_eq!(operations(&base, 1).len(), 1);
+
+    // Et à la réouverture, elle repart du compteur : un majorant, jamais un
+    // retard — un lecteur qui compare relit au pire une fois pour rien.
+    drop(base);
+    let base = Entrepot::ouvrir(&chemin, racine()).expect("rouvert");
+    assert_eq!(base.derniere_operation(), 102);
     let _ = std::fs::remove_file(&chemin);
 }
 

@@ -23,6 +23,10 @@ ams-proto-http.workspace = true
 # La pile QUIC et HTTP/3 d'`air-mail-server` (C15). Voir le manifeste du
 # workspace pour ce qui est repris et ce qui ne l'est pas.
 ams-h3.workspace = true
+# `ams-proto-h3` POUR CADRER NOUS-MÊMES LES TRAMES `DATA` DE LA VOIE ENTRE
+# RACINES : `Http3::pousser` ignore ce que le transport n'a pas pris, ce qui
+# convient à une poussée de verdict et pas à un instantané. Voir `FluxPair`.
+ams-proto-h3.workspace = true
 ams-proto-quic.workspace = true
 ams-quic.workspace = true
 ams-quic-tls.workspace = true
