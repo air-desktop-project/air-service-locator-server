@@ -141,6 +141,23 @@ cargo run -p asl-server -- \
     --attestation optional      # ou `required` : il n'y a pas de défaut
 ```
 
+**Deux racines qui se répliquent** (`docs/replication.md`) tiennent chacune une
+clé d'identité, et la clé publique de l'autre :
+
+```sh
+asl-server --new-identity-key local/nitrogen.key      # écrit .key (0600) et .key.pub,
+                                                      # imprime la clé publique et le n-…
+cargo run -p asl-server -- … \
+    --identity-key local/nitrogen.key \
+    --peer         argon.air-desktop.org:6630 \
+    --peer-key     local/argon.key.pub                # le .pub de l'AUTRE
+```
+
+Les trois vont ensemble. Sans `--identity-key`, la racine tourne seule et le
+dit au démarrage. **Aujourd'hui, la voie est SERVIE et pas encore TIRÉE** :
+l'autre racine peut prouver sa clé et lire ici (`/v1/pair/…`), mais aucune
+connexion sortante n'est ouverte — c'est la tranche suivante.
+
 `asl-server --help` dit le reste. **La grammaire est en anglais** — options,
 valeurs, texte de l'aide — parce que c'est la langue universelle des outils en
 ligne de commande ; les messages d'exécution, eux, restent en français. Trois
@@ -166,7 +183,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.5.0_amd64.deb
+sudo dpkg -i asl-server_0.6.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :

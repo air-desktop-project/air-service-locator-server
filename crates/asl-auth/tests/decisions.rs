@@ -10,7 +10,7 @@
 use asl_auth::{
     Autorisation, Capacites, Cible, Decision, EtatCode, Faute, Machine, Politique, Portee,
     decider_annonce, decider_attestation, decider_enrolement, decider_gestion,
-    decider_machine_visible, decider_resolution, decider_revocation_d_appareil,
+    decider_machine_visible, decider_pair, decider_resolution, decider_revocation_d_appareil,
 };
 use asl_id::{Genre, Identifiant};
 
@@ -518,4 +518,47 @@ fn une_arete_revoquee_ou_d_un_autre_bout_ne_donne_rien() {
         decider_machine_visible(bob(), true, alice(), m, &[], &[morte, de_carole, vivante]),
         Decision::Servir
     );
+}
+
+// ── L'autre racine (`replication.md` §2.2) ──────────────────────────────────
+
+#[test]
+fn seule_la_racine_attendue_est_un_pair_et_aucune_sans_reglage() {
+    // **UNE SEULE CLÉ, AUCUNE LISTE.** L'identifiant que `--peer-key` donne
+    // est le seul qui passe ; un autre `n-…` rend le refus d'une clé inconnue.
+    let argon = ident(Genre::Annuaire, 0xA0);
+    let inconnue = ident(Genre::Annuaire, 0xB0);
+    assert_eq!(decider_pair(argon, Some(argon)), Decision::Servir);
+    assert_eq!(decider_pair(inconnue, Some(argon)), Decision::Refuser);
+    // Sans pair configuré, personne n'est une racine — pas même celle qu'on
+    // épinglerait demain.
+    assert_eq!(decider_pair(argon, None), Decision::Refuser);
+}
+
+#[test]
+fn un_autre_genre_n_est_jamais_une_racine() {
+    // Le genre entre dans le message signé, donc une machine qui se
+    // présenterait sous les seize octets d'une racine ne vérifierait pas de
+    // toute façon ; on le refuse ici quand même, pour que la faute se voie
+    // avant d'aller chercher une clé.
+    let argon = ident(Genre::Annuaire, 0xA0);
+    for genre in [
+        Genre::Utilisateur,
+        Genre::Appareil,
+        Genre::Machine,
+        Genre::Service,
+        Genre::Autorisation,
+    ] {
+        let autre = ident(genre, 0xA0);
+        assert_eq!(
+            decider_pair(autre, Some(argon)),
+            Decision::Refuser,
+            "{genre:?}"
+        );
+        assert_eq!(
+            decider_pair(autre, Some(autre)),
+            Decision::Refuser,
+            "{genre:?}"
+        );
+    }
 }

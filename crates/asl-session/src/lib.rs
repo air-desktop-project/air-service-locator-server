@@ -166,6 +166,17 @@ pub const ENROLEMENT_CORPS_OCTETS: usize = asl_cle::CODE_SYMBOLES + POSSESSION_O
 /// Le type de média d'un défi et d'une preuve.
 pub const OCTETS_MEDIA: &[u8] = b"application/octet-stream";
 
+/// `410 Gone` — le journal d'opérations ne remonte plus jusqu'au compteur
+/// demandé (`replication.md` §5.4).
+///
+/// **`ams-proto-http` ne le nomme pas** : un serveur de courrier n'a rien qui
+/// disparaisse. On le construit ici, sous une constante, pour qu'il n'y ait
+/// qu'un endroit où `410` soit écrit.
+pub const GONE: StatusCode = match StatusCode::new(410) {
+    Ok(statut) => statut,
+    Err(_) => panic!("410 est un code d'état"),
+};
+
 /// Ce qu'il faut aller chercher pour répondre.
 ///
 /// **Ce n'est pas un effet, c'est un besoin.** L'étage 3 le satisfait ; cette
@@ -454,6 +465,40 @@ pub enum Besoin<'a> {
     },
     /// Retirer l'alias public du compte.
     RetirerAlias,
+    /// L'autre racine pose un défi, et cette racine-ci doit le signer.
+    ///
+    /// # LE SECOND TEMPS DE `replication.md` §2.2
+    ///
+    /// Le tireur a prouvé sa clé (genre `n` sur `/v1/defi`) ; il veut
+    /// maintenant que la racine tirée prouve la sienne, sans quoi elle ne
+    /// serait authentifiée que par son certificat — c'est-à-dire par
+    /// l'autorité de certification, qui n'est pas l'ancre. La clé d'identité
+    /// vit à l'étage 3 ; c'est lui qui signe, sous le domaine propre
+    /// d'`asl_cle::message_de_preuve_de_racine`, avec la liaison de CETTE
+    /// connexion ([`Session::liaison`]).
+    ProuverLaRacine {
+        /// Le défi que le tireur a posé.
+        defi: Defi,
+    },
+    /// Ouvrir le flux des opérations écrites après ce compteur, **sans fin**.
+    ///
+    /// # LA RÉPONSE EST VIDE, ET C'EST LE FLUX QUI COMPTE
+    ///
+    /// Comme [`Besoin::EcouterLesPoussees`] : ce qui s'y écrira ne passe pas
+    /// par [`repondre`]. L'étage 3 lit le journal, pousse ce qu'il porte après
+    /// `apres`, puis chaque opération nouvelle à mesure qu'elle s'écrit
+    /// (`replication.md` §5.3). Ce que cette crate décide est le statut : le
+    /// flux s'ouvre, ou le journal ne remonte plus jusque-là — `410`.
+    LireLesOperations {
+        /// Le curseur du tireur : tout ce qui suit.
+        apres: u64,
+    },
+    /// Ouvrir le flux de l'instantané : l'état entier, puis le compteur de
+    /// coupe, et le flux se ferme (`replication.md` §5.4).
+    ///
+    /// La même forme que [`Besoin::LireLesOperations`], à ceci près que
+    /// l'étage 3 ferme le flux après le cadre de fin.
+    LireLInstantane,
 }
 
 /// Ce qu'il faut savoir pour décider d'une résolution.
@@ -514,6 +559,9 @@ pub enum CleTrouvee {
     Machine(ClePublique),
     /// Une clé d'appareil, P-256.
     Appareil(CleAppareil),
+    /// La clé d'identité de l'autre racine, Ed25519 — **celle de
+    /// `--peer-key`, jamais une clé de l'entrepôt** (`replication.md` §2.2).
+    Racine(ClePublique),
 }
 
 /// autorisations sont une liste, dont la longueur ne se connaît qu'à
@@ -680,7 +728,8 @@ pub enum Trouvaille {
     /// Les révocations et l'alias : **la réponse est le fait qu'elle réussisse**.
     /// Rendre l'objet modifié n'apprendrait rien à qui vient de le modifier.
     Fait,
-    /// Cet alias appartient déjà à quelqu'un d'autre.
+    /// Cet alias appartient déjà à quelqu'un d'autre — ou, sur la voie entre
+    /// racines, **cette connexion tient déjà un flux**.
     ///
     /// # CE N'EST NI UN REFUS NI UNE PANNE, ET LE STATUT DOIT LE DIRE
     ///
@@ -689,6 +738,23 @@ pub enum Trouvaille {
     /// notre côté. C'est un CONFLIT : la demande est légitime, et l'état du
     /// monde s'y oppose. Le client doit en proposer un autre, et lui seul peut.
     Conflit,
+    /// La racine tirée a signé le défi du tireur.
+    PreuveDeRacine {
+        /// L'identifiant `n-…` de cette racine-ci, déduit de sa clé.
+        racine: Identifiant,
+        /// La signature, sous le domaine de la preuve de racine.
+        signature: Signature,
+    },
+    /// Le flux demandé s'ouvre : l'étage 3 y écrira ce qui suit.
+    ///
+    /// **Il ne porte rien**, et c'est voulu : les cadres ne passent pas par
+    /// [`repondre`] — un tampon de réponse ne tient pas un instantané, et un
+    /// flux sans fin n'a pas de corps. L'étage 3 les tient et les pousse.
+    FluxOuvert,
+    /// Le journal d'opérations ne remonte plus jusqu'au compteur demandé :
+    /// c'est le `410` de `replication.md` §5.4, et la réponse du tireur est
+    /// l'instantané.
+    HorsJournal,
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -760,6 +826,26 @@ impl Session {
         self.pair.filter(|qui| qui.genre() == Genre::Appareil)
     }
 
+    /// L'autre racine, si c'est elle qui a prouvé sa clé sur cette connexion.
+    ///
+    /// **Une racine n'est ni une machine ni un appareil** : elle ne lit aucune
+    /// ressource des deux autres voies, et rien d'elles ne lit la sienne. Le
+    /// genre `n` de son identifiant est ce qui tient les trois à part.
+    #[must_use]
+    pub fn racine(&self) -> Option<Identifiant> {
+        self.pair.filter(|qui| qui.genre() == Genre::Annuaire)
+    }
+
+    /// Ce à quoi une signature de cette connexion est liée.
+    ///
+    /// **Rendue pour que l'étage 3 puisse SIGNER** — la preuve de racine du
+    /// second temps se compose avec la liaison de la connexion sur laquelle
+    /// on la rend, et la clé qui signe vit là-bas. Rien d'autre ne la lit.
+    #[must_use]
+    pub const fn liaison(&self) -> &LiaisonDeCanal {
+        &self.liaison
+    }
+
     /// Range le défi qu'on vient de tirer, et rend ses octets.
     ///
     /// **UN SEUL DÉFI À LA FOIS.** En tirer un second remplace le premier :
@@ -785,7 +871,12 @@ impl Session {
         // ce qui diffère est la mathématique qui les vérifie, et c'est le genre
         // du pair — donc la table d'où vient la clé — qui la fixe.
         let ok = match cle {
-            CleTrouvee::Machine(cle) => cle.verifie(pair, &defi, &self.liaison, signature),
+            // **UNE RACINE PROUVE COMME UNE MACHINE** : même courbe, même
+            // message, un genre de plus — et une clé qui ne vient pas de
+            // l'entrepôt.
+            CleTrouvee::Machine(cle) | CleTrouvee::Racine(cle) => {
+                cle.verifie(pair, &defi, &self.liaison, signature)
+            }
             CleTrouvee::Appareil(cle) => cle.verifie(
                 pair,
                 &defi,
@@ -915,6 +1006,14 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
                 return Besoin::Deja(StatusCode::UNAUTHORIZED);
             }
         }
+        // **L'AUTRE RACINE, ET RIEN D'AUTRE.** Ni une machine ni un appareil
+        // n'atteignent la voie entre racines (C10) : elle transporte tout,
+        // et seule la clé de `--peer-key` l'ouvre.
+        Exigence::Racine => {
+            if session.racine().is_none() {
+                return Besoin::Deja(StatusCode::UNAUTHORIZED);
+            }
+        }
     }
 
     match resolu.ressource {
@@ -1010,6 +1109,10 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
                 Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
         },
+        // ── LA VOIE ENTRE RACINES ───────────────────────────────────────
+        Ressource::PairPreuve => lire_un_defi(corps),
+        Ressource::PairOperations { apres } => Besoin::LireLesOperations { apres },
+        Ressource::PairInstantane => Besoin::LireLInstantane,
         // Ce qui reste — les expositions —
         // n'est pas écrit. Le dire par `501` est exact : la ressource existe, le
         // verbe est servi, et l'annuaire ne sait pas encore le faire.
@@ -1167,14 +1270,16 @@ fn lire_une_preuve<'a>(corps: &[u8]) -> Besoin<'a> {
     if corps.len() != PREUVE_OCTETS {
         return Besoin::Deja(StatusCode::BAD_REQUEST);
     }
-    // **DEUX GENRES SIGNENT, ET L'OCTET EXACT LES DISTINGUE.** Une machine
+    // **TROIS GENRES SIGNENT, ET L'OCTET EXACT LES DISTINGUE.** Une machine
     // s'authentifie pour annoncer et interroger ; un appareil s'authentifie pour
-    // administrer un compte. Le genre entre dans le message signé
+    // administrer un compte ; l'autre racine s'authentifie pour tirer
+    // (`replication.md` §2.2). Le genre entre dans le message signé
     // (`asl_cle::message_a_signer`), donc une preuve de l'un ne vaut jamais pour
-    // l'autre — ce n'est pas cette lecture qui les sépare, c'est la signature.
+    // un autre — ce n'est pas cette lecture qui les sépare, c'est la signature.
     let genre = match corps.first().copied().unwrap_or(0) {
         octet if octet == Genre::Machine.prefixe() => Genre::Machine,
         octet if octet == Genre::Appareil.prefixe() => Genre::Appareil,
+        octet if octet == Genre::Annuaire.prefixe() => Genre::Annuaire,
         _ => return Besoin::Deja(StatusCode::BAD_REQUEST),
     };
     let mut entropie = [0_u8; 16];
@@ -1188,6 +1293,23 @@ fn lire_une_preuve<'a>(corps: &[u8]) -> Besoin<'a> {
     Besoin::ClePourPreuve {
         machine: Identifiant::depuis_entropie(genre, entropie),
         signature: Signature::depuis_octets(brute),
+    }
+}
+
+/// Lit le défi que le tireur pose à cette racine : trente-deux octets, exactement.
+///
+/// **Aucune longueur ne vient des octets**, comme pour une preuve : le corps
+/// fait [`asl_cle::DEFI_OCTETS`] ou il est refusé.
+fn lire_un_defi<'a>(corps: &[u8]) -> Besoin<'a> {
+    if corps.len() != asl_cle::DEFI_OCTETS {
+        return Besoin::Deja(StatusCode::BAD_REQUEST);
+    }
+    let mut octets = [0_u8; asl_cle::DEFI_OCTETS];
+    for (place, octet) in octets.iter_mut().zip(corps.iter()) {
+        *place = *octet;
+    }
+    Besoin::ProuverLaRacine {
+        defi: Defi::depuis_octets(octets),
     }
 }
 
@@ -1628,6 +1750,61 @@ pub fn repondre<'o>(
             ),
         },
 
+        // ── LA VOIE ENTRE RACINES ───────────────────────────────────────
+        //
+        // **`Rien` REND `500` ICI, ET C'EST JUSTE** : ces trois ressources
+        // exigent une racine, un inconnu ne les atteint pas — un `500` qu'il
+        // ne peut pas fabriquer dit la vérité, la panne est de notre côté.
+        Besoin::ProuverLaRacine { .. } => match trouvaille {
+            Trouvaille::PreuveDeRacine { racine, signature } => {
+                // `n-… (17) ‖ signature (64)` — la forme du corps d'une preuve
+                // (`protocole.md` §2.1 bis), dans l'autre sens.
+                let mut corps = Corps::<PREUVE_OCTETS>::neuf();
+                corps.pousser(&[racine.genre().prefixe()]);
+                corps.pousser(racine.octets());
+                corps.pousser(signature.octets());
+                composer(StatusCode::OK, OCTETS_MEDIA, corps.rendu(), sortie)
+            }
+            _ => composer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::INTERNAL_SERVER_ERROR),
+                sortie,
+            ),
+        },
+        // **UNE RÉPONSE VIDE, ET UN FLUX QUI RESTE OUVERT** — la forme de
+        // `GET /v1/poussees`, et pour la même raison : pas de
+        // `content-length`, pas de corps, le premier cadre sera le premier
+        // octet. L'instantané aussi : c'est l'étage 3 qui fermera le flux
+        // après le cadre de fin, et une longueur annoncée ici serait celle
+        // d'un corps qu'on ne tient pas.
+        Besoin::LireLesOperations { .. } | Besoin::LireLInstantane => match trouvaille {
+            Trouvaille::FluxOuvert => Reponse::new(StatusCode::OK, &[])
+                .avec_champ(b"content-type", OCTETS_MEDIA)
+                .avec_champ(b"cache-control", b"no-store")
+                .avec_champ(b"x-content-type-options", b"nosniff")
+                .tenue(),
+            // **`410`, ET LA RÉPONSE DU TIREUR EST L'INSTANTANÉ**
+            // (`replication.md` §5.4).
+            Trouvaille::HorsJournal => composer(GONE, PROBLEME_MEDIA, probleme(GONE), sortie),
+            // **UN FLUX PAR CONNEXION.** Une connexion qui en tient déjà un
+            // ne peut pas en ouvrir un second : les cadres poussés sur une
+            // connexion vont à SON flux, et deux flux avec deux curseurs y
+            // liraient la même chose.
+            Trouvaille::Conflit => composer(
+                StatusCode::CONFLICT,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::CONFLICT),
+                sortie,
+            ),
+            _ => composer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::INTERNAL_SERVER_ERROR),
+                sortie,
+            ),
+        },
+
         Besoin::Compte(_) | Besoin::CompteParAlias(_) => match trouvaille {
             // **UN COMPTE QU'ON NE TROUVE PAS EST UN `404`**, et jamais un
             // corps vide avec un `200` : le client doit pouvoir distinguer
@@ -2010,6 +2187,7 @@ const fn probleme(statut: StatusCode) -> &'static [u8] {
         }
         StatusCode::FORBIDDEN => br#"{"type":"about:blank","title":"Forbidden","status":403}"#,
         StatusCode::CONFLICT => br#"{"type":"about:blank","title":"Conflict","status":409}"#,
+        GONE => br#"{"type":"about:blank","title":"Gone","status":410}"#,
         StatusCode::INTERNAL_SERVER_ERROR => {
             br#"{"type":"about:blank","title":"Internal Server Error","status":500}"#
         }
@@ -5117,12 +5295,10 @@ mod creations {
 
     #[test]
     fn un_genre_qui_ne_signe_pas_est_refuse_des_la_lecture() {
-        for genre in [
-            Genre::Utilisateur,
-            Genre::Service,
-            Genre::Autorisation,
-            Genre::Annuaire,
-        ] {
+        // **L'ANNUAIRE N'EST PLUS DANS CETTE LISTE** : l'autre racine prouve sa
+        // clé d'identité sous le genre `n` (`replication.md` §2.2), et c'est
+        // `voie_entre_racines` qui l'éprouve.
+        for genre in [Genre::Utilisateur, Genre::Service, Genre::Autorisation] {
             let mut corps = alloc::vec![genre.prefixe()];
             corps.extend_from_slice(un(genre, 1).octets());
             corps.extend_from_slice(&[0_u8; asl_cle::SIGNATURE_OCTETS]);
@@ -5378,5 +5554,340 @@ mod retraits {
         assert_eq!(session.appareil(), None);
 
         assert_eq!(Session::new(liaison()).pair(), None);
+    }
+}
+
+#[cfg(test)]
+mod voie_entre_racines {
+    //! La voie entre racines (`docs/replication.md` §2.2, §5.3-5.4) : les deux
+    //! preuves, l'exigence, et les deux flux.
+
+    extern crate alloc;
+
+    use alloc::vec::Vec;
+    use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
+    use asl_cle::{CleSecrete, Defi, LiaisonDeCanal, identifiant_de_racine};
+    use asl_id::{Genre, Identifiant};
+
+    use super::{
+        Besoin, CleTrouvee, GONE, OCTETS_MEDIA, PREUVE_OCTETS, PROBLEME_MEDIA, Session, Trouvaille,
+        besoin, probleme, repondre,
+    };
+
+    fn liaison() -> LiaisonDeCanal {
+        LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
+    }
+
+    fn un(genre: Genre, graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(genre, [graine; 16])
+    }
+
+    fn tete<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
+        let limites = Limits::default();
+        let mut constructeur = HeadBuilder::new(&limites);
+        constructeur.field(b":method", verbe).expect("le verbe");
+        constructeur.field(b":scheme", b"https").expect("le schéma");
+        constructeur
+            .field(b":authority", b"annuaire.example")
+            .expect("l'autorité");
+        constructeur.field(b":path", cible).expect("la cible");
+        constructeur.finish().expect("une tête close")
+    }
+
+    fn champ<'a>(reponse: &ams_h3::Reponse<'a>, nom: &[u8]) -> Option<&'a [u8]> {
+        reponse
+            .fields()
+            .find(|(cle, _)| *cle == nom)
+            .map(|(_, valeur)| valeur)
+    }
+
+    /// La clé d'identité de l'autre racine — celle de `--peer-key`.
+    fn argon() -> CleSecrete {
+        CleSecrete::depuis_entropie([0xA0; 32])
+    }
+
+    /// Authentifie l'autre racine sur une session neuve, comme l'étage 3 le
+    /// ferait : un défi, une preuve de genre `n`, et la clé épinglée.
+    fn session_de_racine() -> (Session, Identifiant) {
+        let secrete = argon();
+        let racine = identifiant_de_racine(&secrete.publique());
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 256];
+        let defi = Defi::depuis_octets([0x42; 32]);
+        let quoi = besoin(&session, &tete(b"GET", b"/v1/defi"), b"");
+        let _ = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Rien,
+            Some(defi),
+            &mut sortie,
+        );
+
+        let signature = secrete
+            .signer(racine, &defi, &liaison())
+            .expect("une racine signe");
+        let mut corps = Vec::with_capacity(PREUVE_OCTETS);
+        corps.push(Genre::Annuaire.prefixe());
+        corps.extend_from_slice(racine.octets());
+        corps.extend_from_slice(signature.octets());
+        let quoi = besoin(&session, &tete(b"POST", b"/v1/defi"), &corps);
+        assert!(matches!(quoi, Besoin::ClePourPreuve { machine, .. } if machine == racine));
+        let reponse = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Cle(CleTrouvee::Racine(secrete.publique())),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::NO_CONTENT, "{reponse:?}");
+        (session, racine)
+    }
+
+    fn rendre<'o>(
+        session: &mut Session,
+        quoi: &Besoin<'_>,
+        trouvaille: &Trouvaille,
+        sortie: &'o mut [u8],
+    ) -> ams_h3::Reponse<'o> {
+        repondre(session, quoi, trouvaille, None, sortie)
+    }
+
+    // ── Le premier temps : la racine qui tire prouve comme une machine ──────
+
+    #[test]
+    fn l_autre_racine_prouve_sa_cle_sous_le_genre_n() {
+        let (session, racine) = session_de_racine();
+        assert_eq!(session.racine(), Some(racine));
+        assert_eq!(session.pair(), Some(racine));
+        // **UNE RACINE N'EST NI UNE MACHINE NI UN APPAREIL.**
+        assert_eq!(session.machine(), None);
+        assert_eq!(session.appareil(), None);
+        assert_eq!(*session.liaison(), liaison());
+    }
+
+    #[test]
+    fn une_preuve_de_racine_contre_une_autre_cle_est_refusee() {
+        // L'étage 3 apporte la clé de `--peer-key` ; si ce n'est pas celle qui
+        // a signé, c'est le même `401` qu'une machine inconnue.
+        let secrete = argon();
+        let racine = identifiant_de_racine(&secrete.publique());
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 256];
+        let defi = Defi::depuis_octets([0x42; 32]);
+        let quoi = besoin(&session, &tete(b"GET", b"/v1/defi"), b"");
+        let _ = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Rien,
+            Some(defi),
+            &mut sortie,
+        );
+        let signature = secrete
+            .signer(racine, &defi, &liaison())
+            .expect("elle signe");
+        let mut corps = Vec::with_capacity(PREUVE_OCTETS);
+        corps.push(Genre::Annuaire.prefixe());
+        corps.extend_from_slice(racine.octets());
+        corps.extend_from_slice(signature.octets());
+        let quoi = besoin(&session, &tete(b"POST", b"/v1/defi"), &corps);
+        let autre = CleSecrete::depuis_entropie([0xB0; 32]).publique();
+        let reponse = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Cle(CleTrouvee::Racine(autre)),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(session.racine(), None);
+    }
+
+    // ── L'exigence ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn sans_racine_la_voie_est_un_401_pour_tous_les_autres() {
+        // **C10** : ni un inconnu, ni une machine, ni un appareil.
+        let mut machine = Session::new(liaison());
+        machine.pair = Some(un(Genre::Machine, 1));
+        let mut appareil = Session::new(liaison());
+        appareil.pair = Some(un(Genre::Appareil, 2));
+        for session in [Session::new(liaison()), machine, appareil] {
+            for (verbe, cible) in [
+                (&b"POST"[..], &b"/v1/pair/preuve"[..]),
+                (b"GET", b"/v1/pair/operations?apres=0"),
+                (b"GET", b"/v1/pair/instantane"),
+            ] {
+                assert_eq!(
+                    besoin(&session, &tete(verbe, cible), &[0; 32]),
+                    Besoin::Deja(StatusCode::UNAUTHORIZED),
+                    "{cible:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn avec_une_racine_les_trois_verbes_se_routent_vers_leur_besoin() {
+        let (session, _) = session_de_racine();
+        assert_eq!(
+            besoin(
+                &session,
+                &tete(b"GET", b"/v1/pair/operations?apres=4812"),
+                b""
+            ),
+            Besoin::LireLesOperations { apres: 4_812 }
+        );
+        assert_eq!(
+            besoin(&session, &tete(b"GET", b"/v1/pair/instantane"), b""),
+            Besoin::LireLInstantane
+        );
+        assert_eq!(
+            besoin(&session, &tete(b"POST", b"/v1/pair/preuve"), &[0x5A; 32]),
+            Besoin::ProuverLaRacine {
+                defi: Defi::depuis_octets([0x5A; 32])
+            }
+        );
+        // Un défi qui ne fait pas trente-deux octets n'en est pas un.
+        for taille in [0_usize, 31, 33] {
+            assert_eq!(
+                besoin(
+                    &session,
+                    &tete(b"POST", b"/v1/pair/preuve"),
+                    &alloc::vec![0_u8; taille]
+                ),
+                Besoin::Deja(StatusCode::BAD_REQUEST),
+                "{taille}"
+            );
+        }
+        // Et une racine ne lit rien des autres voies : elle n'est ni machine
+        // ni appareil.
+        assert_eq!(
+            besoin(&session, &tete(b"GET", b"/v1/machines"), b""),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            besoin(&session, &tete(b"GET", b"/v1/moi"), b""),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    // ── Le second temps : la racine tirée prouve en retour ──────────────────
+
+    #[test]
+    fn la_preuve_de_racine_se_rend_en_octets_bruts_et_se_verifie() {
+        let (mut session, _) = session_de_racine();
+        // L'étage 3 signe avec SA clé d'identité — ici une autre que celle du
+        // tireur, comme dans la vie —, sous la liaison de cette connexion.
+        let notre = CleSecrete::depuis_entropie([0xC0; 32]);
+        let defi = Defi::depuis_octets([0x5A; 32]);
+        let (racine, signature) = notre.prouver_la_racine(&defi, session.liaison());
+        let quoi = Besoin::ProuverLaRacine { defi };
+        let mut sortie = [0_u8; 256];
+        let reponse = rendre(
+            &mut session,
+            &quoi,
+            &Trouvaille::PreuveDeRacine { racine, signature },
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert_eq!(champ(&reponse, b"content-type"), Some(OCTETS_MEDIA));
+        let corps = reponse.body();
+        assert_eq!(corps.len(), PREUVE_OCTETS);
+        assert_eq!(corps[0], b'n');
+        assert_eq!(&corps[1..17], racine.octets());
+        let mut brute = [0_u8; asl_cle::SIGNATURE_OCTETS];
+        brute.copy_from_slice(&corps[17..]);
+        assert!(notre.publique().prouve_la_racine(
+            Identifiant::depuis_entropie(Genre::Annuaire, corps[1..17].try_into().unwrap()),
+            &defi,
+            &liaison(),
+            &asl_cle::Signature::depuis_octets(brute),
+        ));
+
+        // Sans clé d'identité à l'étage 3, c'est une panne de notre côté.
+        let reponse = rendre(&mut session, &quoi, &Trouvaille::Rien, &mut sortie);
+        assert_eq!(reponse.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ── Les deux flux ───────────────────────────────────────────────────────
+
+    #[test]
+    fn le_flux_des_operations_s_ouvre_sans_fin_et_sans_longueur() {
+        let (mut session, _) = session_de_racine();
+        let quoi = Besoin::LireLesOperations { apres: 0 };
+        let mut sortie = [0_u8; 256];
+        let reponse = rendre(&mut session, &quoi, &Trouvaille::FluxOuvert, &mut sortie);
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert!(reponse.est_tenue(), "le flux ne se termine pas");
+        assert!(
+            reponse.body().is_empty(),
+            "le premier cadre sera le premier octet"
+        );
+        assert_eq!(champ(&reponse, b"content-type"), Some(OCTETS_MEDIA));
+        assert_eq!(
+            champ(&reponse, b"content-length"),
+            None,
+            "une longueur annoncée sur un corps qui s'allonge se contredirait"
+        );
+        assert_eq!(champ(&reponse, b"cache-control"), Some(&b"no-store"[..]));
+        assert_eq!(
+            champ(&reponse, b"x-content-type-options"),
+            Some(&b"nosniff"[..])
+        );
+    }
+
+    #[test]
+    fn l_instantane_s_ouvre_de_la_meme_facon() {
+        // C'est l'étage 3 qui ferme après le cadre de fin ; ce qui se décide
+        // ici est le même : un flux tenu, sans longueur.
+        let (mut session, _) = session_de_racine();
+        let mut sortie = [0_u8; 256];
+        let reponse = rendre(
+            &mut session,
+            &Besoin::LireLInstantane,
+            &Trouvaille::FluxOuvert,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert!(reponse.est_tenue());
+        assert_eq!(champ(&reponse, b"content-length"), None);
+    }
+
+    #[test]
+    fn un_journal_qui_ne_remonte_plus_jusque_la_rend_410() {
+        // **ET LA RÉPONSE DU TIREUR EST L'INSTANTANÉ** (`replication.md` §5.4).
+        let (mut session, _) = session_de_racine();
+        let mut sortie = [0_u8; 256];
+        let reponse = rendre(
+            &mut session,
+            &Besoin::LireLesOperations { apres: 12 },
+            &Trouvaille::HorsJournal,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), GONE);
+        assert_eq!(GONE.value(), 410);
+        assert!(!reponse.est_tenue());
+        assert_eq!(champ(&reponse, b"content-type"), Some(PROBLEME_MEDIA));
+        assert!(reponse.body().windows(3).any(|f| f == b"410"));
+        assert_eq!(reponse.body(), probleme(GONE));
+    }
+
+    #[test]
+    fn un_second_flux_sur_la_meme_connexion_est_un_conflit_et_rien_un_500() {
+        let (mut session, _) = session_de_racine();
+        let mut sortie = [0_u8; 256];
+        for quoi in [
+            Besoin::LireLesOperations { apres: 0 },
+            Besoin::LireLInstantane,
+        ] {
+            let reponse = rendre(&mut session, &quoi, &Trouvaille::Conflit, &mut sortie);
+            assert_eq!(reponse.status(), StatusCode::CONFLICT, "{quoi:?}");
+            let reponse = rendre(&mut session, &quoi, &Trouvaille::Rien, &mut sortie);
+            assert_eq!(
+                reponse.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{quoi:?} : un inconnu ne l'atteint pas, un `500` dit la vérité"
+            );
+        }
     }
 }

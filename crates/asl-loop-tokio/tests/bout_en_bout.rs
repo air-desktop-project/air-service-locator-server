@@ -200,7 +200,15 @@ async fn lever_complet(
             let rang = compteur.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some([rang; 16])
         };
-        let mut application = Annuaire::new(&entrepot, &tirer, &nommer, politique, apple, bail);
+        let mut application = Annuaire::new(
+            &entrepot,
+            &tirer,
+            &nommer,
+            politique,
+            apple,
+            bail,
+            asl_loop_tokio::h3::Voie::AUCUNE,
+        );
         let arret = async {
             let _ = entendre_stop.await;
         };

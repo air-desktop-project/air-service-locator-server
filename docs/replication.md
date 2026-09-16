@@ -483,9 +483,12 @@ parce qu'une adresse seule n'est pas une racine (`annuaires.md` §2). Sans
 démarrage — ce n'est pas un défaut, c'est un banc.
 
 **`--identity-key` ne se génère pas tout seul.** `asl-server --new-identity-key
-<fichier>` écrit la paire, imprime la clé publique et l'identifiant `n-…`
-qu'elle donne, et s'arrête ; c'est cette clé publique qu'on porte chez l'autre
-racine. Une clé générée en silence au premier démarrage serait une clé que
+<fichier>` écrit la clé privée dans `<fichier>` (0600) et la publique dans
+`<fichier>.pub`, imprime la clé publique et l'identifiant `n-…` qu'elle donne,
+et s'arrête ; c'est `<fichier>.pub` qu'on porte chez l'autre racine, en
+`--peer-key`. **Les deux fichiers portent trente-deux octets bruts** — ce
+qu'`asl-cle` sait lire, ni PEM ni hexadécimal — et un fichier d'une autre
+taille est refusé en le disant. Une clé générée en silence au premier démarrage serait une clé que
 personne n'a copiée nulle part, et deux racines qui ne se connaissent pas.
 `--identity-key` et non `--identity` : c'est une clé PRIVÉE, et son nom le
 dit — comme `--key` le dit pour celle de TLS.

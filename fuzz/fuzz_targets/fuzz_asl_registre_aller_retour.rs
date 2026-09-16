@@ -42,6 +42,11 @@
 //!    des valeurs construites. C'est ce que l'autre racine tirera sur le fil
 //!    (`docs/replication.md` §5), et **le fil ne porte aucune longueur** : le
 //!    genre dit tout, et une tranche trop courte est refusée, jamais devinée.
+//! 6. **UN CADRE EST UNE OPÉRATION OU LA FIN D'UN INSTANTANÉ, ET JAMAIS LES
+//!    DEUX.** `Cadre::lire` relit exactement ce qu'`Operation::lire` relit, sur
+//!    les mêmes octets, et reconnaît la fin — que `Operation::lire` refuse —
+//!    sans jamais la prendre pour une opération. Ce qui applique ne verra donc
+//!    jamais un signal de coupe comme un fait.
 
 #![no_main]
 
@@ -51,10 +56,11 @@ use libfuzzer_sys::fuzz_target;
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
     ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
-    Autorisation, COMPTE_OCTETS, Capacites, CleLiee, Compte, DESCRIPTION_OCTETS, Description,
-    ENROLEMENT_OCTETS, ENTREE_OCTETS, Enrolement, EntreeJournal, Estampille, Faute, MACHINE_OCTETS,
-    Machine, NOM_OCTETS_MAX, NomRange, OPERATION_OCTETS_MAX, Operation, Portee, Provenance,
-    SERVICE_OCTETS, Service, Systeme, Verdict,
+    Autorisation, CADRE_DE_FIN_OCTETS, COMPTE_OCTETS, Cadre, Capacites, CleLiee, Compte,
+    DESCRIPTION_OCTETS, Description, ENROLEMENT_OCTETS, ENTREE_OCTETS, ETIQUETTE_DE_FIN,
+    Enrolement, EntreeJournal, Estampille, Faute, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX,
+    NomRange, OPERATION_OCTETS_MAX, Operation, Portee, Provenance, SERVICE_OCTETS, Service,
+    Systeme, Verdict,
 };
 
 /// Ce qu'on soumet.
@@ -479,6 +485,70 @@ fuzz_target!(|entree: Entree| {
     // opération plus courte relue avec ce qui manque deviné.
     assert_eq!(
         Operation::lire(&cadre[..combien - 1]),
+        Err(Faute::Tronquee {
+            attendus: combien,
+            obtenus: combien - 1,
+        })
+    );
+
+    // ── PROPRIÉTÉ 6 : un cadre est une opération ou une fin ─────────────────
+    //
+    // Sur les mêmes octets quelconques : ce qu'`Operation::lire` accepte,
+    // `Cadre::lire` le rend en `Operation` ; ce qui commence par l'étiquette
+    // de fin est une fin, ou tronqué, ou une racine qui n'en est pas une ; et
+    // rien ne panique.
+    match (
+        Cadre::lire(&entree.operation),
+        Operation::lire(&entree.operation),
+    ) {
+        (
+            Ok((
+                Cadre::Operation {
+                    estampille,
+                    operation,
+                },
+                lu,
+            )),
+            Ok((e, o, combien)),
+        ) => {
+            assert_eq!((estampille, operation, lu), (e, o, combien));
+        }
+        (Ok((Cadre::Fin { coupe }, lu)), Err(Faute::Etiquette { lue })) => {
+            assert_eq!(lue, ETIQUETTE_DE_FIN);
+            assert_eq!(lu, CADRE_DE_FIN_OCTETS);
+            let mut refait = [0_u8; OPERATION_OCTETS_MAX];
+            assert_eq!(Cadre::Fin { coupe }.ecrire(&mut refait), lu);
+            assert_eq!(
+                &refait[..lu],
+                &entree.operation[..lu],
+                "une fin relue ne se réécrit pas octet pour octet"
+            );
+        }
+        (Err(Faute::Tronquee { attendus, obtenus }), _) => {
+            assert_eq!(obtenus, entree.operation.len());
+            assert!(obtenus < attendus);
+        }
+        (Err(faute), Err(autre)) => {
+            nommee(faute);
+            // Une fin dont la racine n'est pas un annuaire est une faute de
+            // genre, que l'opération lit comme une étiquette inconnue ; tout
+            // le reste est la même faute des deux côtés.
+            if entree.operation.first() != Some(&ETIQUETTE_DE_FIN) {
+                assert_eq!(faute, autre);
+            }
+        }
+        (cadre, operation) => panic!("les deux lecteurs divergent : {cadre:?} / {operation:?}"),
+    }
+
+    // Depuis une valeur construite : la fin se relit, et un octet de moins
+    // est tronqué.
+    let fin = Cadre::Fin { coupe: estampille };
+    let mut cadre = [0_u8; OPERATION_OCTETS_MAX];
+    let combien = fin.ecrire(&mut cadre);
+    assert_eq!(combien, CADRE_DE_FIN_OCTETS);
+    assert_eq!(Cadre::lire(&cadre[..combien]), Ok((fin, combien)));
+    assert_eq!(
+        Cadre::lire(&cadre[..combien - 1]),
         Err(Faute::Tronquee {
             attendus: combien,
             obtenus: combien - 1,

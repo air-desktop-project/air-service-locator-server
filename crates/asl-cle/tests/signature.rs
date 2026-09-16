@@ -164,17 +164,12 @@ fn signer_avec_autre_chose_qu_une_machine_est_refuse() {
     // message que l'annuaire ne composera jamais — et le daemon chercherait la
     // panne du côté de sa clé.
     let secrete = cle();
-    // **L'APPAREIL N'EST PLUS DANS CETTE LISTE**, et c'est le seul changement :
-    // un téléphone enrôlé signe le défi de sa connexion exactement comme une
-    // machine signe le sien. Les deux genres restent DISTINGUÉS, puisque le
-    // genre entre dans le message signé — une preuve de machine ne vaut pas
-    // pour un appareil, et réciproquement.
-    for genre in [
-        Genre::Utilisateur,
-        Genre::Service,
-        Genre::Autorisation,
-        Genre::Annuaire,
-    ] {
+    // **NI L'APPAREIL NI L'ANNUAIRE NE SONT DANS CETTE LISTE** : un téléphone
+    // enrôlé signe le défi de sa connexion exactement comme une machine signe
+    // le sien, et l'autre racine aussi (`replication.md` §2.2, genre `n`). Les
+    // trois genres restent DISTINGUÉS, puisque le genre entre dans le message
+    // signé — une preuve de l'un ne vaut jamais pour un autre.
+    for genre in [Genre::Utilisateur, Genre::Service, Genre::Autorisation] {
         let autre = Identifiant::depuis_entropie(genre, [0x11; 16]);
         assert_eq!(
             secrete.signer(autre, &defi(1), &liaison(1)).map(|_| ()),

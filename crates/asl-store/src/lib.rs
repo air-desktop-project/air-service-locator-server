@@ -53,7 +53,7 @@ use std::path::Path;
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
     APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation, Autorisation,
-    CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Capacites, CleLiee,
+    CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Cadre, Capacites, CleLiee,
     Compte, DESCRIPTION_OCTETS, Description, EMPREINTE_OCTETS, ENROLEMENT_OCTETS, ENTREE_OCTETS,
     ESTAMPILLE_OCTETS, Enrolement, EntreeJournal, Estampille, IDENTIFIANT_OCTETS, JetonPoussee,
     JetonRange, MACHINE_OCTETS, Machine, NomRange, OPERATION_OCTETS_MAX, Operation, POUSSEE_OCTETS,
@@ -530,9 +530,9 @@ fn journaliser_l_operation(
     estampille: Estampille,
     provenance: Provenance,
     operation: &Operation,
-) -> Result<(), Faute> {
+) -> Result<Option<Estampille>, Faute> {
     if provenance != Provenance::Ici {
-        return Ok(());
+        return Ok(None);
     }
     let mut cadre = [0_u8; OPERATION_OCTETS_MAX];
     let combien = operation.ecrire(estampille, &mut cadre);
@@ -541,7 +541,7 @@ fn journaliser_l_operation(
     valeur.extend_from_slice(cadre.get(..combien).unwrap_or_default());
     let mut table = ecriture.open_table(OPERATIONS)?;
     table.insert(estampille.compteur, valeur.as_slice())?;
-    Ok(())
+    Ok(Some(estampille))
 }
 
 /// Ce qu'un rattrapage rend (`docs/replication.md` §5.3-5.4).
@@ -561,6 +561,31 @@ pub enum Rattrapage {
     },
 }
 
+/// Ce qu'un instantané accumule : des cadres, dans l'ordre d'émission.
+#[derive(Default)]
+struct Suite {
+    /// Les cadres, chacun tel que le fil le porte.
+    cadres: Vec<Vec<u8>>,
+}
+
+impl Suite {
+    /// Ajoute cette opération, sous cette estampille.
+    fn ajouter(&mut self, estampille: Estampille, operation: &Operation) {
+        let mut cadre = [0_u8; OPERATION_OCTETS_MAX];
+        let combien = operation.ecrire(estampille, &mut cadre);
+        self.cadres
+            .push(cadre.get(..combien).unwrap_or_default().to_vec());
+    }
+
+    /// Termine la suite par le cadre de fin, à cette coupe.
+    fn finir(&mut self, coupe: Estampille) {
+        let mut cadre = [0_u8; OPERATION_OCTETS_MAX];
+        let combien = Cadre::Fin { coupe }.ecrire(&mut cadre);
+        self.cadres
+            .push(cadre.get(..combien).unwrap_or_default().to_vec());
+    }
+}
+
 // ── L'entrepôt ──────────────────────────────────────────────────────────────
 
 /// L'entrepôt durable d'un annuaire.
@@ -570,6 +595,21 @@ pub struct Entrepot {
     /// La racine pour laquelle cet entrepôt écrit : ce que porte chaque
     /// estampille qu'il frappe.
     racine: Identifiant,
+    /// Le compteur de la dernière opération JOURNALISÉE, en mémoire.
+    ///
+    /// # C'EST LA NOTIFICATION DES ÉCRITURES, ET ELLE NE COÛTE RIEN
+    ///
+    /// `GET /v1/pair/operations` ne se termine jamais : la voie doit apprendre
+    /// qu'une opération vient d'être écrite pour la pousser. Une relecture du
+    /// journal à chaque tour de boucle serait une transaction de lecture par
+    /// datagramme reçu ; un canal demanderait à la transaction de connaître
+    /// la boucle. Un entier en mémoire, posé APRÈS le commit, dit à qui le
+    /// compare à son curseur qu'il y a quelque chose à lire — et rien d'autre.
+    ///
+    /// **Après le commit, jamais avant** : posé avant, le lecteur pourrait
+    /// relire le journal sans y trouver l'opération, et ne plus jamais être
+    /// prévenu pour elle.
+    derniere_operation: std::sync::atomic::AtomicU64,
 }
 
 impl Entrepot {
@@ -643,7 +683,52 @@ impl Entrepot {
             ecriture.open_table(CURSEURS)?;
             ecriture.commit()?;
         }
-        Ok(Self { base, racine })
+        // Le compteur de la racine majore ce que le journal porte : un lecteur
+        // qui part de là ne manque rien, et relit au pire une fois pour rien.
+        let compteur = {
+            let lecture = base.begin_read()?;
+            let table = lecture.open_table(RACINE)?;
+            table.get(CLEF_DU_COMPTEUR)?.map_or(0, |quoi| quoi.value())
+        };
+        Ok(Self {
+            base,
+            racine,
+            derniere_operation: std::sync::atomic::AtomicU64::new(compteur),
+        })
+    }
+
+    /// Le compteur de la dernière opération journalisée, sans transaction.
+    ///
+    /// **Ce n'est pas [`Entrepot::compteur`]** : celui-là est l'horloge de
+    /// Lamport, qui se hisse aussi sur ce qu'on reçoit ; celui-ci ne bouge que
+    /// sur ce que CETTE racine a écrit et journalisé. La voie entre racines le
+    /// compare à ce qu'elle a déjà poussé, à chaque tour, et ne relit le
+    /// journal que s'il a avancé.
+    #[must_use]
+    pub fn derniere_operation(&self) -> u64 {
+        self.derniere_operation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Commet cette écriture, et prévient si une opération est entrée dans le
+    /// journal — sous l'estampille que [`journaliser_l_operation`] a rendue.
+    ///
+    /// **Tout ce qui peut journaliser passe par ici**, et rien d'autre : le
+    /// journal des requêtes (C18), le curseur, le compteur hissé n'ajoutent
+    /// aucune opération, et prévenir pour eux ferait relire le journal pour
+    /// rien. Une écriture de provenance distante non plus : elle est
+    /// estampillée, pas journalisée, et `None` le dit.
+    fn commettre_une_operation(
+        &self,
+        ecriture: WriteTransaction,
+        journalisee: Option<Estampille>,
+    ) -> Result<(), Faute> {
+        ecriture.commit()?;
+        if let Some(estampille) = journalisee {
+            self.derniere_operation
+                .fetch_max(estampille.compteur, std::sync::atomic::Ordering::Release);
+        }
+        Ok(())
     }
 
     /// La racine pour laquelle cet entrepôt écrit.
@@ -706,6 +791,7 @@ impl Entrepot {
     ) -> Result<(), Faute> {
         let clef_compte = clef(qui);
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         {
             let mut comptes = ecriture.open_table(COMPTES)?;
             let mut reclamations = ecriture.open_table(ALIAS)?;
@@ -733,7 +819,7 @@ impl Entrepot {
                     clef_compte.as_slice(),
                 )?;
             }
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 provenance,
@@ -743,7 +829,7 @@ impl Entrepot {
                 },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(())
     }
 
@@ -771,6 +857,7 @@ impl Entrepot {
     ) -> Result<bool, Faute> {
         let clef_compte = clef(qui);
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         {
             let mut comptes = ecriture.open_table(COMPTES)?;
             let mut reclamations = ecriture.open_table(ALIAS)?;
@@ -807,14 +894,14 @@ impl Entrepot {
                     clef_compte.as_slice(),
                 )?;
             }
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 compte.provenance,
                 &Operation::Alias { compte: qui, alias },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(true)
     }
 
@@ -865,6 +952,7 @@ impl Entrepot {
     ) -> Result<(), Faute> {
         let clef_machine = clef(quelle);
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         {
             let mut machines = ecriture.open_table(MACHINES)?;
             if machines.get(clef_machine.as_slice())?.is_some() {
@@ -893,7 +981,7 @@ impl Entrepot {
                 paire(proprietaire, quelle).as_slice(),
                 clef_machine.as_slice(),
             )?;
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 provenance,
@@ -903,7 +991,7 @@ impl Entrepot {
                 },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(())
     }
 
@@ -928,6 +1016,7 @@ impl Entrepot {
     ) -> Result<Option<Machine>, Faute> {
         let clef_machine = clef(quelle);
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         let avant;
         {
             let mut machines = ecriture.open_table(MACHINES)?;
@@ -955,7 +1044,7 @@ impl Entrepot {
             let mut octets = [0_u8; MACHINE_OCTETS];
             apres.ecrire(&mut octets);
             machines.insert(clef_machine.as_slice(), &octets)?;
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 avant.provenance,
@@ -966,7 +1055,7 @@ impl Entrepot {
                 },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(Some(avant))
     }
 
@@ -996,6 +1085,7 @@ impl Entrepot {
     ) -> Result<Option<Machine>, Faute> {
         let clef_machine = clef(quelle);
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         let avant;
         {
             let mut machines = ecriture.open_table(MACHINES)?;
@@ -1016,7 +1106,7 @@ impl Entrepot {
             let mut octets = [0_u8; MACHINE_OCTETS];
             apres.ecrire(&mut octets);
             machines.insert(clef_machine.as_slice(), &octets)?;
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 avant.provenance,
@@ -1028,7 +1118,7 @@ impl Entrepot {
                 },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(Some(avant))
     }
 
@@ -1046,6 +1136,7 @@ impl Entrepot {
     pub fn revoquer_cle(&self, quelle: Identifiant) -> Result<Option<Machine>, Faute> {
         let clef_machine = clef(quelle);
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         let avant;
         {
             let mut machines = ecriture.open_table(MACHINES)?;
@@ -1065,7 +1156,7 @@ impl Entrepot {
             let mut octets = [0_u8; MACHINE_OCTETS];
             apres.ecrire(&mut octets);
             machines.insert(clef_machine.as_slice(), &octets)?;
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 avant.provenance,
@@ -1075,7 +1166,7 @@ impl Entrepot {
                 },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(Some(avant))
     }
 
@@ -1138,6 +1229,7 @@ impl Entrepot {
     ) -> Result<(), Faute> {
         let clef_appareil = clef(quel);
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         {
             let mut table = ecriture.open_table(APPAREILS)?;
             if table.get(clef_appareil.as_slice())?.is_some() {
@@ -1160,7 +1252,7 @@ impl Entrepot {
                 paire(proprietaire, quel).as_slice(),
                 clef_appareil.as_slice(),
             )?;
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 provenance,
@@ -1170,7 +1262,7 @@ impl Entrepot {
                 },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(())
     }
 
@@ -1237,6 +1329,7 @@ impl Entrepot {
     pub fn revoquer_appareil(&self, quel: Identifiant) -> Result<Option<Appareil>, Faute> {
         let clef_appareil = clef(quel);
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         let avant;
         {
             let mut table = ecriture.open_table(APPAREILS)?;
@@ -1255,14 +1348,14 @@ impl Entrepot {
             table.insert(clef_appareil.as_slice(), &octets)?;
             let mut poussees = ecriture.open_table(POUSSEES)?;
             poussees.remove(clef_appareil.as_slice())?;
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 avant.provenance,
                 &Operation::AppareilRevoque { appareil: quel },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(Some(avant))
     }
 
@@ -1285,6 +1378,7 @@ impl Entrepot {
         jeton: JetonRange,
     ) -> Result<(), Faute> {
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         {
             let estampille = estampiller(&ecriture, self.racine)?;
             let poussee = JetonPoussee {
@@ -1297,7 +1391,7 @@ impl Entrepot {
             poussee.ecrire(&mut octets);
             let mut table = ecriture.open_table(POUSSEES)?;
             table.insert(clef(appareil).as_slice(), &octets)?;
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 provenance,
@@ -1307,7 +1401,7 @@ impl Entrepot {
                 },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(())
     }
 
@@ -1344,6 +1438,7 @@ impl Entrepot {
         modele: NomRange,
     ) -> Result<(), Faute> {
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         {
             let estampille = estampiller(&ecriture, self.racine)?;
             let description = Description {
@@ -1356,7 +1451,7 @@ impl Entrepot {
             description.ecrire(&mut octets);
             let mut table = ecriture.open_table(DESCRIPTIONS)?;
             table.insert(clef(appareil).as_slice(), &octets)?;
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 provenance,
@@ -1366,7 +1461,7 @@ impl Entrepot {
                 },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(())
     }
 
@@ -1406,6 +1501,7 @@ impl Entrepot {
     ) -> Result<(), Faute> {
         let clef_machine = clef(machine);
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         {
             let mut codes = ecriture.open_table(ENROLEMENTS)?;
             let mut index = ecriture.open_table(ENROLEMENTS_PAR_MACHINE)?;
@@ -1423,7 +1519,7 @@ impl Entrepot {
             enrolement.ecrire(&mut octets);
             codes.insert(empreinte.as_slice(), &octets)?;
             index.insert(clef_machine.as_slice(), empreinte.as_slice())?;
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 provenance,
@@ -1433,7 +1529,7 @@ impl Entrepot {
                 },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(())
     }
 
@@ -1533,6 +1629,7 @@ impl Entrepot {
         let clef_service = clef(quel);
         let clef_nom = clef_de_nom(machine, nom.octets());
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         {
             let mut services = ecriture.open_table(SERVICES)?;
             let mut par_nom = ecriture.open_table(SERVICES_PAR_NOM)?;
@@ -1552,7 +1649,7 @@ impl Entrepot {
             service.ecrire(&mut octets);
             services.insert(clef_service.as_slice(), &octets)?;
             par_nom.insert(clef_nom.as_slice(), clef_service.as_slice())?;
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 provenance,
@@ -1562,7 +1659,7 @@ impl Entrepot {
                 },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(())
     }
 
@@ -1646,6 +1743,7 @@ impl Entrepot {
     ) -> Result<(), Faute> {
         let clef_autorisation = clef(quelle);
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         {
             let mut table = ecriture.open_table(AUTORISATIONS)?;
             if table.get(clef_autorisation.as_slice())?.is_some() {
@@ -1672,7 +1770,7 @@ impl Entrepot {
             recues.insert(paire(a, quelle).as_slice(), clef_autorisation.as_slice())?;
             let mut accordees = ecriture.open_table(AUTORISATIONS_ACCORDEES)?;
             accordees.insert(paire(par, quelle).as_slice(), clef_autorisation.as_slice())?;
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 provenance,
@@ -1682,7 +1780,7 @@ impl Entrepot {
                 },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(())
     }
 
@@ -1722,6 +1820,7 @@ impl Entrepot {
     ) -> Result<Option<Autorisation>, Faute> {
         let clef_autorisation = clef(quelle);
         let ecriture = self.base.begin_write()?;
+        let journalisee;
         let avant;
         {
             let mut table = ecriture.open_table(AUTORISATIONS)?;
@@ -1738,7 +1837,7 @@ impl Entrepot {
             }
             .ecrire(&mut octets);
             table.insert(clef_autorisation.as_slice(), &octets)?;
-            journaliser_l_operation(
+            journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
                 avant.provenance,
@@ -1747,7 +1846,7 @@ impl Entrepot {
                 },
             )?;
         }
-        ecriture.commit()?;
+        self.commettre_une_operation(ecriture, journalisee)?;
         Ok(Some(avant))
     }
 
@@ -1933,6 +2032,263 @@ impl Entrepot {
             cadres.push(valeur.value().get(8..).unwrap_or_default().to_vec());
         }
         Ok(Rattrapage::Operations(cadres))
+    }
+
+    /// L'état entier, en suite d'opérations, puis le cadre de fin.
+    ///
+    /// **C'est `GET /v1/pair/instantane`** (`docs/replication.md` §5.4) : une
+    /// seule transaction de lecture, et pour chaque enregistrement les
+    /// opérations qui le reconstituent — **avec LEURS estampilles**, celles de
+    /// l'écriture d'origine, qui peuvent être de l'une ou l'autre racine. Puis
+    /// [`Cadre::Fin`], qui porte le compteur auquel l'instantané a été coupé :
+    /// c'est là que le tireur reprend `GET /v1/pair/operations`.
+    ///
+    /// # CE QUI SORT POUR CHAQUE ENREGISTREMENT, ET SOUS QUELLE ESTAMPILLE
+    ///
+    /// Un instantané s'applique avec les règles de §5.2, donc il FUSIONNE : ce
+    /// qui a une règle « le plus récent gagne » doit sortir sous l'estampille
+    /// du champ, et non sous celle de l'enregistrement.
+    ///
+    /// | Enregistrement | Ce qui sort |
+    /// |---|---|
+    /// | Compte | `compte` sous l'estampille du compte, puis `alias` sous celle de sa réclamation courante — même sans alias : lâcher est une réclamation aussi. |
+    /// | Machine | `machine` **sans clé** sous l'estampille de la machine ; `machine-modifiee` pour le nom et les capacités, une opération par estampille distincte ; `cle-machine` sous l'estampille de la liaison, si une clé est liée. |
+    /// | Appareil | `appareil` sous son estampille, puis `appareil-revoque` s'il l'est. |
+    /// | Description, jeton | `description`, `poussee`, sous leur estampille. |
+    /// | Code d'enrôlement | `enrolement` sous son estampille — les expirés partent d'eux-mêmes. |
+    /// | Service, autorisation | `service` ; `autorisation`, puis `autorisation-revoquee` si elle l'est. |
+    ///
+    /// **L'empreinte du code d'une `cle-machine` d'instantané est nulle** : le
+    /// code a été consommé, il n'existe plus nulle part, et l'opération dit
+    /// « supprimer le code s'il est là » — il n'y sera pas. L'estampille
+    /// d'émission, elle, est gardée avec la clé, et c'est elle que la règle
+    /// de §3.2 compare.
+    ///
+    /// # C11 : SEULE LA PROVENANCE LOCALE SORT
+    ///
+    /// Ce qu'une racine aura un jour reçu d'un annuaire rattaché n'est pas à
+    /// elle, et ne passe pas — comme dans le journal (§7).
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn instantane(&self) -> Result<Vec<Vec<u8>>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let mut suite = Suite::default();
+
+        let comptes = lecture.open_table(COMPTES)?;
+        for entree in comptes.iter()? {
+            let (clef, valeur) = entree?;
+            let compte = Compte::lire(valeur.value())?;
+            if compte.provenance != Provenance::Ici {
+                continue;
+            }
+            let qui = depuis_clef(clef.value())?;
+            suite.ajouter(
+                compte.estampille,
+                &Operation::Compte {
+                    compte: qui,
+                    enregistrement: compte,
+                },
+            );
+            suite.ajouter(
+                compte.reclamation,
+                &Operation::Alias {
+                    compte: qui,
+                    alias: compte.alias,
+                },
+            );
+        }
+
+        let machines = lecture.open_table(MACHINES)?;
+        for entree in machines.iter()? {
+            let (clef, valeur) = entree?;
+            let machine = Machine::lire(valeur.value())?;
+            if machine.provenance != Provenance::Ici {
+                continue;
+            }
+            let quelle = depuis_clef(clef.value())?;
+            suite.ajouter(
+                machine.estampille,
+                &Operation::Machine {
+                    machine: quelle,
+                    enregistrement: Machine {
+                        cle: None,
+                        ..machine
+                    },
+                },
+            );
+            // **CHAMP PAR CHAMP** : une opération par estampille distincte, et
+            // les deux champs dans la même quand elles se confondent — c'est
+            // ce qu'un `PATCH` des deux aurait écrit.
+            if machine.nom_estampille == machine.capacites_estampille {
+                suite.ajouter(
+                    machine.nom_estampille,
+                    &Operation::MachineModifiee {
+                        machine: quelle,
+                        nom: Some(machine.nom),
+                        capacites: Some(machine.capacites()),
+                    },
+                );
+            } else {
+                suite.ajouter(
+                    machine.nom_estampille,
+                    &Operation::MachineModifiee {
+                        machine: quelle,
+                        nom: Some(machine.nom),
+                        capacites: None,
+                    },
+                );
+                suite.ajouter(
+                    machine.capacites_estampille,
+                    &Operation::MachineModifiee {
+                        machine: quelle,
+                        nom: None,
+                        capacites: Some(machine.capacites()),
+                    },
+                );
+            }
+            if let Some(liee) = machine.cle {
+                suite.ajouter(
+                    liee.liaison,
+                    &Operation::CleMachine {
+                        machine: quelle,
+                        cle: liee.cle,
+                        empreinte: [0; EMPREINTE_OCTETS],
+                        code: liee.code,
+                    },
+                );
+            }
+        }
+
+        let appareils = lecture.open_table(APPAREILS)?;
+        for entree in appareils.iter()? {
+            let (clef, valeur) = entree?;
+            let appareil = Appareil::lire(valeur.value())?;
+            if appareil.provenance != Provenance::Ici {
+                continue;
+            }
+            let quel = depuis_clef(clef.value())?;
+            suite.ajouter(
+                appareil.estampille,
+                &Operation::Appareil {
+                    appareil: quel,
+                    enregistrement: appareil,
+                },
+            );
+            if appareil.revoque {
+                suite.ajouter(
+                    appareil.estampille,
+                    &Operation::AppareilRevoque { appareil: quel },
+                );
+            }
+        }
+
+        let descriptions = lecture.open_table(DESCRIPTIONS)?;
+        for entree in descriptions.iter()? {
+            let (clef, valeur) = entree?;
+            let description = Description::lire(valeur.value())?;
+            if description.provenance != Provenance::Ici {
+                continue;
+            }
+            suite.ajouter(
+                description.estampille,
+                &Operation::Description {
+                    appareil: depuis_clef(clef.value())?,
+                    enregistrement: description,
+                },
+            );
+        }
+
+        let poussees = lecture.open_table(POUSSEES)?;
+        for entree in poussees.iter()? {
+            let (clef, valeur) = entree?;
+            let poussee = JetonPoussee::lire(valeur.value())?;
+            if poussee.provenance != Provenance::Ici {
+                continue;
+            }
+            suite.ajouter(
+                poussee.estampille,
+                &Operation::Poussee {
+                    appareil: depuis_clef(clef.value())?,
+                    enregistrement: poussee,
+                },
+            );
+        }
+
+        let codes = lecture.open_table(ENROLEMENTS)?;
+        for entree in codes.iter()? {
+            let (empreinte, valeur) = entree?;
+            let enrolement = Enrolement::lire(valeur.value())?;
+            if enrolement.provenance != Provenance::Ici {
+                continue;
+            }
+            let mut octets = [0_u8; EMPREINTE_OCTETS];
+            for (place, octet) in octets.iter_mut().zip(empreinte.value().iter()) {
+                *place = *octet;
+            }
+            suite.ajouter(
+                enrolement.estampille,
+                &Operation::Enrolement {
+                    empreinte: octets,
+                    enregistrement: enrolement,
+                },
+            );
+        }
+
+        let services = lecture.open_table(SERVICES)?;
+        for entree in services.iter()? {
+            let (clef, valeur) = entree?;
+            let service = Service::lire(valeur.value())?;
+            if service.provenance != Provenance::Ici {
+                continue;
+            }
+            suite.ajouter(
+                service.estampille,
+                &Operation::Service {
+                    service: depuis_clef(clef.value())?,
+                    enregistrement: service,
+                },
+            );
+        }
+
+        let autorisations = lecture.open_table(AUTORISATIONS)?;
+        for entree in autorisations.iter()? {
+            let (clef, valeur) = entree?;
+            let autorisation = Autorisation::lire(valeur.value())?;
+            if autorisation.provenance != Provenance::Ici {
+                continue;
+            }
+            let quelle = depuis_clef(clef.value())?;
+            suite.ajouter(
+                autorisation.estampille,
+                &Operation::Autorisation {
+                    autorisation: quelle,
+                    enregistrement: autorisation,
+                },
+            );
+            if autorisation.revoquee {
+                suite.ajouter(
+                    autorisation.estampille,
+                    &Operation::AutorisationRevoquee {
+                        autorisation: quelle,
+                    },
+                );
+            }
+        }
+
+        // **LE COMPTEUR DE COUPE EST LU DANS LA MÊME TRANSACTION** : tout ce
+        // qui a été écrit jusqu'à lui est dans l'instantané, et tout ce qui
+        // suivra sera dans le journal après lui.
+        let coupe = lecture
+            .open_table(RACINE)?
+            .get(CLEF_DU_COMPTEUR)?
+            .map_or(0, |quoi| quoi.value());
+        suite.finir(Estampille {
+            compteur: coupe,
+            racine: self.racine,
+        });
+        Ok(suite.cadres)
     }
 
     /// Retire du journal d'opérations ce qui a été écrit avant cet instant, et

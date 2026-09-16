@@ -748,3 +748,110 @@ fn moi_exige_une_machine_quelle_que_soit_sa_capacite() {
         assert!(!resoudre(methode, b"/v1/moi").unwrap().sert, "{methode:?}");
     }
 }
+
+// ── La voie entre racines (`docs/replication.md`, `protocole.md` §3 bis) ────
+
+#[test]
+fn les_trois_verbes_de_la_voie_se_routent_et_exigent_une_racine() {
+    // **UNE EXIGENCE QUE SEULE UNE CLÉ D'IDENTITÉ DE RACINE SATISFAIT** (C10) :
+    // la voie transporte tout, sans que le lecteur choisisse.
+    assert_eq!(
+        resoudre_get("/v1/pair/preuve").unwrap(),
+        Ressource::PairPreuve
+    );
+    assert_eq!(
+        resoudre_get("/v1/pair/operations?apres=4812").unwrap(),
+        Ressource::PairOperations { apres: 4_812 }
+    );
+    assert_eq!(
+        resoudre_get("/v1/pair/instantane").unwrap(),
+        Ressource::PairInstantane
+    );
+    for cible in [
+        "/v1/pair/preuve",
+        "/v1/pair/operations?apres=0",
+        "/v1/pair/instantane",
+    ] {
+        assert_eq!(
+            resoudre_get(cible).unwrap().exigence(),
+            Exigence::Racine,
+            "{cible}"
+        );
+    }
+
+    // La preuve se POSTE — c'est le tireur qui pose un défi — ; les deux
+    // lectures se lisent, et rien d'autre.
+    let preuve = resoudre(Methode::Post, b"/v1/pair/preuve").unwrap();
+    assert!(preuve.sert);
+    assert!(!resoudre(Methode::Get, b"/v1/pair/preuve").unwrap().sert);
+    assert!(
+        !resoudre(Methode::Post, b"/v1/pair/operations?apres=0")
+            .unwrap()
+            .sert
+    );
+    assert!(
+        !resoudre(Methode::Post, b"/v1/pair/instantane")
+            .unwrap()
+            .sert
+    );
+    assert_eq!(Ressource::PairPreuve.verbes(), &[Methode::Post]);
+    assert_eq!(
+        Ressource::PairOperations { apres: 0 }.verbes(),
+        &[Methode::Get]
+    );
+    assert_eq!(Ressource::PairInstantane.verbes(), &[Methode::Get]);
+}
+
+#[test]
+fn le_curseur_des_operations_n_a_qu_une_ecriture() {
+    // **UNE SEULE ÉCRITURE PAR NOMBRE**, comme une seule écriture par cible :
+    // ce module refuse plutôt que de normaliser.
+    for (requete, attendu) in [
+        ("apres=0", 0_u64),
+        ("apres=7", 7),
+        ("apres=18446744073709551615", u64::MAX),
+    ] {
+        assert_eq!(
+            resoudre_get(&format!("/v1/pair/operations?{requete}")).unwrap(),
+            Ressource::PairOperations { apres: attendu },
+            "{requete}"
+        );
+    }
+    for requete in [
+        "",
+        "apres=",
+        "apres=007",
+        "apres=-1",
+        "apres=+1",
+        "apres=1x",
+        "apres=18446744073709551616",
+        "apres=100000000000000000000",
+        "apres=1&apres=2",
+        "service=depot",
+        "apres=1&service=depot",
+    ] {
+        assert_eq!(
+            resoudre_get(&format!("/v1/pair/operations?{requete}")),
+            Err(Erreur::RequeteInvalide),
+            "{requete}"
+        );
+    }
+    // Et la chaîne de requête ne fait rien aux deux autres : elle est hors
+    // du chemin, et ces ressources ne la lisent pas.
+    assert_eq!(
+        resoudre_get("/v1/pair/instantane?apres=1").unwrap(),
+        Ressource::PairInstantane
+    );
+    assert_eq!(
+        resoudre_get("/v1/pair/preuve?x=y").unwrap(),
+        Ressource::PairPreuve
+    );
+    // Un quatrième segment, ou un autre mot, n'est rien.
+    for cible in ["/v1/pair", "/v1/pair/autre", "/v1/pair/preuve/x"] {
+        assert_eq!(
+            resoudre_get(cible),
+            Err(Erreur::RessourceInconnue),
+            "{cible}"
+        );
+    }
+}

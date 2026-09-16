@@ -978,7 +978,7 @@ opération visible dans l'application plutôt qu'enfouie dans un menu.
 
 ---
 
-## 3 bis. La voie entre racines — spécifiée, pas écrite
+## 3 bis. La voie entre racines — servie, pas encore tirée
 
 Le quatrième public : **l'autre racine.** Elle n'est ni un daemon, ni une
 application, ni une machine qui cherche un port — elle est la même autorité,
@@ -986,6 +986,10 @@ sur une autre machine, et ce qu'elle veut est TOUT ce que celle-ci a écrit.
 [`replication.md`](replication.md) porte le fond : le périmètre, la règle de
 conflit, l'horloge, le rattrapage, la sécurité. Ce qui tient ici est ce qui se
 voit sur le fil.
+
+**Depuis 0.6.0, le côté SERVI est écrit** : les deux preuves, les deux flux,
+et l'exigence qui les garde. Le côté qui TIRE — la connexion sortante, le
+curseur qui avance, l'application des opérations — est la tranche suivante.
 
 **Le même port, le même transport.** La voie est une ressource de plus sous
 `/v1`, avec une exigence que seule une clé d'identité de racine satisfait ; il
@@ -1017,7 +1021,21 @@ vient du réseau (§2.1 bis), et il n'y a pas de second décodeur.
 
 **`410` sur `operations` veut dire « mon journal ne remonte plus jusque-là »**,
 et la réponse du tireur est `instantane`, puis `operations` à partir du compteur
-de coupe. Un instantané est une suite d'opérations, pas un autre format.
+de coupe. Un instantané est une suite d'opérations, pas un autre format : **son
+cadre de fin a la forme d'une opération sans charge**, `15 ‖ compteur (8) ‖
+racine (17)`, où l'étiquette `15` suit les quatorze genres et n'en est pas un
+— ce qui applique ne le prend jamais pour un fait (`asl_registre::Cadre`).
+
+**Un flux par connexion.** Une connexion qui tient déjà `operations` ou
+`instantane` reçoit `409` au second : ce qui est poussé sur une connexion va à
+SON flux, et deux curseurs y liraient la même chose.
+
+**`POST /v1/pair/preuve` signe sous un domaine propre**,
+`asl_cle::DOMAINE_PREUVE_DE_RACINE`, le message `domaine ‖ n ‖ identifiant
+(16) ‖ défi (32) ‖ liaison (32)` — la liaison de canal de LA connexion sur
+laquelle la preuve est rendue, dérivée des deux côtés. Un domaine propre,
+parce qu'un serveur qui signerait sous celui de `/v1/defi` ce qu'un client lui
+présente serait un oracle pour la preuve d'authentification.
 
 **Un genre `n` sur `POST /v1/defi`, et rien d'autre ne change à ce verbe.**
 L'identifiant présenté est celui que la clé d'identité de l'autre racine donne
