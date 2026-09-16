@@ -320,6 +320,10 @@ pub enum Besoin<'a> {
         /// passer à `asl_apple::verifier` — ou son SHA-256 à
         /// `asl_keystore::verifier`.
         defi_attestation: [u8; asl_cle::MESSAGE_ATTESTATION_OCTETS],
+        /// Le défi qu'un appareil ANDROID a dû poser à la génération de sa
+        /// clé, sous SHA-256 : `asl_cle::message_d_attestation_de_cle(défi,
+        /// liaison)` — sans la clé, que le certificat porte.
+        defi_attestation_de_cle: [u8; asl_cle::MESSAGE_ATTESTATION_DE_CLE_OCTETS],
     },
     /// Enrôler un appareil de plus sur le compte de cette connexion.
     ///
@@ -971,12 +975,18 @@ impl Session {
         &self,
         cle: &CleAppareil,
         signature: &SignatureAppareil,
-    ) -> Option<[u8; asl_cle::MESSAGE_ATTESTATION_OCTETS]> {
+    ) -> Option<(
+        [u8; asl_cle::MESSAGE_ATTESTATION_OCTETS],
+        [u8; asl_cle::MESSAGE_ATTESTATION_DE_CLE_OCTETS],
+    )> {
         let defi = self.defi?;
         if !cle.prouve_sa_possession(&defi, &self.liaison, signature) {
             return None;
         }
-        Some(asl_cle::message_d_attestation(cle, &defi, &self.liaison))
+        Some((
+            asl_cle::message_d_attestation(cle, &defi, &self.liaison),
+            asl_cle::message_d_attestation_de_cle(&defi, &self.liaison),
+        ))
     }
 
     /// Dépense le défi en cours, s'il y en a un.
@@ -1180,7 +1190,9 @@ fn lire_creation_de_compte<'a>(session: &Session, corps: &'a [u8]) -> Besoin<'a>
     // détient la clé, et composer le défi que son attestation aura dû couvrir —
     // le même défi pour les deux. L'attestation elle-même ne se vérifie qu'à
     // l'étage 3, avec la racine d'Apple et l'horloge.
-    let Some(defi_attestation) = session.possession_et_defi_d_attestation(&cle, &preuve) else {
+    let Some((defi_attestation, defi_attestation_de_cle)) =
+        session.possession_et_defi_d_attestation(&cle, &preuve)
+    else {
         return Besoin::PreuveRefusee;
     };
     Besoin::CreerCompte {
@@ -1188,6 +1200,7 @@ fn lire_creation_de_compte<'a>(session: &Session, corps: &'a [u8]) -> Besoin<'a>
         plateforme: compte.plateforme,
         attestation: compte.attestation,
         defi_attestation,
+        defi_attestation_de_cle,
     }
 }
 
@@ -4285,6 +4298,7 @@ mod creations {
                 plateforme: PlateformeAttestation::Aucune,
                 attestation: &[],
                 defi_attestation: attendu,
+                defi_attestation_de_cle: asl_cle::message_d_attestation_de_cle(&defi(), &liaison()),
             }
         );
     }
@@ -4344,6 +4358,7 @@ mod creations {
                 plateforme: PlateformeAttestation::Apple,
                 attestation: objet_attestation,
                 defi_attestation: attendu_defi,
+                defi_attestation_de_cle: asl_cle::message_d_attestation_de_cle(&defi(), &liaison()),
             }
         );
     }

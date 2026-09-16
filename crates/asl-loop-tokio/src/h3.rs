@@ -531,7 +531,14 @@ impl Service<'_> {
                 plateforme,
                 attestation,
                 defi_attestation,
-            } => self.creer_un_compte(cle, *plateforme, attestation, defi_attestation),
+                defi_attestation_de_cle,
+            } => self.creer_un_compte(
+                cle,
+                *plateforme,
+                attestation,
+                defi_attestation,
+                defi_attestation_de_cle,
+            ),
             Besoin::CreerAppareil { cle } => self.creer_un_appareil(cle),
             Besoin::CreerMachine { nom, capacites } => self.creer_une_machine(nom, *capacites),
             Besoin::ModifierMachine {
@@ -648,16 +655,22 @@ impl Service<'_> {
         plateforme: PlateformeAttestation,
         attestation: &[u8],
         defi_attestation: &[u8],
+        defi_attestation_de_cle: &[u8],
     ) -> Trouvaille {
         // **L'ATTESTATION, D'ABORD.** Elle est ce qui garde ce chemin : il
         // n'exige aucune signature de compte, puisqu'il n'y a pas encore de
         // compte. Un refus ici est `Refus` (403), pas `Rien` (500) : la règle a
         // tranché, ce n'est pas une panne.
-        let atteste =
-            match self.verifier_l_attestation(plateforme, attestation, defi_attestation, cle) {
-                Some(atteste) => atteste,
-                None => return Trouvaille::Refus,
-            };
+        let atteste = match self.verifier_l_attestation(
+            plateforme,
+            attestation,
+            defi_attestation,
+            defi_attestation_de_cle,
+            cle,
+        ) {
+            Some(atteste) => atteste,
+            None => return Trouvaille::Refus,
+        };
         let prouvee = atteste != asl_registre::Attestation::Aucune;
         if asl_auth::decider_attestation(prouvee, self.politique) == asl_auth::Decision::Refuser {
             return Trouvaille::Refus;
@@ -712,6 +725,7 @@ impl Service<'_> {
         plateforme: PlateformeAttestation,
         attestation: &[u8],
         defi_attestation: &[u8],
+        defi_attestation_de_cle: &[u8],
         cle: &CleAppareil,
     ) -> Option<asl_registre::Attestation> {
         let dire = |cause: &str| {
@@ -750,16 +764,19 @@ impl Service<'_> {
                 }
             }
             // **L'ATTESTATION DE CLÉ D'ANDROID** (`protocole.md` §2.1, C19) :
-            // le défi posé à la génération de la clé est le SHA-256 du même
-            // message que pour Apple, et la clé attestée est la clé enrôlée —
-            // `asl_keystore` compare la feuille à `cle`.
+            // le défi posé à la génération de la clé est le SHA-256 de
+            // `message_d_attestation_de_cle(défi, liaison)` — SANS la clé,
+            // qui n'existe pas encore quand le défi est posé ; c'est le
+            // certificat qui la porte, et `asl_keystore` compare la feuille à
+            // `cle`. Jusqu'en 0.9.0, ce code prenait le message d'App Attest,
+            // qui contient la clé : impossible à poser à la génération.
             PlateformeAttestation::Android => {
                 let Some(config) = self.attestations.android else {
                     dire("Android, sans --android-roots, --android-app ni --android-signer");
                     return None;
                 };
                 let racines: Vec<&[u8]> = config.racines.iter().map(Vec::as_slice).collect();
-                let defi = Sha256::digest(defi_attestation);
+                let defi = Sha256::digest(defi_attestation_de_cle);
                 let attendu = asl_keystore::Attendu {
                     racines: &racines,
                     defi: &defi,

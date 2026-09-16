@@ -509,10 +509,21 @@ un fichier.
   octets grand-boutiens ; la racine peut être omise (l'annuaire la tient). Une
   chaîne réelle fait quatre certificats et de 4 à 6 Kio — la borne de 8 Kio
   reste, et la capture réelle dira si elle tient.
-- **La liaison au défi** est celle de §2.1 : le `attestationChallenge` de la
-  clé est `SHA-256(asl_cle::message_d_attestation(clé, défi, liaison))`, posé à
-  la GÉNÉRATION de la clé (`setAttestationChallenge`) — la clé attestée EST la
-  clé enrôlée, sans le détour qu'App Attest impose.
+- **La liaison au défi.** Le `attestationChallenge` de la clé est
+  `SHA-256(asl_cle::message_d_attestation_de_cle(défi, liaison))`, posé à la
+  GÉNÉRATION de la clé (`setAttestationChallenge`) — la clé attestée EST la
+  clé enrôlée, sans le détour qu'App Attest impose. **Sans la clé dans le
+  message, et ce n'est pas un oubli** (corrigé le 2026-09-16, 0.9.1 : la
+  première rédaction reprenait le message d'App Attest, qui contient la clé —
+  impossible à poser à la génération de cette clé). Le certificat d'attestation
+  PORTE la clé publique, et `asl-keystore` compare la feuille à la clé
+  enrôlée : la liaison à la clé est là, plus forte qu'un condensat. Le défi n'a
+  à lier que ce que le certificat ne porte pas — la connexion, par le défi tiré
+  (`GET /v1/defi`) et la liaison de canal. D'où l'ordre côté app : se connecter
+  nu, tirer le défi, composer le message, GÉNÉRER la clé avec son condensat,
+  puis `POST /v1/comptes`. Un domaine à part
+  (`air-service-locator/v1/attestation-de-cle`), pour qu'un message
+  d'attestation d'une voie ne vaille jamais sur l'autre.
 - **Ce que l'annuaire vérifie** (`asl-keystore`, étage 2, comme `asl-apple`) :
   la chaîne jusqu'à une racine épinglée (`--android-roots <fichier PEM>`, une ou
   plusieurs), l'extension `1.3.6.1.4.1.11129.2.1.17` de la feuille — le
@@ -545,7 +556,7 @@ certificats) remonte à la racine de Google dans les essais de la crate, et
 chaque valeur que la capture a montrée en sort telle quelle. Ce qui est jugé :
 la chaîne jusqu'à une racine de `--android-roots`, la clé de la feuille égale à
 la clé enrôlée (comparée sous sa forme compressée, celle du fil),
-`attestationChallenge` égal à `SHA-256(message_d_attestation)`, les deux
+`attestationChallenge` égal à `SHA-256(message_d_attestation_de_cle)`, les deux
 niveaux de sécurité matériels, `rootOfTrust` côté matériel — `Verified` et
 verrouillé —, `origin` `GENERATED` côté matériel, et NOTRE paquet sous NOTRE
 empreinte dans `attestationApplicationId`. Ce qui est rendu sans être jugé :
