@@ -707,3 +707,42 @@ un mauvais choix pour un produit dont la base se consulte à la main.
 **La règle « aucune ligne de C » vaut donc désormais pour le serveur AUSSI**, et
 ce n'est plus une intention : c'est ce que `check-sans-c.sh` mesure sur le
 workspace entier.
+
+## C19 — Aucun tiers n'est appelé, et l'attestation est un choix de l'exploitant
+
+air-desktop est un projet libre qui ne dépend **ni de Google ni d'Apple pour
+fonctionner**. Cette contrainte dit ce que cela impose, et ce qu'elle ne peut
+pas promettre.
+
+- **L'annuaire n'appelle aucun service tiers**, jamais — ni pour vérifier une
+  attestation, ni pour décider d'un enrôlement, ni pour rendre une réponse. Ce
+  qu'il vérifie, il le vérifie hors ligne. Une liste de révocation, si elle
+  sert un jour, est un fichier que l'exploitant rafraîchit, pas un appel.
+- **L'attestation est une posture par racine** (`--attestation required |
+  optional | invitation`), et **aucune n'est une condition du service** : une
+  racine en `optional` ou en `invitation` rend tout ce qu'une racine en
+  `required` rend. L'attestation qualifie l'entrée d'un appareil (`modele.md`
+  §2.2, la valeur `attestation`) ; elle ne conditionne rien d'autre.
+- **Les racines de confiance sont des fichiers épinglés par l'exploitant**
+  (`--android-roots`, et la racine App Attest dans le binaire), comme
+  `--peer-ca` l'est pour la réplication. Aucune ne demande un compte, une
+  console ou une clé « gérée par » un tiers pour être obtenue. C'est ce qui a
+  disqualifié Play Integrity (`protocole.md` §2.1, 2026-09-16).
+- **Aucune bibliothèque d'un fournisseur de services dans les apps pour
+  l'enrôlement** : l'attestation de clé d'Android est une fonction du système
+  (`KeyGenParameterSpec.setAttestationChallenge`), App Attest une fonction
+  d'iOS ; ni l'une ni l'autre ne passe par un SDK de services.
+
+**Ce que cette contrainte ne peut pas promettre.** Prouver qu'une clé vit dans
+du matériel, c'est faire confiance à qui a fabriqué ce matériel : la racine de
+Google pour un Android certifié, celle de GrapheneOS pour les siens, celle
+d'Apple pour un iPhone. C'est une confiance dans un **fichier**, choisie et
+révocable par l'exploitant — pas dans un service. Une racine qui n'en veut
+aucune tourne en `invitation`, et n'a alors aucun fabricant dans sa boucle.
+
+**Ce qu'elle ne couvre pas encore : les notifications.** APNs et FCM
+(`modele.md` §2.6) sont des services tiers, et l'appareil les appelle pour
+recevoir. Le principe vaut pour eux aussi ; la voie à instruire est UnifiedPush
+pour Android, et l'absence de poussée — la relecture à l'ouverture — comme repli
+partout. C'est un chantier à part, et il est nommé ici pour qu'il ne soit pas
+oublié.

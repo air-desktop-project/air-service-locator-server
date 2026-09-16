@@ -1,3 +1,10 @@
+> **Abandonné le 2026-09-16.** Play Integrity demandait un compte Google Play,
+> l'app dans la Play Console et les services Google sur l'appareil — contraire
+> à C19 (`contraintes.md`). Il est remplacé par l'attestation de clé du Keystore
+> d'Android, vérifiée hors ligne contre une racine épinglée :
+> [`capture-keystore.md`](capture-keystore.md). Ce document et la capture du
+> 2026-09-12 restent comme trace de ce qu'on a lu.
+
 # Capturer un jeton Play Integrity réel
 
 `asl-play` sait déchiffrer et vérifier un jeton Play Integrity, mais il **n'en a
