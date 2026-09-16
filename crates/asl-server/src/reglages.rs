@@ -101,12 +101,26 @@ pub struct Reglages {
 pub struct ReglagePair {
     /// Où elle écoute : `hôte:port`, un nom ou une adresse — une adresse
     /// IPv6 entre crochets.
-    ///
-    /// **Lue et validée ici, mais pas encore jointe** : la connexion sortante
-    /// est la tranche suivante de `docs/replication.md`.
     pub adresse: String,
-    /// Le fichier de sa clé d'identité publique (`--peer-key`).
+    /// Le fichier de sa clé d'identité publique (`--peer-key`) : ce contre quoi
+    /// sa preuve de racine se vérifie, et l'ancre réelle (§2.2).
     pub cle: PathBuf,
+    /// L'autorité qui valide le CERTIFICAT TLS du pair (`--peer-ca`), en PEM.
+    ///
+    /// # POURQUOI IL FAUT CELUI-CI, EN PLUS DE LA CLÉ D'IDENTITÉ
+    ///
+    /// La clé d'identité (`--peer-key`) est l'ancre de l'AUTHENTIFICATION : le
+    /// pair prouve la clé qu'on tient de lui, liée au canal, et un tiers au bon
+    /// certificat n'est pas une racine (§2.2). Mais pour OUVRIR la connexion
+    /// TLS, le tireur doit valider le certificat que le pair présente — et la
+    /// chaîne qu'un serveur montre (`--certificate`) ne porte pas la racine qui
+    /// l'a signée (voir `scripts/ca.sh`). C'est cette racine-là, le
+    /// `racine.crt` de la cérémonie — celui-là même que le client épingle.
+    ///
+    /// **`docs/replication.md` §8 n'en parlait pas**, et l'ajoute cette PR : une
+    /// adresse ne suffit pas à monter une poignée de main sûre, il y faut de
+    /// quoi valider le certificat d'en face.
+    pub ca: PathBuf,
 }
 
 /// De quoi vérifier une attestation Apple App Attest.
@@ -141,7 +155,8 @@ pub enum Faute {
     EnvironnementInconnu(String),
     /// `--apple-app` et `--apple-environment` ne vont pas l'un sans l'autre.
     AppleIncomplet,
-    /// `--peer` et `--peer-key` ne vont pas l'un sans l'autre.
+    /// `--peer`, `--peer-key` et `--peer-ca` ne vont pas les uns sans les
+    /// autres.
     PairIncomplet,
     /// `--peer` sans `--identity-key` : une racine sans identité ne peut ni
     /// prouver ni être prouvée.
@@ -187,9 +202,8 @@ impl core::fmt::Display for Faute {
             Self::AppleIncomplet => sortie.write_str(
                 "--apple-app et --apple-environment se donnent ensemble, ou pas du tout",
             ),
-            Self::PairIncomplet => {
-                sortie.write_str("--peer et --peer-key se donnent ensemble, ou pas du tout")
-            }
+            Self::PairIncomplet => sortie
+                .write_str("--peer, --peer-key et --peer-ca se donnent ensemble, ou pas du tout"),
             Self::PairSansIdentite => sortie.write_str(
                 "--peer demande --identity-key : une racine sans identité ne peut ni \
                  prouver ni être prouvée (docs/replication.md §8)",
@@ -226,6 +240,7 @@ asl-server — an air-service-locator service directory.
   --identity-key <path>     this root's Ed25519 identity key, 32 raw bytes
   --peer         <host:port> the other root                      (with --peer-key)
   --peer-key     <path>     the other root's public identity key, 32 raw bytes
+  --peer-ca      <path>     the CA that validates the peer's TLS cert, PEM
   --new-identity-key <path> write a new identity key there (0600), print the
                             public key and the `n-…` it gives, then exit
   --version                 print the version and commit, then exit
@@ -295,6 +310,7 @@ impl Reglages {
         let mut identite = None;
         let mut pair_adresse: Option<String> = None;
         let mut pair_cle: Option<PathBuf> = None;
+        let mut pair_ca: Option<PathBuf> = None;
 
         let mut arguments = arguments.into_iter();
         while let Some(drapeau) = arguments.next() {
@@ -335,6 +351,7 @@ impl Reglages {
                 "--identity-key" => identite = Some(PathBuf::from(valeur()?.as_ref())),
                 "--peer" => pair_adresse = Some(adresse_de_pair(valeur()?.as_ref())?),
                 "--peer-key" => pair_cle = Some(PathBuf::from(valeur()?.as_ref())),
+                "--peer-ca" => pair_ca = Some(PathBuf::from(valeur()?.as_ref())),
                 autre => {
                     return Err(match ancien(autre) {
                         Some((ancien, nouveau)) => Faute::Ancien { ancien, nouveau },
@@ -365,17 +382,17 @@ impl Reglages {
                 (None, None) => None,
                 _ => return Err(Faute::AppleIncomplet),
             },
-            // **LES TROIS VONT ENSEMBLE** (`replication.md` §8) : une adresse
-            // seule n'est pas une racine, une clé seule ne se joint pas, et
-            // sans identité on ne prouve rien.
-            pair: match (pair_adresse, pair_cle) {
-                (Some(adresse), Some(cle)) => {
+            // **ILS VONT ENSEMBLE** (`replication.md` §8) : une adresse seule
+            // n'est pas une racine, une clé seule ne se joint pas, une autorité
+            // seule ne dit qui joindre, et sans identité on ne prouve rien.
+            pair: match (pair_adresse, pair_cle, pair_ca) {
+                (Some(adresse), Some(cle), Some(ca)) => {
                     if identite.is_none() {
                         return Err(Faute::PairSansIdentite);
                     }
-                    Some(ReglagePair { adresse, cle })
+                    Some(ReglagePair { adresse, cle, ca })
                 }
-                (None, None) => None,
+                (None, None, None) => None,
                 _ => return Err(Faute::PairIncomplet),
             },
             identite,
@@ -748,9 +765,9 @@ mod tests {
     }
 
     #[test]
-    fn les_trois_reglages_de_la_voie_vont_ensemble() {
-        // **`replication.md` §8** : `--peer` sans `--peer-key` refuse de
-        // démarrer, et l'un ou l'autre sans `--identity-key` aussi.
+    fn les_reglages_de_la_voie_vont_ensemble() {
+        // **`replication.md` §8** : `--peer`, `--peer-key` et `--peer-ca` se
+        // donnent ensemble, et sans `--identity-key` c'est un refus à part.
         let lus = Reglages::depuis(avec(&[
             "--identity-key",
             "/id",
@@ -758,13 +775,16 @@ mod tests {
             "argon.air-desktop.org:6630",
             "--peer-key",
             "/argon.pub",
+            "--peer-ca",
+            "/racine.crt",
         ]))
-        .expect("les trois");
+        .expect("les quatre");
         assert_eq!(
             lus.pair,
             Some(ReglagePair {
                 adresse: "argon.air-desktop.org:6630".to_owned(),
                 cle: std::path::PathBuf::from("/argon.pub"),
+                ca: std::path::PathBuf::from("/racine.crt"),
             })
         );
 
@@ -773,13 +793,27 @@ mod tests {
             Err(Faute::PairIncomplet)
         );
         assert_eq!(
-            Reglages::depuis(avec(&["--identity-key", "/id", "--peer-key", "/argon.pub"]))
-                .map(|_| ()),
+            Reglages::depuis(avec(&[
+                "--identity-key",
+                "/id",
+                "--peer",
+                "argon:6630",
+                "--peer-key",
+                "/argon.pub",
+            ]))
+            .map(|_| ()),
             Err(Faute::PairIncomplet)
         );
         assert_eq!(
-            Reglages::depuis(avec(&["--peer", "argon:6630", "--peer-key", "/argon.pub"]))
-                .map(|_| ()),
+            Reglages::depuis(avec(&[
+                "--peer",
+                "argon:6630",
+                "--peer-key",
+                "/argon.pub",
+                "--peer-ca",
+                "/racine.crt",
+            ]))
+            .map(|_| ()),
             Err(Faute::PairSansIdentite)
         );
         for faute in [Faute::PairIncomplet, Faute::PairSansIdentite] {
@@ -803,6 +837,8 @@ mod tests {
                 bonne,
                 "--peer-key",
                 "/argon.pub",
+                "--peer-ca",
+                "/racine.crt",
             ]))
             .unwrap_or_else(|faute| panic!("{bonne} : {faute}"));
             assert_eq!(lus.pair.map(|pair| pair.adresse), Some(bonne.to_owned()));
@@ -827,6 +863,8 @@ mod tests {
                     mauvaise,
                     "--peer-key",
                     "/argon.pub",
+                    "--peer-ca",
+                    "/racine.crt",
                 ]))
                 .map(|_| ()),
                 Err(Faute::PairInvalide(mauvaise.to_owned())),

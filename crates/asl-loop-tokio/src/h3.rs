@@ -1849,6 +1849,17 @@ pub struct Annuaire<'a> {
     dernier_balayage: u64,
     /// Les pairs révoqués dont il reste des connexions à fermer.
     revoques: Vec<Identifiant>,
+    /// Ce que le tireur demande de fermer ici : une clé de machine révoquée,
+    /// une annonce retirée, un appareil révoqué, appliqués depuis l'AUTRE
+    /// racine (`docs/replication.md` §3.3).
+    ///
+    /// # POURQUOI UN CANAL, ET NON UN APPEL DIRECT
+    ///
+    /// Le tireur tourne dans SA tâche, et ne tient aucune connexion — c'est
+    /// cette boucle qui les tient. Il applique l'opération à l'entrepôt partagé,
+    /// puis NOMME ce qu'il faut fermer ; `au_tour` le verse dans [`Self::revoques`],
+    /// et la fermeture suit le même chemin qu'une révocation locale.
+    fermetures: Option<tokio::sync::mpsc::UnboundedReceiver<Identifiant>>,
     /// La voie entre racines : nos clés, et où dire ce qui s'y passe.
     voie: Voie<'a>,
     /// L'identifiant `n-…` que la clé du pair donne, calculé une fois.
@@ -1901,7 +1912,22 @@ impl<'a> Annuaire<'a> {
             voie,
             pair_attendu,
             suite: None,
+            fermetures: None,
         }
+    }
+
+    /// Écoute ce que le tireur demande de fermer ici (`docs/replication.md`
+    /// §3.3).
+    ///
+    /// **APPELÉ UNE FOIS, AU MONTAGE** : le tireur applique les opérations de
+    /// l'autre racine à l'entrepôt, et pousse par ce canal les machines et
+    /// appareils dont les connexions doivent tomber ici. `au_tour` les verse
+    /// dans la file des révocations, et la boucle les ferme comme les siennes.
+    pub fn ecouter_les_fermetures(
+        &mut self,
+        fermetures: tokio::sync::mpsc::UnboundedReceiver<Identifiant>,
+    ) {
+        self.fermetures = Some(fermetures);
     }
 
     /// Écrit ce qui attend sur le flux de la voie, et le ferme s'il est fini.
@@ -2106,6 +2132,16 @@ impl Application for Annuaire<'_> {
         // rendez-vous qui n'appartienne à aucune connexion, et une écriture
         // faite sur une connexion se pousse sur une autre.
         a_pousser.extend(self.suivre_le_journal());
+        // **CE QUE LE TIREUR A APPLIQUÉ FERME AUSSI ICI** : une clé révoquée ou
+        // une annonce retirée par l'autre racine tombe sur cette boucle comme
+        // une révocation locale (§3.3).
+        if let Some(fermetures) = &mut self.fermetures {
+            while let Ok(quoi) = fermetures.try_recv() {
+                if !self.revoques.contains(&quoi) {
+                    self.revoques.push(quoi);
+                }
+            }
+        }
         let mut consignes = self.consignes_de_fermeture();
         consignes.a_pousser = a_pousser;
         consignes

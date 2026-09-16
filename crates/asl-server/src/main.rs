@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use asl_id::{Genre, Identifiant};
 use asl_loop_tokio::h3::Voie;
-use asl_loop_tokio::{Annuaire, configuration_tls, refuser_root, servir_quic};
+use asl_loop_tokio::{Annuaire, Tireur, configuration_tls, refuser_root, servir_quic};
 use asl_store::Entrepot;
 
 use crate::reglages::{Reglages, USAGE};
@@ -192,8 +192,8 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         }
         match (&reglages.pair, &cle_du_pair) {
             (Some(pair), Some(cle)) => eprintln!(
-                "asl-server : pair {} à {} — il peut tirer d'ici ; la connexion \
-                 sortante vers lui n'est pas écrite (docs/replication.md, tranche 3).",
+                "asl-server : pair {} à {} — il tire d'ici, et l'on tire chez lui \
+                 (docs/replication.md §2.1).",
                 asl_cle::identifiant_de_racine(cle),
                 pair.adresse,
             ),
@@ -253,6 +253,45 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
             bail,
             voie,
         );
+
+        // **LE TIREUR : LA CONNEXION SORTANTE** (`docs/replication.md` §2.1).
+        // Quand `--peer` est réglé, une tâche ouvre une connexion vers le pair,
+        // prouve les deux identités, et applique ce qu'il a écrit. Ce qu'elle
+        // ferme ici — une clé révoquée, une annonce retirée — remonte par un
+        // canal que la boucle draine (§3.3).
+        let tireur = match (&reglages.pair, &identite) {
+            (Some(pair), Some(_)) => {
+                let (fermetures, entendre_fermetures) = tokio::sync::mpsc::unbounded_channel();
+                application.ecouter_les_fermetures(entendre_fermetures);
+                // La tâche possède sa propre clé d'identité : on la relit du
+                // fichier plutôt que de la partager avec la voie servie.
+                let chemin_identite = reglages
+                    .identite
+                    .as_ref()
+                    .expect("--peer exige --identity-key");
+                let tireur = Tireur {
+                    entrepot: Arc::clone(&entrepot),
+                    adresse: pair.adresse.clone(),
+                    racines_pem: std::fs::read(&pair.ca)?,
+                    identite: identite::lire_secrete(chemin_identite)?,
+                    cle_du_pair: cle_du_pair.expect("la clé du pair est lue avec le pair"),
+                    keepalive_us: reglages.keepalive_s.saturating_mul(1_000_000),
+                    idle_us: reglages.inactivite_us(),
+                    tirer_un_defi: Box::new(|| entropie::un_defi().ok()),
+                    alea: Box::new(|| {
+                        entropie::un_identifiant()
+                            .map(|octets| u16::from_be_bytes([octets[0], octets[1]]))
+                            .unwrap_or(0)
+                    }),
+                    journal: Box::new(|ligne| eprintln!("asl-server : {ligne}")),
+                    fermetures,
+                    plafond_recul_ms: reglages.keepalive_s.saturating_mul(1_000).max(1),
+                };
+                Some(tokio::spawn(tireur.tirer_sans_fin()))
+            }
+            _ => None,
+        };
+
         let comptes = servir_quic(
             socket,
             tls,
@@ -264,6 +303,9 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
         balayeur.abort();
+        if let Some(tireur) = tireur {
+            tireur.abort();
+        }
         eprintln!(
             "asl-server : arrêté. {} connexions acceptées, {} refusées, \
              {} fermées, {} datagrammes jetés.",

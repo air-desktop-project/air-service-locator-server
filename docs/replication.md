@@ -475,12 +475,24 @@ l'inverse : un entrepôt perdu se reconstruit depuis l'autre.
 asl-server … --identity-key <fichier>        # la clé d'identité Ed25519 de cette racine
               --peer <hôte:port>             # l'autre racine
               --peer-key <fichier>           # sa clé d'identité publique
+              --peer-ca <fichier>            # l'autorité qui valide son certificat TLS (PEM)
 ```
 
-**Les trois vont ensemble** : `--peer` sans `--peer-key` refuse de démarrer,
-parce qu'une adresse seule n'est pas une racine (`annuaires.md` §2). Sans
-`--peer`, la racine tourne seule et le journal d'exploitation le dit au
-démarrage — ce n'est pas un défaut, c'est un banc.
+**Ils vont ensemble** : `--peer` sans `--peer-key` refuse de démarrer, parce
+qu'une adresse seule n'est pas une racine (`annuaires.md` §2). Sans `--peer`, la
+racine tourne seule et le journal d'exploitation le dit au démarrage — ce n'est
+pas un défaut, c'est un banc.
+
+**`--peer-ca` a été ajouté par la PR de code (0.7.0), et §8 ne l'avait pas
+prévu.** La clé d'identité (`--peer-key`) est l'ancre de l'AUTHENTIFICATION —
+le pair prouve la clé qu'on tient de lui, liée au canal (§2.2). Mais pour
+OUVRIR la connexion TLS, le tireur doit valider le certificat que le pair
+présente, et la chaîne qu'un serveur montre (`--certificate`) ne porte pas la
+racine qui l'a signée (`scripts/ca.sh` : « le certificat, puis rien »).
+`--peer-ca` est cette racine-là — le `racine.crt` de la cérémonie, celui-là
+même que le client épingle. C'est le certificat de plus que §2.2 disait ne pas
+vouloir ; ce n'en est pas un « par pair », c'est l'autorité commune, et
+l'authentification reste la clé d'identité, pas lui.
 
 **`--identity-key` ne se génère pas tout seul.** `asl-server --new-identity-key
 <fichier>` écrit la clé privée dans `<fichier>` (0600) et la publique dans
@@ -559,7 +571,7 @@ journal d'exploitation dit la même chose, à qui sait lire la machine.
 | 16 | Les règles client de §6 — la connexion est la session ; `asl enroll` et le daemon essaient l'autre racine avant de conclure. | **Décidé** |
 | 17 | La provenance d'un enregistrement répliqué entre racines reste `locale`. | **Décidé** (2026-09-15) |
 | 18 | Rompre la réplication n'efface rien. | **Décidé** |
-| 19 | `--identity-key`, `--peer`, `--peer-key` ; `--new-identity-key` pour générer. | **Décidé** (2026-09-15) — `--identity-key`, parce que c'est une clé privée |
+| 19 | `--identity-key`, `--peer`, `--peer-key` ; `--new-identity-key` pour générer. **`--peer-ca` ajouté par la PR de code (0.7.0)** : valider le certificat TLS du pair demande son autorité, que sa chaîne ne porte pas. | **Décidé** (2026-09-15) — `--identity-key`, parce que c'est une clé privée ; `--peer-ca` amendé (2026-09-16) |
 | 20 | `GET /v1/replication`, **sur la voie machine** — pas sans exigence : l'état de la voie dit à un inconnu quand une unicité se gagne. | **Décidé** (2026-09-15), amendé |
 
 ---

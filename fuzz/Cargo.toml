@@ -73,6 +73,13 @@ path = "../crates/asl-cle"
 [dependencies.asl-registre]
 path = "../crates/asl-registre"
 
+# `asl-store` POUR FUZZER L'APPLICATION DES OPÉRATIONS. C'est la seule crate de
+# l'étage 3 tirée ici, et c'est délibéré : sa COUVERTURE est hors de portée
+# (elle fait des entrées-sorties), mais la panique-freedom de l'application se
+# fuzze — et l'entrepôt EN MÉMOIRE le fait sans toucher au disque.
+[dependencies.asl-store]
+path = "../crates/asl-store"
+
 [dependencies.asl-session]
 path = "../crates/asl-session"
 
@@ -196,6 +203,13 @@ bench = false
 [[bin]]
 name = "fuzz_asl_registre_aller_retour"
 path = "fuzz_targets/fuzz_asl_registre_aller_retour.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_asl_store_application"
+path = "fuzz_targets/fuzz_asl_store_application.rs"
 test = false
 doc = false
 bench = false
