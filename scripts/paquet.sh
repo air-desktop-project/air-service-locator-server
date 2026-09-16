@@ -145,13 +145,17 @@ cat > "$arbre/usr/share/doc/asl-server/replication.conf.exemple" <<'EXEMPLE'
 #      — écrit identite.key (0600) et identite.key.pub, imprime le n-… .
 #   2. Échangez les .pub entre les deux bancs, et posez le racine.crt de la
 #      cérémonie (celui que le client épingle) en /etc/asl-server/racine.crt.
-#   3. Remplissez la ligne ci-dessous — NON CITÉE, systemd la découpe sur les
-#      espaces —, puis `systemctl restart asl-server`.
+#   3. Remplissez la ligne ci-dessous — l'affectation ENTIÈRE entre guillemets :
+#      `Environment=` découpe sa ligne sur les espaces avant d'y lire des
+#      affectations, et sans eux la variable ne vaudrait que `--identity-key`.
+#      Les guillemets sont pour systemd ; c'est le `$ASL_REPLICATION` de
+#      l'unité, non cité, qui découpe ensuite la valeur en arguments —, puis
+#      `systemctl restart asl-server`.
 #
 # Vide, cette variable laisse la racine SEULE : ce n'est pas un défaut.
 
 [Service]
-Environment=ASL_REPLICATION=--identity-key /etc/asl-server/identite.key --peer argon.air-desktop.org:6630 --peer-key /etc/asl-server/pair.pub --peer-ca /etc/asl-server/racine.crt
+Environment="ASL_REPLICATION=--identity-key /etc/asl-server/identite.key --peer argon.air-desktop.org:6630 --peer-key /etc/asl-server/pair.pub --peer-ca /etc/asl-server/racine.crt"
 EXEMPLE
 chmod 0644 "$arbre/usr/share/doc/asl-server/replication.conf.exemple"
 dit "binaire, unité, /etc/asl-server, tables d'exemple, documentation"

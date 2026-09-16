@@ -193,13 +193,26 @@ estampille. La réplication les reprend sans rien perdre ; voici l'ordre exact.
    ```sh
    systemctl edit asl-server
    # [Service]
-   # Environment=ASL_REPLICATION=--identity-key /etc/asl-server/identite.key --peer argon.air-desktop.org:6630 --peer-key /etc/asl-server/pair.pub --peer-ca /etc/asl-server/racine.crt
+   # Environment="ASL_REPLICATION=--identity-key /etc/asl-server/identite.key --peer argon.air-desktop.org:6630 --peer-key /etc/asl-server/pair.pub --peer-ca /etc/asl-server/racine.crt"
    ```
 
    Le modèle est expédié sous
-   `/usr/share/doc/asl-server/replication.conf.exemple`. **La ligne n'est pas
-   citée** : systemd la découpe sur les espaces, et les quatre `--peer…`
-   arrivent séparés.
+   `/usr/share/doc/asl-server/replication.conf.exemple`. **L'affectation est
+   citée, en entier** : `Environment=` découpe sa ligne sur les espaces avant
+   d'y lire des affectations, et sans les guillemets `ASL_REPLICATION` ne vaut
+   que `--identity-key` — l'annuaire refuse de démarrer, « attend une valeur ».
+   Les guillemets sont pour systemd, pas pour la valeur : c'est ensuite le
+   `$ASL_REPLICATION` de l'unité, lui non cité, qui la découpe en arguments,
+   et les quatre `--peer…` arrivent séparés.
+
+   **Entre deux bancs d'un même /64 chez un hébergeur, IPv6 peut ne pas
+   passer** — la voie reste « coupée, la poignée de main n'a pas abouti à
+   temps » alors que chacun se joint de l'extérieur. Le voisin est `FAILED`
+   (`ip -6 neigh`) : l'hébergeur ne relaie pas la découverte de voisin entre
+   ses hôtes. Une route `/128` vers l'autre banc par la passerelle du réseau
+   règle le cas (`ip -6 route add <l'autre>/128 via <passerelle>`), à rendre
+   persistante — un fragment netplan à part, sans toucher à celui de
+   l'hébergeur. C'est un réglage de l'hôte, pas de l'annuaire.
 
 5. **Redémarrez, l'un puis l'autre** — l'ordre est sans importance, chacun
    rappelle l'autre jusqu'à ce qu'il réponde. Au **premier** démarrage avec une
@@ -257,7 +270,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.8.0_amd64.deb
+sudo dpkg -i asl-server_0.8.1_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
