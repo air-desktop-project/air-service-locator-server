@@ -111,7 +111,7 @@ jamais l'utilisateur : il n'y a pas de mot de passe dans ce produit.
 |---|---|
 | `identifiant` | `a-` + 26 caractères. |
 | `clé publique` | La partie publique d'une clé qui vit dans le matériel sécurisé du téléphone et ne peut être employée qu'après une confirmation biométrique. **P-256** — la Secure Enclave et StrongBox ne font que cette courbe (`protocole.md` §2.1). |
-| `attestation` | Sous quoi l'appareil est entré : aucune, Apple, ou Google. **Une valeur, pas une absence** : un annuaire en posture facultative laisse entrer des appareils sans preuve, et il faut pouvoir dire lesquels — c'est ce qu'on regarde le jour où l'on resserre, pour savoir qui prévenir. |
+| `attestation` | Sous quoi l'appareil est entré : `aucune`, `apple` (App Attest), `android` (l'attestation de clé du Keystore, contre une racine que l'exploitant épingle), ou `invitation` (un code émis par l'exploitant). `google` — Play Integrity — n'a jamais été acceptée et est abandonnée (`protocole.md` §2.1, décision du 2026-09-16, C19). **Une valeur, pas une absence** : un annuaire en posture facultative laisse entrer des appareils sans preuve, et il faut pouvoir dire lesquels — c'est ce qu'on regarde le jour où l'on resserre, pour savoir qui prévenir. |
 | `jeton de poussée` | APNs ou FCM, pour les notifications (§2.6). Lié à l'appareil, révoqué avec lui. |
 | `plateforme` | `ios`, `android` ou `macos` — ce que l'appareil fait tourner. **Déclaré par l'appareil lui-même**, absent tant qu'il ne l'a pas fait. |
 | `modele` | « iPhone 17 », « MacBook Pro (2019) » — le nom de son **modèle**, libre, 1 à 64 octets, aux règles du nom de machine (§2.3). Déclaré avec la plate-forme, absent avec elle. |

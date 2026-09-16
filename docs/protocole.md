@@ -466,14 +466,94 @@ pour App Attest. Un seul aller-retour, une seule valeur à usage unique, et
 l'attestation se trouve liée À LA clé présentée : sans ce lien, App Attest
 n'atteste qu'une clé à lui, jamais celle qu'on enrôle.
 
-**Ce qui reste, et qui n'est pas Apple :** Play Integrity, d'une tout autre
-forme (un jeton JWS signé par Google) — `POST /v1/comptes` lui réserve déjà sa
-case de plate-forme, mais sa vérification n'est pas écrite, et une attestation
-Google est aujourd'hui refusée. Et toujours : **aucune capture réelle.** La
-chaîne, la forme de l'extension et l'environnement viennent de la documentation
-d'Apple ; `--attestation required` ne peut pas être tenue pour sûre tant qu'un vrai
-iPhone n'a pas été lu — le premier appareil légitime serait sinon le premier
-refusé.
+**Et toujours : aucune capture réelle côté Apple.** La chaîne, la forme de
+l'extension et l'environnement viennent de la documentation d'Apple ;
+`--attestation required` ne peut pas être tenue pour sûre tant qu'un vrai iPhone
+n'a pas été lu — le premier appareil légitime serait sinon le premier refusé.
+
+#### Décidé le 2026-09-16 : l'attestation n'appelle personne, et Play Integrity est abandonné
+
+**Le principe, avant le moyen** (C19) : air-desktop ne dépend ni de Google ni
+d'Apple pour fonctionner. L'attestation est une **garantie que l'exploitant
+d'une racine choisit** — jamais une condition du service : les racines tournent
+en `optional` depuis le premier jour, et tout marche. Et quand elle est choisie,
+**aucun tiers n'est appelé** : ce que l'annuaire vérifie, il le vérifie hors
+ligne, contre des **racines de confiance qui sont des fichiers**, épinglés par
+l'exploitant comme `--peer-ca` l'est pour la réplication.
+
+**Play Integrity contredisait ce principe, et il est abandonné.** Il demandait
+un compte développeur Google Play, l'app dans la Play Console, des clés de
+réponse « gérées par moi », et les services Google Play sur l'appareil ; son
+verdict était l'opinion de Google sur l'appareil ET sur la distribution par le
+Play Store. C'était le mauvais outil : `asl-play` est retiré, la dépendance
+`com.google.android.play:integrity` avec lui, et aucun compte Google ne sera
+ouvert. Le jeton capturé le 2026-09-12 reste dans `docs/attestation/captures/`
+comme trace de ce qu'on a lu, pas comme chemin.
+
+**Ce qui le remplace : l'attestation de clé d'Android (Keystore).** C'est ce
+que ce document appelait plus haut « une case de plus, plus tard », et c'est
+MIEUX que ce qu'on quitte : elle atteste **la clé elle-même** — générée dans le
+TEE ou StrongBox, non exportable —, l'état du démarrage vérifié (`verifiedBootState`,
+bootloader verrouillé), le niveau de correctif, et **l'application qui détient
+la clé** (nom du paquet et empreinte de sa signature, dans
+`attestationApplicationId`). Exactement la question posée en §2.1 — « une vraie
+build de notre app, sur un vrai appareil, a présenté cette clé » —, et pour
+Android c'est bien « cette clé vit dans du matériel », ce qu'iOS ne sait pas
+dire. Rien n'est appelé : la chaîne X.509 remonte à une racine, et la racine est
+un fichier.
+
+- **Sur le fil**, la case de plate-forme `2` de `POST /v1/comptes` (§2.1 bis)
+  devient **Android** — elle ne désignait Google que sur le papier, aucune
+  attestation `2` n'a jamais été acceptée. L'attestation est la chaîne,
+  **feuille d'abord**, chaque certificat DER précédé de sa longueur sur deux
+  octets grand-boutiens ; la racine peut être omise (l'annuaire la tient). Une
+  chaîne réelle fait quatre certificats et de 4 à 6 Kio — la borne de 8 Kio
+  reste, et la capture réelle dira si elle tient.
+- **La liaison au défi** est celle de §2.1 : le `attestationChallenge` de la
+  clé est `SHA-256(asl_cle::message_d_attestation(clé, défi, liaison))`, posé à
+  la GÉNÉRATION de la clé (`setAttestationChallenge`) — la clé attestée EST la
+  clé enrôlée, sans le détour qu'App Attest impose.
+- **Ce que l'annuaire vérifie** (`asl-keystore`, étage 2, comme `asl-apple`) :
+  la chaîne jusqu'à une racine épinglée (`--android-roots <fichier PEM>`, une ou
+  plusieurs), l'extension `1.3.6.1.4.1.11129.2.1.17` de la feuille — le
+  `attestationChallenge` égal au condensat attendu, la clé publique de la feuille
+  égale à celle qu'on enrôle, `attestationSecurityLevel` et
+  `keymintSecurityLevel` à `TrustedEnvironment` ou `StrongBox`,
+  `verifiedBootState` à `Verified`, et `attestationApplicationId` portant NOTRE
+  paquet et NOTRE empreinte de signature (`--android-app <paquet>` et
+  `--android-signer <empreinte SHA-256>`, les pendants de `--apple-app`). La
+  politique sur le niveau de correctif et la liste de révocation de Google
+  (`attestation/status`) restent à trancher après la capture — et cette liste
+  serait un tiers appelé : si elle sert, c'est un fichier rafraîchi par
+  l'exploitant, pas un appel de l'annuaire.
+- **Les racines sont celles que l'exploitant choisit.** Celle de Google, pour
+  les Android certifiés — publiée, un fichier, aucun compte ; celle de
+  GrapheneOS, pour les siens ; ou aucune. Le dépôt expédie les deux en exemple
+  sous `paquet/`, et n'en impose aucune. Un appareil dont la chaîne ne remonte
+  à aucune racine épinglée est traité comme sans attestation : refusé en
+  `required`, admis en `optional`, avec sa valeur `aucune`.
+- **La capture réelle vient du Fairphone 5**, sans rien demander à personne —
+  c'est aussi ce qui rend cette voie éprouvable là où App Attest attend un
+  iPhone. `docs/attestation/capture-keystore.md` en donne le geste.
+
+**Une troisième posture, pour une racine sans aucun fabricant : l'invitation.**
+`--attestation invitation` : l'exploitant émet un code d'invitation — même
+forme que le code d'enrôlement (§2.3 de `modele.md` : dix symboles, usage
+unique, l'annuaire n'en garde que l'empreinte) —, et `POST /v1/comptes` le
+présente sous la plate-forme `3`, dans la case d'attestation (dix octets). Un
+compte s'ouvre parce que quelqu'un l'a voulu, pas parce qu'un fabricant l'a
+dit ; l'appareil entre avec la valeur `invitation`. **Comment l'exploitant émet
+le code** — un verbe de `asl-server` sur la machine, ou un verbe de `asl` réservé
+à un compte d'exploitation — reste à trancher avec le chantier.
+
+**Ce qui reste, honnêtement.** La racine de confiance d'une attestation est
+celle de qui a fabriqué l'enclave — Google pour les Android certifiés, Apple
+pour iOS. C'est inhérent à « prouver du matériel », et c'est un fichier, pas un
+service. Sur iOS, il n'y a pas d'autre attestation que celle d'Apple, et App
+Attest reste : vérifié hors ligne, sans autre compte que celui qui signe déjà
+l'app. Et **les notifications** (§2.6 de `modele.md`) passent encore par APNs et
+FCM — c'est la dépendance qui reste à regarder, sous le même principe ;
+UnifiedPush est la voie à instruire pour Android.
 
 ### 2.1 bis Ce que porte chaque corps, et pourquoi ce n'est pas toujours du JSON
 
@@ -497,7 +577,9 @@ seul où la règle des longueurs fixes plie : une chaîne de certificats n'a pas
 taille. Le corps est donc un préfixe fixe de 98 octets, puis l'attestation, qui
 est tout le reste — **aucune longueur n'est lue des octets pour autant**, il n'y
 a pas de champ de longueur à déplacer. La plate-forme se note `0` aucune, `1`
-Apple, `2` Google ; `0` interdit toute attestation derrière, `1` et `2`
+Apple, `2` Android (l'attestation de clé du Keystore, décidé le 2026-09-16 —
+la case disait Google, et n'a jamais été acceptée), `3` invitation ; `0`
+interdit toute attestation derrière, `3` porte le code d'invitation, `1` et `2`
 l'exigent. `asl_api::CreationDeCompte` isole les trois tranches sans les
 interpréter ; `asl-attest` refuse ensuite le moindre octet en trop DANS l'objet.
 
