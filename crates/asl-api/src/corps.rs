@@ -82,7 +82,7 @@ pub const COMPTE_CORPS_MAX: usize = COMPTE_PREFIXE_OCTETS + ATTESTATION_MAX;
 
 /// Sous quelle plate-forme un appareil s'atteste, tel que le FIL le porte.
 ///
-/// # TROIS VALEURS, ET LES ÉTIQUETTES DU FIL NE SONT PAS CELLES DU STOCKAGE
+/// # QUATRE VALEURS, ET LES ÉTIQUETTES DU FIL NE SONT PAS CELLES DU STOCKAGE
 ///
 /// Ici, `0` désigne « aucune » : c'est ce qu'écrit une application qui
 /// n'atteste rien, et c'est un choix explicite de sa part, pas un octet oublié.
@@ -90,14 +90,23 @@ pub const COMPTE_CORPS_MAX: usize = COMPTE_PREFIXE_OCTETS + ATTESTATION_MAX;
 /// qu'un enregistrement à demi écrit ne se relise pas comme non attesté. Chaque
 /// couche tient son encodage ; c'est `asl-session` qui traduit de l'un à
 /// l'autre.
+///
+/// **`2` a désigné Google (Play Integrity) sur le papier, et désigne Android
+/// depuis le 2026-09-16** (`protocole.md` §2.1, C19) : l'attestation de clé
+/// du Keystore. Aucune attestation `2` n'avait jamais été acceptée — l'octet
+/// est réemployé, pas rompu. `3` est l'invitation : un code émis par
+/// l'exploitant, dix octets dans la case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlateformeAttestation {
     /// Aucune attestation : l'application ne fournit rien à cautionner.
     Aucune,
     /// Apple App Attest.
     Apple,
-    /// Google Play Integrity.
-    Google,
+    /// L'attestation de clé d'Android (Keystore), contre une racine que
+    /// l'exploitant épingle.
+    Android,
+    /// Un code d'invitation émis par l'exploitant.
+    Invitation,
 }
 
 impl PlateformeAttestation {
@@ -107,7 +116,8 @@ impl PlateformeAttestation {
         match self {
             Self::Aucune => 0,
             Self::Apple => 1,
-            Self::Google => 2,
+            Self::Android => 2,
+            Self::Invitation => 3,
         }
     }
 
@@ -116,7 +126,8 @@ impl PlateformeAttestation {
         match octet {
             0 => Ok(Self::Aucune),
             1 => Ok(Self::Apple),
-            2 => Ok(Self::Google),
+            2 => Ok(Self::Android),
+            3 => Ok(Self::Invitation),
             octet => Err(Erreur::PlateformeInconnue { octet }),
         }
     }
@@ -160,8 +171,9 @@ pub struct CreationDeCompte<'a> {
     /// La preuve de possession, [`PREUVE_APPAREIL_OCTETS`] octets, non
     /// interprétée.
     pub preuve: &'a [u8],
-    /// L'attestation, telle quelle : l'objet CBOR d'App Attest, ou vide quand
-    /// la plate-forme est [`PlateformeAttestation::Aucune`].
+    /// L'attestation, telle quelle : l'objet CBOR d'App Attest, la chaîne de
+    /// certificats du Keystore (`asl_keystore::case`), le code d'invitation —
+    /// ou vide quand la plate-forme est [`PlateformeAttestation::Aucune`].
     pub attestation: &'a [u8],
 }
 
@@ -172,7 +184,7 @@ impl<'a> CreationDeCompte<'a> {
     ///
     /// [`Erreur::CorpsTropCourt`] sous le préfixe, [`Erreur::CorpsTropLong`]
     /// au-delà de [`COMPTE_CORPS_MAX`], [`Erreur::PlateformeInconnue`] pour un
-    /// premier octet hors de {0, 1, 2}, [`Erreur::AttestationInattendue`] si
+    /// premier octet hors de {0, 1, 2, 3}, [`Erreur::AttestationInattendue`] si
     /// des octets suivent une plate-forme `Aucune`, [`Erreur::AttestationManquante`]
     /// si une plate-forme déclarée n'est suivie de rien.
     pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
@@ -1144,7 +1156,8 @@ const fn mot_d_attestation(plateforme: PlateformeAttestation) -> &'static str {
     match plateforme {
         PlateformeAttestation::Aucune => "aucune",
         PlateformeAttestation::Apple => "apple",
-        PlateformeAttestation::Google => "google",
+        PlateformeAttestation::Android => "android",
+        PlateformeAttestation::Invitation => "invitation",
     }
 }
 
@@ -1153,10 +1166,11 @@ fn attestation_du_mot(texte: &str, position: usize) -> Result<PlateformeAttestat
     match texte {
         "aucune" => Ok(PlateformeAttestation::Aucune),
         "apple" => Ok(PlateformeAttestation::Apple),
-        "google" => Ok(PlateformeAttestation::Google),
+        "android" => Ok(PlateformeAttestation::Android),
+        "invitation" => Ok(PlateformeAttestation::Invitation),
         _ => Err(Erreur::JsonAttendu {
             position,
-            attendu: "aucune, apple ou google",
+            attendu: "aucune, apple, android ou invitation",
         }),
     }
 }

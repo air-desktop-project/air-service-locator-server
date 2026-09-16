@@ -89,8 +89,8 @@ path = "../crates/asl-attest"
 [dependencies.asl-jwt]
 path = "../crates/asl-jwt"
 
-[dependencies.asl-play]
-path = "../crates/asl-play"
+[dependencies.asl-keystore]
+path = "../crates/asl-keystore"
 
 [dependencies.asl-apple]
 path = "../crates/asl-apple"
@@ -243,8 +243,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_asl_play"
-path = "fuzz_targets/fuzz_asl_play.rs"
+name = "fuzz_asl_keystore"
+path = "fuzz_targets/fuzz_asl_keystore.rs"
 test = false
 doc = false
 bench = false

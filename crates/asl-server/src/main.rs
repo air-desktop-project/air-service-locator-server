@@ -140,6 +140,14 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
     let racine = identite.as_ref().map_or(RACINE_SANS_IDENTITE, |cle| {
         asl_cle::identifiant_de_racine(&cle.publique())
     });
+    // **LES RACINES ANDROID SE LISENT AVANT L'ENTREPÔT, ELLES AUSSI** : un
+    // PEM absent ou vide doit se dire avant d'avoir verrouillé une base. Ce
+    // sont des fichiers de l'exploitant (C19), jamais des constantes.
+    let racines_android = reglages
+        .android
+        .as_ref()
+        .map(|android| racines_android(&android.racines))
+        .transpose()?;
 
     let entrepot = Arc::new(Entrepot::ouvrir(&reglages.entrepot, racine)?);
     let chaine = std::fs::read(&reglages.certificat)?;
@@ -221,11 +229,11 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                 "asl-server : ATTENTION — l'attestation de plate-forme n'est pas exigée. \
                  N'IMPORTE QUI peut créer un compte sur cet annuaire."
             );
-        } else if reglages.apple.is_none() {
+        } else if reglages.apple.is_none() && reglages.android.is_none() {
             eprintln!(
-                "asl-server : l'attestation est exigée, mais aucune app Apple n'est \
-                 configurée (--apple-app / --apple-environment) : AUCUN appareil ne \
-                 pourra s'enrôler."
+                "asl-server : l'attestation est exigée, mais aucune plate-forme n'est \
+                 configurée (--apple-app / --apple-environment, --android-roots / \
+                 --android-app / --android-signer) : AUCUN appareil ne pourra s'enrôler."
             );
         }
         // La racine d'Apple est la même pour tous ; seuls l'app et
@@ -236,6 +244,26 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
             .map(|reglage| asl_loop_tokio::h3::ConfigApple {
                 identifiant_app: reglage.identifiant_app.as_str(),
                 environnement: reglage.environnement,
+            });
+        // **LES RACINES ANDROID SE DISENT AU DÉMARRAGE**, par leur nombre :
+        // c'est là qu'on relit ce qu'on croyait avoir épinglé.
+        let android = reglages
+            .android
+            .as_ref()
+            .zip(racines_android.as_deref())
+            .map(|(reglage, racines)| {
+                eprintln!(
+                    "asl-server : attestation Android — {} racine(s) épinglée(s), \
+                     paquet {}, signataire {}.",
+                    racines.len(),
+                    reglage.paquet,
+                    identite::en_hexadecimal(&reglage.signataire),
+                );
+                asl_loop_tokio::h3::ConfigAndroid {
+                    racines,
+                    paquet: reglage.paquet.as_str(),
+                    signataire: reglage.signataire,
+                }
             });
         // Le journal d'exploitation de la voie entre racines
         // (`replication.md` §8) : la même sortie que le reste.
@@ -254,7 +282,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
             &tirer,
             &nommer,
             reglages.politique,
-            apple,
+            asl_loop_tokio::h3::Attestations { apple, android },
             bail,
             voie,
         );
@@ -319,6 +347,22 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         );
         Ok::<(), Box<dyn std::error::Error>>(())
     })
+}
+
+/// Lit les racines d'attestation Android, fichier par fichier.
+///
+/// Chaque fichier est nommé dans sa faute : un exploitant qui a posé trois PEM
+/// doit savoir lequel ne se lit pas.
+fn racines_android(chemins: &[std::path::PathBuf]) -> Result<Vec<Vec<u8>>, String> {
+    let mut racines = Vec::new();
+    for chemin in chemins {
+        let pem = std::fs::read(chemin)
+            .map_err(|quoi| format!("--android-roots {} : {quoi}", chemin.display()))?;
+        let lues = asl_loop_tokio::racines_depuis_pem(&pem)
+            .map_err(|quoi| format!("--android-roots {} : {quoi}", chemin.display()))?;
+        racines.extend(lues);
+    }
+    Ok(racines)
 }
 
 /// Frappe une clé d'identité, imprime ce que l'autre racine doit en savoir,

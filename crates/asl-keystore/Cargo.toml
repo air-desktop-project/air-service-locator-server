@@ -1,0 +1,33 @@
+[package]
+name = "asl-keystore"
+description = "Ce qu'une attestation de clé Android PROUVE : la chaîne jusqu'à une racine épinglée, le défi, la clé, l'app. Aucune entrée-sortie."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# La chaîne X.509 : construite et signée par `rustls-webpki`, avec des
+# vérificateurs que cette crate lui fournit elle-même (voir `signature.rs`) —
+# ECDSA sur `p256` et `p384`, RSA PKCS#1 v1.5 sur `rsa`.
+rustls-webpki.workspace = true
+rustls-pki-types.workspace = true
+p256.workspace = true
+p384.workspace = true
+rsa.workspace = true
+sha2.workspace = true
+signature.workspace = true
+
+[dev-dependencies]
+# Pour FABRIQUER une chaîne dans les essais : signer des certificats sous la
+# racine du banc. Personne, en production, n'émet de certificat ici — c'est le
+# Keystore de l'appareil qui le fait, sous la racine de son fabricant.
+p256 = { workspace = true, features = ["ecdsa", "pkcs8"] }
+p384 = { workspace = true, features = ["ecdsa"] }
+sha2.workspace = true
+# Pour nommer l'erreur de `webpki` qu'un essai attend.
+rustls-webpki.workspace = true
+
+[lints]
+workspace = true

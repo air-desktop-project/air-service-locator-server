@@ -536,6 +536,29 @@ un fichier.
   c'est aussi ce qui rend cette voie éprouvable là où App Attest attend un
   iPhone. `docs/attestation/capture-keystore.md` en donne le geste.
 
+**Écrit et branché le 2026-09-16 (0.9.0) : `asl-keystore`.** La case ci-dessus
+est servie telle quelle — `n` certificats DER, feuille d'abord, chacun précédé
+de sa longueur sur deux octets grand-boutiens, racine omissible, huit
+certificats et 8 Kio au plus. La chaîne réelle du Fairphone 5
+(`docs/attestation/captures/keystore-fp5-2026-09-16/`, 3 421 octets en quatre
+certificats) remonte à la racine de Google dans les essais de la crate, et
+chaque valeur que la capture a montrée en sort telle quelle. Ce qui est jugé :
+la chaîne jusqu'à une racine de `--android-roots`, la clé de la feuille égale à
+la clé enrôlée (comparée sous sa forme compressée, celle du fil),
+`attestationChallenge` égal à `SHA-256(message_d_attestation)`, les deux
+niveaux de sécurité matériels, `rootOfTrust` côté matériel — `Verified` et
+verrouillé —, `origin` `GENERATED` côté matériel, et NOTRE paquet sous NOTRE
+empreinte dans `attestationApplicationId`. Ce qui est rendu sans être jugé :
+`osVersion`, `osPatchLevel`, `vendorPatchLevel`, `bootPatchLevel` — la
+politique de correctif reste à écrire. Les balises que le lecteur ne connaît
+pas sont sautées, jamais refusées : le schéma change à chaque Android. Chaque
+refus est dit au journal d'exploitation avec sa cause, sans la chaîne. La
+plate-forme `3` (invitation) est **refusée « pas encore servie »** tant que la
+posture ci-dessous n'est pas écrite. Le dépôt n'expédie que la racine de
+Google (`paquet/racines-android/google.pem`, celle de la capture) : celle de
+GrapheneOS n'a pas pu être obtenue hors ligne de façon sûre, et une racine
+qu'on ne peut pas vérifier ne s'expédie pas.
+
 **Une troisième posture, pour une racine sans aucun fabricant : l'invitation.**
 `--attestation invitation` : l'exploitant émet un code d'invitation — même
 forme que le code d'enrôlement (§2.3 de `modele.md` : dix symboles, usage

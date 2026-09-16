@@ -1150,7 +1150,7 @@ impl Appareil {
 /// # POURQUOI LES ÉTIQUETTES RANGÉES NE SONT PAS CELLES DU FIL
 ///
 /// Sur le fil (`POST /v1/comptes`), la plate-forme se note `0` aucune, `1`
-/// Apple, `2` Google — parce que là, zéro est ce qu'écrit une application qui
+/// Apple, `2` Android — parce que là, zéro est ce qu'écrit une application qui
 /// n'atteste rien, et c'est un choix explicite de sa part.
 ///
 /// **Ici, zéro ne doit désigner personne.** Un octet oublié dans un tampon
@@ -1158,14 +1158,23 @@ impl Appareil {
 /// relirait comme un appareil non attesté — un enregistrement à demi formé qui
 /// se croirait entier, exactement ce que le fuzz du registre existe pour
 /// fermer. Les étiquettes rangées commencent donc à `1`.
+///
+/// # `Android` A PRIS L'OCTET DE `Google`, SANS RUPTURE
+///
+/// L'étiquette `3` disait « Google Play Integrity » ; elle dit « l'attestation
+/// de clé d'Android » depuis le 2026-09-16 (`protocole.md` §2.1, C19). Aucun
+/// appareil n'a jamais été rangé sous `3` — Play Integrity n'a jamais été
+/// accepté —, donc aucun enregistrement existant ne change de sens, et le
+/// format ne bouge pas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attestation {
     /// Entré sans preuve, sous une posture `facultative`.
     Aucune,
     /// Cautionné par Apple App Attest.
     Apple,
-    /// Cautionné par Google Play Integrity.
-    Google,
+    /// Cautionné par l'attestation de clé d'Android (Keystore), contre une
+    /// racine que l'exploitant épingle.
+    Android,
 }
 
 impl Attestation {
@@ -1173,15 +1182,15 @@ impl Attestation {
     const AUCUNE: u8 = 1;
     /// L'étiquette d'Apple.
     const APPLE: u8 = 2;
-    /// L'étiquette de Google.
-    const GOOGLE: u8 = 3;
+    /// L'étiquette d'Android — celle qui disait Google.
+    const ANDROID: u8 = 3;
 
     /// Son étiquette rangée. **Aucune ne vaut zéro** — voir l'en-tête du type.
     const fn etiquette(self) -> u8 {
         match self {
             Self::Aucune => Self::AUCUNE,
             Self::Apple => Self::APPLE,
-            Self::Google => Self::GOOGLE,
+            Self::Android => Self::ANDROID,
         }
     }
 
@@ -1190,7 +1199,7 @@ impl Attestation {
         match octet {
             Self::AUCUNE => Ok(Self::Aucune),
             Self::APPLE => Ok(Self::Apple),
-            Self::GOOGLE => Ok(Self::Google),
+            Self::ANDROID => Ok(Self::Android),
             lue => Err(Faute::Etiquette { lue }),
         }
     }
@@ -4361,7 +4370,7 @@ mod tests {
     fn un_appareil_ancien_se_reprend_avec_l_estampille_qu_on_lui_donne() {
         let attendu = Appareil {
             estampille: e(40),
-            ..un_appareil(Attestation::Google, true)
+            ..un_appareil(Attestation::Android, true)
         };
         let mut neuf = [0_u8; APPAREIL_OCTETS];
         attendu.ecrire(&mut neuf);
@@ -4480,7 +4489,7 @@ mod tests {
         // **UN BOOLÉEN N'A QUE DEUX ÉCRITURES.** En accepter une troisième
         // rendrait l'encodage non canonique : un enregistrement relu se
         // réécrirait différemment de lui-même, et c'est le fuzz qui le dirait.
-        let appareil = un_appareil(Attestation::Google, false);
+        let appareil = un_appareil(Attestation::Android, false);
         let mut octets = [0_u8; APPAREIL_OCTETS];
         appareil.ecrire(&mut octets);
         let dernier = APPAREIL_OCTETS.saturating_sub(1);
@@ -4490,7 +4499,11 @@ mod tests {
 
     #[test]
     fn les_trois_attestations_font_l_aller_retour() {
-        for atteste in [Attestation::Aucune, Attestation::Apple, Attestation::Google] {
+        for atteste in [
+            Attestation::Aucune,
+            Attestation::Apple,
+            Attestation::Android,
+        ] {
             let appareil = un_appareil(atteste, false);
             let mut octets = [0_u8; APPAREIL_OCTETS];
             appareil.ecrire(&mut octets);

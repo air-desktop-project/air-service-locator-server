@@ -54,7 +54,7 @@ members = [
     "crates/asl-auth",
     "crates/asl-cle",
     "crates/asl-apple",
-    "crates/asl-play",
+    "crates/asl-keystore",
     "crates/asl-session",
     # Étage 3 — exécution
     "crates/asl-store",
@@ -90,7 +90,7 @@ exclude = ["fuzz"]
 [workspace.package]
 # Version en LOCKSTEP : toutes les crates la partagent via `version.workspace`.
 # Un seul numéro à incrémenter, donc aucune dérive possible entre les paquets.
-version = "0.8.2"
+version = "0.9.0"
 edition = "2024"
 # PAS DE `rust-version`, ET C'EST DÉLIBÉRÉ.
 #
@@ -109,21 +109,21 @@ repository = "https://github.com/air-desktop-project/air-service-locator-server"
 # Les arêtes INTERNES ne se déclarent qu'à mesure qu'elles servent : une
 # dépendance posée d'avance affirmerait un assemblage qui n'existe pas. Les neuf
 # crates sont donc listées, mais AUCUNE ne dépend encore d'une autre.
-asl-annuaire = { path = "crates/asl-annuaire", version = "0.8.2" }
-asl-api = { path = "crates/asl-api", version = "0.8.2" }
-asl-apple = { path = "crates/asl-apple", version = "0.8.2" }
-asl-attest = { path = "crates/asl-attest", version = "0.8.2" }
-asl-jwt = { path = "crates/asl-jwt", version = "0.8.2" }
-asl-play = { path = "crates/asl-play", version = "0.8.2" }
-asl-auth = { path = "crates/asl-auth", version = "0.8.2" }
-asl-cle = { path = "crates/asl-cle", version = "0.8.2" }
-asl-id = { path = "crates/asl-id", version = "0.8.2" }
-asl-loop-tokio = { path = "crates/asl-loop-tokio", version = "0.8.2" }
-asl-proto = { path = "crates/asl-proto", version = "0.8.2" }
-asl-registre = { path = "crates/asl-registre", version = "0.8.2" }
-asl-server = { path = "crates/asl-server", version = "0.8.2" }
-asl-session = { path = "crates/asl-session", version = "0.8.2" }
-asl-store = { path = "crates/asl-store", version = "0.8.2" }
+asl-annuaire = { path = "crates/asl-annuaire", version = "0.9.0" }
+asl-api = { path = "crates/asl-api", version = "0.9.0" }
+asl-apple = { path = "crates/asl-apple", version = "0.9.0" }
+asl-attest = { path = "crates/asl-attest", version = "0.9.0" }
+asl-jwt = { path = "crates/asl-jwt", version = "0.9.0" }
+asl-keystore = { path = "crates/asl-keystore", version = "0.9.0" }
+asl-auth = { path = "crates/asl-auth", version = "0.9.0" }
+asl-cle = { path = "crates/asl-cle", version = "0.9.0" }
+asl-id = { path = "crates/asl-id", version = "0.9.0" }
+asl-loop-tokio = { path = "crates/asl-loop-tokio", version = "0.9.0" }
+asl-proto = { path = "crates/asl-proto", version = "0.9.0" }
+asl-registre = { path = "crates/asl-registre", version = "0.9.0" }
+asl-server = { path = "crates/asl-server", version = "0.9.0" }
+asl-session = { path = "crates/asl-session", version = "0.9.0" }
+asl-store = { path = "crates/asl-store", version = "0.9.0" }
 
 # LES DÉPENDANCES EXTERNES n'entrent qu'au moment où une crate les consomme. Le
 # graphe est donc VIDE aujourd'hui, et cette section restera vide tant que rien
@@ -198,19 +198,27 @@ sha2 = { version = "0.11", default-features = false }
 # à `rustls` pour une crate qui ne parle pas TLS.
 rustls-webpki = { version = "0.103", default-features = false, features = ["alloc"] }
 
-# ── POUR VÉRIFIER UN JETON PLAY INTEGRITY (`asl-play`) ─────────────────────
-#
-# Toutes DÉJÀ au graphe, tirées par la pile TLS (`rustls-rustcrypto`) : un jeton
-# standard est un JWS chiffré en AES-256-GCM dont la clé est emballée en AES-256
-# key wrap (RFC 3394). `aes` donne le chiffrement par blocs dont le déballage a
-# besoin ; `aes-gcm` le déchiffrement authentifié. La signature ES256 se vérifie
-# avec `p256`, déjà là aussi.
-aes = { version = "0.9", default-features = false }
-aes-gcm = { version = "0.11", default-features = false, features = ["alloc", "aes"] }
 rustls-pki-types = { version = "1", default-features = false, features = ["alloc"] }
 p256 = { version = "0.14", default-features = false, features = ["ecdsa", "pkcs8"] }
 p384 = { version = "0.14", default-features = false, features = ["ecdsa"] }
 signature = { version = "3", default-features = false }
+
+# ── LA VÉRIFICATION D'UNE ATTESTATION DE CLÉ ANDROID (`asl-keystore`) ──────
+#
+# La chaîne d'un Keystore remonte à la racine de Google, qui est RSA-4096, et
+# l'intermédiaire qu'elle signe l'est en RSA aussi (la capture du 2026-09-16 le
+# montre) : il faut donc un vérificateur RSA PKCS#1 v1.5 à côté des ECDSA.
+#
+# `rsa` est DÉJÀ dans le graphe, tirée par `rustls-rustcrypto` avec exactement
+# ces deux features (`encoding` pour lire une clé PKCS#1, `sha2` pour le préfixe
+# DigestInfo de SHA-256) : la déclarer ici n'ajoute aucun paquet, et elle est
+# en Rust pur — `check-sans-c.sh` la connaît déjà. C'est une version
+# candidate, comme tout RustCrypto en 2026 ; on la suit au rythme de la pile
+# TLS, pas au nôtre.
+#
+# `asl-play` (Play Integrity) a été RETIRÉE le 2026-09-16 (C19) : `aes` et
+# `aes-gcm` sont parties avec elle, aucune autre crate ne les consommait.
+rsa = { version = "0.10.0-rc.18", default-features = false, features = ["encoding", "sha2"] }
 
 # ── LA PILE QUIC ET HTTP/3, GREFFÉE DEPUIS `air-mail-server` (C15) ─────────
 #

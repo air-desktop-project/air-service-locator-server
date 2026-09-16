@@ -308,16 +308,17 @@ pub enum Besoin<'a> {
         /// La clé de l'appareil, dont la possession est déjà prouvée. P-256.
         cle: CleAppareil,
         /// Sous quelle plate-forme l'appareil s'atteste — `Aucune`, Apple,
-        /// Google.
+        /// Android, invitation.
         plateforme: PlateformeAttestation,
-        /// L'objet d'attestation, tel quel ; vide quand la plate-forme est
-        /// `Aucune`. **Non vérifié ici** : la vérification demande la racine
-        /// d'Apple et l'horloge, qui vivent à l'étage 3.
+        /// L'attestation, telle quelle ; vide quand la plate-forme est
+        /// `Aucune`. **Non vérifiée ici** : la vérification demande les
+        /// racines et l'horloge, qui vivent à l'étage 3.
         attestation: &'a [u8],
         /// Le défi que l'appareil a dû couvrir dans son attestation :
         /// `asl_cle::message_d_attestation(cle, défi, liaison)`. Composé ici,
         /// où le défi et la liaison vivent, pour que l'étage 3 n'ait qu'à le
-        /// passer à `asl_apple::verifier`.
+        /// passer à `asl_apple::verifier` — ou son SHA-256 à
+        /// `asl_keystore::verifier`.
         defi_attestation: [u8; asl_cle::MESSAGE_ATTESTATION_OCTETS],
     },
     /// Enrôler un appareil de plus sur le compte de cette connexion.

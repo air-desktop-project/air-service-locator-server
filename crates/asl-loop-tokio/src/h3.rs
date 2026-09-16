@@ -43,6 +43,7 @@ use asl_session::{
     Besoin, CleTrouvee, EtatDeLaReplication, Resolution, Session, Trouvaille, VoieVersLePair,
 };
 use asl_store::{Entrepot, Rattrapage};
+use sha2::{Digest, Sha256};
 
 use crate::sonde::{self, Verdict};
 use crate::tireur::EtatDeLaVoie;
@@ -300,13 +301,49 @@ pub struct ConfigApple<'a> {
     pub environnement: asl_apple::Environnement,
 }
 
+/// De quoi vérifier une attestation de clé Android, tel que l'exploitant l'a
+/// fourni (`protocole.md` §2.1, décidé le 2026-09-16 ; C19).
+///
+/// **Ici, même la racine vient de l'exploitant** : c'est un fichier PEM
+/// (`--android-roots`), celle de Google, de GrapheneOS, ou la sienne — aucune
+/// n'est dans le binaire. Absent, aucune attestation Android ne se vérifie, et
+/// un compte qui en déclare une est refusé.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigAndroid<'a> {
+    /// Les racines épinglées, en DER, au moins une.
+    pub racines: &'a [Vec<u8>],
+    /// Le nom de notre paquet, `org.airdesktop.servicelocator`.
+    pub paquet: &'a str,
+    /// L'empreinte SHA-256 du certificat qui signe notre build.
+    pub signataire: [u8; 32],
+}
+
+/// De quoi vérifier les attestations, plate-forme par plate-forme — chacune
+/// absente tant que l'exploitant ne l'a pas réglée.
+#[derive(Debug, Clone, Copy)]
+pub struct Attestations<'a> {
+    /// Apple App Attest (`--apple-app`, `--apple-environment`).
+    pub apple: Option<ConfigApple<'a>>,
+    /// L'attestation de clé d'Android (`--android-roots`, `--android-app`,
+    /// `--android-signer`).
+    pub android: Option<ConfigAndroid<'a>>,
+}
+
+impl Attestations<'static> {
+    /// Aucune plate-forme réglée : toute attestation déclarée est refusée.
+    pub const AUCUNE: Self = Self {
+        apple: None,
+        android: None,
+    };
+}
+
 struct Service<'a> {
     /// Ce qui décide.
     session: &'a mut Session,
     /// Ce que l'annuaire exige d'un appareil qui s'enrôle.
     politique: asl_auth::Politique,
-    /// De quoi vérifier une attestation Apple, si l'exploitant l'a fournie.
-    apple: Option<ConfigApple<'a>>,
+    /// De quoi vérifier les attestations, si l'exploitant l'a fourni.
+    attestations: Attestations<'a>,
     /// Le bail qu'on accorde à une annonce servie sur cette requête.
     bail: asl_proto::Bail,
     /// Les pairs qu'une révocation vient de condamner, sur CETTE requête.
@@ -662,10 +699,14 @@ impl Service<'_> {
     ///
     /// `None` est un REFUS — la plate-forme est déclarée mais l'attestation ne
     /// prouve rien : elle ne vérifie pas, ou l'annuaire n'a pas de quoi la
-    /// vérifier (pas de configuration Apple), ou c'est une plate-forme dont la
-    /// vérification n'est pas écrite (Google). `Some(Aucune)` est le cas franc
-    /// où l'application n'a rien présenté ; c'est alors à `decider_attestation`
-    /// de dire si l'annuaire l'accepte.
+    /// vérifier (pas de configuration pour cette plate-forme), ou c'est une
+    /// plate-forme qu'on ne sert pas encore (l'invitation). `Some(Aucune)` est
+    /// le cas franc où l'application n'a rien présenté ; c'est alors à
+    /// `decider_attestation` de dire si l'annuaire l'accepte.
+    ///
+    /// **Chaque refus est dit au journal d'exploitation, avec sa cause** — et
+    /// sans l'attestation elle-même : la cause suffit à l'exploitant, et une
+    /// chaîne de certificats n'a rien à faire dans un journal.
     fn verifier_l_attestation(
         &self,
         plateforme: PlateformeAttestation,
@@ -673,30 +714,77 @@ impl Service<'_> {
         defi_attestation: &[u8],
         cle: &CleAppareil,
     ) -> Option<asl_registre::Attestation> {
-        // La clé de l'appareil est SANS emploi dans la vérification elle-même :
-        // le défi la porte déjà (`asl_cle::message_d_attestation`), et c'est ce
-        // défi qu'`asl_apple` recompose dans le nonce. On la garde en signature
-        // pour que ce lien soit lisible ici.
-        let _ = cle;
+        let dire = |cause: &str| {
+            (self.voie.journal)(&format!("attestation refusée : {cause}"));
+        };
         match plateforme {
             PlateformeAttestation::Aucune => Some(asl_registre::Attestation::Aucune),
             PlateformeAttestation::Apple => {
-                let config = self.apple?;
+                // La clé de l'appareil est SANS emploi dans la vérification
+                // elle-même : le défi la porte déjà
+                // (`asl_cle::message_d_attestation`), et c'est ce défi
+                // qu'`asl_apple` recompose dans le nonce.
+                let Some(config) = self.attestations.apple else {
+                    dire("Apple, sans --apple-app ni --apple-environment");
+                    return None;
+                };
+                // **`maintenant()` EST EN MICROSECONDES, ET LES VÉRIFICATEURS
+                // VEULENT DES SECONDES.** Jusqu'en 0.8.2, la division était par
+                // mille : l'instant tombait en l'an 58 000, et toute chaîne
+                // d'Apple aurait été refusée « expirée » — ce que le premier
+                // iPhone aurait découvert. Corrigé avec Android, qui prend le
+                // même instant.
                 let attendu = asl_apple::Attendu {
                     racine: asl_apple::RACINE_APPLE,
                     defi: defi_attestation,
                     identifiant_app: config.identifiant_app,
                     environnement: config.environnement,
-                    maintenant: maintenant().saturating_div(1_000),
+                    maintenant: maintenant().saturating_div(1_000_000),
                 };
-                asl_apple::verifier(attestation, &attendu)
-                    .ok()
-                    .map(|_| asl_registre::Attestation::Apple)
+                match asl_apple::verifier(attestation, &attendu) {
+                    Ok(_) => Some(asl_registre::Attestation::Apple),
+                    Err(refus) => {
+                        dire(&format!("Apple, {refus}"));
+                        None
+                    }
+                }
             }
-            // **PLAY INTEGRITY N'EST PAS ÉCRIT.** Un jeton JWS de Google est
-            // d'une tout autre forme qu'une chaîne X.509 ; le refuser franchement
-            // vaut mieux que de le laisser entrer sans preuve.
-            PlateformeAttestation::Google => None,
+            // **L'ATTESTATION DE CLÉ D'ANDROID** (`protocole.md` §2.1, C19) :
+            // le défi posé à la génération de la clé est le SHA-256 du même
+            // message que pour Apple, et la clé attestée est la clé enrôlée —
+            // `asl_keystore` compare la feuille à `cle`.
+            PlateformeAttestation::Android => {
+                let Some(config) = self.attestations.android else {
+                    dire("Android, sans --android-roots, --android-app ni --android-signer");
+                    return None;
+                };
+                let racines: Vec<&[u8]> = config.racines.iter().map(Vec::as_slice).collect();
+                let defi = Sha256::digest(defi_attestation);
+                let attendu = asl_keystore::Attendu {
+                    racines: &racines,
+                    defi: &defi,
+                    cle: &cle.octets(),
+                    paquet: config.paquet,
+                    empreinte: &config.signataire,
+                    maintenant: maintenant().saturating_div(1_000_000),
+                };
+                match asl_keystore::verifier(attestation, &attendu) {
+                    Ok(_) => Some(asl_registre::Attestation::Android),
+                    Err(refus) => {
+                        dire(&format!("Android, {refus}"));
+                        None
+                    }
+                }
+            }
+            // **L'INVITATION N'EST PAS ENCORE SERVIE.** La posture
+            // `--attestation invitation` et l'émission du code par l'exploitant
+            // sont un chantier à part (`protocole.md` §2.1) ; en attendant, la
+            // plate-forme `3` est refusée franchement, et le journal dit
+            // pourquoi.
+            PlateformeAttestation::Invitation => {
+                dire("invitation, pas encore servie");
+                None
+            }
         }
     }
 
@@ -1707,8 +1795,8 @@ impl Service<'_> {
                         asl_registre::Attestation::Apple => {
                             asl_api::corps::PlateformeAttestation::Apple
                         }
-                        asl_registre::Attestation::Google => {
-                            asl_api::corps::PlateformeAttestation::Google
+                        asl_registre::Attestation::Android => {
+                            asl_api::corps::PlateformeAttestation::Android
                         }
                     },
                     revoque: enregistre.revoque,
@@ -1963,8 +2051,8 @@ pub struct Annuaire<'a> {
     /// **Il n'y a pas de défaut** — voir `asl_auth::Politique`. L'exploitant
     /// dit laquelle il tient, et `asl-server` refuse de démarrer sans.
     politique: asl_auth::Politique,
-    /// De quoi vérifier une attestation Apple, si l'exploitant l'a fournie.
-    apple: Option<ConfigApple<'a>>,
+    /// De quoi vérifier les attestations, si l'exploitant l'a fourni.
+    attestations: Attestations<'a>,
     /// Le bail qu'on accorde : la cadence attendue et le délai d'inactivité.
     ///
     /// # POURQUOI IL VIENT DE L'ASSEMBLEUR, ET N'EST PLUS UNE CONSTANTE
@@ -2022,7 +2110,7 @@ impl<'a> Annuaire<'a> {
         tirer_un_defi: &'a (dyn Fn() -> Option<Defi> + Send + Sync),
         tirer_un_identifiant: &'a (dyn Fn() -> Option<[u8; 16]> + Send + Sync),
         politique: asl_auth::Politique,
-        apple: Option<ConfigApple<'a>>,
+        attestations: Attestations<'a>,
         bail: asl_proto::Bail,
         voie: Voie<'a>,
     ) -> Self {
@@ -2039,7 +2127,7 @@ impl<'a> Annuaire<'a> {
             tirer_un_defi,
             servies: 0,
             politique,
-            apple,
+            attestations,
             bail,
             dernier_balayage: 0,
             revoques: Vec::new(),
@@ -2398,7 +2486,7 @@ impl Application for Annuaire<'_> {
         let mut service = Service {
             session,
             politique: self.politique,
-            apple: self.apple,
+            attestations: self.attestations,
             a_fermer: &mut self.revoques,
             entrepot: self.entrepot,
             vivier: &mut self.vivier,

@@ -94,6 +94,32 @@ pub fn configuration_tls(
     Ok(configuration)
 }
 
+/// Les certificats d'un fichier PEM, en DER — les racines d'attestation
+/// Android qu'un exploitant épingle (`--android-roots`).
+///
+/// Un fichier peut en porter plusieurs ; ce qui n'est pas un bloc
+/// `CERTIFICATE` est ignoré (des commentaires, une clé), comme le veut le
+/// format. **Un fichier sans aucun certificat est une faute**, pas une liste
+/// vide : une racine qu'on croit épinglée et qui ne l'est pas refuserait tous
+/// les appareils sans le dire.
+///
+/// # Errors
+///
+/// Un bloc PEM illisible, ou aucun certificat.
+pub fn racines_depuis_pem(pem: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    use rustls::pki_types::pem::PemObject as _;
+
+    let mut racines = Vec::new();
+    for der in rustls::pki_types::CertificateDer::pem_slice_iter(pem) {
+        let der = der.map_err(|quoi| format!("certificat illisible : {quoi}"))?;
+        racines.push(der.to_vec());
+    }
+    if racines.is_empty() {
+        return Err("aucun certificat dans le fichier".to_owned());
+    }
+    Ok(racines)
+}
+
 /// La liaison de canal de CETTE connexion — RFC 8446 §7.5.
 ///
 /// # ELLE A REMPLACÉ UNE EMPREINTE DE CERTIFICAT, ET C'EST UN GAIN

@@ -33,6 +33,20 @@
 # `optional`, et non «  » ». Sans accolades, l'argument disparaît, et le
 # message est celui qu'on veut lire.
 #
+# ── L'ATTESTATION ANDROID EST OPTIONNELLE, ET SUIT LA MÊME MÉCANIQUE ─────────
+#
+# `protocole.md` §2.1 (2026-09-16, C19) : `--android-roots`, `--android-app` et
+# `--android-signer` — exigés ensemble — donnent à l'annuaire de quoi vérifier
+# l'attestation de clé d'un Android, hors ligne, contre des racines qui sont
+# des FICHIERS de l'exploitant. Aucune n'est épinglée par un paquet : la racine
+# de Google est expédiée en EXEMPLE sous
+# `/usr/share/doc/asl-server/racines-android/google.pem`, et c'est le drop-in
+# qui la nomme, s'il le veut — modèle sous
+# `/usr/share/doc/asl-server/android.conf.exemple`. `$ASL_ANDROID`, NON CITÉ,
+# est vide tant qu'un drop-in ne le remplit pas, et une racine sans lui refuse
+# les attestations Android (elle en dit la cause au journal), ce qui n'est pas
+# un défaut : c'est une racine qui ne les vérifie pas encore.
+#
 # ── LA RÉPLICATION EST OPTIONNELLE, ET SUIT LA MÊME MÉCANIQUE ────────────────
 #
 # `docs/replication.md` §8 : `--identity-key`, `--peer`, `--peer-key` et
@@ -71,6 +85,7 @@ ExecStart=/usr/bin/asl-server \
     --certificate /etc/asl-server/certificat.pem \
     --key /etc/asl-server/cle.pem \
     --attestation $ASL_ATTESTATION \
+    $ASL_ANDROID \
     $ASL_REPLICATION
 
 # **PAS DE `Restart=always`.** Les fautes qui empêchent cet annuaire de démarrer

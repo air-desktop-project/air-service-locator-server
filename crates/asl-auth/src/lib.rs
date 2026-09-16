@@ -653,9 +653,11 @@ pub fn decider_pair(presente: Identifiant, attendu: Option<Identifiant>) -> Deci
 /// refus se relâche plus tard alors qu'une acceptation ne se resserre jamais
 /// sans casser des comptes existants. »
 ///
-/// **Mais la vérification n'est pas écrite** — App Attest et Play Integrity
-/// demandent les racines d'Apple et de Google, du CBOR, et une chaîne à valider.
-/// Exiger l'attestation aujourd'hui, c'est donc refuser TOUS les enrôlements.
+/// **La vérification est écrite** — `asl-apple` pour App Attest, `asl-keystore`
+/// pour l'attestation de clé d'Android (depuis le 2026-09-16, C19) —, mais elle
+/// demande des réglages que seul l'exploitant tient (`--apple-app`,
+/// `--android-roots`…), et sans eux, exiger l'attestation refuse TOUS les
+/// enrôlements.
 ///
 /// Les deux postures sont défendables et **aucune ne peut être le défaut** :
 /// exiger livre un produit qui ne crée aucun compte, dispenser livre en silence
@@ -664,9 +666,11 @@ pub fn decider_pair(presente: Identifiant, attendu: Option<Identifiant>) -> Deci
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Politique {
     /// L'attestation est exigée. Un appareil ne s'enrôle qu'avec une
-    /// attestation Apple VALIDE (`--apple-app` / `--apple-environnement`) ;
-    /// sans configuration Apple, ou sous une attestation qui ne vérifie pas,
-    /// l'enrôlement est refusé. C'est la posture de `protocole.md`.
+    /// attestation VALIDE — Apple (`--apple-app` / `--apple-environment`) ou
+    /// Android (`--android-roots` / `--android-app` / `--android-signer`) ;
+    /// sans la configuration de sa plate-forme, ou sous une attestation qui
+    /// ne vérifie pas, l'enrôlement est refusé. C'est la posture de
+    /// `protocole.md`.
     AttestationExigee,
     /// L'attestation n'est pas exigée. **N'importe qui crée un compte**, et le
     /// journal d'exploitation doit le dire au démarrage.
@@ -675,10 +679,11 @@ pub enum Politique {
 
 /// Cet appareil peut-il s'enrôler ?
 ///
-/// `atteste` est un FAIT que l'étage 3 établit : depuis le 2026-09-11,
-/// `asl_apple::verifier` le lui donne pour une attestation Apple valide. **Il
-/// reste en paramètre**, et c'est cette fonction-ci, et elle seule, qui traduit
-/// le fait en décision — selon la posture de l'annuaire.
+/// `atteste` est un FAIT que l'étage 3 établit : `asl_apple::verifier` le lui
+/// donne pour une attestation Apple valide (depuis le 2026-09-11),
+/// `asl_keystore::verifier` pour une attestation Android valide (depuis le
+/// 2026-09-16). **Il reste en paramètre**, et c'est cette fonction-ci, et elle
+/// seule, qui traduit le fait en décision — selon la posture de l'annuaire.
 #[must_use]
 pub const fn decider_attestation(atteste: bool, politique: Politique) -> Decision {
     match politique {
