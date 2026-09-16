@@ -272,6 +272,28 @@ fn soixante_quatre_octets_qui_ne_sont_pas_une_signature_ne_verifient_pas() {
 // ── Le défi d'attestation ────────────────────────────────────────────────────
 
 #[test]
+fn le_defi_d_attestation_de_cle_lie_le_defi_et_la_liaison_sans_la_cle() {
+    use asl_cle::{
+        DOMAINE_ATTESTATION, DOMAINE_ATTESTATION_DE_CLE, MESSAGE_ATTESTATION_DE_CLE_OCTETS,
+        message_d_attestation, message_d_attestation_de_cle,
+    };
+    let m = message_d_attestation_de_cle(&defi(1), &liaison(1));
+    assert_eq!(m.len(), MESSAGE_ATTESTATION_DE_CLE_OCTETS);
+    assert!(m.starts_with(DOMAINE_ATTESTATION_DE_CLE));
+    let debut = DOMAINE_ATTESTATION_DE_CLE.len();
+    assert_eq!(&m[debut..debut + 32], &defi(1).octets()[..]);
+    assert_eq!(&m[debut + 32..], &liaison(1).octets()[..]);
+    assert_ne!(m, message_d_attestation_de_cle(&defi(2), &liaison(1)));
+    assert_ne!(m, message_d_attestation_de_cle(&defi(1), &liaison(2)));
+    // Un domaine à part : le message d'App Attest ne commence pas pareil.
+    assert_ne!(DOMAINE_ATTESTATION, DOMAINE_ATTESTATION_DE_CLE);
+    let cle = cle().publique();
+    assert!(
+        !message_d_attestation(&cle, &defi(1), &liaison(1)).starts_with(DOMAINE_ATTESTATION_DE_CLE)
+    );
+}
+
+#[test]
 fn le_defi_d_attestation_lie_la_cle_le_defi_et_la_liaison() {
     use asl_cle::{DOMAINE_ATTESTATION, MESSAGE_ATTESTATION_OCTETS, message_d_attestation};
     let cle = cle().publique();

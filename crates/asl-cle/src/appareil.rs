@@ -177,6 +177,46 @@ pub fn message_d_attestation(
     message
 }
 
+/// Le domaine du défi d'une ATTESTATION DE CLÉ — Android, où le défi est posé
+/// à la génération de la clé.
+pub const DOMAINE_ATTESTATION_DE_CLE: &[u8] = b"air-service-locator/v1/attestation-de-cle\x00";
+
+/// La taille du défi d'une attestation de clé.
+pub const MESSAGE_ATTESTATION_DE_CLE_OCTETS: usize =
+    DOMAINE_ATTESTATION_DE_CLE.len() + DEFI_OCTETS + LIAISON_OCTETS;
+
+/// Compose le défi qu'un appareil Android pose à la GÉNÉRATION de sa clé
+/// (`setAttestationChallenge`, sous SHA-256).
+///
+/// **Sans la clé, et c'est voulu** : le défi existe AVANT la clé — il est
+/// posé à sa génération —, il ne peut donc pas la contenir. La liaison à la
+/// clé n'en est pas moins là, et plus forte : le certificat d'attestation
+/// PORTE la clé publique, et `asl_keystore` compare la feuille à la clé
+/// enrôlée. Le défi n'a à lier que ce que le certificat ne porte pas — la
+/// connexion, par le défi tiré et la liaison de canal. Un domaine à part,
+/// pour qu'un message d'attestation App Attest ne vaille jamais ici, ni
+/// l'inverse.
+#[must_use]
+pub fn message_d_attestation_de_cle(
+    defi: &Defi,
+    liaison: &LiaisonDeCanal,
+) -> [u8; MESSAGE_ATTESTATION_DE_CLE_OCTETS] {
+    const _: () = assert!(
+        MESSAGE_ATTESTATION_DE_CLE_OCTETS
+            == DOMAINE_ATTESTATION_DE_CLE.len() + DEFI_OCTETS + LIAISON_OCTETS,
+        "la taille du défi d'attestation de clé ne correspond plus à ses champs"
+    );
+    let source = DOMAINE_ATTESTATION_DE_CLE
+        .iter()
+        .chain(defi.octets().iter())
+        .chain(liaison.octets().iter());
+    let mut message = [0_u8; MESSAGE_ATTESTATION_DE_CLE_OCTETS];
+    for (place, octet) in message.iter_mut().zip(source) {
+        *place = *octet;
+    }
+    message
+}
+
 /// La clé publique d'un appareil, telle que l'annuaire la connaît.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CleAppareil(VerifyingKey);

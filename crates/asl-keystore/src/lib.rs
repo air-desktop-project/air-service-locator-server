@@ -19,7 +19,9 @@
 //!   4. la `KeyDescription` se lit ([`description`]) ;
 //!   5. la clé de la feuille EST la clé qu'on enrôle ;
 //!   6. `attestationChallenge` est le défi attendu —
-//!      `SHA-256(asl_cle::message_d_attestation(clé, défi, liaison))` ;
+//!      `SHA-256(asl_cle::message_d_attestation_de_cle(défi, liaison))`, SANS
+//!      la clé : il est posé à la génération, avant qu'elle existe, et c'est
+//!      le certificat qui la porte (point 5) ;
 //!   7. `attestationSecurityLevel` ET `keymasterSecurityLevel` sont matériels
 //!      (TEE ou StrongBox) ;
 //!   8. `rootOfTrust`, côté matériel : démarrage `Verified`, bootloader
@@ -87,7 +89,8 @@ pub struct Attendu<'a> {
     /// à l'une d'elles.
     pub racines: &'a [&'a [u8]],
     /// Le défi que la clé a dû recevoir à sa génération :
-    /// `SHA-256(message_d_attestation(clé, défi, liaison))`.
+    /// `SHA-256(message_d_attestation_de_cle(défi, liaison))` — sans la clé,
+    /// que le certificat porte.
     pub defi: &'a [u8],
     /// La clé qu'on enrôle, P-256 compressée, telle que le fil la porte.
     pub cle: &'a [u8; CLE_OCTETS],

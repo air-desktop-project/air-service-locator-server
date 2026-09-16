@@ -61,9 +61,10 @@ elle qui fixe la politique d'`asl-keystore`.
 ## À noter
 
 - En production, le défi n'est pas un aléa : c'est
-  `SHA-256(asl_cle::message_d_attestation(clé, défi, liaison))`, posé à la
-  génération de la clé d'appareil elle-même (`protocole.md` §2.1). La clé
-  attestée est la clé enrôlée.
+  `SHA-256(asl_cle::message_d_attestation_de_cle(défi, liaison))` — sans la
+  clé, qui n'existe pas encore —, posé à la génération de la clé d'appareil
+  elle-même (`protocole.md` §2.1). La clé attestée est la clé enrôlée, et c'est
+  le certificat qui la porte.
 - La chaîne d'un appareil certifié remonte à la racine de Google, celle d'un
   GrapheneOS à la racine de GrapheneOS : les deux sont des fichiers, et
   l'exploitant choisit lesquels il épingle (`--android-roots`).
