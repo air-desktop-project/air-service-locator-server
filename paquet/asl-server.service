@@ -44,9 +44,13 @@
 #
 # Non cité, comme `$ASL_ATTESTATION` : vide, l'argument disparaît, et rien ne
 # passe à `asl-server` ; rempli, systemd DÉCOUPE sur les espaces, et les quatre
-# `--peer…` arrivent séparés. C'est pourquoi le drop-in ne cite pas, lui non
-# plus — une valeur citée arriverait en UN seul argument que `asl-server`
-# refuserait.
+# `--peer…` arrivent séparés. Le drop-in, lui, CITE l'affectation entière —
+# `Environment="ASL_REPLICATION=--identity-key … --peer …"` — parce que
+# `Environment=` découpe aussi sa ligne sur les espaces, avant d'y lire des
+# affectations : sans guillemets, la variable ne vaudrait que `--identity-key`
+# et l'annuaire refuserait de démarrer. Les guillemets sont pour systemd ; ils
+# ne sont pas dans la valeur, et c'est ici, sur `$ASL_REPLICATION`, qu'elle se
+# découpe en arguments.
 
 [Unit]
 Description=air-service-locator — annuaire de services

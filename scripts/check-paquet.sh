@@ -169,6 +169,12 @@ grep -q '^Environment=ASL_REPLICATION' "$essai/unite-nue" \
     && rate "l'unité MET la racine en réplication — le paquet choisit à la place de l'exploitant"
 grep -q './usr/share/doc/asl-server/replication.conf.exemple' "$essai/contenu" \
     || rate "le fragment de réplication n'est pas expédié"
+# **L'AFFECTATION DU DROP-IN EST CITÉE EN ENTIER.** `Environment=` découpe sa
+# ligne sur les espaces avant d'y lire des affectations : non citée, la
+# variable ne vaudrait que `--identity-key`, et l'annuaire refuserait de
+# démarrer — c'est arrivé sur un banc, quatre fois, avant qu'on comprenne.
+grep -q '^Environment="ASL_REPLICATION=--identity-key .*"$' scripts/paquet.sh \
+    || rate "le gabarit du drop-in de réplication ne cite pas l'affectation en entier"
 
 # **ET LA TABLE DU PARE-FEU NON PLUS N'EST PAS CHARGÉE.** Un paquet qui la
 # poserait sous `/etc/nftables.conf` fermerait des ports sur une machine qu'il ne
