@@ -29,7 +29,7 @@
 //! Elle est donc rangée avec le conducteur, sous l'identifiant local de la
 //! connexion, et les deux disparaissent ensemble.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 
 use ams_h3::{Http3, Reponse};
@@ -39,10 +39,13 @@ use ams_quic_tls::Connection;
 use asl_api::corps::PlateformeAttestation;
 use asl_cle::{CleAppareil, ClePublique, CleSecrete, Defi};
 use asl_id::Identifiant;
-use asl_session::{Besoin, CleTrouvee, Resolution, Session, Trouvaille};
+use asl_session::{
+    Besoin, CleTrouvee, EtatDeLaReplication, Resolution, Session, Trouvaille, VoieVersLePair,
+};
 use asl_store::{Entrepot, Rattrapage};
 
 use crate::sonde::{self, Verdict};
+use crate::tireur::EtatDeLaVoie;
 use crate::vivier::Vivier;
 
 use crate::pont::Pont;
@@ -60,10 +63,55 @@ struct ParConnexion {
     /// sur une connexion va à SON flux, et deux flux avec deux curseurs y
     /// liraient la même chose.
     flux_pair: Option<FluxPair>,
+    /// Ce qu'il reste d'un instantané que cette connexion a commencé à
+    /// tirer, part après part (voir [`PART_OCTETS_MAX`]).
+    ///
+    /// # L'INSTANTANÉ VIT AVEC LA CONNEXION QUI L'A DEMANDÉ
+    ///
+    /// Il est lu dans UNE transaction, et ses parts doivent venir de cette
+    /// lecture-là : en recalculer une entre deux parts glisserait le compteur
+    /// de coupe sous des écritures que la première part n'a pas vues. Le reste
+    /// est donc tenu ici, et `GET /v1/pair/instantane` sur cette connexion le
+    /// continue. La connexion tombe, le reste tombe avec elle, et le tireur
+    /// redemande un instantané entier — qui fusionne, sans dommage.
+    reste_d_instantane: Option<VecDeque<Vec<u8>>>,
 }
 
-/// Un flux de la voie entre racines, tenu sur une connexion : les opérations
-/// sans fin, ou l'instantané jusqu'à son cadre de fin.
+/// Ce qu'un flux de la voie porte AU PLUS, en octets de charge `DATA`.
+///
+/// # LA PILE ANNONCE SEIZE KIBIOCTETS PAR FLUX, ET NE LES RELÈVE JAMAIS
+///
+/// `ams_quic_tls::FLUX_OCTETS` est la fenêtre de réception qu'un pair annonce
+/// pour chaque flux, et la pile n'émet aucun `MAX_STREAM_DATA` : un flux ne
+/// porte donc jamais plus de seize kibioctets dans un sens, sur toute sa vie.
+/// Au-delà, `write` ne prend plus rien et rien ne le dit — un flux
+/// d'opérations « sans fin » s'y taisait au bout de quelques dizaines
+/// d'écritures.
+///
+/// **On coupe donc chaque flux à une PART**, à une frontière de cadre, et le
+/// tireur en rouvre un sur la même connexion (`crate::tireur`). Douze
+/// kibioctets de charge laissent quatre kibioctets à la section d'en-têtes et
+/// aux en-têtes de trame, qui comptent dans la même fenêtre. C'est la borne
+/// qui reste ; l'autre est l'instantané entier, tenu en mémoire par
+/// connexion, dont la taille est celle de l'entrepôt.
+pub const PART_OCTETS_MAX: usize = 12 * 1_024;
+
+/// La fenêtre qu'un flux reçoit, telle que la pile l'annonce — la valeur de
+/// `ams_quic_tls::connection::FLUX_OCTETS`, qui n'est pas exportée.
+///
+/// **Recopiée, donc à tenir d'accord** : le jour où la pile relèvera ses
+/// fenêtres, cette constante et la part qu'elle borne deviendront un choix, et
+/// non plus une contrainte. L'essai `un_grand_instantane_passe_par_parts…` de
+/// `tests/bout_en_bout.rs` éprouve la part contre la vraie pile.
+const FENETRE_D_UN_FLUX: usize = 16 * 1_024;
+
+const _: () = assert!(
+    PART_OCTETS_MAX + 4 * 1_024 <= FENETRE_D_UN_FLUX,
+    "une part et ses en-têtes doivent tenir dans la fenêtre d'un flux"
+);
+
+/// Un flux de la voie entre racines, tenu sur une connexion : une part des
+/// opérations, ou une part de l'instantané.
 ///
 /// # CE QUI EST EN ATTENTE, ET POURQUOI IL Y A UNE ATTENTE
 ///
@@ -71,16 +119,21 @@ struct ParConnexion {
 /// attend d'être émis est borné (C3), et le reste se réécrit quand la place
 /// se libère. `ams_h3::Http3::pousser` ignore ce reste — une poussée de
 /// verdict tient dans la place —, mais un rattrapage ou un instantané ne
-/// tiennent pas. On cadre donc la trame `DATA` nous-mêmes, on écrit ce qui
+/// tiennent pas. On cadre donc les trames `DATA` nous-mêmes, une par lot de
+/// cadres qui tient dans ce que la part peut encore porter, on écrit ce qui
 /// entre, et on garde le reste ici pour le tour suivant. **Tant qu'il reste
 /// quelque chose, on ne relit pas le journal** : c'est la contre-pression,
 /// et c'est ce qui borne la mémoire à un instantané, jamais plus.
 struct FluxPair {
     /// Le flux, tel que la réponse tenue l'a laissé ouvert.
     flux: StreamId,
-    /// Des trames `DATA` déjà cadrées, pas encore prises par le transport.
+    /// La trame `DATA` en cours, pas encore prise entière par le transport.
     en_attente: Vec<u8>,
-    /// Le compteur de la dernière opération poussée — `None` pour un
+    /// Les cadres pas encore cadrés pour ce flux, dans l'ordre.
+    a_venir: VecDeque<Vec<u8>>,
+    /// Ce que ce flux a déjà cadré, en octets de charge : la part.
+    portes: usize,
+    /// Le compteur de la dernière opération relue du journal — `None` pour un
     /// instantané, qui ne suit rien.
     curseur: Option<u64>,
     /// Jusqu'où le journal a été regardé (`Entrepot::derniere_operation`).
@@ -89,9 +142,53 @@ struct FluxPair {
     /// depuis, il n'y a rien à relire, et le tour ne coûte qu'une lecture
     /// d'entier.
     vu_jusqu_a: u64,
-    /// Fermer le flux une fois l'attente vidée : l'instantané est fini, ou le
-    /// journal s'est expiré sous le lecteur.
+    /// Fermer le flux une fois l'attente vidée : la part est pleine,
+    /// l'instantané est entièrement cadré, ou le journal s'est expiré sous le
+    /// lecteur.
     a_clore: bool,
+}
+
+impl FluxPair {
+    /// Cadre la prochaine trame `DATA` depuis ce qui est à venir, dans ce que
+    /// la part peut encore porter — et dit s'il faut clore après elle.
+    ///
+    /// **À UNE FRONTIÈRE DE CADRE, TOUJOURS** : un cadre coupé entre deux flux
+    /// serait illisible des deux côtés, et le tireur repart à neuf sur chaque
+    /// flux.
+    fn cadrer_une_trame(&mut self) {
+        if !self.en_attente.is_empty() {
+            return;
+        }
+        let budget = PART_OCTETS_MAX.saturating_sub(self.portes);
+        let mut pris = Vec::new();
+        let mut total = 0_usize;
+        while let Some(cadre) = self.a_venir.front() {
+            let apres = total.saturating_add(cadre.len());
+            if apres > budget {
+                break;
+            }
+            total = apres;
+            if let Some(cadre) = self.a_venir.pop_front() {
+                pris.push(cadre);
+            }
+        }
+        if !pris.is_empty() {
+            self.en_attente = trame_de_donnees(&pris);
+            self.portes = self.portes.saturating_add(total);
+        }
+        // La part est pleine et il reste à porter : ce sera le flux suivant.
+        // Ou l'instantané est entièrement cadré : il se ferme derrière sa fin.
+        if (!self.a_venir.is_empty() && pris.is_empty())
+            || (self.a_venir.is_empty() && self.curseur.is_none())
+        {
+            self.a_clore = true;
+        }
+    }
+
+    /// Y a-t-il encore quelque chose à faire sur ce flux, ce tour-ci ?
+    fn a_pousser(&self) -> bool {
+        !self.en_attente.is_empty() || !self.a_venir.is_empty() || self.a_clore
+    }
 }
 
 /// Ce qu'une requête de la voie a préparé, et que la boucle poussera sur le
@@ -102,7 +199,7 @@ struct FluxPair {
 /// ramasse.
 struct SuiteAuPair {
     /// Les cadres à écrire, chacun tel que le fil le porte.
-    cadres: Vec<Vec<u8>>,
+    cadres: VecDeque<Vec<u8>>,
     /// Le curseur à partir duquel suivre le journal, ou `None` pour un
     /// instantané qui se ferme après ses cadres.
     curseur: Option<u64>,
@@ -125,11 +222,14 @@ pub struct Voie<'a> {
     pub identite: Option<&'a CleSecrete>,
     /// La clé d'identité de l'autre racine (`--peer-key`), si elle est réglée.
     pub pair: Option<ClePublique>,
-    /// Où dire l'ouverture et la fermeture de chaque flux, un rattrapage avec
+    /// Où dire l'ouverture et la fermeture de chaque sens, un rattrapage avec
     /// son nombre d'opérations, un amorçage avec sa taille — le journal
     /// d'exploitation de `replication.md` §8. **Jamais une opération par
     /// ligne.**
     pub journal: &'a (dyn Fn(&str) + Send + Sync),
+    /// L'état de la voie SORTANTE, que le tireur publie et que
+    /// `GET /v1/replication` lit — `None` sans tireur.
+    pub etat: Option<&'a EtatDeLaVoie>,
 }
 
 impl Voie<'static> {
@@ -138,6 +238,7 @@ impl Voie<'static> {
         identite: None,
         pair: None,
         journal: &taire,
+        etat: None,
     };
 }
 
@@ -253,6 +354,8 @@ struct Service<'a> {
     flux_pair_tenu: bool,
     /// Ce que la requête a préparé pour son flux, que la boucle poussera.
     suite: &'a mut Option<SuiteAuPair>,
+    /// Ce qu'il reste d'un instantané que cette connexion tire par parts.
+    reste_d_instantane: &'a mut Option<VecDeque<Vec<u8>>>,
 }
 
 impl ams_h3::Service for Service<'_> {
@@ -440,6 +543,21 @@ impl Service<'_> {
             },
             Besoin::LireLesOperations { apres } => self.ouvrir_les_operations(*apres),
             Besoin::LireLInstantane => self.ouvrir_l_instantane(),
+            // **L'ÉTAT SE LIT AU MOMENT DE LA REQUÊTE, ET NULLE PART N'EST
+            // RECOPIÉ** : le compteur et le curseur viennent de l'entrepôt,
+            // le seul fait qu'il ne tient pas — la connexion sortante est-elle
+            // ouverte — vient du tireur (`EtatDeLaVoie`). Sans pair, « seule ».
+            Besoin::EtatDeLaReplication => match self.entrepot.compteur() {
+                Ok(compteur) => Trouvaille::Replication(EtatDeLaReplication {
+                    compteur,
+                    voie: self.pair_attendu.map(|pair| VoieVersLePair {
+                        pair,
+                        ouverte: self.voie.etat.is_some_and(EtatDeLaVoie::ouverte),
+                        applique: self.entrepot.curseur(pair).unwrap_or(0),
+                    }),
+                }),
+                Err(_) => Trouvaille::Rien,
+            },
 
             Besoin::CompteParAlias(alias) => match self.entrepot.compte_par_alias(alias) {
                 Ok(Some(qui)) => match self.entrepot.compte(qui) {
@@ -1195,6 +1313,9 @@ impl Service<'_> {
         if self.flux_pair_tenu {
             return Trouvaille::Conflit;
         }
+        // Le tireur passe aux opérations : ce qu'il restait d'un instantané
+        // ne l'intéresse plus.
+        *self.reste_d_instantane = None;
         // **LA BORNE EST LUE AVANT LE JOURNAL.** Une opération journalisée
         // entre les deux serait relue au tour suivant : le curseur avance
         // sur ce qu'on a poussé, et la borne ne dit que « regarde ».
@@ -1220,7 +1341,7 @@ impl Service<'_> {
                     return Trouvaille::Rien;
                 };
                 *self.suite = Some(SuiteAuPair {
-                    cadres,
+                    cadres: cadres.into(),
                     curseur: Some(curseur),
                     vu_jusqu_a,
                 });
@@ -1238,24 +1359,37 @@ impl Service<'_> {
     }
 
     /// Ouvre le flux de l'instantané (`replication.md` §5.4) : tout l'état,
-    /// lu dans une seule transaction, puis le cadre de fin — et le flux se
-    /// ferme derrière.
+    /// lu dans une seule transaction, puis le cadre de fin — par parts, un
+    /// flux par part, et le dernier se ferme derrière la fin.
+    ///
+    /// **Une connexion qui tient le reste d'un instantané le CONTINUE** : la
+    /// demande suivante rend la part suivante de la même lecture, et non un
+    /// instantané neuf (voir `ParConnexion::reste_d_instantane`).
     fn ouvrir_l_instantane(&mut self) -> Trouvaille {
         if self.flux_pair_tenu {
             return Trouvaille::Conflit;
+        }
+        if let Some(reste) = self.reste_d_instantane.take() {
+            *self.suite = Some(SuiteAuPair {
+                cadres: reste,
+                curseur: None,
+                vu_jusqu_a: 0,
+            });
+            return Trouvaille::FluxOuvert;
         }
         match self.entrepot.instantane() {
             Ok(cadres) => {
                 let octets: usize = cadres.iter().map(Vec::len).sum();
                 (self.voie.journal)(&format!(
-                    "{} s'amorce par instantané : {} cadres, {octets} octets",
+                    "{} s'amorce par instantané : {} cadres, {octets} octets, par parts de \
+                     {PART_OCTETS_MAX} au plus",
                     self.session
                         .racine()
                         .map_or_else(String::new, |qui| qui.texte().as_str().to_owned()),
                     cadres.len()
                 ));
                 *self.suite = Some(SuiteAuPair {
-                    cadres,
+                    cadres: cadres.into(),
                     curseur: None,
                     vu_jusqu_a: 0,
                 });
@@ -1930,13 +2064,21 @@ impl<'a> Annuaire<'a> {
         self.fermetures = Some(fermetures);
     }
 
-    /// Écrit ce qui attend sur le flux de la voie, et le ferme s'il est fini.
+    /// Écrit ce qui attend sur le flux de la voie, cadre la suite dans la
+    /// part, et le ferme s'il est fini.
     ///
     /// Rend `true` quand le flux n'a plus rien à faire ici — fermé, ou
     /// refusé par le transport — et doit être oublié.
     fn vidanger(conducteur: &mut Http3, connexion: &mut Connection, flux: &mut FluxPair) -> bool {
-        if !flux.en_attente.is_empty() {
-            match connexion.write(flux.flux, &flux.en_attente) {
+        loop {
+            flux.cadrer_une_trame();
+            if flux.en_attente.is_empty() {
+                break;
+            }
+            let resultat = connexion.write(flux.flux, &flux.en_attente);
+            match resultat {
+                // Le transport est plein : la suite au tour suivant.
+                Ok(0) => break,
                 Ok(pris) => {
                     flux.en_attente.drain(..pris.min(flux.en_attente.len()));
                 }
@@ -1952,6 +2094,17 @@ impl<'a> Annuaire<'a> {
             return true;
         }
         false
+    }
+
+    /// Oublie le flux de la voie de cette connexion — et garde ce qu'il
+    /// restait d'un instantané, pour le flux suivant.
+    fn oublier_le_flux(etat: &mut ParConnexion) {
+        if let Some(flux) = etat.flux_pair.take()
+            && flux.curseur.is_none()
+            && !flux.a_venir.is_empty()
+        {
+            etat.reste_d_instantane = Some(flux.a_venir);
+        }
     }
 
     /// Ce que chaque flux de la voie a de neuf à pousser, ce tour-ci.
@@ -1970,6 +2123,7 @@ impl<'a> Annuaire<'a> {
                 continue;
             };
             if flux.en_attente.is_empty()
+                && flux.a_venir.is_empty()
                 && !flux.a_clore
                 && let Some(curseur) = flux.curseur
                 && flux.vu_jusqu_a < derniere
@@ -1981,7 +2135,7 @@ impl<'a> Annuaire<'a> {
                             match dernier_compteur(&cadres) {
                                 Some(compteur) => {
                                     flux.curseur = Some(compteur);
-                                    flux.en_attente = trame_de_donnees(&cadres);
+                                    flux.a_venir.extend(cadres);
                                 }
                                 None => {
                                     (self.voie.journal)(
@@ -2003,7 +2157,7 @@ impl<'a> Annuaire<'a> {
                     }
                 }
             }
-            if !flux.en_attente.is_empty() || flux.a_clore {
+            if flux.a_pousser() {
                 a_pousser.push((clef.clone(), Vec::new()));
             }
         }
@@ -2160,14 +2314,12 @@ impl Application for Annuaire<'_> {
         // qui s'y écrit est ce que `suivre_le_journal` y a mis en attente ;
         // la consigne ne porte rien, elle dit « écris ce que tu tiens ».
         if let Some(flux) = &mut etat.flux_pair {
+            // **UN FLUX QUI SE FERME NE SE DIT PAS** : il a porté sa part, et
+            // le tireur en rouvre un — une ligne par part serait presque une
+            // ligne par opération (§8). Ce qui se dit est le sens qui s'ouvre
+            // et se ferme, et c'est la connexion.
             if Self::vidanger(&mut etat.conducteur, connexion, flux) {
-                (self.voie.journal)(&format!(
-                    "flux de la voie fermé{}",
-                    etat.session
-                        .racine()
-                        .map_or_else(String::new, |qui| format!(" ({})", qui.texte()))
-                ));
-                etat.flux_pair = None;
+                Self::oublier_le_flux(etat);
             }
             return;
         }
@@ -2201,6 +2353,7 @@ impl Application for Annuaire<'_> {
             conducteur: Http3::default(),
             session: Session::new(liaison),
             flux_pair: None,
+            reste_d_instantane: None,
         });
         self.servies = self.servies.saturating_add(1);
         // §6.2.1 : notre flux de contrôle et nos réglages, tout de suite — puis
@@ -2239,7 +2392,9 @@ impl Application for Annuaire<'_> {
             conducteur,
             session,
             flux_pair,
+            reste_d_instantane,
         } = etat;
+        let racine_avant = session.racine();
         let mut service = Service {
             session,
             politique: self.politique,
@@ -2264,11 +2419,21 @@ impl Application for Annuaire<'_> {
             pair_attendu: self.pair_attendu,
             flux_pair_tenu: flux_pair.is_some(),
             suite: &mut self.suite,
+            reste_d_instantane,
         };
         if let Err(faute) = conducteur.on_readable(&mut Pont(connexion), &mut service, flux) {
             Self::condamner(connexion, &faute);
             self.suite = None;
             return;
+        }
+        // **LE SENS ENTRANT S'OUVRE QUAND L'AUTRE RACINE A PROUVÉ SA CLÉ**, et
+        // c'est ce qui se dit (§8) — avec son identifiant.
+        if racine_avant.is_none()
+            && let Some(racine) = session.racine()
+        {
+            (self.voie.journal)(&format!(
+                "voie depuis {racine} ouverte : l'autre racine a prouvé sa clé — elle tire d'ici"
+            ));
         }
         // **CE QUE LA REQUÊTE A PRÉPARÉ PART SUR SON PROPRE FLUX**, tout de
         // suite : la réponse tenue vient d'y être écrite, et les cadres la
@@ -2277,12 +2442,18 @@ impl Application for Annuaire<'_> {
         if let Some(suite) = self.suite.take() {
             let mut neuf = FluxPair {
                 flux,
-                en_attente: trame_de_donnees(&suite.cadres),
+                en_attente: Vec::new(),
+                a_venir: suite.cadres,
+                portes: 0,
                 curseur: suite.curseur,
                 vu_jusqu_a: suite.vu_jusqu_a,
-                a_clore: suite.curseur.is_none(),
+                a_clore: false,
             };
-            if !Self::vidanger(conducteur, connexion, &mut neuf) {
+            if Self::vidanger(conducteur, connexion, &mut neuf) {
+                if neuf.curseur.is_none() && !neuf.a_venir.is_empty() {
+                    *reste_d_instantane = Some(neuf.a_venir);
+                }
+            } else {
                 *flux_pair = Some(neuf);
             }
         }
@@ -2335,6 +2506,14 @@ impl Application for Annuaire<'_> {
             asl_annuaire::MotifDeDepart::Volontaire,
         );
         let _ = partis;
-        self.connexions.remove(connexion.local_id().as_bytes());
+        if let Some(etat) = self.connexions.remove(connexion.local_id().as_bytes())
+            && let Some(racine) = etat.session.racine()
+        {
+            // Le sens entrant se ferme avec la connexion de l'autre racine,
+            // et c'est ce qui se dit (§8).
+            (self.voie.journal)(&format!(
+                "voie depuis {racine} fermée : la connexion de l'autre racine est tombée"
+            ));
+        }
     }
 }

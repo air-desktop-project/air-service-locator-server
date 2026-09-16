@@ -165,6 +165,17 @@ l'heure d'arrivée.
 | **Un alias pris des deux côtés** | **Un alias est une RÉCLAMATION, et la plus ancienne tient.** Chaque compte porte au plus une réclamation courante (son dernier `PUT`/`DELETE /v1/alias`, le plus récent gagne). Pour un alias donné, le titulaire est le compte dont la réclamation courante porte la plus petite estampille. Les deux racines calculent le même titulaire, parce que c'est une fonction de l'ensemble des réclamations, pas de leur ordre. | Le perdant a reçu `204` et n'a pas l'alias. Il l'apprend en lisant `GET /v1/alias/{alias}` — l'application le fait après un `PUT` par l'alias, et le dit. Sa réclamation reste en file : si le titulaire lâche l'alias, il le tient. |
 | **Un `PATCH` de machine des deux côtés** | **Le plus récent gagne, CHAMP PAR CHAMP** — le nom a son estampille, les capacités ont la leur. `PATCH` est champ par champ (`protocole.md` §2.2) ; une règle par enregistrement ferait perdre un nom parce qu'une capacité a gagné. | Un renommage, ou un jeu de capacités, écrit dans la fenêtre. Il se réécrit. |
 | **Un code d'enrôlement consommé d'un côté, présenté de l'autre** | Un code consommé est **supprimé partout dès que la consommation est répliquée** — c'est la même opération que la liaison de la clé (§5.2). Entre-temps, l'autre racine n'a pas encore vu la consommation et **l'accepte** : elle ne peut pas refuser ce qu'elle ne sait pas. D'où le cas suivant. | Rien, dans le cas nominal : la consommation arrive en moins d'une seconde. |
+
+**Cette ligne est une FENÊTRE, pas un conflit réordonnable** — et la PR de code
+(3/4) l'a nommé en l'éprouvant. Un code se consomme sur la racine où il a été
+émis, et la consommation SUIT l'émission sur cette même racine : les deux ne
+peuvent pas arriver dans l'ordre inverse chez un pair, contrairement à un alias
+que deux racines réclament chacune de son côté. L'invariant de §3.1 s'éprouve
+donc sur les cas VRAIMENT réordonnables (les six autres lignes), et ce cas-ci
+par une régression dirigée qui rejoue « émettre, consommer, présenter ailleurs
+avant la propagation » — la fenêtre —, non par les permutations. Ce qui la
+ferme reste la règle du cas suivant : à code égal, la première consommation
+gagne.
 | **Le même code consommé des deux côtés** — deux clés pour une machine | **La liaison qui gagne est celle du code le plus récemment ÉMIS ; à code égal, la PREMIÈRE consommation.** La liaison porte l'estampille d'émission de son code et la sienne ; c'est un ordre total, donc le plus grand gagne quel que soit l'ordre d'arrivée. | La machine perdante s'est crue enrôlée — elle a reçu son `m-…` — et sa prochaine connexion rend `401`. Elle se ré-enrôle avec un nouveau code. Cela ne se produit que si le même code a été tapé sur deux machines pendant une coupure entre racines : une faute de l'humain, ou un code intercepté — et dans ce second cas, la règle vaut mieux que « le dernier gagne ». |
 | **Deux codes émis pour la même machine** | Le plus récent gagne, l'autre meurt — c'est déjà la règle locale (« le code précédent meurt à l'émission du suivant »). | Un code affiché sur un écran ne marche plus. Il se réémet. |
 | **Le même service déclaré des deux côtés** — un daemon bascule pendant une coupure et réannonce `(machine, nom)` chez l'autre, qui lui attribue un second `s-…` | **Le plus ancien gagne, l'autre s'efface.** Un service ne bouge jamais et ne se retire jamais ; les deux racines finissent donc avec le même, dans tous les ordres. | Un `s-…` qu'un client a pu voir disparaît. Les clients résolvent par le NOM (`protocole.md` §3), et l'identifiant n'est qu'attribué à la première annonce : la perte est un identifiant, pas un service. |
@@ -373,6 +384,23 @@ celles de l'écriture d'origine, qui peuvent être de l'une ou l'autre racine.
 Puis un cadre de fin porte le compteur auquel l'instantané a été coupé, et le
 tireur reprend `GET /v1/pair/operations` à partir de là.
 
+**Il part en PLUSIEURS trames, sur plusieurs flux, et non en une seule
+(décidé par la PR de code, 4/4).** La pile QUIC greffée d'`air-mail-server`
+annonce une fenêtre par flux — seize kibioctets — et ne la relève jamais : un
+corps plus grand émis en une trame `DATA` se tairait au-delà de cette fenêtre,
+sans que rien ne le dise. La racine tirée coupe donc chaque flux quand il a
+porté sa PART — douze kibioctets, à une frontière d'opération, jamais au milieu
+d'un cadre —, et le tireur en rouvre un : `operations` reprend depuis son
+curseur, `instantane` continue le reste que la connexion tient jusqu'au cadre
+de fin. **La borne qui reste est l'instantané entier**, tenu en mémoire le
+temps d'une lecture par la racine tirée — à l'échelle où ce produit vit,
+quelques mégaoctets —, et c'est le prix d'une reprise, pas d'une routine. Le
+flux d'opérations courant se coupe et se rouvre de la même façon ; ce qui ne
+change pas est qu'il ne se termine JAMAIS de lui-même — seul son curseur avance.
+Le tireur applique chaque part par LOT, dans une transaction, et non une
+opération à la fois : un amorçage de plusieurs milliers d'enregistrements est
+alors une affaire de secondes.
+
 **Parce qu'il s'applique avec les mêmes règles, un instantané FUSIONNE au lieu
 d'écraser.** Une racine qui a continué d'écrire pendant quarante jours de
 coupure applique l'instantané de l'autre comme un flux : ce qu'elle a de plus
@@ -520,15 +548,35 @@ GET /v1/replication
 {"pair": "n-…", "voie": "ouverte", "compteur": 4812, "applique": 4790}
 ```
 
+**La forme exacte, décidée par la PR de code (4/4).** Le corps est du JSON, et
+le champ `voie` prend l'une de trois valeurs — un mot qu'on lit d'abord, dont
+les autres champs découlent :
+
+- `"ouverte"` — la connexion sortante vers le pair est ouverte et prouvée dans
+  les deux sens en ce moment ;
+- `"coupée"` — il y a un pair réglé, mais la connexion n'est pas établie (le
+  pair est parti, ou la voie est rompue et la reprise rappelle) ;
+- `"seule"` — **aucun pair n'est réglé** : la racine tourne seule, et le corps
+  est alors `{"voie": "seule", "compteur": 4812}`, **sans `pair` ni
+  `applique`** — il n'y a personne dont on applique quoi que ce soit, et un
+  champ nul aurait l'air d'une valeur.
+
+`compteur` est l'horloge de Lamport de cette racine (§4) ; `applique` est le
+curseur qu'elle tient pour le pair (§5.3) — jusqu'où elle a appliqué ce qu'il a
+écrit. Voie ouverte, `applique` rejoint `compteur` du pair en moins d'une
+seconde après une écriture ; coupée, l'écart dit ce qu'il reste à rattraper.
+Les deux nombres et le mot se lisent de l'entrepôt et du tireur au moment de la
+requête — rien n'est recopié, donc rien ne vieillit.
+
 **Sur la voie machine (`Exigence::Machine`), et non sans exigence.** La
 vérification de déploiement — « un compte créé chez l'une est lu chez
 l'autre » — demande une réponse au présent, qu'un journal ne donne qu'au
-passé ; l'exploitant la pose avec `asl`, depuis une machine enrôlée, ce qu'il
-a toujours sous la main. **Elle ne se rend pas à un inconnu**, et la raison a
-tranché : dire à qui le demande que la voie est coupée, c'est lui dire l'heure
-exacte où une unicité — un alias — se gagne sur une racine isolée (§3.2).
-Une réclamation en file n'est pas rien quand c'est un inconnu qui la pose. Le
-journal d'exploitation dit la même chose, à qui sait lire la machine.
+passé ; l'exploitant la pose depuis une machine enrôlée, ce qu'il a toujours
+sous la main. **Elle ne se rend pas à un inconnu**, et la raison a tranché :
+dire à qui le demande que la voie est coupée, c'est lui dire l'heure exacte où
+une unicité — un alias — se gagne sur une racine isolée (§3.2). Une réclamation
+en file n'est pas rien quand c'est un inconnu qui la pose. Le journal
+d'exploitation dit la même chose, à qui sait lire la machine.
 
 ---
 
@@ -567,12 +615,13 @@ journal d'exploitation dit la même chose, à qui sait lire la machine.
 | 12 | Une estampille par enregistrement, et par champ là où `PATCH` est champ par champ. | **Décidé** |
 | 13 | Le journal d'opérations dans l'entrepôt, dans la transaction d'écriture ; le format d'`asl-registre` sur le fil. | **Décidé** |
 | 14 | Rétention du journal d'opérations : trente jours. | **Décidé** (2026-09-15) |
-| 15 | `410` puis instantané pour l'amorçage ; l'instantané est une suite d'opérations et fusionne. | **Décidé** |
+| 15 | `410` puis instantané pour l'amorçage ; l'instantané est une suite d'opérations et fusionne. **Émis par PARTS — un flux par part, borné à la fenêtre d'un flux —, appliquées par lots** (PR de code, 4/4). | **Décidé** |
 | 16 | Les règles client de §6 — la connexion est la session ; `asl enroll` et le daemon essaient l'autre racine avant de conclure. | **Décidé** |
 | 17 | La provenance d'un enregistrement répliqué entre racines reste `locale`. | **Décidé** (2026-09-15) |
 | 18 | Rompre la réplication n'efface rien. | **Décidé** |
 | 19 | `--identity-key`, `--peer`, `--peer-key` ; `--new-identity-key` pour générer. **`--peer-ca` ajouté par la PR de code (0.7.0)** : valider le certificat TLS du pair demande son autorité, que sa chaîne ne porte pas. | **Décidé** (2026-09-15) — `--identity-key`, parce que c'est une clé privée ; `--peer-ca` amendé (2026-09-16) |
-| 20 | `GET /v1/replication`, **sur la voie machine** — pas sans exigence : l'état de la voie dit à un inconnu quand une unicité se gagne. | **Décidé** (2026-09-15), amendé |
+| 20 | `GET /v1/replication`, **sur la voie machine** — pas sans exigence : l'état de la voie dit à un inconnu quand une unicité se gagne. **La réponse : `voie` vaut `ouverte`, `coupée` ou `seule` ; `seule` n'a ni `pair` ni `applique`** (PR de code, 4/4). | **Décidé** (2026-09-15), amendé |
+| 21 | **La reprise d'un entrepôt sans identité : ré-estampillage sous l'identité réelle au premier démarrage avec une clé, une fois, dans une transaction** (§11.4). | **Décidé** (2026-09-16) |
 
 ---
 
@@ -589,7 +638,35 @@ journal d'exploitation dit la même chose, à qui sait lire la machine.
    des estampilles et les curseurs par pair s'étendent —, mais rien ne l'a
    éprouvé, et « pas de réplication transitive » demanderait alors que chacune
    tire chez chacune.
-4. **La reprise d'un entrepôt existant.** Les bancs tournent avec des bases sans
-   estampille ni journal ; leur donner l'un et l'autre est une reprise, et elle
-   ne s'improvise pas (`asl-store`, `AUTORISATIONS_ACCORDEES`). La PR de code
-   la portera, ou dira qu'elle repart de zéro.
+4. **La reprise d'un entrepôt existant — DÉCIDÉ (PR de code, 4/4).** Les bancs
+   tournent en 0.4.x avec des bases sans estampille ni journal. La reprise a
+   deux temps, et les deux sont dans `asl-store` :
+
+   - **À la première ouverture d'une base ancienne** (PR 1), chaque
+     enregistrement reçoit une estampille en séquence, sous la racine qui
+     ouvre ; les index absents à l'époque — `AUTORISATIONS_ACCORDEES`,
+     `MACHINES_PAR_COMPTE`, `APPAREILS_PAR_COMPTE` — sont reconstruits, et le
+     journal d'opérations démarre vide, marqué retiré jusqu'au compteur (une
+     base reprise s'amorce chez l'autre par instantané, jamais par
+     rattrapage). Tout cela dans une transaction : une reprise interrompue n'a
+     pas eu lieu.
+   - **Tant qu'un banc n'a pas de `--identity-key`**, il estampille sous
+     `RACINE_SANS_IDENTITE` — `n-` seize zéros, qui ne se déduit d'aucune clé
+     et ne sera jamais celui d'une racine réelle. **Au premier démarrage AVEC
+     une clé**, tout ce qui portait cette racine — enregistrements, champs,
+     réclamations d'alias, opérations du journal — passe sous l'identité
+     réelle, le compteur gardé, une fois, dans une transaction ; le journal
+     d'exploitation le dit avec le nombre. Sans cela, seize zéros partiraient
+     sur la voie, et l'autre racine les ré-estampillerait sous SON identité au
+     redémarrage suivant — deux estampilles pour un même fait, et la règle de
+     conflit ne calculerait plus la même chose des deux côtés.
+
+   **Ce que l'exploitant verra, et qui n'est pas un défaut.** Les deux bancs
+   ont créé des comptes chacun de son côté, avec des identifiants tirés
+   indépendamment : ce sont des comptes DIFFÉRENTS pour les mêmes personnes. La
+   réplication ne les fusionne pas — un identifiant à 128 bits ne collisionne
+   pas —, elle les additionne. Après la première synchronisation, une personne
+   inscrite sur les deux bancs a deux comptes, chacun avec ses machines. Ce qui
+   est départagé est l'unicité : un alias réclamé des deux côtés va au plus
+   ancien (§3.2), et le perdant garde sa réclamation en file. Aucune donnée
+   n'est perdue ; c'est une information pour le déploiement, pas un blocage.

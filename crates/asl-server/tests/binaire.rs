@@ -103,9 +103,15 @@ fn lancer_avec(autorite: &Path, base: &Path, en_plus: &[&str]) -> (Child, Socket
     // fermé : `eprintln!` panique alors, et le serveur meurt avant d'avoir
     // servi. C'était une course, gagnée le plus souvent ; une ligne de plus au
     // démarrage l'a fait perdre une fois sur deux.
+    // **`ASL_ESSAI_JOURNAL=1` MONTRE CE QUE LE SERVEUR DIT** : sans lui, le
+    // journal d'exploitation est bu en silence, et un essai qui échoue ne dit
+    // pas ce que le binaire a vu.
+    let montrer = std::env::var_os("ASL_ESSAI_JOURNAL").is_some();
     std::thread::spawn(move || {
-        for ligne in lignes {
-            let _ = ligne;
+        for ligne in lignes.map_while(Result::ok) {
+            if montrer {
+                eprintln!("[{}] {ligne}", annonce.port());
+            }
         }
     });
 
@@ -936,6 +942,50 @@ async fn alias_chez(vers: SocketAddr, racine_tls: &[u8], alias: &str) -> Option<
     (statut(&client, 0) == "200").then(|| String::from_utf8_lossy(&corps).into_owned())
 }
 
+/// Lit `GET /v1/replication` chez cet annuaire, depuis cette machine enrôlée,
+/// et rend son corps.
+async fn replication_chez(
+    vers: SocketAddr,
+    racine_tls: &[u8],
+    machine: Identifiant,
+    secrete: &CleSecrete,
+) -> String {
+    let mut client = client_vers(vers, racine_tls).await;
+    assert_eq!(prouver(&mut client, machine, secrete, 0).await, "204");
+    ams_quic_client::envoyer_une_requete(&mut client, 8, 17, b"/v1/replication", None, b"").await;
+    let corps = ams_quic_client::attendre_la_reponse(&mut client, 8).await;
+    assert_eq!(
+        statut(&client, 8),
+        "200",
+        "{}",
+        String::from_utf8_lossy(&corps)
+    );
+    String::from_utf8_lossy(&corps).into_owned()
+}
+
+/// La valeur d'un champ JSON — texte ou nombre — dans ce corps, sans
+/// guillemets.
+fn champ_json(corps: &str, nom: &str) -> Option<String> {
+    let marque = format!("\"{nom}\":");
+    let debut = corps.find(&marque)?.saturating_add(marque.len());
+    let reste = corps.get(debut..)?;
+    let reste = reste.strip_prefix('"').unwrap_or(reste);
+    let fin = reste.find(['"', ',', '}'])?;
+    reste.get(..fin).map(str::to_owned)
+}
+
+/// Un dossier où `fsync` ne coûte rien, s'il y en a un : garnir des milliers
+/// d'enregistrements — une transaction chacun — prend une minute sur un disque,
+/// et une seconde en mémoire. Le binaire, lui, ne voit qu'un chemin.
+fn dossier_rapide() -> PathBuf {
+    let shm = PathBuf::from("/dev/shm");
+    if shm.is_dir() {
+        shm
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 /// Réessaie cette vérification asynchrone jusqu'à ce qu'elle tienne, ou échoue.
 ///
 /// **LA RÉPLICATION EST À MOINS D'UNE SECONDE VOIE OUVERTE**, mais le tireur se
@@ -966,7 +1016,9 @@ async fn la_replication_de_bout_en_bout() {
     // rattrapage, application, flux vivant, et l'effet d'une révocation.
     let (autorite, racine_tls) = materiel("bout");
     let (cle_nitrogen, pub_nitrogen, _sn, publique_nitrogen) = identite("e2e-nitrogen");
-    let (cle_argon, pub_argon, _sa, _publique_argon) = identite("e2e-argon");
+    let (cle_argon, pub_argon, _sa, publique_argon) = identite("e2e-argon");
+    let n_nitrogen = identifiant_de_racine(&publique_nitrogen);
+    let n_argon = identifiant_de_racine(&publique_argon);
 
     let base_nitrogen =
         std::env::temp_dir().join(format!("asl-bin-{}-e2e-nitrogen.redb", std::process::id()));
@@ -1080,6 +1132,33 @@ async fn la_replication_de_bout_en_bout() {
         prouver(&mut client, grenier, &secrete_grenier, 0).await == "204"
     });
 
+    // ── 2 bis. `GET /v1/replication`, DEPUIS LA MACHINE ENRÔLÉE ─────────────
+    //
+    // Chez argon, la voie vers nitrogen est ouverte, et ce qu'il a appliqué
+    // rejoint son compteur — il a tout tiré. Chez nitrogen, la voie vers son
+    // pair (un port mort) est coupée, et rien n'a été appliqué de lui.
+    attendre!("l'état de la voie chez argon", {
+        let corps = replication_chez(vers_argon, &racine_tls, grenier, &secrete_grenier).await;
+        champ_json(&corps, "voie").as_deref() == Some("ouverte")
+            && champ_json(&corps, "pair") == Some(n_nitrogen.texte().as_str().to_owned())
+            && champ_json(&corps, "applique") == champ_json(&corps, "compteur")
+            && champ_json(&corps, "applique").as_deref() == Some("5")
+    });
+    {
+        let corps = replication_chez(vers_nitrogen, &racine_tls, grenier, &secrete_grenier).await;
+        assert_eq!(
+            champ_json(&corps, "voie").as_deref(),
+            Some("coupée"),
+            "{corps}"
+        );
+        assert_eq!(
+            champ_json(&corps, "pair"),
+            Some(n_argon.texte().as_str().to_owned())
+        );
+        assert_eq!(champ_json(&corps, "compteur").as_deref(), Some("5"));
+        assert_eq!(champ_json(&corps, "applique").as_deref(), Some("0"));
+    }
+
     // ── 3. UN FLUX VIVANT : UN ALIAS POSÉ CHEZ NITROGEN ARRIVE CHEZ ARGON ────
     {
         let mut telephone = client_vers(vers_nitrogen, &racine_tls).await;
@@ -1104,6 +1183,13 @@ async fn la_replication_de_bout_en_bout() {
         alias_chez(vers_argon, &racine_tls, "grenier-hote")
             .await
             .is_some_and(|corps| corps.contains(thierry.texte().as_str()))
+    });
+    // Et `applique` rejoint `compteur` après l'écriture : six chez nitrogen,
+    // six appliqués chez argon.
+    attendre!("`applique` rejoint `compteur` chez argon", {
+        let corps = replication_chez(vers_argon, &racine_tls, grenier, &secrete_grenier).await;
+        champ_json(&corps, "applique").as_deref() == Some("6")
+            && champ_json(&corps, "compteur").as_deref() == Some("6")
     });
 
     // ── 4. UNE RÉVOCATION CHEZ NITROGEN FERME LA MACHINE TENUE CHEZ ARGON ────
@@ -1147,6 +1233,172 @@ async fn la_replication_de_bout_en_bout() {
     attendre!("la connexion tenue tombe chez argon", {
         tenue.parler().await;
         !tenue.ecouter().await
+    });
+
+    let _ = nitrogen.kill();
+    let _ = nitrogen.wait();
+    let _ = argon.kill();
+    let _ = argon.wait();
+    let _ = std::fs::remove_dir_all(&autorite);
+    for fichier in [
+        &base_nitrogen,
+        &base_argon,
+        &cle_nitrogen,
+        &pub_nitrogen,
+        &cle_argon,
+        &pub_argon,
+    ] {
+        let _ = std::fs::remove_file(fichier);
+    }
+}
+
+// ── Au-delà de la fenêtre d'un flux : les parts (`protocole.md` §3 bis) ──────
+
+/// Garnit cet entrepôt de `combien` comptes, chacun avec un alias `compteN`,
+/// et rend ce que son instantané pèse.
+fn garnir(base: &Entrepot, combien: u32) -> usize {
+    for rang in 0..combien {
+        let mut entropie = [0_u8; 16];
+        entropie[..4].copy_from_slice(&rang.to_be_bytes());
+        base.creer_compte(
+            Identifiant::depuis_entropie(Genre::Utilisateur, entropie),
+            Provenance::Ici,
+            Some(AliasRange::nouveau(&format!("compte{rang}")).expect("un alias")),
+        )
+        .expect("le compte s'écrit");
+    }
+    base.instantane()
+        .expect("lisible")
+        .iter()
+        .map(Vec::len)
+        .sum()
+}
+
+#[tokio::test]
+async fn un_entrepot_de_plusieurs_milliers_d_enregistrements_s_amorce() {
+    // **L'AMORÇAGE, AU-DELÀ DE SOIXANTE-QUATRE KIBIOCTETS, AVEC LE VRAI
+    // TIREUR** : trois mille comptes chez nitrogen, argon part vide et les tire
+    // tous — par parts, appliqués par lots —, puis `GET /v1/replication` chez
+    // argon dit que tout est appliqué.
+    let (autorite, racine_tls) = materiel("grand");
+    let (cle_nitrogen, pub_nitrogen, _sn, publique_nitrogen) = identite("grand-nitrogen");
+    let (cle_argon, pub_argon, _sa, _publique_argon) = identite("grand-argon");
+    let base_nitrogen = dossier_rapide().join(format!(
+        "asl-bin-{}-grand-nitrogen.redb",
+        std::process::id()
+    ));
+    let base_argon =
+        dossier_rapide().join(format!("asl-bin-{}-grand-argon.redb", std::process::id()));
+    let _ = std::fs::remove_file(&base_nitrogen);
+    let _ = std::fs::remove_file(&base_argon);
+    const COMBIEN: u32 = 3_000;
+    let grenier = Identifiant::depuis_entropie(Genre::Machine, [0x33; 16]);
+    let secrete_grenier = CleSecrete::depuis_entropie([0x55; 32]);
+    let (octets, compteur) = {
+        let entrepot = Entrepot::ouvrir(&base_nitrogen, identifiant_de_racine(&publique_nitrogen))
+            .expect("un entrepôt");
+        garnir(&entrepot, COMBIEN);
+        // Et une machine enrôlée, pour lire `/v1/replication` chez argon.
+        let thierry = Identifiant::depuis_entropie(Genre::Utilisateur, [0x11; 16]);
+        entrepot
+            .creer_compte(thierry, Provenance::Ici, None)
+            .expect("compte");
+        entrepot
+            .creer_machine(
+                grenier,
+                Provenance::Ici,
+                thierry,
+                asl_registre::NomRange::nouveau("grenier").unwrap(),
+                asl_registre::Capacites {
+                    annonce: false,
+                    lecture: false,
+                },
+            )
+            .expect("machine");
+        let code = asl_cle::CodeEnrolement::analyser("4K9M2P7R1T")
+            .unwrap()
+            .empreinte();
+        entrepot
+            .emettre_enrolement(&code, Provenance::Ici, grenier, u64::MAX)
+            .expect("code");
+        let enrolement = entrepot.consommer_enrolement(&code).unwrap().unwrap();
+        entrepot
+            .lier_cle(
+                grenier,
+                secrete_grenier.publique().octets(),
+                code,
+                enrolement.estampille,
+            )
+            .expect("clé");
+        let octets: usize = entrepot
+            .instantane()
+            .expect("lisible")
+            .iter()
+            .map(Vec::len)
+            .sum();
+        (octets, entrepot.compteur().expect("lisible"))
+    };
+    assert!(octets > 64 * 1024, "{octets} octets");
+
+    let ca = autorite.join("racine.crt");
+    let ca = ca.to_str().expect("utf-8");
+    let (mut nitrogen, ou_nitrogen) = lancer_avec(
+        &autorite,
+        &base_nitrogen,
+        &[
+            "--identity-key",
+            cle_nitrogen.to_str().unwrap(),
+            "--peer-key",
+            pub_argon.to_str().unwrap(),
+            "--peer-ca",
+            ca,
+            "--peer",
+            "127.0.0.1:6630",
+        ],
+    );
+    let vers_nitrogen = SocketAddr::from(([127, 0, 0, 1], ou_nitrogen.port()));
+    let (mut argon, ou_argon) = lancer_avec(
+        &autorite,
+        &base_argon,
+        &[
+            "--identity-key",
+            cle_argon.to_str().unwrap(),
+            "--peer-key",
+            pub_nitrogen.to_str().unwrap(),
+            "--peer-ca",
+            ca,
+            "--peer",
+            &vers_nitrogen.to_string(),
+        ],
+    );
+    let vers_argon = SocketAddr::from(([127, 0, 0, 1], ou_argon.port()));
+
+    // Le dernier compte garni est chez argon, et le premier aussi.
+    let dernier = format!("compte{}", COMBIEN - 1);
+    attendre!("le dernier compte chez argon", {
+        alias_chez(vers_argon, &racine_tls, &dernier)
+            .await
+            .is_some()
+    });
+    assert!(
+        alias_chez(vers_argon, &racine_tls, "compte0")
+            .await
+            .is_some()
+    );
+    // Et l'état le dit : voie ouverte vers nitrogen, tout appliqué jusqu'au
+    // compteur de nitrogen, que le compteur d'argon a rejoint.
+    attendre!("tout appliqué chez argon", {
+        let corps = replication_chez(vers_argon, &racine_tls, grenier, &secrete_grenier).await;
+        champ_json(&corps, "voie").as_deref() == Some("ouverte")
+            && champ_json(&corps, "pair")
+                == Some(
+                    identifiant_de_racine(&publique_nitrogen)
+                        .texte()
+                        .as_str()
+                        .to_owned(),
+                )
+            && champ_json(&corps, "applique") == Some(compteur.to_string())
+            && champ_json(&corps, "compteur") == Some(compteur.to_string())
     });
 
     let _ = nitrogen.kill();

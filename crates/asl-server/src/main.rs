@@ -37,10 +37,11 @@ mod socket;
 
 use std::sync::Arc;
 
-use asl_id::{Genre, Identifiant};
 use asl_loop_tokio::h3::Voie;
-use asl_loop_tokio::{Annuaire, Tireur, configuration_tls, refuser_root, servir_quic};
-use asl_store::Entrepot;
+use asl_loop_tokio::{
+    Annuaire, EtatDeLaVoie, Tireur, configuration_tls, refuser_root, servir_quic,
+};
+use asl_store::{Entrepot, RACINE_SANS_IDENTITE};
 
 use crate::reglages::{Reglages, USAGE};
 
@@ -50,21 +51,6 @@ use crate::reglages::{Reglages, USAGE};
 /// nettoyer qu'au lancement ferait de la rétention de quatre-vingt-dix jours une
 /// promesse que seul un redémarrage tiendrait — et C18 serait tenue par accident.
 const EXPIRATION_TOUTES_LES: core::time::Duration = core::time::Duration::from_secs(3_600);
-
-/// L'identifiant sous lequel cette racine estampille, TANT QU'ELLE N'A PAS DE
-/// CLÉ D'IDENTITÉ.
-///
-/// # SEIZE ZÉROS, ET C'EST DIT AU DÉMARRAGE
-///
-/// `docs/replication.md` §2.2 : l'identifiant `n-…` d'une racine SE DÉDUIT de
-/// sa clé d'identité Ed25519 (`asl_cle::identifiant_de_racine`), que
-/// `--identity-key` lui donne. Sans ce réglage, la racine tourne comme avant
-/// — l'entrepôt ne sait pas écrire sans racine, chaque écriture porte
-/// `(compteur, racine)` — sous un identifiant qui ne se déduit d'aucune clé,
-/// et qui le dit : seize zéros. Il est visible dans le journal d'exploitation,
-/// et il ne sera jamais celui d'une racine réelle. Une clé générée en silence
-/// aurait été pire (§8) — une clé que personne n'a copiée nulle part.
-const RACINE_SANS_IDENTITE: Identifiant = Identifiant::depuis_entropie(Genre::Annuaire, [0; 16]);
 
 fn main() -> std::process::ExitCode {
     match demarrer() {
@@ -146,6 +132,11 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map(|pair| identite::lire_publique(&pair.cle))
         .transpose()?;
+    // **SANS CLÉ, SEIZE ZÉROS — ET C'EST DIT AU DÉMARRAGE.** Une clé générée
+    // en silence aurait été pire (§8) : une clé que personne n'a copiée nulle
+    // part. `asl_store::RACINE_SANS_IDENTITE` dit le reste, et l'entrepôt
+    // ré-estampille ce qui a été écrit sous elle au premier démarrage avec
+    // une clé (§11.4).
     let racine = identite.as_ref().map_or(RACINE_SANS_IDENTITE, |cle| {
         asl_cle::identifiant_de_racine(&cle.publique())
     });
@@ -189,6 +180,16 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                 entrepot.racine(),
                 entrepot.compteur().unwrap_or(0),
             ),
+        }
+        // **LA REPRISE SE DIT, AVEC LE NOMBRE** (§11.4) : ce qui avait été
+        // estampillé sans identité est passé sous celle-ci, une fois.
+        if entrepot.reestampilles() > 0 {
+            eprintln!(
+                "asl-server : {} enregistrements et opérations estampillés sans identité \
+                 ({RACINE_SANS_IDENTITE}) sont passés sous {} — une fois, dans une transaction.",
+                entrepot.reestampilles(),
+                entrepot.racine(),
+            );
         }
         match (&reglages.pair, &cle_du_pair) {
             (Some(pair), Some(cle)) => eprintln!(
@@ -239,10 +240,14 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         // Le journal d'exploitation de la voie entre racines
         // (`replication.md` §8) : la même sortie que le reste.
         let dire = |ligne: &str| eprintln!("asl-server : {ligne}");
+        // L'état vivant de la voie sortante : le tireur l'écrit, la ressource
+        // `/v1/replication` le lit (§8).
+        let etat_de_la_voie = Arc::new(EtatDeLaVoie::nouvelle());
         let voie = Voie {
             identite: identite.as_ref(),
             pair: cle_du_pair,
             journal: &dire,
+            etat: reglages.pair.as_ref().map(|_| etat_de_la_voie.as_ref()),
         };
         let mut application = Annuaire::new(
             &entrepot,
@@ -286,6 +291,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                     journal: Box::new(|ligne| eprintln!("asl-server : {ligne}")),
                     fermetures,
                     plafond_recul_ms: reglages.keepalive_s.saturating_mul(1_000).max(1),
+                    etat: Arc::clone(&etat_de_la_voie),
                 };
                 Some(tokio::spawn(tireur.tirer_sans_fin()))
             }

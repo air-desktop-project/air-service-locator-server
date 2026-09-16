@@ -61,7 +61,7 @@ pub use privileges::{EstRoot, refuser_root};
 pub use quic::{
     Application, Comptes, GRACE_EXTINCTION_US, SansApplication, maintenant, servir_quic,
 };
-pub use tireur::Tireur;
+pub use tireur::{EtatDeLaVoie, Tireur};
 pub use vivier::Vivier;
 
 /// Monte la configuration TLS d'un annuaire, ALPN comprise.

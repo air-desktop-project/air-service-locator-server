@@ -855,3 +855,21 @@ fn le_curseur_des_operations_n_a_qu_une_ecriture() {
         );
     }
 }
+
+#[test]
+fn l_etat_de_la_replication_exige_une_machine_et_ne_se_lit_que_par_get() {
+    // **`replication.md` §8, décision 20** : sur la voie machine, et non sans
+    // exigence — dire à un inconnu que la voie est coupée, c'est lui dire
+    // quand une unicité se gagne sur une racine isolée. Une machine quelle que
+    // soit sa capacité, comme `/v1/moi`.
+    let resolu = resoudre(Methode::Get, b"/v1/replication").expect("elle se route");
+    assert_eq!(resolu.ressource, Ressource::Replication);
+    assert_eq!(resolu.exigence, Exigence::Machine);
+    assert!(resolu.sert);
+    for methode in [Methode::Post, Methode::Put, Methode::Patch, Methode::Delete] {
+        assert!(
+            !resoudre(methode, b"/v1/replication").unwrap().sert,
+            "{methode:?}"
+        );
+    }
+}

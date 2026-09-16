@@ -95,6 +95,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::PairPreuve => "/v1/pair/preuve".to_owned(),
         Ressource::PairOperations { apres } => format!("/v1/pair/operations?apres={apres}"),
         Ressource::PairInstantane => "/v1/pair/instantane".to_owned(),
+        Ressource::Replication => "/v1/replication".to_owned(),
     }
 }
 

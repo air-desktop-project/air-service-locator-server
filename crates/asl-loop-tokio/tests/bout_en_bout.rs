@@ -1906,6 +1906,65 @@ async fn la_version_se_lit_sans_rien_prouver() {
 }
 
 #[tokio::test]
+async fn une_racine_seule_dit_qu_elle_est_seule_a_une_machine_et_a_personne_d_autre() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // `GET /v1/replication` (`replication.md` §8) est sur la voie MACHINE : un
+    // inconnu reçoit `401`, une machine enrôlée — quelle que soit sa capacité —
+    // lit l'état. Sans `--peer`, la racine dit « seule », avec son compteur, et
+    // ni `pair` ni `applique`.
+    let (autorite, racine, chaine, cle) = materiel("replication-seule");
+    let (base, fichier) = entrepot("replication-seule");
+    let proprietaire = Identifiant::depuis_entropie(Genre::Utilisateur, [0x01; 16]);
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0x02; 16]);
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0x03; 32]);
+    base.creer_compte(proprietaire, Provenance::Ici, None)
+        .expect("le compte");
+    machine_enrolee(
+        &base,
+        machine,
+        proprietaire,
+        secrete.publique().octets(),
+        asl_registre::Capacites {
+            annonce: false,
+            lecture: false,
+        },
+    );
+    let compteur = base.compteur().expect("lisible");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    // Un inconnu : `401`.
+    let mut inconnu = connecter(&racine, adresse).await;
+    ams_quic_client::envoyer_une_requete(&mut inconnu, 0, 17, b"/v1/replication", None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut inconnu, 0).await;
+    assert_eq!(
+        champ(&champs(inconnu.recu(0)), b":status"),
+        Some(&b"401"[..])
+    );
+
+    // Une machine sans aucune capacité : elle lit.
+    let mut client = connecter(&racine, adresse).await;
+    authentifier(&mut client, machine, &secrete, 0, 4).await;
+    ams_quic_client::envoyer_une_requete(&mut client, 8, 17, b"/v1/replication", None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut client, 8).await;
+    assert_eq!(
+        champ(&champs(client.recu(8)), b":status"),
+        Some(&b"200"[..]),
+        "{}",
+        String::from_utf8_lossy(&rendu)
+    );
+    assert_eq!(
+        rendu,
+        format!(r#"{{"voie":"seule","compteur":{compteur}}}"#).into_bytes()
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
 async fn un_jeton_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
     // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
     //

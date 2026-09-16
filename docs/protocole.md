@@ -993,7 +993,11 @@ la connexion sortante vers `--peer`, les deux preuves prouvées dans l'autre
 sens, le curseur qui avance dans la transaction qui applique, et l'application
 des opérations avec la règle de conflit de [`replication.md`](replication.md)
 §3.2. Une racine qui a `--peer` tire chez l'autre sans fin, et reprend depuis
-son curseur à chaque rupture (§1.5).
+son curseur à chaque rupture (§1.5). **Depuis 0.8.0, la voie est exploitable
+sur les bancs** : `GET /v1/replication` rend son état, l'instantané et le
+rattrapage passent par parts au-delà de la fenêtre d'un flux, et une base
+reprise sans identité est ré-estampillée sous l'identité réelle
+([`replication.md`](replication.md) §11.4).
 
 **Le même port, le même transport.** La voie est une ressource de plus sous
 `/v1`, avec une exigence que seule une clé d'identité de racine satisfait ; il
@@ -1009,6 +1013,15 @@ GET  /v1/pair/operations?apres=<compteur>       tout ce qu'elle a écrit après,
 GET  /v1/pair/instantane                        l'état entier, puis le compteur de coupe — fini
 GET  /v1/replication                            l'état de la voie, sur la voie machine (`Exigence::Machine`)
 ```
+
+**`GET /v1/replication` rend un JSON dont `voie` prend trois valeurs** : avec un
+pair, `{"pair":"n-…","voie":"ouverte"|"coupée","compteur":…,"applique":…}` —
+`compteur` est notre horloge (§4), `applique` le curseur qu'on tient pour le
+pair (§5.3). Sans pair, `{"voie":"seule","compteur":…}`, **ni `pair` ni
+`applique`** : rien à appliquer de personne. La ressource est **sur la voie
+machine** (`Exigence::Machine`), et non sans exigence : elle ne se rend pas à un
+inconnu, à qui elle dirait l'heure où une unicité se gagne sur une racine isolée
+([`replication.md`](replication.md) §8).
 
 **Chaque racine OUVRE vers l'autre, et y LIT.** Deux connexions, une par sens,
 et le même code des deux côtés : c'est le lecteur qui tient son curseur, parce
@@ -1029,6 +1042,18 @@ de coupe. Un instantané est une suite d'opérations, pas un autre format : **so
 cadre de fin a la forme d'une opération sans charge**, `15 ‖ compteur (8) ‖
 racine (17)`, où l'étiquette `15` suit les quatorze genres et n'en est pas un
 — ce qui applique ne le prend jamais pour un fait (`asl_registre::Cadre`).
+
+**Un flux porte une PART, puis se ferme, et le tireur en rouvre un.** La pile
+QUIC annonce une fenêtre par flux — seize kibioctets — et ne la relève jamais :
+un instantané ou un rattrapage plus grands ne tiennent pas dans un seul flux.
+La racine tirée coupe donc chaque flux quand il a porté sa part (douze
+kibioctets, **toujours à une frontière d'opération** — jamais au milieu d'un
+cadre), et le tireur rouvre : `operations?apres=<curseur>` reprend depuis son
+curseur, `instantane` continue le reste de la MÊME lecture, que la connexion
+tient jusqu'au cadre de fin. La fin d'un flux n'est donc pas une rupture ; seule
+la connexion qui tombe en est une, et c'est la reprise (§1.5) qui joue alors.
+Le flux d'`operations` ne se termine, lui, jamais de son propre chef — une
+part pleine le coupe, une part vide le tient ouvert.
 
 **Un flux par connexion.** Une connexion qui tient déjà `operations` ou
 `instantane` reçoit `409` au second : ce qui est poussé sur une connexion va à

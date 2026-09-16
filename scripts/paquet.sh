@@ -128,7 +128,33 @@ cat > "$arbre/usr/share/doc/asl-server/attestation.conf.exemple" <<'EXEMPLE'
 Environment=ASL_ATTESTATION=optional
 EXEMPLE
 chmod 0644 "$arbre/usr/share/doc/asl-server/attestation.conf.exemple"
-dit "binaire, unité, /etc/asl-server, table d'exemple, documentation"
+
+# **LE FRAGMENT DE RÉPLICATION VA DANS LA DOCUMENTATION, ET NON DANS `/etc`.**
+# Comme celui de l'attestation : posé sous le drop-in, il mettrait la racine en
+# réplication à la place de l'exploitant, avec des clés qui n'existent pas
+# encore. Vide, `$ASL_REPLICATION` laisse la racine SEULE — le cas nominal d'un
+# banc isolé (docs/replication.md §8).
+cat > "$arbre/usr/share/doc/asl-server/replication.conf.exemple" <<'EXEMPLE'
+# À copier sous /etc/systemd/system/asl-server.service.d/replication.conf,
+# APRÈS avoir frappé l'identité de CETTE racine et posé la clé publique de
+# l'autre. La procédure complète est dans le README (« Mettre deux bancs en
+# réplication ») et dans docs/replication.md §8.
+#
+#   1. En tant que asl-server (ou chown ensuite root:asl-server, 0640) :
+#        sudo -u asl-server asl-server --new-identity-key /etc/asl-server/identite.key
+#      — écrit identite.key (0600) et identite.key.pub, imprime le n-… .
+#   2. Échangez les .pub entre les deux bancs, et posez le racine.crt de la
+#      cérémonie (celui que le client épingle) en /etc/asl-server/racine.crt.
+#   3. Remplissez la ligne ci-dessous — NON CITÉE, systemd la découpe sur les
+#      espaces —, puis `systemctl restart asl-server`.
+#
+# Vide, cette variable laisse la racine SEULE : ce n'est pas un défaut.
+
+[Service]
+Environment=ASL_REPLICATION=--identity-key /etc/asl-server/identite.key --peer argon.air-desktop.org:6630 --peer-key /etc/asl-server/pair.pub --peer-ca /etc/asl-server/racine.crt
+EXEMPLE
+chmod 0644 "$arbre/usr/share/doc/asl-server/replication.conf.exemple"
+dit "binaire, unité, /etc/asl-server, tables d'exemple, documentation"
 
 titre "dépendances, calculées et non devinées"
 # **`dpkg-shlibdeps` LIT LE BINAIRE.** Écrire `libc6 (>= 2.34)` à la main serait
