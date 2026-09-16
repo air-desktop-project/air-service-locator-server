@@ -14,11 +14,14 @@ asl-apple.workspace = true
 asl-auth.workspace = true
 asl-cle.workspace = true
 asl-id.workspace = true
+asl-keystore.workspace = true
 asl-proto.workspace = true
 asl-registre.workspace = true
 asl-session.workspace = true
 asl-store.workspace = true
 ams-proto-http.workspace = true
+# Le défi d'une attestation Android est le SHA-256 du message d'attestation.
+sha2.workspace = true
 
 # La pile QUIC et HTTP/3 d'`air-mail-server` (C15). Voir le manifeste du
 # workspace pour ce qui est repris et ce qui ne l'est pas.

@@ -176,6 +176,24 @@ grep -q './usr/share/doc/asl-server/replication.conf.exemple' "$essai/contenu" \
 grep -q '^Environment="ASL_REPLICATION=--identity-key .*"$' scripts/paquet.sh \
     || rate "le gabarit du drop-in de réplication ne cite pas l'affectation en entier"
 
+# **L'ATTESTATION ANDROID EST OPTIONNELLE, ET AUCUNE RACINE N'EST ÉPINGLÉE PAR
+# LE PAQUET** (C19). `$ASL_ANDROID` non cité, vide par défaut ; la racine de
+# Google est dans la DOCUMENTATION, d'où rien ne la lit.
+grep -q 'ASL_ANDROID' "$essai/unite-nue" \
+    || rate "l'unité ne passe pas les réglages Android par l'environnement"
+grep -q '\${ASL_ANDROID}' "$essai/unite-nue" \
+    && rate "les accolades donneraient un argument VIDE au lieu de le retirer"
+grep -q '^Environment=ASL_ANDROID' "$essai/unite-nue" \
+    && rate "l'unité ÉPINGLE des racines — le paquet choisit à la place de l'exploitant"
+grep -q './usr/share/doc/asl-server/android.conf.exemple' "$essai/contenu" \
+    || rate "le fragment Android n'est pas expédié"
+grep -q './usr/share/doc/asl-server/racines-android/google.pem' "$essai/contenu" \
+    || rate "la racine de Google n'est pas expédiée en exemple"
+grep -qE './etc/asl-server/racines-android' "$essai/contenu" \
+    && rate "une racine posée sous /etc serait épinglée par le paquet"
+grep -q '^Environment="ASL_ANDROID=--android-roots .*"$' scripts/paquet.sh \
+    || rate "le gabarit du drop-in Android ne cite pas l'affectation en entier"
+
 # **ET LA TABLE DU PARE-FEU NON PLUS N'EST PAS CHARGÉE.** Un paquet qui la
 # poserait sous `/etc/nftables.conf` fermerait des ports sur une machine qu'il ne
 # connaît pas — à commencer, si elle est mal relue, par celui du `ssh`.
@@ -263,7 +281,9 @@ conclure "il part, et son aide dit tout ce que la source lit"
 titre "11. la marche à suivre imprimée existe vraiment"
 commencer
 # CE QU'UN SCRIPT IMPRIME EST CE QUE L'EXPLOITANT RECOPIE.
-for chemin in /usr/share/doc/asl-server/attestation.conf.exemple; do
+for chemin in /usr/share/doc/asl-server/attestation.conf.exemple \
+        /usr/share/doc/asl-server/android.conf.exemple \
+        /usr/share/doc/asl-server/racines-android/google.pem; do
     grep -qF "$chemin" "$essai/CONTROLE/postinst" \
         || rate "le \`postinst\` ne nomme pas $chemin"
     [ -f "$essai/deballe$chemin" ] || rate "$chemin est nommé mais n'est pas expédié"

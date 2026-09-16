@@ -158,7 +158,48 @@ cat > "$arbre/usr/share/doc/asl-server/replication.conf.exemple" <<'EXEMPLE'
 Environment="ASL_REPLICATION=--identity-key /etc/asl-server/identite.key --peer argon.air-desktop.org:6630 --peer-key /etc/asl-server/pair.pub --peer-ca /etc/asl-server/racine.crt"
 EXEMPLE
 chmod 0644 "$arbre/usr/share/doc/asl-server/replication.conf.exemple"
-dit "binaire, unité, /etc/asl-server, tables d'exemple, documentation"
+
+# **LES RACINES D'ATTESTATION ANDROID VONT DANS LA DOCUMENTATION, ET NE SONT
+# PAS ÉPINGLÉES** (C19). L'annuaire ne fait confiance qu'aux fichiers que
+# `--android-roots` nomme ; expédier celle de Google sous `/usr/share/doc`,
+# c'est la mettre à portée de main sans la choisir à la place de l'exploitant.
+install -d -m 0755 "$arbre/usr/share/doc/asl-server/racines-android"
+install -m 0644 paquet/racines-android/google.pem \
+    "$arbre/usr/share/doc/asl-server/racines-android/google.pem"
+
+cat > "$arbre/usr/share/doc/asl-server/android.conf.exemple" <<'EXEMPLE'
+# À copier sous /etc/systemd/system/asl-server.service.d/android.conf,
+# APRÈS avoir choisi quelles racines d'attestation vous épinglez.
+#
+# L'attestation de clé d'Android (protocole.md §2.1, C19) se vérifie hors
+# ligne, contre des racines qui sont des fichiers — celle de Google pour les
+# Android certifiés, expédiée en exemple ici même :
+#   /usr/share/doc/asl-server/racines-android/google.pem
+# (vérifiez son empreinte, écrite en tête du fichier). Copiez-la, ou une
+# autre, sous /etc/asl-server/, et nommez-la ci-dessous ; `--android-roots`
+# se répète pour en épingler plusieurs.
+#
+# Les trois réglages se donnent ensemble, ou pas du tout :
+#   --android-roots  <PEM>         la ou les racines épinglées
+#   --android-app    <paquet>      org.airdesktop.servicelocator
+#   --android-signer <SHA-256 hex> l'empreinte du certificat qui signe la build
+#                                  (apksigner verify --print-certs) — celle de
+#                                  la build de DÉBOGAGE ci-dessous ; la build de
+#                                  release en a une AUTRE.
+#
+# L'affectation ENTIÈRE entre guillemets, comme pour la réplication :
+# `Environment=` découpe sa ligne sur les espaces avant d'y lire des
+# affectations. C'est le `$ASL_ANDROID` de l'unité, non cité, qui découpe
+# ensuite la valeur en arguments —, puis `systemctl restart asl-server`.
+#
+# Vide, cette variable laisse la racine refuser les attestations Android, en
+# le disant au journal : ce n'est pas un défaut.
+
+[Service]
+Environment="ASL_ANDROID=--android-roots /etc/asl-server/racines-android/google.pem --android-app org.airdesktop.servicelocator --android-signer 5ea316f1b50f2ce54b8225aba85ff5cc8238a710b8fae44b4f3a195aadeb5f68"
+EXEMPLE
+chmod 0644 "$arbre/usr/share/doc/asl-server/android.conf.exemple"
+dit "binaire, unité, /etc/asl-server, racines et tables d'exemple, documentation"
 
 titre "dépendances, calculées et non devinées"
 # **`dpkg-shlibdeps` LIT LE BINAIRE.** Écrire `libc6 (>= 2.34)` à la main serait
@@ -247,6 +288,13 @@ qu'un paquet ne peut pas décider.
          # Environment=ASL_ATTESTATION=optional
 
      Le modèle : /usr/share/doc/asl-server/attestation.conf.exemple
+
+     Pour vérifier l'attestation de clé des Android (facultatif, C19) : les
+     racines à épingler, le paquet et l'empreinte de signature de l'app —
+     modèle et racine de Google en exemple :
+
+         /usr/share/doc/asl-server/android.conf.exemple
+         /usr/share/doc/asl-server/racines-android/google.pem
 
   2. le certificat, émis pour le nom sous lequel cet annuaire répond :
 

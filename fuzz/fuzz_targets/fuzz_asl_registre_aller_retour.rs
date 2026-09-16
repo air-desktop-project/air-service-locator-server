@@ -373,7 +373,7 @@ fuzz_target!(|entree: Entree| {
     let atteste = match entree.graine % 3 {
         0 => Attestation::Aucune,
         1 => Attestation::Apple,
-        _ => Attestation::Google,
+        _ => Attestation::Android,
     };
     let appareil = Appareil {
         provenance,

@@ -37,7 +37,7 @@ use std::sync::Arc;
 use ams_proto_h3::{FrameHeader, FrameKind, qpack};
 use asl_api::corps::{CreationDeCompte, PlateformeAttestation};
 use asl_id::{Genre, Identifiant};
-use asl_loop_tokio::h3::ConfigApple;
+use asl_loop_tokio::h3::{Attestations, ConfigAndroid, ConfigApple, Voie};
 use asl_loop_tokio::{Annuaire, Comptes, configuration_tls, servir_quic};
 use asl_registre::{AliasRange, Provenance};
 use asl_store::Entrepot;
@@ -165,11 +165,24 @@ async fn lever_avec_bail(
         bail,
         asl_auth::Politique::AttestationFacultative,
         None,
+        None,
     )
     .await
 }
 
-/// La plus générale : on choisit la posture et la configuration Apple.
+/// Ce que l'annuaire dit à son journal d'exploitation, pour les essais qui
+/// veulent lire la cause d'un refus.
+static JOURNAL: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn journaliser(ligne: &str) {
+    JOURNAL
+        .lock()
+        .expect("le journal n'est pas empoisonné")
+        .push(ligne.to_owned());
+}
+
+/// La plus générale : on choisit la posture et les configurations
+/// d'attestation.
 async fn lever_complet(
     chaine: &[u8],
     cle: &[u8],
@@ -177,6 +190,7 @@ async fn lever_complet(
     bail: asl_proto::Bail,
     politique: asl_auth::Politique,
     apple: Option<ConfigApple<'static>>,
+    android: Option<ConfigAndroid<'static>>,
 ) -> (
     SocketAddr,
     tokio::sync::oneshot::Sender<()>,
@@ -205,9 +219,12 @@ async fn lever_complet(
             &tirer,
             &nommer,
             politique,
-            apple,
+            Attestations { apple, android },
             bail,
-            asl_loop_tokio::h3::Voie::AUCUNE,
+            Voie {
+                journal: &journaliser,
+                ..Voie::AUCUNE
+            },
         );
         let arret = async {
             let _ = entendre_stop.await;
@@ -1347,20 +1364,61 @@ async fn creer_un_compte(
     (compte, appareil, secrete)
 }
 
+/// La capture réelle du Fairphone 5 — `docs/attestation/captures/
+/// keystore-fp5-2026-09-16/` : une case qui porte la feuille et le premier
+/// intermédiaire, et la racine de Google.
+///
+/// **Pas la chaîne entière** : le harnais `ams-quic-client` scelle chaque
+/// requête dans UN paquet, et les 3 421 octets de la chaîne n'y tiennent pas.
+/// La feuille et l'intermédiaire de TEE font 1 193 octets, et suffisent à ce
+/// que cet essai prouve — que la plate-forme `2` arrive bien à
+/// `asl_keystore::verifier`, sous les réglages de l'exploitant, et que le
+/// refus se journalise avec sa cause. La chaîne entière, elle, remonte à
+/// Google dans les essais d'`asl-keystore`.
+fn capture_android() -> (Vec<u8>, Vec<u8>) {
+    let dossier = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/attestation/captures/keystore-fp5-2026-09-16");
+    let certificats: Vec<Vec<u8>> = (0..4)
+        .map(|i| std::fs::read(dossier.join(format!("cert{i}.der"))).expect("la capture"))
+        .collect();
+    let case =
+        asl_keystore::case::assembler(&[&certificats[0], &certificats[1]]).expect("la case tient");
+    (case, certificats[3].clone())
+}
+
 #[tokio::test]
 async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
     // **CE QUE CET ESSAI PROUVE** : une attestation déclarée mais invalide ne
-    // crée pas de compte. L'annuaire est configuré avec une app Apple, donc il
-    // ESSAIE de vérifier — et échoue, parce que ces octets ne remontent pas à
-    // la racine d'Apple. Google, lui, n'est pas écrit. Les deux rendent `403` :
-    // la règle refuse, ce n'est pas une panne (`500`). La possession, elle, est
-    // bien prouvée : c'est l'attestation seule qui fait tomber la création.
+    // crée pas de compte, et le journal d'exploitation dit pourquoi. L'annuaire
+    // est configuré pour Apple ET pour Android (la racine de Google, le paquet
+    // et l'empreinte du Fairphone 5), donc il ESSAIE de vérifier — et échoue :
+    // les octets d'Apple ne remontent pas à sa racine ; la chaîne du Fairphone
+    // 5, amputée de ce que le harnais ne sait pas porter, ne remonte pas à
+    // Google. L'invitation n'est pas servie. Les trois rendent `403` : la règle refuse,
+    // ce n'est pas une panne (`500`). La possession, elle, est bien prouvée :
+    // c'est l'attestation seule qui fait tomber la création.
     let (autorite, racine, chaine, cle) = materiel("attest");
     let (base, fichier) = entrepot("attest");
     let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
     let apple = Some(ConfigApple {
         identifiant_app: "ABCDE12345.ch.narro.essai",
         environnement: asl_apple::Environnement::Production,
+    });
+    let (case_reelle, google) = capture_android();
+    let racines: &'static [Vec<u8>] = Box::leak(vec![google].into_boxed_slice());
+    let mut signataire = [0_u8; 32];
+    for (place, paire) in signataire.iter_mut().zip(
+        "5ea316f1b50f2ce54b8225aba85ff5cc8238a710b8fae44b4f3a195aadeb5f68"
+            .as_bytes()
+            .chunks(2),
+    ) {
+        *place = u8::from_str_radix(std::str::from_utf8(paire).expect("ascii"), 16)
+            .expect("hexadécimal");
+    }
+    let android = Some(ConfigAndroid {
+        racines,
+        paquet: "org.airdesktop.servicelocator",
+        signataire,
     });
     let (adresse, dire_stop, tache) = lever_complet(
         &chaine,
@@ -1369,14 +1427,31 @@ async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
         bail,
         asl_auth::Politique::AttestationFacultative,
         apple,
+        android,
     )
     .await;
     let mut client = connecter(&racine, adresse).await;
 
-    for (rang, plateforme) in [PlateformeAttestation::Apple, PlateformeAttestation::Google]
-        .into_iter()
-        .enumerate()
-    {
+    let cas: [(PlateformeAttestation, &[u8], &str); 3] = [
+        // Des octets qui ne sont même pas une attestation : peu importe, la
+        // chaîne ne remonte de toute façon pas à Apple.
+        (
+            PlateformeAttestation::Apple,
+            &[0xA5, 0x01, 0x02, 0x03, 0x04],
+            "attestation refusée : Apple, ",
+        ),
+        (
+            PlateformeAttestation::Android,
+            &case_reelle,
+            "attestation refusée : Android, chaîne refusée",
+        ),
+        (
+            PlateformeAttestation::Invitation,
+            b"4K9M2P7R1T",
+            "attestation refusée : invitation, pas encore servie",
+        ),
+    ];
+    for (rang, (plateforme, attestation, cause)) in cas.into_iter().enumerate() {
         let flux_defi = (rang as u64).saturating_mul(8);
         let flux_post = flux_defi.saturating_add(4);
         let defi = tirer_le_defi(&mut client, flux_defi).await;
@@ -1388,11 +1463,9 @@ async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
             plateforme,
             cle: &secrete.publique().octets(),
             preuve: preuve.octets(),
-            // Des octets qui ne sont même pas une attestation : peu importe, la
-            // chaîne ne remonte de toute façon pas à Apple.
-            attestation: &[0xA5, 0x01, 0x02, 0x03, 0x04],
+            attestation,
         };
-        let mut tampon = [0_u8; 256];
+        let mut tampon = [0_u8; asl_api::corps::COMPTE_CORPS_MAX];
         let n = objet.encoder(&mut tampon).expect("un corps bien formé");
         let (statut, _) = poster(
             &mut client,
@@ -1403,6 +1476,17 @@ async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
         )
         .await;
         assert_eq!(statut, b"403", "{plateforme:?} aurait dû être refusée");
+        // **LE JOURNAL DIT LA CAUSE, SANS L'ATTESTATION.** C'est ce que
+        // l'exploitant lit ; une chaîne de certificats n'y a pas sa place.
+        let journal = JOURNAL.lock().expect("le journal n'est pas empoisonné");
+        let ligne = journal
+            .iter()
+            .rev()
+            .find(|ligne| ligne.starts_with("attestation refusée"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(ligne.starts_with(cause), "{plateforme:?} : « {ligne} »");
+        assert!(ligne.len() < 200, "le journal ne porte pas l'attestation");
     }
 
     let _ = dire_stop.send(());

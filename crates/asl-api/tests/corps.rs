@@ -1766,7 +1766,8 @@ fn un_appareil_rendu_fait_l_aller_et_le_retour() {
     for attestation in [
         PlateformeAttestation::Aucune,
         PlateformeAttestation::Apple,
-        PlateformeAttestation::Google,
+        PlateformeAttestation::Android,
+        PlateformeAttestation::Invitation,
     ] {
         for revoque in [false, true] {
             let avant = un_appareil_rendu(attestation, revoque);
@@ -2101,7 +2102,13 @@ mod compte {
             CreationDeCompte::decoder(&corps(2, &[9]))
                 .unwrap()
                 .plateforme,
-            PlateformeAttestation::Google
+            PlateformeAttestation::Android
+        );
+        assert_eq!(
+            CreationDeCompte::decoder(&corps(3, &[9]))
+                .unwrap()
+                .plateforme,
+            PlateformeAttestation::Invitation
         );
     }
 
@@ -2110,7 +2117,8 @@ mod compte {
         for (plateforme, attestation) in [
             (PlateformeAttestation::Aucune, &[][..]),
             (PlateformeAttestation::Apple, &[0xA5, 1, 2, 3][..]),
-            (PlateformeAttestation::Google, &[0xFF; 500][..]),
+            (PlateformeAttestation::Android, &[0xFF; 500][..]),
+            (PlateformeAttestation::Invitation, &[0x41; 10][..]),
         ] {
             let objet = CreationDeCompte {
                 plateforme,
@@ -2172,7 +2180,7 @@ mod compte {
 
     #[test]
     fn une_plateforme_inconnue_est_refusee() {
-        for octet in [3_u8, 4, 200, 255] {
+        for octet in [4_u8, 5, 200, 255] {
             assert_eq!(
                 CreationDeCompte::decoder(&corps(octet, &[9])),
                 Err(Erreur::PlateformeInconnue { octet })

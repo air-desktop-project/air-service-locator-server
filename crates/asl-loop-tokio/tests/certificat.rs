@@ -111,3 +111,35 @@ fn une_cle_qui_n_est_pas_celle_du_certificat_est_refusée() {
 
     let _ = std::fs::remove_dir_all(&autorite);
 }
+
+#[test]
+fn la_racine_de_google_expediee_en_exemple_se_lit_et_est_bien_celle_de_la_capture() {
+    // `paquet/racines-android/google.pem` est ce que l'exploitant épinglera
+    // par `--android-roots` : ses commentaires ne gênent pas la lecture, et
+    // son DER est octet pour octet `cert3.der` de la capture.
+    let dossier = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pem = std::fs::read(dossier.join("paquet/racines-android/google.pem")).expect("le PEM");
+    let racines = asl_loop_tokio::racines_depuis_pem(&pem).expect("un PEM lisible");
+    let cert3 =
+        std::fs::read(dossier.join("docs/attestation/captures/keystore-fp5-2026-09-16/cert3.der"))
+            .expect("la capture");
+    assert_eq!(racines, vec![cert3]);
+
+    // Deux certificats dans un fichier : deux racines.
+    let deux = [pem.clone(), pem].concat();
+    assert_eq!(
+        asl_loop_tokio::racines_depuis_pem(&deux)
+            .expect("deux certificats")
+            .len(),
+        2
+    );
+    // Un fichier sans certificat est une faute, pas une liste vide.
+    assert!(asl_loop_tokio::racines_depuis_pem(b"# rien\n").is_err());
+    // Un bloc abîmé aussi.
+    assert!(
+        asl_loop_tokio::racines_depuis_pem(
+            b"-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n"
+        )
+        .is_err()
+    );
+}

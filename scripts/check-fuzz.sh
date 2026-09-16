@@ -103,7 +103,7 @@ fuzz_asl_store_application application
 fuzz_asl_attest_objet attestation
 fuzz_asl_apple_verifier apple
 fuzz_asl_jwt jwt
-fuzz_asl_play play
+fuzz_asl_keystore keystore
 TABLE
 )
 

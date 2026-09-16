@@ -284,7 +284,9 @@ fuzz_target!(|octets: &[u8]| {
                 "une plate-forme Aucune ne doit rien traîner : {} octets",
                 compte.attestation.len()
             ),
-            PlateformeAttestation::Apple | PlateformeAttestation::Google => assert!(
+            PlateformeAttestation::Apple
+            | PlateformeAttestation::Android
+            | PlateformeAttestation::Invitation => assert!(
                 !compte.attestation.is_empty(),
                 "une plate-forme déclarée sans attestation a été acceptée"
             ),

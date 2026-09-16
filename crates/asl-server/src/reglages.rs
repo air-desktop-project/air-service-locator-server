@@ -75,6 +75,23 @@ pub struct Reglages {
     /// la comparer. Un annuaire `optional` sans configuration Apple crée donc
     /// des comptes sans attestation, et refuse ceux qui en présentent une.
     pub apple: Option<ReglageApple>,
+    /// De quoi vérifier une attestation de clé Android, si l'exploitant l'a
+    /// fournie (`protocole.md` §2.1, décidé le 2026-09-16 ; C19).
+    ///
+    /// # TROIS RÉGLAGES, ET LA RACINE EN EST UN
+    ///
+    /// Contrairement à Apple, dont la racine vit dans le binaire, **la racine
+    /// d'une attestation Android est un fichier que l'exploitant épingle**
+    /// (`--android-roots`, un PEM, répétable) : celle de Google pour les
+    /// Android certifiés, celle de GrapheneOS, la sienne. Le dépôt en expédie
+    /// en exemple sous `paquet/racines-android/`, et n'en impose aucune. Avec
+    /// elle, le paquet de notre app (`--android-app`) et l'empreinte SHA-256
+    /// du certificat qui signe la build (`--android-signer`).
+    ///
+    /// **Sans ces trois réglages, aucune attestation Android ne peut être
+    /// vérifiée** : un compte qui en déclare une est alors refusé, comme pour
+    /// Apple.
+    pub android: Option<ReglageAndroid>,
     /// Le fichier de la clé d'identité Ed25519 de cette racine
     /// (`--identity-key`), si elle en a une.
     ///
@@ -132,6 +149,19 @@ pub struct ReglageApple {
     pub environnement: asl_apple::Environnement,
 }
 
+/// De quoi vérifier une attestation de clé Android.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReglageAndroid {
+    /// Les fichiers PEM des racines épinglées (`--android-roots`), un au
+    /// moins ; un fichier peut porter plusieurs certificats.
+    pub racines: Vec<PathBuf>,
+    /// Le nom du paquet de notre app (`--android-app`).
+    pub paquet: String,
+    /// L'empreinte SHA-256 du certificat de signature de la build
+    /// (`--android-signer`), décodée.
+    pub signataire: [u8; 32],
+}
+
 /// Ce qui empêche de lire les réglages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Faute {
@@ -155,6 +185,11 @@ pub enum Faute {
     EnvironnementInconnu(String),
     /// `--apple-app` et `--apple-environment` ne vont pas l'un sans l'autre.
     AppleIncomplet,
+    /// `--android-roots`, `--android-app` et `--android-signer` ne vont pas
+    /// les uns sans les autres.
+    AndroidIncomplet,
+    /// `--android-signer` n'est pas une empreinte SHA-256 en hexadécimal.
+    SignataireInvalide(String),
     /// `--peer`, `--peer-key` et `--peer-ca` ne vont pas les uns sans les
     /// autres.
     PairIncomplet,
@@ -202,6 +237,15 @@ impl core::fmt::Display for Faute {
             Self::AppleIncomplet => sortie.write_str(
                 "--apple-app et --apple-environment se donnent ensemble, ou pas du tout",
             ),
+            Self::AndroidIncomplet => sortie.write_str(
+                "--android-roots, --android-app et --android-signer se donnent ensemble, \
+                 ou pas du tout",
+            ),
+            Self::SignataireInvalide(quoi) => write!(
+                sortie,
+                "--android-signer attend une empreinte SHA-256, 64 chiffres hexadécimaux, \
+                 et non « {quoi} »"
+            ),
             Self::PairIncomplet => sortie
                 .write_str("--peer, --peer-key et --peer-ca se donnent ensemble, ou pas du tout"),
             Self::PairSansIdentite => sortie.write_str(
@@ -237,6 +281,10 @@ asl-server — an air-service-locator service directory.
   --attestation  <required|optional>                             (required)
   --apple-app    <id>       the Apple app identifier             (with the env.)
   --apple-environment <production|development>                   (with the app)
+  --android-roots <path>    a PEM file of pinned Android attestation roots;
+                            repeatable, one file may hold several certificates
+  --android-app  <package>  the Android package name             (with the roots)
+  --android-signer <sha256> the hex SHA-256 of the APK signing certificate
   --identity-key <path>     this root's Ed25519 identity key, 32 raw bytes
   --peer         <host:port> the other root                      (with --peer-key)
   --peer-key     <path>     the other root's public identity key, 32 raw bytes
@@ -246,10 +294,12 @@ asl-server — an air-service-locator service directory.
   --version                 print the version and commit, then exit
   --help                    this
 
-`--attestation` HAS NO DEFAULT, AND THAT IS DELIBERATE. Platform attestation
-verification has never been confirmed against a real device: `required` may
-therefore refuse EVERY device enrollment, and `optional` lets anyone create an
-account. Neither can be chosen on your behalf.
+`--attestation` HAS NO DEFAULT, AND THAT IS DELIBERATE. `required` refuses every
+device enrollment unless the matching platform is configured — `--apple-app` and
+`--apple-environment` together for App Attest, `--android-roots`, `--android-app`
+and `--android-signer` together for the Android key attestation —, and
+`optional` lets anyone create an account. Neither can be chosen on your behalf.
+No third party is ever called: the Android roots are files you pin.
 
 The socket is DUAL-STACK: IPv6 first, IPv4 accepted on the same socket.
 The directory REFUSES to start as root — it needs no privilege at all.
@@ -307,6 +357,9 @@ impl Reglages {
         let mut politique = None;
         let mut apple_app: Option<String> = None;
         let mut apple_env: Option<asl_apple::Environnement> = None;
+        let mut android_racines: Vec<PathBuf> = Vec::new();
+        let mut android_paquet: Option<String> = None;
+        let mut android_signataire: Option<[u8; 32]> = None;
         let mut identite = None;
         let mut pair_adresse: Option<String> = None;
         let mut pair_cle: Option<PathBuf> = None;
@@ -348,6 +401,9 @@ impl Reglages {
                         autre => return Err(Faute::EnvironnementInconnu(autre.to_owned())),
                     });
                 }
+                "--android-roots" => android_racines.push(PathBuf::from(valeur()?.as_ref())),
+                "--android-app" => android_paquet = Some(valeur()?.as_ref().to_owned()),
+                "--android-signer" => android_signataire = Some(empreinte(valeur()?.as_ref())?),
                 "--identity-key" => identite = Some(PathBuf::from(valeur()?.as_ref())),
                 "--peer" => pair_adresse = Some(adresse_de_pair(valeur()?.as_ref())?),
                 "--peer-key" => pair_cle = Some(PathBuf::from(valeur()?.as_ref())),
@@ -381,6 +437,23 @@ impl Reglages {
                 }),
                 (None, None) => None,
                 _ => return Err(Faute::AppleIncomplet),
+            },
+            // **LES TROIS VONT ENSEMBLE, OU PAS DU TOUT.** Une racine sans app
+            // ne dit pas quelle app doit tenir la clé ; une app sans racine
+            // ne remonte à rien ; et sans l'empreinte, n'importe quelle build
+            // du même nom de paquet passerait.
+            android: match (
+                android_racines.is_empty(),
+                android_paquet,
+                android_signataire,
+            ) {
+                (false, Some(paquet), Some(signataire)) => Some(ReglageAndroid {
+                    racines: android_racines,
+                    paquet,
+                    signataire,
+                }),
+                (true, None, None) => None,
+                _ => return Err(Faute::AndroidIncomplet),
             },
             // **ILS VONT ENSEMBLE** (`replication.md` §8) : une adresse seule
             // n'est pas une racine, une clé seule ne se joint pas, une autorité
@@ -476,6 +549,22 @@ fn adresse_de_pair(donnee: &str) -> Result<String, Faute> {
     Ok(donnee.to_owned())
 }
 
+/// Lit une empreinte SHA-256 en hexadécimal — 64 chiffres, comme `apksigner
+/// verify --print-certs` l'imprime, avec ou sans deux-points entre les octets.
+fn empreinte(donnee: &str) -> Result<[u8; 32], Faute> {
+    let invalide = || Faute::SignataireInvalide(donnee.to_owned());
+    let propre: String = donnee.chars().filter(|c| *c != ':').collect();
+    if propre.len() != 64 {
+        return Err(invalide());
+    }
+    let mut sortie = [0_u8; 32];
+    for (place, paire) in sortie.iter_mut().zip(propre.as_bytes().chunks(2)) {
+        let texte = core::str::from_utf8(paire).map_err(|_| invalide())?;
+        *place = u8::from_str_radix(texte, 16).map_err(|_| invalide())?;
+    }
+    Ok(sortie)
+}
+
 /// Lit un nombre, ou dit lequel n'en était pas un.
 fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute> {
     donnee.parse().map_err(|_| Faute::PasUnNombre {
@@ -486,7 +575,7 @@ fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute
 
 #[cfg(test)]
 mod tests {
-    use super::{Faute, ReglageApple, ReglagePair, Reglages};
+    use super::{Faute, ReglageAndroid, ReglageApple, ReglagePair, Reglages};
 
     /// Les quatre réglages obligatoires, et rien d'autre.
     fn minimum() -> Vec<String> {
@@ -580,6 +669,113 @@ mod tests {
                 .is_empty()
         );
         assert!(!Faute::AppleIncomplet.to_string().is_empty());
+    }
+
+    #[test]
+    fn sans_reglage_android_il_n_y_en_a_pas() {
+        let lus = Reglages::depuis(minimum()).expect("le minimum suffit");
+        assert_eq!(lus.android, None);
+    }
+
+    #[test]
+    fn les_trois_reglages_android_forment_une_configuration() {
+        let lus = Reglages::depuis(avec(&[
+            "--android-roots",
+            "/racines/google.pem",
+            "--android-app",
+            "org.airdesktop.servicelocator",
+            "--android-signer",
+            "5ea316f1b50f2ce54b8225aba85ff5cc8238a710b8fae44b4f3a195aadeb5f68",
+            "--android-roots",
+            "/racines/grapheneos.pem",
+        ]))
+        .expect("une configuration complète");
+        let mut signataire = [0_u8; 32];
+        signataire[0] = 0x5e;
+        signataire[1] = 0xa3;
+        signataire[31] = 0x68;
+        let android = lus.android.expect("Android est réglé");
+        assert_eq!(
+            android.racines,
+            vec![
+                std::path::PathBuf::from("/racines/google.pem"),
+                std::path::PathBuf::from("/racines/grapheneos.pem")
+            ]
+        );
+        assert_eq!(android.paquet, "org.airdesktop.servicelocator");
+        assert_eq!(android.signataire[..2], signataire[..2]);
+        assert_eq!(android.signataire[31], signataire[31]);
+        // L'empreinte s'accepte aussi comme `apksigner` l'imprime, avec des
+        // deux-points, et en majuscules.
+        let deux_points = Reglages::depuis(avec(&[
+            "--android-roots",
+            "/r.pem",
+            "--android-app",
+            "a.b",
+            "--android-signer",
+            "5E:A3:16:F1:B5:0F:2C:E5:4B:82:25:AB:A8:5F:F5:CC:82:38:A7:10:B8:FA:E4:4B:4F:3A:19:5A:AD:EB:5F:68",
+        ]))
+        .expect("les deux-points sont ignorés");
+        assert_eq!(
+            deux_points.android.map(|a| a.signataire),
+            Some(android.signataire)
+        );
+        assert_eq!(
+            android,
+            ReglageAndroid {
+                racines: android.racines.clone(),
+                paquet: android.paquet.clone(),
+                signataire: android.signataire,
+            }
+        );
+    }
+
+    #[test]
+    fn un_reglage_android_sans_les_deux_autres_est_refuse() {
+        for incomplet in [
+            &["--android-roots", "/r.pem"][..],
+            &["--android-app", "a.b"][..],
+            &["--android-signer", &"00".repeat(32)][..],
+            &["--android-roots", "/r.pem", "--android-app", "a.b"][..],
+            &["--android-app", "a.b", "--android-signer", &"00".repeat(32)][..],
+        ] {
+            assert_eq!(
+                Reglages::depuis(avec(incomplet)).map(|_| ()),
+                Err(Faute::AndroidIncomplet),
+                "{incomplet:?}"
+            );
+        }
+        assert!(!Faute::AndroidIncomplet.to_string().is_empty());
+    }
+
+    #[test]
+    fn une_empreinte_de_signataire_mal_formee_est_refusee() {
+        for mauvaise in [
+            "",
+            "5ea3",
+            &"0".repeat(63),
+            &"zz".repeat(32),
+            &"é".repeat(64),
+        ] {
+            assert_eq!(
+                Reglages::depuis(avec(&[
+                    "--android-roots",
+                    "/r.pem",
+                    "--android-app",
+                    "a.b",
+                    "--android-signer",
+                    mauvaise,
+                ]))
+                .map(|_| ()),
+                Err(Faute::SignataireInvalide(mauvaise.to_owned())),
+                "« {mauvaise} »"
+            );
+        }
+        assert!(
+            Faute::SignataireInvalide("x".to_owned())
+                .to_string()
+                .contains("SHA-256")
+        );
     }
 
     #[test]

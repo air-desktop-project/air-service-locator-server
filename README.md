@@ -155,6 +155,26 @@ cargo run -p asl-server -- … \
     --peer-ca      local/ca/racine.crt                # l'autorité de la cérémonie
 ```
 
+**L'attestation de clé des Android** (`docs/protocole.md` §2.1, C19) se
+vérifie hors ligne, contre des racines que VOUS épinglez — des fichiers PEM,
+jamais un service appelé :
+
+```sh
+cargo run -p asl-server -- … \
+    --android-roots  paquet/racines-android/google.pem \   # répétable
+    --android-app    org.airdesktop.servicelocator \
+    --android-signer 5ea316f1b50f2ce54b8225aba85ff5cc8238a710b8fae44b4f3a195aadeb5f68
+```
+
+Les trois vont ensemble, comme `--apple-app` et `--apple-environment` pour App
+Attest. L'empreinte est celle du certificat qui signe la build de l'app
+(`apksigner verify --print-certs`) — celle ci-dessus est la build de
+**débogage** du Fairphone 5 ; la build de release en a une autre. Sans ces
+réglages, un appareil qui présente une attestation Android est refusé, et le
+journal d'exploitation dit pourquoi. `paquet/racines-android/google.pem` est la
+racine de Google, telle que la capture réelle l'a rendue ; aucune n'est
+épinglée par défaut.
+
 Les quatre vont ensemble. Sans `--identity-key`, la racine tourne seule et le
 dit au démarrage. Chacune ouvre une connexion sortante vers l'autre et y **tire
 sans fin** ce que l'autre a écrit ; une écriture faite chez l'une est chez
@@ -270,7 +290,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.8.2_amd64.deb
+sudo dpkg -i asl-server_0.9.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
@@ -314,12 +334,28 @@ coûté une heure à comprendre, et la seconde vaut pour tout système :
 choses qu'un paquet ne peut pas décider :
 
 1. **La posture d'attestation**, qui n'a pas de défaut (`protocole.md` §2.1).
-   `required` refuse TOUS les enrôlements tant que la vérification n'est pas
-   écrite ; `optional` laisse n'importe qui créer un compte. Elle se pose par
+   `required` refuse TOUS les enrôlements tant qu'aucune plate-forme n'est
+   configurée ; `optional` laisse n'importe qui créer un compte. Elle se pose par
    `systemctl edit asl-server`, et le modèle est expédié sous
    `/usr/share/doc/asl-server/attestation.conf.exemple`.
 2. **Le certificat**, émis pour le nom sous lequel cet annuaire répond, à poser
    en `/etc/asl-server/certificat.pem` et `/etc/asl-server/cle.pem`.
+
+Et une troisième, **facultative** : les racines d'attestation Android. Le paquet
+expédie celle de Google sous `/usr/share/doc/asl-server/racines-android/google.pem`
+et **n'en épingle aucune** (C19) — copiez-la sous `/etc/asl-server/`, vérifiez
+son empreinte (en tête du fichier), et posez les trois réglages dans un drop-in
+sur le modèle de `/usr/share/doc/asl-server/android.conf.exemple` :
+
+```sh
+systemctl edit asl-server
+# [Service]
+# Environment="ASL_ANDROID=--android-roots /etc/asl-server/racines-android/google.pem --android-app org.airdesktop.servicelocator --android-signer <SHA-256 de la signature de la build>"
+```
+
+L'affectation est **citée en entier**, comme celle de la réplication, et pour
+la même raison. Vide, `$ASL_ANDROID` laisse la racine refuser les attestations
+Android en le disant au journal.
 
 Tant que la première manque, le service échoue en disant `--attestation attend
 une valeur` — un message qui nomme exactement ce qu'il reste à décider. Un paquet
