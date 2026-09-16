@@ -562,6 +562,8 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
     // `nitrogen` d'abord — l'adresse de son pair ne sert pas encore, et c'est
     // dit : la connexion sortante est la tranche suivante. `argon` ensuite,
     // avec la vraie adresse de `nitrogen`.
+    let racine_ca = autorite.join("racine.crt");
+    let ca = racine_ca.to_str().expect("utf-8");
     let (mut nitrogen, ou_nitrogen) = lancer_avec(
         &autorite,
         &base_nitrogen,
@@ -572,9 +574,16 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
             "127.0.0.1:6630",
             "--peer-key",
             pub_argon.to_str().expect("utf-8"),
+            "--peer-ca",
+            ca,
         ],
     );
     let vers_nitrogen = SocketAddr::from(([127, 0, 0, 1], ou_nitrogen.port()));
+    // **LES DEUX POINTENT SUR UN PORT MORT**, et c'est voulu : cet essai éprouve
+    // le côté SERVI de la voie avec un FAUX tireur (le harnais `ams-quic-client`
+    // ci-dessous). Les vrais tireurs des deux binaires ne doivent donc tirer de
+    // personne — sinon `argon` répliquerait l'entrepôt de `nitrogen`, et son
+    // instantané ne serait plus vide. Ils rappellent 6630 sans fin, sans effet.
     let (mut argon, ou_argon) = lancer_avec(
         &autorite,
         &base_argon,
@@ -582,9 +591,11 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
             "--identity-key",
             cle_argon.to_str().expect("utf-8"),
             "--peer",
-            &vers_nitrogen.to_string(),
+            "127.0.0.1:6630",
             "--peer-key",
             pub_nitrogen.to_str().expect("utf-8"),
+            "--peer-ca",
+            ca,
         ],
     );
     let vers_argon = SocketAddr::from(([127, 0, 0, 1], ou_argon.port()));
@@ -856,6 +867,8 @@ fn un_pair_sans_identite_refuse_de_demarrer() {
             "argon.air-desktop.org:6630",
             "--peer-key",
             "/tmp/argon.pub",
+            "--peer-ca",
+            "/tmp/racine.crt",
         ])
         .output()
         .expect("le binaire se lance");
@@ -865,4 +878,290 @@ fn un_pair_sans_identite_refuse_de_demarrer() {
         dit.contains("--identity-key"),
         "il doit nommer ce qui manque : {dit}"
     );
+}
+
+// ── La réplication, de bout en bout : le TIREUR réel (`replication.md` §3) ───
+
+/// Un client qui parle à cet annuaire, la poignée de main faite.
+async fn client_vers(vers: SocketAddr, racine_tls: &[u8]) -> ams_quic_client::Client {
+    let mut client =
+        ams_quic_client::Client::new(ams_quic_client::config_client(racine_tls), vers).await;
+    poignee(&mut client).await;
+    client
+}
+
+/// Prouve la clé d'un appareil (P-256) sur cette connexion, sur ce flux.
+async fn prouver_appareil(
+    client: &mut ams_quic_client::Client,
+    appareil: Identifiant,
+    secrete: &asl_cle::CleSecreteAppareil,
+    flux: u64,
+) {
+    let defi = un_defi(client, flux).await;
+    let signature = secrete
+        .signer(appareil, &defi, &liaison_du_client(client))
+        .expect("l'appareil signe");
+    let mut preuve = Vec::with_capacity(81);
+    preuve.push(Genre::Appareil.prefixe());
+    preuve.extend_from_slice(appareil.octets());
+    preuve.extend_from_slice(signature.octets());
+    let suivant = flux.saturating_add(4);
+    ams_quic_client::envoyer_avec_media(
+        client,
+        suivant,
+        20,
+        b"/v1/defi",
+        None,
+        &preuve,
+        b"application/octet-stream",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(client, suivant).await;
+    assert_eq!(statut(client, suivant), "204", "l'appareil s'authentifie");
+}
+
+/// Lit `GET /v1/alias/{alias}` chez cet annuaire, et rend son corps si `200`.
+async fn alias_chez(vers: SocketAddr, racine_tls: &[u8], alias: &str) -> Option<String> {
+    let mut client = client_vers(vers, racine_tls).await;
+    ams_quic_client::envoyer_une_requete(
+        &mut client,
+        0,
+        17,
+        format!("/v1/alias/{alias}").as_bytes(),
+        None,
+        b"",
+    )
+    .await;
+    let corps = ams_quic_client::attendre_la_reponse(&mut client, 0).await;
+    (statut(&client, 0) == "200").then(|| String::from_utf8_lossy(&corps).into_owned())
+}
+
+/// Réessaie cette vérification asynchrone jusqu'à ce qu'elle tienne, ou échoue.
+///
+/// **LA RÉPLICATION EST À MOINS D'UNE SECONDE VOIE OUVERTE**, mais le tireur se
+/// connecte en arrière-plan et recule à chaque échec : on lui laisse le temps
+/// de s'établir plutôt que de fixer un délai unique.
+macro_rules! attendre {
+    ($etiquette:expr, $corps:block) => {{
+        let depart = std::time::Instant::now();
+        loop {
+            if $corps {
+                break;
+            }
+            assert!(
+                depart.elapsed() < std::time::Duration::from_secs(30),
+                "{} n'est pas advenu à temps",
+                $etiquette
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }};
+}
+
+#[tokio::test]
+async fn la_replication_de_bout_en_bout() {
+    // **DEUX BINAIRES, CHACUN `--peer` DE L'AUTRE, ET LE TIREUR QUI TOURNE.**
+    // `nitrogen` est garni avant le lancement ; `argon` part vide et s'amorce
+    // de lui. On éprouve la chaîne entière : connexion sortante, deux preuves,
+    // rattrapage, application, flux vivant, et l'effet d'une révocation.
+    let (autorite, racine_tls) = materiel("bout");
+    let (cle_nitrogen, pub_nitrogen, _sn, publique_nitrogen) = identite("e2e-nitrogen");
+    let (cle_argon, pub_argon, _sa, _publique_argon) = identite("e2e-argon");
+
+    let base_nitrogen =
+        std::env::temp_dir().join(format!("asl-bin-{}-e2e-nitrogen.redb", std::process::id()));
+    let base_argon =
+        std::env::temp_dir().join(format!("asl-bin-{}-e2e-argon.redb", std::process::id()));
+    let _ = std::fs::remove_file(&base_nitrogen);
+    let _ = std::fs::remove_file(&base_argon);
+
+    let thierry = Identifiant::depuis_entropie(Genre::Utilisateur, [0x11; 16]);
+    let iphone = Identifiant::depuis_entropie(Genre::Appareil, [0x22; 16]);
+    let grenier = Identifiant::depuis_entropie(Genre::Machine, [0x33; 16]);
+    let secrete_iphone =
+        asl_cle::CleSecreteAppareil::depuis_entropie([0x44; 32]).expect("un scalaire valide");
+    let secrete_grenier = CleSecrete::depuis_entropie([0x55; 32]);
+    {
+        let entrepot = Entrepot::ouvrir(&base_nitrogen, identifiant_de_racine(&publique_nitrogen))
+            .expect("un entrepôt");
+        entrepot
+            .creer_compte(
+                thierry,
+                Provenance::Ici,
+                Some(AliasRange::nouveau("thierry").unwrap()),
+            )
+            .expect("compte");
+        entrepot
+            .creer_appareil(
+                iphone,
+                Provenance::Ici,
+                thierry,
+                secrete_iphone.publique().octets(),
+                asl_registre::Attestation::Aucune,
+            )
+            .expect("appareil");
+        entrepot
+            .creer_machine(
+                grenier,
+                Provenance::Ici,
+                thierry,
+                asl_registre::NomRange::nouveau("grenier").unwrap(),
+                asl_registre::Capacites {
+                    annonce: true,
+                    lecture: true,
+                },
+            )
+            .expect("machine");
+        let code = asl_cle::CodeEnrolement::analyser("4K9M2P7R1T")
+            .unwrap()
+            .empreinte();
+        entrepot
+            .emettre_enrolement(&code, Provenance::Ici, grenier, u64::MAX)
+            .expect("code");
+        let enrolement = entrepot.consommer_enrolement(&code).unwrap().unwrap();
+        entrepot
+            .lier_cle(
+                grenier,
+                secrete_grenier.publique().octets(),
+                code,
+                enrolement.estampille,
+            )
+            .expect("clé");
+    }
+
+    let ca = autorite.join("racine.crt");
+    let ca = ca.to_str().expect("utf-8");
+    // **NITROGEN D'ABORD**, pour connaître son port — c'est chez lui qu'argon
+    // tire. Nitrogen part avec une adresse de pair provisoire (son propre
+    // tireur vers argon n'importe pas ici : toutes les écritures de l'essai se
+    // font chez lui, et c'est argon qui les tire) ; ce qui compte est que sa
+    // `--peer-key` soit celle d'argon, pour vérifier argon quand il se présente.
+    let (mut nitrogen, ou_nitrogen) = lancer_avec(
+        &autorite,
+        &base_nitrogen,
+        &[
+            "--identity-key",
+            cle_nitrogen.to_str().unwrap(),
+            "--peer-key",
+            pub_argon.to_str().unwrap(),
+            "--peer-ca",
+            ca,
+            "--peer",
+            "127.0.0.1:6630",
+        ],
+    );
+    let vers_nitrogen = SocketAddr::from(([127, 0, 0, 1], ou_nitrogen.port()));
+    let (mut argon, ou_argon) = lancer_avec(
+        &autorite,
+        &base_argon,
+        &[
+            "--identity-key",
+            cle_argon.to_str().unwrap(),
+            "--peer-key",
+            pub_nitrogen.to_str().unwrap(),
+            "--peer-ca",
+            ca,
+            "--peer",
+            &vers_nitrogen.to_string(),
+        ],
+    );
+    let vers_argon = SocketAddr::from(([127, 0, 0, 1], ou_argon.port()));
+
+    // ── 1. UN COMPTE CRÉÉ CHEZ NITROGEN EST LU CHEZ ARGON ───────────────────
+    attendre!("le compte de nitrogen chez argon", {
+        alias_chez(vers_argon, &racine_tls, "thierry")
+            .await
+            .is_some_and(|corps| corps.contains(thierry.texte().as_str()))
+    });
+
+    // ── 2. LA CLÉ DE GRENIER, ENRÔLÉE CHEZ NITROGEN, EST ACCEPTÉE CHEZ ARGON ─
+    attendre!("la clé de machine acceptée chez argon", {
+        let mut client = client_vers(vers_argon, &racine_tls).await;
+        prouver(&mut client, grenier, &secrete_grenier, 0).await == "204"
+    });
+
+    // ── 3. UN FLUX VIVANT : UN ALIAS POSÉ CHEZ NITROGEN ARRIVE CHEZ ARGON ────
+    {
+        let mut telephone = client_vers(vers_nitrogen, &racine_tls).await;
+        prouver_appareil(&mut telephone, iphone, &secrete_iphone, 0).await;
+        ams_quic_client::envoyer_une_requete(
+            &mut telephone,
+            8,
+            21, // PUT
+            b"/v1/alias",
+            None,
+            br#"{"alias":"grenier-hote"}"#,
+        )
+        .await;
+        let _ = ams_quic_client::attendre_la_reponse(&mut telephone, 8).await;
+        assert_eq!(
+            statut(&telephone, 8),
+            "204",
+            "l'alias est posé chez nitrogen"
+        );
+    }
+    attendre!("l'alias vivant chez argon", {
+        alias_chez(vers_argon, &racine_tls, "grenier-hote")
+            .await
+            .is_some_and(|corps| corps.contains(thierry.texte().as_str()))
+    });
+
+    // ── 4. UNE RÉVOCATION CHEZ NITROGEN FERME LA MACHINE TENUE CHEZ ARGON ────
+    //
+    // Une machine tient une connexion chez argon (clé prouvée). On révoque sa
+    // clé chez nitrogen ; la révocation se réplique, argon l'applique, et
+    // l'effet vivant ferme la connexion ici (§3.3) — la clé n'ouvre plus rien.
+    let mut tenue = client_vers(vers_argon, &racine_tls).await;
+    assert_eq!(
+        prouver(&mut tenue, grenier, &secrete_grenier, 0).await,
+        "204",
+        "la machine tient une connexion chez argon"
+    );
+    {
+        let mut telephone = client_vers(vers_nitrogen, &racine_tls).await;
+        prouver_appareil(&mut telephone, iphone, &secrete_iphone, 0).await;
+        let cible = format!("/v1/machines/{}/cle", grenier.texte());
+        ams_quic_client::envoyer_une_requete(
+            &mut telephone,
+            8,
+            16, /* DELETE */
+            cible.as_bytes(),
+            None,
+            b"",
+        )
+        .await;
+        let _ = ams_quic_client::attendre_la_reponse(&mut telephone, 8).await;
+        assert_eq!(
+            statut(&telephone, 8),
+            "204",
+            "la clé est révoquée chez nitrogen"
+        );
+    }
+    // La révocation appliquée chez argon : une NOUVELLE preuve de grenier y est
+    // désormais refusée.
+    attendre!("la clé révoquée refusée chez argon", {
+        let mut client = client_vers(vers_argon, &racine_tls).await;
+        prouver(&mut client, grenier, &secrete_grenier, 8).await == "401"
+    });
+    // Et la connexion qu'elle TENAIT chez argon tombe : le transport se ferme.
+    attendre!("la connexion tenue tombe chez argon", {
+        tenue.parler().await;
+        !tenue.ecouter().await
+    });
+
+    let _ = nitrogen.kill();
+    let _ = nitrogen.wait();
+    let _ = argon.kill();
+    let _ = argon.wait();
+    let _ = std::fs::remove_dir_all(&autorite);
+    for fichier in [
+        &base_nitrogen,
+        &base_argon,
+        &cle_nitrogen,
+        &pub_nitrogen,
+        &cle_argon,
+        &pub_argon,
+    ] {
+        let _ = std::fs::remove_file(fichier);
+    }
 }

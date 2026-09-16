@@ -52,6 +52,7 @@ pub mod pont;
 pub mod privileges;
 pub mod quic;
 pub mod sonde;
+pub mod tireur;
 pub mod vivier;
 
 pub use h3::Annuaire;
@@ -60,6 +61,7 @@ pub use privileges::{EstRoot, refuser_root};
 pub use quic::{
     Application, Comptes, GRACE_EXTINCTION_US, SansApplication, maintenant, servir_quic,
 };
+pub use tireur::Tireur;
 pub use vivier::Vivier;
 
 /// Monte la configuration TLS d'un annuaire, ALPN comprise.

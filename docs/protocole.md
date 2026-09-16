@@ -988,8 +988,12 @@ conflit, l'horloge, le rattrapage, la sécurité. Ce qui tient ici est ce qui se
 voit sur le fil.
 
 **Depuis 0.6.0, le côté SERVI est écrit** : les deux preuves, les deux flux,
-et l'exigence qui les garde. Le côté qui TIRE — la connexion sortante, le
-curseur qui avance, l'application des opérations — est la tranche suivante.
+et l'exigence qui les garde. **Depuis 0.7.0, le côté qui TIRE l'est aussi** :
+la connexion sortante vers `--peer`, les deux preuves prouvées dans l'autre
+sens, le curseur qui avance dans la transaction qui applique, et l'application
+des opérations avec la règle de conflit de [`replication.md`](replication.md)
+§3.2. Une racine qui a `--peer` tire chez l'autre sans fin, et reprend depuis
+son curseur à chaque rupture (§1.5).
 
 **Le même port, le même transport.** La voie est une ressource de plus sous
 `/v1`, avec une exigence que seule une clé d'identité de racine satisfait ; il

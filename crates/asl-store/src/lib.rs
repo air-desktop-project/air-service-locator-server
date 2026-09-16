@@ -561,6 +561,67 @@ pub enum Rattrapage {
     },
 }
 
+/// Les effets sur l'état VIVANT d'une opération appliquée (`docs/replication.md`
+/// §3.3).
+///
+/// # CE QUI EST VIVANT SE REJOUE, CE QUI EST PARTI NE REPART PAS
+///
+/// Appliquer une opération venue de l'autre racine produit les mêmes effets sur
+/// l'état vivant qu'une écriture locale : une clé de machine révoquée ferme les
+/// connexions de cette machine ICI, une capacité `annonce` retirée fait tomber
+/// ses baux ICI, un appareil révoqué ferme les siennes. **L'entrepôt ne tient
+/// pas les connexions** — c'est la boucle qui les tient —, donc il ne peut pas
+/// fermer lui-même : il NOMME ce qu'il faut fermer, et la boucle le fait, comme
+/// pour une révocation locale.
+///
+/// **Et AUCUN effet vers l'extérieur** : la notification d'une autorisation part
+/// de la racine qui a pris l'écriture, jamais de celle qui l'applique. Il n'y a
+/// donc rien ici pour cela.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EffetsVivants {
+    /// Les machines et appareils dont les connexions doivent tomber ici : une
+    /// clé de machine révoquée, une capacité `annonce` retirée, un appareil
+    /// révoqué. La boucle les compare au pair authentifié de chaque connexion
+    /// (`asl_session::Session::pair`), comme pour une révocation locale.
+    pub a_fermer: Vec<Identifiant>,
+}
+
+/// Pourquoi une opération a été refusée (`docs/replication.md` §3, §5.3, §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotifDeRefus {
+    /// Son compteur ne dépasse pas le curseur : c'est une relivraison, et la
+    /// règle d'application est idempotente — on la saute sans bruit (§5.3).
+    Recule,
+    /// Elle porte NOTRE propre identifiant de racine : c'est un rejeu de ce que
+    /// nous avons écrit, revenu par la voie. Il n'y a pas de réplication
+    /// transitive (§5.1), donc cela ne devrait pas arriver — on le journalise.
+    Rejeu,
+    /// Son enregistrement n'est pas de provenance locale : C11 ne laisse passer
+    /// que `locale` entre racines (§7). Refusée et journalisée.
+    HorsProvenance,
+}
+
+/// Ce qu'une application de cadre a donné (`docs/replication.md` §3, §5.3-5.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Applique {
+    /// L'opération a été appliquée : le curseur du pair est à ce compteur, et
+    /// voici ce qu'il faut fermer ici.
+    Faite {
+        /// Le compteur auquel le curseur du pair est désormais.
+        curseur: u64,
+        /// Ce que l'application ferme ici.
+        effets: EffetsVivants,
+    },
+    /// C'était le cadre de fin d'un instantané : le curseur reprend là.
+    Fin {
+        /// Le compteur de coupe — c'est là que `GET /v1/pair/operations`
+        /// reprend.
+        curseur: u64,
+    },
+    /// L'opération a été refusée, et pour cette raison. Le curseur n'avance pas.
+    Refusee(MotifDeRefus),
+}
+
 /// Ce qu'un instantané accumule : des cadres, dans l'ordre d'émission.
 #[derive(Default)]
 struct Suite {
@@ -638,7 +699,27 @@ impl Entrepot {
     /// [`Faute::Format`] s'il est d'un format inconnu, [`Faute::Enregistrement`]
     /// si une base ancienne porte un enregistrement illisible.
     pub fn ouvrir(chemin: &Path, racine: Identifiant) -> Result<Self, Faute> {
-        let base = Database::create(chemin)?;
+        Self::amorcer(Database::create(chemin)?, racine)
+    }
+
+    /// Un entrepôt EN MÉMOIRE, qui ne touche aucun fichier.
+    ///
+    /// **POUR LES ESSAIS ET LE FUZZ, ET RIEN D'AUTRE** : l'application des
+    /// opérations se pilote sans disque, et le fuzz en fait des milliers par
+    /// seconde là où un `fsync` par transaction en ferait quelques centaines.
+    /// La règle est la même — c'est le support qui change.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] si la base en mémoire refuse.
+    pub fn en_memoire(racine: Identifiant) -> Result<Self, Faute> {
+        let base =
+            Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
+        Self::amorcer(base, racine)
+    }
+
+    /// Prépare les tables et lit le compteur, quel que soit le support.
+    fn amorcer(base: Database, racine: Identifiant) -> Result<Self, Faute> {
         {
             let ecriture = base.begin_write()?;
             let format = {
@@ -2388,6 +2469,98 @@ impl Entrepot {
         Ok(())
     }
 
+    // ── L'application d'une opération reçue (`docs/replication.md` §3, §5.3) ─
+
+    /// Applique un cadre venu de ce pair, et dit ce qu'il faut fermer ici.
+    ///
+    /// # TOUT SE PASSE DANS UNE SEULE TRANSACTION
+    ///
+    /// `docs/replication.md` §5.3 : « le tireur applique chaque opération et
+    /// avance son curseur dans la même transaction ». C'est ce qui rend la
+    /// relivraison sans effet — une coupure entre les deux relivre l'opération,
+    /// et la règle d'application est idempotente. La transaction, ici :
+    ///
+    /// 1. **vérifie la provenance** — C11 ne laisse passer que `locale` (§7) ;
+    /// 2. **vérifie l'estampille** — refuse ce qui recule (relivraison,
+    ///    idempotente) ou porte NOTRE propre identifiant de racine (rejeu) ;
+    /// 3. **applique la règle de conflit** de §3.2 pour le genre ;
+    /// 4. **écrit SANS journaliser** — l'écriture distante ne repart pas (§5.1) ;
+    /// 5. **hisse le compteur** au-dessus de l'estampille (§4) ;
+    /// 6. **avance le curseur** du pair.
+    ///
+    /// # DEUX MODES, ET LA DIFFÉRENCE EST L'ANTI-REJEU
+    ///
+    /// `instantane` distingue le flux des opérations de l'amorçage (§5.4). Le
+    /// flux ne porte que ce que le pair a écrit LUI-MÊME, donc jamais notre
+    /// identifiant ni un compteur qui recule ; on refuse l'un et l'autre.
+    /// L'instantané, lui, rend les estampilles d'ORIGINE — « de l'une ou l'autre
+    /// racine » —, y compris les nôtres d'avant une perte, que l'on doit
+    /// réappliquer pour reconstruire ; on ne refuse alors ni le rejeu ni le
+    /// recul, et le curseur ne bouge qu'au cadre de fin.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn appliquer(
+        &self,
+        pair: Identifiant,
+        cadre: &Cadre,
+        instantane: bool,
+    ) -> Result<Applique, Faute> {
+        let (estampille, operation) = match cadre {
+            // Le cadre de fin d'un instantané : le curseur reprend à la coupe,
+            // et le compteur se hisse au-dessus d'elle.
+            Cadre::Fin { coupe } => {
+                let ecriture = self.base.begin_write()?;
+                {
+                    hisser_dans(&ecriture, coupe.compteur)?;
+                    avancer_le_curseur(&ecriture, pair, coupe.compteur)?;
+                }
+                ecriture.commit()?;
+                return Ok(Applique::Fin {
+                    curseur: coupe.compteur,
+                });
+            }
+            Cadre::Operation {
+                estampille,
+                operation,
+            } => (*estampille, operation),
+        };
+
+        // 1. La provenance : C11 ne laisse passer que `locale` entre racines.
+        if provenance_de(operation).is_some_and(|quoi| quoi != Provenance::Ici) {
+            return Ok(Applique::Refusee(MotifDeRefus::HorsProvenance));
+        }
+        // 2. L'estampille — mais l'instantané rend les estampilles d'origine, y
+        //    compris les nôtres, et ne recule pas au sens du curseur.
+        if !instantane {
+            if estampille.racine == self.racine {
+                return Ok(Applique::Refusee(MotifDeRefus::Rejeu));
+            }
+            if estampille.compteur <= self.curseur(pair)? {
+                return Ok(Applique::Refusee(MotifDeRefus::Recule));
+            }
+        }
+
+        let ecriture = self.base.begin_write()?;
+        let mut effets = EffetsVivants::default();
+        {
+            appliquer_dans(&ecriture, estampille, operation, &mut effets)?;
+            // 5. Le compteur se hisse au-dessus de l'estampille appliquée (§4).
+            hisser_dans(&ecriture, estampille.compteur)?;
+            // 6. Le curseur avance — mais pas pendant un instantané, où c'est le
+            //    cadre de fin qui le pose (à la coupe).
+            if !instantane {
+                avancer_le_curseur(&ecriture, pair, estampille.compteur)?;
+            }
+        }
+        ecriture.commit()?;
+        Ok(Applique::Faite {
+            curseur: if instantane { 0 } else { estampille.compteur },
+            effets,
+        })
+    }
+
     // ── La rupture de confiance (C17) ───────────────────────────────────────
 
     /// Efface tout ce qui vient de cet annuaire, et rend combien.
@@ -2553,6 +2726,623 @@ impl Entrepot {
         ecriture.commit()?;
         Ok(combien)
     }
+}
+
+// ── L'application d'une opération, cas par cas (`docs/replication.md` §3.2) ──
+//
+// Ces fonctions vivent HORS de l'`impl` parce qu'elles écrivent dans une
+// transaction qu'on leur prête, et ne touchent au compteur ni au curseur : la
+// méthode [`Entrepot::appliquer`] les encadre.
+
+/// Hisse le compteur de la racine au-dessus de ce compteur, dans cette
+/// transaction (`docs/replication.md` §4).
+fn hisser_dans(ecriture: &WriteTransaction, jusqu_a: u64) -> Result<(), Faute> {
+    let mut table = ecriture.open_table(RACINE)?;
+    let courant = table.get(CLEF_DU_COMPTEUR)?.map_or(0, |quoi| quoi.value());
+    if jusqu_a > courant {
+        table.insert(CLEF_DU_COMPTEUR, jusqu_a)?;
+    }
+    Ok(())
+}
+
+/// Avance le curseur de ce pair, dans cette transaction — jamais en arrière.
+fn avancer_le_curseur(
+    ecriture: &WriteTransaction,
+    pair: Identifiant,
+    compteur: u64,
+) -> Result<(), Faute> {
+    let mut table = ecriture.open_table(CURSEURS)?;
+    let courant = table
+        .get(clef(pair).as_slice())?
+        .map_or(0, |quoi| quoi.value());
+    if compteur > courant {
+        table.insert(clef(pair).as_slice(), compteur)?;
+    }
+    Ok(())
+}
+
+/// La provenance de l'enregistrement que porte cette opération, s'il en porte
+/// un. Les opérations qui ne nomment qu'un identifiant (révocation, alias,
+/// `PATCH`) n'ont pas de provenance à vérifier.
+fn provenance_de(operation: &Operation) -> Option<Provenance> {
+    match operation {
+        Operation::Compte { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::Appareil { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::Description { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::Poussee { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::Machine { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::Enrolement { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::Service { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::Autorisation { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::Alias { .. }
+        | Operation::AppareilRevoque { .. }
+        | Operation::MachineModifiee { .. }
+        | Operation::CleMachine { .. }
+        | Operation::CleMachineRevoquee { .. }
+        | Operation::AutorisationRevoquee { .. } => None,
+    }
+}
+
+/// Applique cette opération dans cette transaction, sous cette estampille,
+/// selon la règle de conflit de son genre — et note ce qu'il faut fermer ici.
+///
+/// **Chaque règle est une fonction de l'ENSEMBLE des opérations, pas de leur
+/// ordre** (`docs/replication.md` §3.1) : ce qui remplace va au plus récent par
+/// estampille, ce qui est unique va au plus ancien, une révocation est un
+/// tombeau. Deux racines qui ont tout vu obtiennent le même entrepôt, quel que
+/// soit l'ordre — et c'est l'essai des permutations qui le tient.
+fn appliquer_dans(
+    ecriture: &WriteTransaction,
+    estampille: Estampille,
+    operation: &Operation,
+    effets: &mut EffetsVivants,
+) -> Result<(), Faute> {
+    match operation {
+        Operation::Compte {
+            compte,
+            enregistrement,
+        } => appliquer_compte(ecriture, *compte, enregistrement),
+        Operation::Alias { compte, alias } => {
+            appliquer_alias(ecriture, *compte, alias.as_ref(), estampille)
+        }
+        Operation::Appareil {
+            appareil,
+            enregistrement,
+        } => appliquer_appareil(ecriture, *appareil, enregistrement),
+        Operation::AppareilRevoque { appareil } => {
+            appliquer_appareil_revoque(ecriture, *appareil, estampille, effets)
+        }
+        Operation::Description {
+            appareil,
+            enregistrement,
+        } => appliquer_description(ecriture, *appareil, enregistrement),
+        Operation::Poussee {
+            appareil,
+            enregistrement,
+        } => appliquer_poussee(ecriture, *appareil, enregistrement),
+        Operation::Machine {
+            machine,
+            enregistrement,
+        } => appliquer_machine(ecriture, *machine, enregistrement),
+        Operation::MachineModifiee {
+            machine,
+            nom,
+            capacites,
+        } => appliquer_machine_modifiee(ecriture, *machine, *nom, *capacites, estampille, effets),
+        Operation::Enrolement {
+            empreinte,
+            enregistrement,
+        } => appliquer_enrolement(ecriture, empreinte, enregistrement),
+        Operation::CleMachine {
+            machine,
+            cle,
+            empreinte,
+            code,
+        } => appliquer_cle_machine(ecriture, *machine, *cle, empreinte, *code, estampille),
+        Operation::CleMachineRevoquee { machine, cle } => {
+            appliquer_cle_revoquee(ecriture, *machine, *cle, estampille, effets)
+        }
+        Operation::Service {
+            service,
+            enregistrement,
+        } => appliquer_service(ecriture, *service, enregistrement),
+        Operation::Autorisation {
+            autorisation,
+            enregistrement,
+        } => appliquer_autorisation(ecriture, *autorisation, enregistrement),
+        Operation::AutorisationRevoquee { autorisation } => {
+            appliquer_autorisation_revoquee(ecriture, *autorisation, estampille)
+        }
+    }
+}
+
+/// `compte` — insérer si absent, et poser sa réclamation d'alias initiale
+/// (`docs/replication.md` §5.2). Un compte créé AVEC un alias arrive en une
+/// seule opération : c'est ici que sa réclamation entre à l'index.
+fn appliquer_compte(
+    ecriture: &WriteTransaction,
+    qui: Identifiant,
+    enregistrement: &Compte,
+) -> Result<(), Faute> {
+    let clef_compte = clef(qui);
+    let mut comptes = ecriture.open_table(COMPTES)?;
+    if comptes.get(clef_compte.as_slice())?.is_some() {
+        return Ok(());
+    }
+    let compte = Compte {
+        provenance: Provenance::Ici,
+        ..*enregistrement
+    };
+    let mut octets = [0_u8; COMPTE_OCTETS];
+    compte.ecrire(&mut octets);
+    comptes.insert(clef_compte.as_slice(), &octets)?;
+    if let Some(alias) = &compte.alias {
+        let mut reclamations = ecriture.open_table(ALIAS)?;
+        reclamations.insert(
+            clef_de_reclamation(alias.octets(), compte.reclamation).as_slice(),
+            clef_compte.as_slice(),
+        )?;
+    }
+    Ok(())
+}
+
+/// `alias` — la réclamation courante du compte, au plus récent
+/// (`docs/replication.md` §3.2). L'index garde TOUTES les réclamations, et le
+/// titulaire est la plus ancienne ; changer la sienne, c'est retirer l'ancienne
+/// et poser la neuve.
+fn appliquer_alias(
+    ecriture: &WriteTransaction,
+    qui: Identifiant,
+    alias: Option<&AliasRange>,
+    estampille: Estampille,
+) -> Result<(), Faute> {
+    let clef_compte = clef(qui);
+    let mut comptes = ecriture.open_table(COMPTES)?;
+    let ancien = match comptes.get(clef_compte.as_slice())? {
+        Some(brut) => Compte::lire(brut.value())?,
+        // Le compte n'existe pas encore — son opération `compte` viendra, et
+        // portera sa réclamation de création. Rien à faire ici.
+        None => return Ok(()),
+    };
+    // **LE PLUS RÉCENT GAGNE** : une réclamation plus ancienne que celle qu'on
+    // tient déjà ne change rien. C'est ce qui rend la règle indépendante de
+    // l'ordre — deux réclamations d'un même compte convergent vers la plus
+    // grande estampille.
+    if estampille <= ancien.reclamation {
+        return Ok(());
+    }
+    let mut reclamations = ecriture.open_table(ALIAS)?;
+    if let Some(parti) = &ancien.alias {
+        reclamations.remove(clef_de_reclamation(parti.octets(), ancien.reclamation).as_slice())?;
+    }
+    let compte = Compte {
+        provenance: Provenance::Ici,
+        estampille: ancien.estampille.max(estampille),
+        alias: alias.copied(),
+        reclamation: estampille,
+    };
+    let mut octets = [0_u8; COMPTE_OCTETS];
+    compte.ecrire(&mut octets);
+    comptes.insert(clef_compte.as_slice(), &octets)?;
+    if let Some(voulu) = alias {
+        reclamations.insert(
+            clef_de_reclamation(voulu.octets(), estampille).as_slice(),
+            clef_compte.as_slice(),
+        )?;
+    }
+    Ok(())
+}
+
+/// `appareil` — insérer si absent (`docs/replication.md` §5.2).
+fn appliquer_appareil(
+    ecriture: &WriteTransaction,
+    quel: Identifiant,
+    enregistrement: &Appareil,
+) -> Result<(), Faute> {
+    let clef_appareil = clef(quel);
+    let mut table = ecriture.open_table(APPAREILS)?;
+    if table.get(clef_appareil.as_slice())?.is_some() {
+        return Ok(());
+    }
+    let appareil = Appareil {
+        provenance: Provenance::Ici,
+        ..*enregistrement
+    };
+    let mut octets = [0_u8; APPAREIL_OCTETS];
+    appareil.ecrire(&mut octets);
+    table.insert(clef_appareil.as_slice(), &octets)?;
+    let mut par_compte = ecriture.open_table(APPAREILS_PAR_COMPTE)?;
+    par_compte.insert(
+        paire(appareil.proprietaire, quel).as_slice(),
+        clef_appareil.as_slice(),
+    )?;
+    Ok(())
+}
+
+/// `appareil-revoque` — marquer, retirer le jeton, TOUJOURS
+/// (`docs/replication.md` §5.2) ; et fermer les connexions de cet appareil ici
+/// (§3.3).
+fn appliquer_appareil_revoque(
+    ecriture: &WriteTransaction,
+    quel: Identifiant,
+    estampille: Estampille,
+    effets: &mut EffetsVivants,
+) -> Result<(), Faute> {
+    let clef_appareil = clef(quel);
+    let mut table = ecriture.open_table(APPAREILS)?;
+    let avant = match table.get(clef_appareil.as_slice())? {
+        Some(brut) => Appareil::lire(brut.value())?,
+        None => return Ok(()),
+    };
+    let mut octets = [0_u8; APPAREIL_OCTETS];
+    Appareil {
+        estampille: avant.estampille.max(estampille),
+        revoque: true,
+        ..avant
+    }
+    .ecrire(&mut octets);
+    table.insert(clef_appareil.as_slice(), &octets)?;
+    ecriture
+        .open_table(POUSSEES)?
+        .remove(clef_appareil.as_slice())?;
+    effets.a_fermer.push(quel);
+    Ok(())
+}
+
+/// `description` — le plus récent (`docs/replication.md` §5.2).
+fn appliquer_description(
+    ecriture: &WriteTransaction,
+    appareil: Identifiant,
+    enregistrement: &Description,
+) -> Result<(), Faute> {
+    let clef_appareil = clef(appareil);
+    let mut table = ecriture.open_table(DESCRIPTIONS)?;
+    if let Some(brut) = table.get(clef_appareil.as_slice())?
+        && Description::lire(brut.value())?.estampille >= enregistrement.estampille
+    {
+        return Ok(());
+    }
+    let description = Description {
+        provenance: Provenance::Ici,
+        ..*enregistrement
+    };
+    let mut octets = [0_u8; DESCRIPTION_OCTETS];
+    description.ecrire(&mut octets);
+    table.insert(clef_appareil.as_slice(), &octets)?;
+    Ok(())
+}
+
+/// `poussee` — le plus récent ; refusé si l'appareil est révoqué
+/// (`docs/replication.md` §5.2). Une poussée sur un appareil révoqué ne se pose
+/// pas, et c'est ce qui la rend convergente avec la révocation : celle-ci a
+/// retiré le jeton, celle-là ne le remet pas.
+fn appliquer_poussee(
+    ecriture: &WriteTransaction,
+    appareil: Identifiant,
+    enregistrement: &JetonPoussee,
+) -> Result<(), Faute> {
+    let clef_appareil = clef(appareil);
+    match ecriture
+        .open_table(APPAREILS)?
+        .get(clef_appareil.as_slice())?
+    {
+        Some(brut) if !Appareil::lire(brut.value())?.revoque => {}
+        _ => return Ok(()),
+    }
+    let mut table = ecriture.open_table(POUSSEES)?;
+    if let Some(brut) = table.get(clef_appareil.as_slice())?
+        && JetonPoussee::lire(brut.value())?.estampille >= enregistrement.estampille
+    {
+        return Ok(());
+    }
+    let poussee = JetonPoussee {
+        provenance: Provenance::Ici,
+        ..*enregistrement
+    };
+    let mut octets = [0_u8; POUSSEE_OCTETS];
+    poussee.ecrire(&mut octets);
+    table.insert(clef_appareil.as_slice(), &octets)?;
+    Ok(())
+}
+
+/// `machine` — insérer si absent, sans clé (`docs/replication.md` §5.2). Le nom
+/// et les capacités de création sont ceux de l'enregistrement ; les `PATCH`
+/// suivants les mènent, champ par champ.
+fn appliquer_machine(
+    ecriture: &WriteTransaction,
+    quelle: Identifiant,
+    enregistrement: &Machine,
+) -> Result<(), Faute> {
+    let clef_machine = clef(quelle);
+    let mut machines = ecriture.open_table(MACHINES)?;
+    if machines.get(clef_machine.as_slice())?.is_some() {
+        return Ok(());
+    }
+    let machine = Machine {
+        provenance: Provenance::Ici,
+        cle: None,
+        ..*enregistrement
+    };
+    let mut octets = [0_u8; MACHINE_OCTETS];
+    machine.ecrire(&mut octets);
+    machines.insert(clef_machine.as_slice(), &octets)?;
+    let mut par_compte = ecriture.open_table(MACHINES_PAR_COMPTE)?;
+    par_compte.insert(
+        paire(machine.proprietaire, quelle).as_slice(),
+        clef_machine.as_slice(),
+    )?;
+    Ok(())
+}
+
+/// `machine-modifiee` — le plus récent, CHAMP PAR CHAMP (`docs/replication.md`
+/// §3.2). Le nom a son estampille, les capacités la leur ; chacune ne bouge que
+/// pour une estampille plus grande. Retirer `annonce` ferme les connexions de
+/// cette machine ici (§3.3).
+fn appliquer_machine_modifiee(
+    ecriture: &WriteTransaction,
+    quelle: Identifiant,
+    nom: Option<NomRange>,
+    capacites: Option<Capacites>,
+    estampille: Estampille,
+    effets: &mut EffetsVivants,
+) -> Result<(), Faute> {
+    let clef_machine = clef(quelle);
+    let mut machines = ecriture.open_table(MACHINES)?;
+    let avant = match machines.get(clef_machine.as_slice())? {
+        Some(brut) => Machine::lire(brut.value())?,
+        None => return Ok(()),
+    };
+    let mut apres = avant;
+    apres.provenance = Provenance::Ici;
+    apres.estampille = avant.estampille.max(estampille);
+    if let Some(nom) = nom
+        && estampille > avant.nom_estampille
+    {
+        apres.nom = nom;
+        apres.nom_estampille = estampille;
+    }
+    let mut perd_l_annonce = false;
+    if let Some(capacites) = capacites
+        && estampille > avant.capacites_estampille
+    {
+        perd_l_annonce = avant.annonce && !capacites.annonce;
+        apres.annonce = capacites.annonce;
+        apres.lecture = capacites.lecture;
+        apres.capacites_estampille = estampille;
+    }
+    let mut octets = [0_u8; MACHINE_OCTETS];
+    apres.ecrire(&mut octets);
+    machines.insert(clef_machine.as_slice(), &octets)?;
+    if perd_l_annonce {
+        effets.a_fermer.push(quelle);
+    }
+    Ok(())
+}
+
+/// `enrolement` — le code courant de la machine, le plus récent ; le précédent
+/// s'efface (`docs/replication.md` §5.2).
+fn appliquer_enrolement(
+    ecriture: &WriteTransaction,
+    empreinte: &[u8; EMPREINTE_OCTETS],
+    enregistrement: &Enrolement,
+) -> Result<(), Faute> {
+    let clef_machine = clef(enregistrement.machine);
+    let mut index = ecriture.open_table(ENROLEMENTS_PAR_MACHINE)?;
+    let mut codes = ecriture.open_table(ENROLEMENTS)?;
+    if let Some(ancienne) = index.get(clef_machine.as_slice())? {
+        let ancienne = ancienne.value().to_vec();
+        if let Some(brut) = codes.get(ancienne.as_slice())? {
+            // **LE PLUS RÉCENT GAGNE** : un code plus ancien que celui qu'on
+            // tient déjà pour cette machine ne le remplace pas.
+            if Enrolement::lire(brut.value())?.estampille >= enregistrement.estampille {
+                return Ok(());
+            }
+        }
+        codes.remove(ancienne.as_slice())?;
+    }
+    let enrolement = Enrolement {
+        provenance: Provenance::Ici,
+        ..*enregistrement
+    };
+    let mut octets = [0_u8; ENROLEMENT_OCTETS];
+    enrolement.ecrire(&mut octets);
+    codes.insert(empreinte.as_slice(), &octets)?;
+    index.insert(clef_machine.as_slice(), empreinte.as_slice())?;
+    Ok(())
+}
+
+/// `cle-machine` — supprimer le code s'il est là ; lier la clé selon §3.2 : le
+/// code le plus récemment ÉMIS gagne, puis la première consommation
+/// (`docs/replication.md` §3.2, §5.2).
+fn appliquer_cle_machine(
+    ecriture: &WriteTransaction,
+    quelle: Identifiant,
+    cle: [u8; CLE_OCTETS],
+    empreinte: &[u8; EMPREINTE_OCTETS],
+    code: Estampille,
+    estampille: Estampille,
+) -> Result<(), Faute> {
+    let clef_machine = clef(quelle);
+    let mut machines = ecriture.open_table(MACHINES)?;
+    let avant = match machines.get(clef_machine.as_slice())? {
+        Some(brut) => Machine::lire(brut.value())?,
+        None => return Ok(()),
+    };
+    // Le code est consommé : on le retire s'il est là. Dans un instantané, son
+    // empreinte est nulle et il n'y a rien à retirer (le code n'existe plus).
+    {
+        let mut codes = ecriture.open_table(ENROLEMENTS)?;
+        if codes.remove(empreinte.as_slice())?.is_some() {
+            let mut index = ecriture.open_table(ENROLEMENTS_PAR_MACHINE)?;
+            if index
+                .get(clef_machine.as_slice())?
+                .is_some_and(|quoi| quoi.value() == empreinte.as_slice())
+            {
+                index.remove(clef_machine.as_slice())?;
+            }
+        }
+    }
+    let candidate = CleLiee {
+        cle,
+        liaison: estampille,
+        code,
+    };
+    // **CODE LE PLUS RÉCENT, PUIS PREMIÈRE CONSOMMATION** : c'est un ordre
+    // total, donc la même clé gagne dans les deux ordres d'arrivée.
+    let gagne = match avant.cle {
+        None => true,
+        Some(tenue) => {
+            candidate.code > tenue.code
+                || (candidate.code == tenue.code && candidate.liaison < tenue.liaison)
+        }
+    };
+    let mut apres = Machine {
+        provenance: Provenance::Ici,
+        estampille: avant.estampille.max(estampille),
+        ..avant
+    };
+    if gagne {
+        apres.cle = Some(candidate);
+    }
+    let mut octets = [0_u8; MACHINE_OCTETS];
+    apres.ecrire(&mut octets);
+    machines.insert(clef_machine.as_slice(), &octets)?;
+    Ok(())
+}
+
+/// `cle-machine-revoquee` — retirer la clé si c'est bien celle-là ; fermer les
+/// connexions (`docs/replication.md` §5.2, §3.3).
+fn appliquer_cle_revoquee(
+    ecriture: &WriteTransaction,
+    quelle: Identifiant,
+    cle: [u8; CLE_OCTETS],
+    estampille: Estampille,
+    effets: &mut EffetsVivants,
+) -> Result<(), Faute> {
+    let clef_machine = clef(quelle);
+    let mut machines = ecriture.open_table(MACHINES)?;
+    let avant = match machines.get(clef_machine.as_slice())? {
+        Some(brut) => Machine::lire(brut.value())?,
+        None => return Ok(()),
+    };
+    let etait_la = avant.cle.is_some_and(|liee| liee.cle == cle);
+    let mut apres = Machine {
+        provenance: Provenance::Ici,
+        estampille: avant.estampille.max(estampille),
+        ..avant
+    };
+    if etait_la {
+        apres.cle = None;
+    }
+    let mut octets = [0_u8; MACHINE_OCTETS];
+    apres.ecrire(&mut octets);
+    machines.insert(clef_machine.as_slice(), &octets)?;
+    // **TOUJOURS** : la connexion tombe même si la clé était déjà partie — c'est
+    // une révocation, et ce qui est vivant se rejoue (§3.3).
+    effets.a_fermer.push(quelle);
+    Ok(())
+}
+
+/// `service` — insérer ; si `(machine, nom)` est déjà tenu, le plus ancien
+/// reste (`docs/replication.md` §3.2, §5.2).
+fn appliquer_service(
+    ecriture: &WriteTransaction,
+    quel: Identifiant,
+    enregistrement: &Service,
+) -> Result<(), Faute> {
+    let clef_service = clef(quel);
+    let clef_nom = clef_de_nom(enregistrement.machine, enregistrement.nom.octets());
+    let mut services = ecriture.open_table(SERVICES)?;
+    let mut par_nom = ecriture.open_table(SERVICES_PAR_NOM)?;
+
+    if let Some(tenu) = par_nom.get(clef_nom.as_slice())? {
+        let tenu = tenu.value().to_vec();
+        if tenu == clef_service.as_slice() {
+            return Ok(());
+        }
+        let estampille_tenu = match services.get(tenu.as_slice())? {
+            Some(brut) => Service::lire(brut.value())?.estampille,
+            None => Estampille {
+                compteur: u64::MAX,
+                racine: enregistrement.estampille.racine,
+            },
+        };
+        // **LE PLUS ANCIEN RESTE**, l'autre s'efface. Si l'entrant est plus
+        // ancien, il prend la place ; sinon il ne s'écrit pas du tout.
+        if enregistrement.estampille < estampille_tenu {
+            services.remove(tenu.as_slice())?;
+        } else {
+            return Ok(());
+        }
+    } else if services.get(clef_service.as_slice())?.is_some() {
+        // L'identifiant existe déjà sous un autre nom : un service ne bouge
+        // jamais, donc rien à faire.
+        return Ok(());
+    }
+
+    let service = Service {
+        provenance: Provenance::Ici,
+        ..*enregistrement
+    };
+    let mut octets = [0_u8; SERVICE_OCTETS];
+    service.ecrire(&mut octets);
+    services.insert(clef_service.as_slice(), &octets)?;
+    par_nom.insert(clef_nom.as_slice(), clef_service.as_slice())?;
+    Ok(())
+}
+
+/// `autorisation` — insérer si absent (`docs/replication.md` §5.2).
+fn appliquer_autorisation(
+    ecriture: &WriteTransaction,
+    quelle: Identifiant,
+    enregistrement: &Autorisation,
+) -> Result<(), Faute> {
+    let clef_autorisation = clef(quelle);
+    let mut table = ecriture.open_table(AUTORISATIONS)?;
+    if table.get(clef_autorisation.as_slice())?.is_some() {
+        return Ok(());
+    }
+    let autorisation = Autorisation {
+        provenance: Provenance::Ici,
+        ..*enregistrement
+    };
+    let mut octets = [0_u8; AUTORISATION_OCTETS];
+    autorisation.ecrire(&mut octets);
+    table.insert(clef_autorisation.as_slice(), &octets)?;
+    let mut recues = ecriture.open_table(AUTORISATIONS_RECUES)?;
+    recues.insert(
+        paire(autorisation.a, quelle).as_slice(),
+        clef_autorisation.as_slice(),
+    )?;
+    let mut accordees = ecriture.open_table(AUTORISATIONS_ACCORDEES)?;
+    accordees.insert(
+        paire(autorisation.par, quelle).as_slice(),
+        clef_autorisation.as_slice(),
+    )?;
+    Ok(())
+}
+
+/// `autorisation-revoquee` — marquer, TOUJOURS (`docs/replication.md` §5.2).
+fn appliquer_autorisation_revoquee(
+    ecriture: &WriteTransaction,
+    quelle: Identifiant,
+    estampille: Estampille,
+) -> Result<(), Faute> {
+    let clef_autorisation = clef(quelle);
+    let mut table = ecriture.open_table(AUTORISATIONS)?;
+    let avant = match table.get(clef_autorisation.as_slice())? {
+        Some(brut) => Autorisation::lire(brut.value())?,
+        None => return Ok(()),
+    };
+    let mut octets = [0_u8; AUTORISATION_OCTETS];
+    Autorisation {
+        estampille: avant.estampille.max(estampille),
+        revoquee: true,
+        ..avant
+    }
+    .ecrire(&mut octets);
+    table.insert(clef_autorisation.as_slice(), &octets)?;
+    Ok(())
 }
 
 /// Le titulaire de cet alias : la plus ancienne réclamation courante.
