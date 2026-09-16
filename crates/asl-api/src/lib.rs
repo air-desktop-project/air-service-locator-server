@@ -111,7 +111,9 @@ pub enum Exigence {
     /// Une machine portant la capacité `lecture`.
     MachineLecture,
     /// **Une machine, quelle que soit sa capacité** : ce qu'elle demande ne
-    /// porte que sur elle-même. Une seule ressource, `/v1/moi`.
+    /// porte sur aucun compte. Deux ressources, `/v1/moi` — qui je suis — et
+    /// `/v1/replication` — l'état de la voie entre racines, que l'exploitant
+    /// lit depuis une machine enrôlée.
     Machine,
     /// **Un appareil du compte, OU une machine portant `lecture`.**
     ///
@@ -364,6 +366,22 @@ pub enum Ressource<'a> {
     /// `/v1/pair/instantane` — **l'état entier en suite d'opérations, puis le
     /// compteur de coupe** (`replication.md` §5.4). Fini, lui.
     PairInstantane,
+    /// `/v1/replication` — **l'état de la voie entre racines, vu d'ici**
+    /// (`replication.md` §8) : le pair, la voie ouverte ou coupée, notre
+    /// compteur, et jusqu'où l'on a appliqué ce que le pair a écrit — ou
+    /// `seule`, sans pair.
+    ///
+    /// # SUR LA VOIE MACHINE, ET NON SANS EXIGENCE
+    ///
+    /// C'est la vérification de déploiement — « un compte créé chez l'une est
+    /// lu chez l'autre » demande une réponse au présent —, et l'exploitant la
+    /// pose depuis une machine enrôlée, ce qu'il a toujours sous la main.
+    /// **Elle ne se rend pas à un inconnu** : dire à qui le demande que la
+    /// voie est coupée, c'est lui dire l'heure exacte où une unicité — un
+    /// alias — se gagne sur une racine isolée (§3.2). Une machine, quelle que
+    /// soit sa capacité, comme [`Ressource::Moi`] : ce qu'elle lit ne porte
+    /// sur aucun compte.
+    Replication,
 }
 
 impl Ressource<'_> {
@@ -386,7 +404,8 @@ impl Ressource<'_> {
             | Self::Ou { .. }
             | Self::OuParNom { .. }
             | Self::PairOperations { .. }
-            | Self::PairInstantane => &[Methode::Get],
+            | Self::PairInstantane
+            | Self::Replication => &[Methode::Get],
             Self::PairPreuve => &[Methode::Post],
             Self::Appareil { .. }
             | Self::CleMachine { .. }
@@ -439,7 +458,7 @@ impl Ressource<'_> {
             | Self::Utilisateur { .. } => Exigence::Aucune,
             Self::Annonce | Self::Poussees => Exigence::MachineAnnonce,
             Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
-            Self::Moi => Exigence::Machine,
+            Self::Moi | Self::Replication => Exigence::Machine,
             Self::MachinesUtilisateur { .. } => Exigence::AppareilOuMachineLecture,
             Self::PairPreuve | Self::PairOperations { .. } | Self::PairInstantane => {
                 Exigence::Racine
@@ -756,6 +775,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "poussees"] => Ok(Ressource::Poussees),
         ["v1", "vu"] => Ok(Ressource::Vu),
         ["v1", "version"] => Ok(Ressource::Version),
+        ["v1", "replication"] => Ok(Ressource::Replication),
         ["v1", "autorisations"] => Ok(Ressource::Autorisations),
         ["v1", "autorisations", autorisation] => Ok(Ressource::Autorisation {
             autorisation: identifiant(autorisation, Genre::Autorisation)?,

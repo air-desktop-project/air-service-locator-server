@@ -142,7 +142,8 @@ cargo run -p asl-server -- \
 ```
 
 **Deux racines qui se répliquent** (`docs/replication.md`) tiennent chacune une
-clé d'identité, et la clé publique de l'autre :
+clé d'identité, la clé publique de l'autre, et l'autorité qui valide son
+certificat TLS :
 
 ```sh
 asl-server --new-identity-key local/nitrogen.key      # écrit .key (0600) et .key.pub,
@@ -150,13 +151,86 @@ asl-server --new-identity-key local/nitrogen.key      # écrit .key (0600) et .k
 cargo run -p asl-server -- … \
     --identity-key local/nitrogen.key \
     --peer         argon.air-desktop.org:6630 \
-    --peer-key     local/argon.key.pub                # le .pub de l'AUTRE
+    --peer-key     local/argon.key.pub \              # le .pub de l'AUTRE
+    --peer-ca      local/ca/racine.crt                # l'autorité de la cérémonie
 ```
 
-Les trois vont ensemble. Sans `--identity-key`, la racine tourne seule et le
-dit au démarrage. **Aujourd'hui, la voie est SERVIE et pas encore TIRÉE** :
-l'autre racine peut prouver sa clé et lire ici (`/v1/pair/…`), mais aucune
-connexion sortante n'est ouverte — c'est la tranche suivante.
+Les quatre vont ensemble. Sans `--identity-key`, la racine tourne seule et le
+dit au démarrage. Chacune ouvre une connexion sortante vers l'autre et y **tire
+sans fin** ce que l'autre a écrit ; une écriture faite chez l'une est chez
+l'autre en moins d'une seconde, voie ouverte. `GET /v1/replication`, **sur la
+voie machine**, rend l'état : `{"pair":"n-…","voie":"ouverte","compteur":…,
+"applique":…}`, ou `{"voie":"seule","compteur":…}` sans pair.
+
+### Mettre deux bancs en réplication
+
+Les bancs — `nitrogen` et `argon` — tournent en 0.4.x avec des bases sans
+estampille. La réplication les reprend sans rien perdre ; voici l'ordre exact.
+
+1. **Frappez l'identité de chaque banc, EN TANT QUE `asl-server`.** La clé est
+   lue par le service, qui tourne sous ce compte ; la frapper en `root` puis
+   oublier de la lui donner à lire est la faute la plus facile.
+
+   ```sh
+   sudo -u asl-server asl-server --new-identity-key /etc/asl-server/identite.key
+   # ou, si vous l'avez frappée en root :
+   sudo chown root:asl-server /etc/asl-server/identite.key* && sudo chmod 0640 /etc/asl-server/identite.key
+   ```
+
+   Le binaire imprime la clé publique (`identite.key.pub`) et l'identifiant
+   `n-…` qu'elle donne. **C'est ce `.pub` qu'on porte chez l'autre banc.**
+
+2. **Échangez les `.pub`** : `nitrogen/identite.key.pub` va chez `argon` en
+   `/etc/asl-server/pair.pub`, et réciproquement. Comparez les `n-…` imprimés à
+   l'œil — deux bancs qui parlent de la même clé impriment le même.
+
+3. **Posez `racine.crt`** — l'autorité de la cérémonie, celle que le client
+   épingle déjà (`scripts/ca.sh racine`) — en `/etc/asl-server/racine.crt` sur
+   les deux. C'est elle qui valide le certificat TLS d'en face (`--peer-ca`).
+
+4. **Le drop-in**, sur chaque banc, avec l'adresse de l'AUTRE :
+
+   ```sh
+   systemctl edit asl-server
+   # [Service]
+   # Environment=ASL_REPLICATION=--identity-key /etc/asl-server/identite.key --peer argon.air-desktop.org:6630 --peer-key /etc/asl-server/pair.pub --peer-ca /etc/asl-server/racine.crt
+   ```
+
+   Le modèle est expédié sous
+   `/usr/share/doc/asl-server/replication.conf.exemple`. **La ligne n'est pas
+   citée** : systemd la découpe sur les espaces, et les quatre `--peer…`
+   arrivent séparés.
+
+5. **Redémarrez, l'un puis l'autre** — l'ordre est sans importance, chacun
+   rappelle l'autre jusqu'à ce qu'il réponde. Au **premier** démarrage avec une
+   clé, chaque banc **ré-estampille** ce qu'il avait écrit sans identité (sous
+   `n-` seize zéros) sous son identité réelle, une fois, dans une transaction,
+   et le journal le dit avec le nombre :
+
+   ```
+   asl-server : 3 214 enregistrements et opérations estampillés sans identité (n-AAAA…) sont passés sous n-… — une fois, dans une transaction.
+   asl-server : voie vers argon… ouverte, prouvée dans les deux sens — état : ouverte
+   asl-server : … amorcé par instantané — … cadres, … octets, … parts
+   ```
+
+6. **Vérifiez.** `asl` n'a pas encore de verbe pour l'état de la voie ; on
+   interroge `GET /v1/replication` en brut, depuis une machine enrôlée (elle est
+   **sur la voie machine**, pas publique — elle ne se rend pas à un inconnu). Un
+   compte créé chez l'un doit se lire chez l'autre en une seconde, et
+   `"applique"` doit rejoindre `"compteur"`. Le chantier `asl replication` est
+   noté côté client.
+
+**La reprise et les doublons de comptes.** Les deux bancs ont créé des comptes
+CHACUN de leur côté (sur `nitrogen` et `argon` séparément), avec des
+identifiants tirés indépendamment : ce sont donc, presque sûrement, des comptes
+DIFFÉRENTS pour les mêmes personnes. La réplication ne les fusionne pas — un
+identifiant à 128 bits ne collisionne pas —, elle les additionne : après la
+première synchronisation, **chaque personne qui s'était inscrite sur les deux
+bancs a deux comptes**, chacun avec ses machines. Ce qui est départagé, c'est
+l'unicité : un **alias** réclamé des deux côtés va au compte dont la réclamation
+est la plus ancienne (`docs/replication.md` §3.2), et le perdant garde sa
+réclamation en file. Aucune donnée n'est perdue ; l'exploitant verra des
+comptes en double, et c'est à prévoir, pas à corriger dans le code.
 
 `asl-server --help` dit le reste. **La grammaire est en anglais** — options,
 valeurs, texte de l'aide — parce que c'est la langue universelle des outils en
@@ -183,7 +257,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.7.0_amd64.deb
+sudo dpkg -i asl-server_0.8.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :

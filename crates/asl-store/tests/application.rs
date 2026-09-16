@@ -612,6 +612,104 @@ fn le_flux_refuse_ce_qui_recule_et_notre_propre_racine() {
 }
 
 #[test]
+fn un_lot_s_applique_en_une_transaction_et_rend_chaque_verdict_a_son_rang() {
+    // **UN LOT EST LE GRAIN DE L'ATOMICITÉ** : `n` cadres et le curseur au
+    // dernier appliqué, en une transaction. Un cadre refusé ne fait pas
+    // échouer le lot ; il est rendu à son rang, et le curseur AVANCE dans le
+    // lot — le cadre qui suit un refus se juge contre le curseur que le
+    // précédent a posé.
+    let (base, chemin) = entrepot("lot");
+    let c1 = un(Genre::Utilisateur, 21);
+    let c2 = un(Genre::Utilisateur, 22);
+    let c3 = un(Genre::Utilisateur, 23);
+    let lot = [
+        Cadre::Operation {
+            estampille: est(pair(), 7),
+            operation: Operation::Compte {
+                compte: c1,
+                enregistrement: compte(est(pair(), 7), None),
+            },
+        },
+        // Un rejeu au milieu : refusé à son rang, sans arrêter le lot.
+        Cadre::Operation {
+            estampille: est(locale(), 8),
+            operation: Operation::Compte {
+                compte: c2,
+                enregistrement: compte(est(locale(), 8), None),
+            },
+        },
+        // Et un recul CONTRE LE CURSEUR DU LOT : sept vient d'être posé par
+        // le premier cadre, dans la même transaction.
+        Cadre::Operation {
+            estampille: est(pair(), 7),
+            operation: Operation::Compte {
+                compte: c2,
+                enregistrement: compte(est(pair(), 7), None),
+            },
+        },
+        Cadre::Operation {
+            estampille: est(pair(), 9),
+            operation: Operation::Compte {
+                compte: c3,
+                enregistrement: compte(est(pair(), 9), None),
+            },
+        },
+    ];
+    let verdicts = base
+        .appliquer_la_suite(pair(), &lot, false)
+        .expect("lisible");
+    assert_eq!(verdicts.len(), 4);
+    assert!(matches!(verdicts[0], Applique::Faite { curseur: 7, .. }));
+    assert!(matches!(
+        verdicts[1],
+        Applique::Refusee(MotifDeRefus::Rejeu)
+    ));
+    assert!(matches!(
+        verdicts[2],
+        Applique::Refusee(MotifDeRefus::Recule)
+    ));
+    assert!(matches!(verdicts[3], Applique::Faite { curseur: 9, .. }));
+    assert_eq!(base.curseur(pair()).expect("lisible"), 9);
+    assert!(base.compte(c1).expect("lisible").is_some());
+    assert!(
+        base.compte(c2).expect("lisible").is_none(),
+        "refusé deux fois"
+    );
+    assert!(base.compte(c3).expect("lisible").is_some());
+
+    // En mode instantané, un lot qui finit par le cadre de fin pose le curseur
+    // à la coupe — et seulement là.
+    let suite = [
+        Cadre::Operation {
+            estampille: est(pair(), 3),
+            operation: Operation::Compte {
+                compte: c2,
+                enregistrement: compte(est(pair(), 3), None),
+            },
+        },
+        Cadre::Fin {
+            coupe: est(pair(), 12),
+        },
+    ];
+    let verdicts = base
+        .appliquer_la_suite(pair(), &suite, true)
+        .expect("lisible");
+    assert!(matches!(verdicts[0], Applique::Faite { curseur: 0, .. }));
+    assert!(matches!(verdicts[1], Applique::Fin { curseur: 12 }));
+    assert_eq!(base.curseur(pair()).expect("lisible"), 12);
+    assert!(base.compte(c2).expect("lisible").is_some());
+    assert!(base.compteur().expect("lisible") >= 12);
+
+    // Un lot vide ne fait rien, et ne rend rien.
+    assert!(
+        base.appliquer_la_suite(pair(), &[], false)
+            .expect("lisible")
+            .is_empty()
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
 fn ce_qui_n_est_pas_de_provenance_locale_est_refuse() {
     // C11 : la voie entre racines ne transporte que des enregistrements de
     // provenance locale (§7).

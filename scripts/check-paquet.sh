@@ -158,6 +158,18 @@ grep -q '^Environment=ASL_ATTESTATION' "$essai/unite-nue" \
 grep -q './usr/share/doc/asl-server/attestation.conf.exemple' "$essai/contenu" \
     || rate "le fragment d'exemple n'est pas expédié"
 
+# **LA RÉPLICATION EST OPTIONNELLE, ET NON CHOISIE PAR LE PAQUET** (§8). Comme
+# la posture : `$ASL_REPLICATION` non cité, vide par défaut, laisse la racine
+# seule ; les clés n'existent pas au moment de l'installation.
+grep -q 'ASL_REPLICATION' "$essai/unite-nue" \
+    || rate "l'unité ne passe pas la réplication par l'environnement"
+grep -q '\${ASL_REPLICATION}' "$essai/unite-nue" \
+    && rate "les accolades donneraient un argument VIDE au lieu de le retirer"
+grep -q '^Environment=ASL_REPLICATION' "$essai/unite-nue" \
+    && rate "l'unité MET la racine en réplication — le paquet choisit à la place de l'exploitant"
+grep -q './usr/share/doc/asl-server/replication.conf.exemple' "$essai/contenu" \
+    || rate "le fragment de réplication n'est pas expédié"
+
 # **ET LA TABLE DU PARE-FEU NON PLUS N'EST PAS CHARGÉE.** Un paquet qui la
 # poserait sous `/etc/nftables.conf` fermerait des ports sur une machine qu'il ne
 # connaît pas — à commencer, si elle est mal relue, par celui du `ssh`.

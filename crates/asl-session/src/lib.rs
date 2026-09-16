@@ -499,6 +499,44 @@ pub enum Besoin<'a> {
     /// La même forme que [`Besoin::LireLesOperations`], à ceci près que
     /// l'étage 3 ferme le flux après le cadre de fin.
     LireLInstantane,
+    /// Savoir où en est la voie entre racines, vue d'ici
+    /// (`replication.md` §8).
+    ///
+    /// **Une machine, quelle que soit sa capacité** — comme [`Besoin::Moi`] :
+    /// c'est la vérification de déploiement, posée depuis une machine
+    /// enrôlée, et elle ne se rend pas à un inconnu. Ce que l'étage 3
+    /// rapporte est [`EtatDeLaReplication`] : notre compteur, et la voie —
+    /// le pair, ouverte ou coupée, jusqu'où l'on a appliqué — ou rien, pour
+    /// une racine seule.
+    EtatDeLaReplication,
+}
+
+/// La voie vers l'autre racine, telle que le tireur la voit en ce moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoieVersLePair {
+    /// L'identifiant `n-…` du pair — celui que sa clé donne.
+    pub pair: Identifiant,
+    /// La connexion sortante est-elle ouverte et prouvée dans les deux sens ?
+    pub ouverte: bool,
+    /// Jusqu'où l'on a appliqué ce que le pair a écrit : le curseur que cette
+    /// racine tient pour lui (`replication.md` §5.3).
+    pub applique: u64,
+}
+
+/// L'état de la réplication, vu de cette racine (`replication.md` §8).
+///
+/// **Deux nombres et un mot**, et c'est tout ce que la vérification de
+/// déploiement demande : `compteur` est l'horloge de Lamport de cette racine,
+/// `applique` le curseur qu'elle tient pour le pair. Voie ouverte, le second
+/// rejoint le premier en moins d'une seconde après une écriture chez le pair ;
+/// coupée, l'écart dit ce qu'il reste à rattraper. `None` : cette racine
+/// tourne seule — ce n'est pas un défaut, c'est un banc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EtatDeLaReplication {
+    /// Notre compteur.
+    pub compteur: u64,
+    /// La voie, s'il y a un pair.
+    pub voie: Option<VoieVersLePair>,
 }
 
 /// Ce qu'il faut savoir pour décider d'une résolution.
@@ -755,6 +793,8 @@ pub enum Trouvaille {
     /// c'est le `410` de `replication.md` §5.4, et la réponse du tireur est
     /// l'instantané.
     HorsJournal,
+    /// Où en est la voie entre racines, vue d'ici.
+    Replication(EtatDeLaReplication),
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -1029,6 +1069,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         Ressource::Poussees => Besoin::EcouterLesPoussees,
         Ressource::Vu => Besoin::OuSuisJeVu,
         Ressource::Version => Besoin::Version,
+        Ressource::Replication => Besoin::EtatDeLaReplication,
         Ressource::OuParNom { service } => Besoin::OuParNom {
             service: service.as_str(),
         },
@@ -1724,6 +1765,18 @@ pub fn repondre<'o>(
                 sortie,
             ),
         },
+        // **`Rien` REND `500`, COMME `/v1/moi`** : cette ressource exige une
+        // machine, un inconnu ne l'atteint pas, et ne pas savoir où en est sa
+        // propre voie est bien une panne de l'annuaire.
+        Besoin::EtatDeLaReplication => match trouvaille {
+            Trouvaille::Replication(etat) => rendre_la_replication(*etat, sortie),
+            _ => composer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::INTERNAL_SERVER_ERROR),
+                sortie,
+            ),
+        },
         Besoin::OuSuisJeVu => match trouvaille {
             Trouvaille::VuDepuis(vu) => rendre_ou_l_on_est_vu(*vu, sortie),
             // **`Rien` REND `404`, ET NON `500`**, comme partout ailleurs dans
@@ -1869,6 +1922,53 @@ fn rendre_la_version<'a>(version: &str, sortie: &'a mut [u8]) -> Reponse<'a> {
     corps.pousser(br#"{"version":""#);
     corps.pousser(version.as_bytes());
     corps.pousser(br#""}"#);
+    composer(StatusCode::OK, JSON_MEDIA, corps.rendu(), sortie)
+}
+
+/// Ce qu'un corps de `/v1/replication` peut faire, en octets.
+///
+/// Un identifiant de racine tient sur vingt-huit caractères, deux compteurs sur
+/// vingt chacun, et le reste est du balisage : cent soixante suffisent avec de
+/// la marge.
+const REPLICATION_CORPS_MAX: usize = 160;
+
+/// Rend l'état de la voie entre racines (`replication.md` §8).
+///
+/// # DEUX FORMES, ET LE MOT `voie` DIT LAQUELLE
+///
+/// Avec un pair : `{"pair":"n-…","voie":"ouverte","compteur":4812,"applique":4790}`
+/// — `voie` vaut `ouverte` ou `coupée`. Sans pair :
+/// `{"voie":"seule","compteur":4812}`, et **ni `pair` ni `applique`** : il n'y
+/// a personne dont on applique quoi que ce soit, et un champ nul aurait l'air
+/// d'une valeur. Un lecteur regarde `voie` d'abord ; les autres champs suivent
+/// de ce qu'il y lit.
+///
+/// **Sans échappement, et c'est sûr** : un identifiant est du base32, un
+/// compteur un nombre, et les trois mots sont à nous.
+fn rendre_la_replication(etat: EtatDeLaReplication, sortie: &mut [u8]) -> Reponse<'_> {
+    let mut corps = Corps::<REPLICATION_CORPS_MAX>::neuf();
+    match etat.voie {
+        Some(voie) => {
+            corps.pousser(br#"{"pair":""#);
+            corps.pousser(voie.pair.texte().as_str().as_bytes());
+            corps.pousser(br#"","voie":""#);
+            corps.pousser(if voie.ouverte {
+                "ouverte".as_bytes()
+            } else {
+                "coupée".as_bytes()
+            });
+            corps.pousser(br#"","compteur":"#);
+            corps.pousser_un_nombre(etat.compteur);
+            corps.pousser(br#","applique":"#);
+            corps.pousser_un_nombre(voie.applique);
+            corps.pousser(b"}");
+        }
+        None => {
+            corps.pousser(br#"{"voie":"seule","compteur":"#);
+            corps.pousser_un_nombre(etat.compteur);
+            corps.pousser(b"}");
+        }
+    }
     composer(StatusCode::OK, JSON_MEDIA, corps.rendu(), sortie)
 }
 
@@ -4086,8 +4186,9 @@ mod creations {
     use alloc::vec;
 
     use super::{
-        Besoin, CLE_SEULE_OCTETS, CleTrouvee, ENROLEMENT_CORPS_OCTETS, MachineRassemblee,
-        POSSESSION_APPAREIL_OCTETS, Session, Trouvaille, besoin, repondre,
+        Besoin, CLE_SEULE_OCTETS, CleTrouvee, ENROLEMENT_CORPS_OCTETS, EtatDeLaReplication,
+        MachineRassemblee, POSSESSION_APPAREIL_OCTETS, REPLICATION_CORPS_MAX, Session, Trouvaille,
+        VoieVersLePair, besoin, repondre,
     };
 
     fn liaison() -> LiaisonDeCanal {
@@ -4875,6 +4976,108 @@ mod creations {
         // Une machine authentifiée que l'entrepôt ne retrouve pas : une panne.
         assert_eq!(
             rendre(&mut session, &Besoin::Moi, &Trouvaille::Rien).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn l_etat_de_la_replication_exige_une_machine_et_a_deux_formes() {
+        // **`replication.md` §8, décision 20** : sur la voie machine, comme
+        // `/v1/moi` — ni un appareil ni un inconnu ne l'atteignent.
+        assert_eq!(
+            besoin(
+                &session_de_machine(),
+                &tete(b"GET", b"/v1/replication"),
+                b""
+            ),
+            Besoin::EtatDeLaReplication
+        );
+        for session in [session_d_appareil(), Session::new(liaison())] {
+            assert_eq!(
+                besoin(&session, &tete(b"GET", b"/v1/replication"), b""),
+                Besoin::Deja(StatusCode::UNAUTHORIZED)
+            );
+        }
+
+        let pair = un(Genre::Annuaire, 0xA0);
+        let mut session = session_de_machine();
+        // Avec un pair, la voie ouverte : les quatre champs de §8.
+        let (statut, rendu) = rendre(
+            &mut session,
+            &Besoin::EtatDeLaReplication,
+            &Trouvaille::Replication(EtatDeLaReplication {
+                compteur: 4812,
+                voie: Some(VoieVersLePair {
+                    pair,
+                    ouverte: true,
+                    applique: 4790,
+                }),
+            }),
+        );
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(
+            rendu,
+            alloc::format!(
+                r#"{{"pair":"{}","voie":"ouverte","compteur":4812,"applique":4790}}"#,
+                pair.texte().as_str()
+            )
+            .into_bytes()
+        );
+        // La voie coupée : le mot change, et rien d'autre.
+        let (_, rendu) = rendre(
+            &mut session,
+            &Besoin::EtatDeLaReplication,
+            &Trouvaille::Replication(EtatDeLaReplication {
+                compteur: 4812,
+                voie: Some(VoieVersLePair {
+                    pair,
+                    ouverte: false,
+                    applique: 0,
+                }),
+            }),
+        );
+        assert_eq!(
+            rendu,
+            alloc::format!(
+                r#"{{"pair":"{}","voie":"coupée","compteur":4812,"applique":0}}"#,
+                pair.texte().as_str()
+            )
+            .into_bytes()
+        );
+        // Sans pair : « seule », et ni `pair` ni `applique`.
+        let (statut, rendu) = rendre(
+            &mut session,
+            &Besoin::EtatDeLaReplication,
+            &Trouvaille::Replication(EtatDeLaReplication {
+                compteur: 7,
+                voie: None,
+            }),
+        );
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(rendu, br#"{"voie":"seule","compteur":7}"#);
+        // Et les plus grands compteurs tiennent dans la borne.
+        let (_, rendu) = rendre(
+            &mut session,
+            &Besoin::EtatDeLaReplication,
+            &Trouvaille::Replication(EtatDeLaReplication {
+                compteur: u64::MAX,
+                voie: Some(VoieVersLePair {
+                    pair,
+                    ouverte: true,
+                    applique: u64::MAX,
+                }),
+            }),
+        );
+        assert!(rendu.ends_with(b"}"), "{rendu:?}");
+        assert!(rendu.len() <= REPLICATION_CORPS_MAX);
+        // Une machine authentifiée, et pas d'état : une panne de notre côté.
+        assert_eq!(
+            rendre(
+                &mut session,
+                &Besoin::EtatDeLaReplication,
+                &Trouvaille::Rien
+            )
+            .0,
             StatusCode::INTERNAL_SERVER_ERROR
         );
     }

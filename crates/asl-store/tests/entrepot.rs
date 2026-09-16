@@ -15,7 +15,7 @@ use asl_registre::{
     AliasRange, Attestation, Cadre, Capacites, Compte, EntreeJournal, Estampille, JetonRange,
     NomRange, Operation, Plateforme, Portee, Provenance, Systeme, Verdict,
 };
-use asl_store::{Entrepot, Faute, Rattrapage};
+use asl_store::{Entrepot, Faute, RACINE_SANS_IDENTITE, Rattrapage};
 
 /// La racine pour laquelle les essais écrivent.
 fn racine() -> Identifiant {
@@ -1192,6 +1192,171 @@ fn une_base_reprise_ne_se_reprend_pas_deux_fois() {
     let base = Entrepot::ouvrir(&chemin, racine()).expect("rouverte");
     assert_eq!(base.compte(thierry).expect("lisible"), Some(avant));
     assert_eq!(base.compteur().expect("lisible"), 14);
+    let _ = std::fs::remove_file(&chemin);
+}
+
+/// Toutes les estampilles que l'instantané porte — enregistrements, champs,
+/// réclamations, cadre de fin —, avec les racines qu'elles nomment.
+fn racines_de_l_instantane(base: &Entrepot) -> Vec<Identifiant> {
+    instantane(base)
+        .iter()
+        .flat_map(|cadre| match cadre {
+            Cadre::Operation {
+                estampille,
+                operation,
+            } => {
+                let mut racines = vec![estampille.racine];
+                match operation {
+                    Operation::Compte { enregistrement, .. } => {
+                        racines.push(enregistrement.estampille.racine);
+                        racines.push(enregistrement.reclamation.racine);
+                    }
+                    Operation::Machine { enregistrement, .. } => {
+                        racines.push(enregistrement.estampille.racine);
+                        racines.push(enregistrement.nom_estampille.racine);
+                        racines.push(enregistrement.capacites_estampille.racine);
+                    }
+                    Operation::CleMachine { code, .. } => racines.push(code.racine),
+                    Operation::Appareil { enregistrement, .. } => {
+                        racines.push(enregistrement.estampille.racine);
+                    }
+                    Operation::Enrolement { enregistrement, .. } => {
+                        racines.push(enregistrement.estampille.racine);
+                    }
+                    Operation::Service { enregistrement, .. } => {
+                        racines.push(enregistrement.estampille.racine);
+                    }
+                    Operation::Autorisation { enregistrement, .. } => {
+                        racines.push(enregistrement.estampille.racine);
+                    }
+                    Operation::Description { enregistrement, .. } => {
+                        racines.push(enregistrement.estampille.racine);
+                    }
+                    Operation::Poussee { enregistrement, .. } => {
+                        racines.push(enregistrement.estampille.racine);
+                    }
+                    _ => {}
+                }
+                racines
+            }
+            Cadre::Fin { coupe } => vec![coupe.racine],
+        })
+        .collect()
+}
+
+#[test]
+fn une_base_reprise_sans_identite_est_reestampillee_au_premier_demarrage_avec_une_cle() {
+    // **C'EST LE CAS DES BANCS** (`replication.md` §11.4) : une base de 0.4.x
+    // reprise par une racine SANS `--identity-key` porte ses estampilles sous
+    // seize zéros. Au premier démarrage AVEC une clé, tout passe sous
+    // l'identité réelle, en une transaction, une fois — et les données ne
+    // bougent pas d'un octet.
+    let chemin = base_ancienne("reestampillage");
+    let thierry = un(Genre::Utilisateur, 1);
+    let lea = un(Genre::Utilisateur, 2);
+    let grenier = un(Genre::Machine, 10);
+    let sans = RACINE_SANS_IDENTITE;
+
+    // ── 1. REPRISE SANS IDENTITÉ : TOUT EST SOUS SEIZE ZÉROS ────────────────
+    let (avant, journal_avant) = {
+        let base = Entrepot::ouvrir(&chemin, sans).expect("reprise sans identité");
+        assert_eq!(base.reestampilles(), 0, "rien à ré-estampiller sans clé");
+        // Et une écriture SANS identité entre au journal sous seize zéros :
+        // elle aussi devra passer sous l'identité réelle.
+        base.reclamer_alias(lea, Some(alias("lea"))).expect("écrit");
+        let racines = racines_de_l_instantane(&base);
+        assert!(!racines.is_empty());
+        assert!(
+            racines.iter().all(|quoi| *quoi == sans),
+            "tout est estampillé sous la racine sans identité"
+        );
+        assert_eq!(
+            operations(&base, 14)
+                .iter()
+                .map(|(estampille, _)| estampille.racine)
+                .collect::<Vec<_>>(),
+            vec![sans]
+        );
+        (instantane(&base), operations(&base, 14))
+    };
+
+    // ── 2. PREMIER DÉMARRAGE AVEC UNE CLÉ : TOUT PASSE SOUS L'IDENTITÉ ──────
+    let base = Entrepot::ouvrir(&chemin, racine()).expect("rouverte avec une identité");
+    // Quatorze enregistrements repris, un compte réécrit par la réclamation
+    // (le même enregistrement — il ne compte qu'une fois), une opération.
+    assert_eq!(
+        base.reestampilles(),
+        15,
+        "quatorze enregistrements et une opération"
+    );
+    let racines = racines_de_l_instantane(&base);
+    assert!(
+        racines.iter().all(|quoi| *quoi == racine()),
+        "aucune estampille n-0… ne reste : {racines:?}"
+    );
+    assert_eq!(
+        base.compteur().expect("lisible"),
+        15,
+        "le compteur ne bouge pas"
+    );
+
+    // Les données sont intactes : le même instantané, à la racine près.
+    let apres = instantane(&base);
+    assert_eq!(apres.len(), avant.len());
+    for (avant, apres) in avant.iter().zip(apres.iter()) {
+        match (avant, apres) {
+            (
+                Cadre::Operation {
+                    estampille: e_avant,
+                    operation: o_avant,
+                },
+                Cadre::Operation {
+                    estampille: e_apres,
+                    operation: o_apres,
+                },
+            ) => {
+                assert_eq!(e_avant.compteur, e_apres.compteur);
+                assert_eq!(o_avant.genre(), o_apres.genre());
+            }
+            (Cadre::Fin { coupe: avant }, Cadre::Fin { coupe: apres }) => {
+                assert_eq!(avant.compteur, apres.compteur);
+            }
+            autre => panic!("l'instantané a changé de forme : {autre:?}"),
+        }
+    }
+    // Le journal d'opérations aussi : la même opération, sous l'identité.
+    let journal = operations(&base, 14);
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].0, e(15));
+    assert_eq!(journal[0].0.compteur, journal_avant[0].0.compteur);
+    assert_eq!(journal[0].1, journal_avant[0].1);
+
+    // L'index des alias suit la réclamation : chacun se retrouve par son alias.
+    assert_eq!(
+        base.compte_par_alias("thierry").expect("lisible"),
+        Some(thierry)
+    );
+    assert_eq!(base.compte_par_alias("lea").expect("lisible"), Some(lea));
+    let compte = base.compte(lea).expect("lisible").expect("Léa");
+    assert_eq!(compte.reclamation, e(15));
+    // La clé liée du grenier et son code aussi.
+    let machine = base.machine(grenier).expect("lisible").expect("là");
+    let liee = machine.cle.expect("enrôlée");
+    assert_eq!(liee.liaison.racine, racine());
+    assert_eq!(liee.code.racine, racine());
+    assert_eq!(machine.nom_estampille.racine, racine());
+
+    // ── 3. UNE SECONDE OUVERTURE NE REFAIT RIEN ─────────────────────────────
+    drop(base);
+    let base = Entrepot::ouvrir(&chemin, racine()).expect("rouverte");
+    assert_eq!(base.reestampilles(), 0);
+    assert_eq!(base.compte(lea).expect("lisible"), Some(compte));
+    assert_eq!(base.compteur().expect("lisible"), 15);
+
+    // Et l'entrepôt reprend ses écritures sous l'identité, comme un neuf.
+    base.reclamer_alias(thierry, None).expect("écrit");
+    assert_eq!(operations(&base, 15).len(), 1);
+    assert_eq!(operations(&base, 15)[0].0, e(16));
     let _ = std::fs::remove_file(&chemin);
 }
 

@@ -27,9 +27,34 @@
 //! **on n'abandonne jamais**. Une racine qui a perdu l'autre la rappelle jusqu'à
 //! ce qu'elle revienne, et reprend là où son curseur s'était arrêté. La voie
 //! coupée se voit dans le journal d'exploitation ; elle n'empêche rien de servir.
+//!
+//! # UN FLUX PORTE UNE PART, ET LE TIREUR LE ROUVRE — SUR LA MÊME CONNEXION
+//!
+//! La pile QUIC greffée d'`air-mail-server` annonce seize kibioctets par flux
+//! (`ams_quic_tls::FLUX_OCTETS`) **et ne relève jamais cette fenêtre** : elle
+//! n'émet aucun `MAX_STREAM_DATA`. Un flux ne peut donc porter que seize
+//! kibioctets dans un sens, sur toute sa vie — au-delà, l'émetteur attend un
+//! crédit qui ne vient jamais, et rien ne le dit. Un flux d'opérations « sans
+//! fin » s'y serait tu au bout de quelques dizaines d'écritures, et un
+//! instantané de quelques centaines d'enregistrements n'y serait jamais passé.
+//!
+//! La racine tirée coupe donc chaque flux quand il a porté sa part
+//! (`crate::h3::PART_OCTETS_MAX`), à une frontière de cadre, et le tireur le
+//! rouvre — `operations` depuis son curseur, `instantane` là où la connexion
+//! tient le reste — sans rompre la connexion ni refaire les preuves. **La fin
+//! d'un flux n'est pas une rupture** ; la fin de la connexion l'est, et c'est
+//! alors la reprise qui joue.
+//!
+//! # CE QU'UN TOUR REÇOIT S'APPLIQUE EN UNE TRANSACTION
+//!
+//! Les cadres entiers arrivés depuis le dernier tour forment un LOT, que
+//! [`Entrepot::appliquer_la_suite`] applique en une transaction — un `fsync`
+//! par tour et non par opération. C'est ce qui fait d'un amorçage de plusieurs
+//! milliers d'enregistrements une affaire de secondes.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ams_h3::{Http3Client, Transport};
 use ams_proto_quic::{ConnectionId, Directional, StreamId};
@@ -62,6 +87,60 @@ const RECUL_INITIAL_MS: u64 = 1_000;
 
 /// Le bruit appliqué au délai, en centièmes : ±20 %.
 const BRUIT_CENTIEMES: u64 = 20;
+
+/// L'état VIVANT de la voie sortante, publié par le tireur et lu par
+/// `GET /v1/replication` (`docs/replication.md` §8).
+///
+/// # UN BOOLÉEN, ET RIEN D'AUTRE, PARCE QUE LE RESTE EST DANS L'ENTREPÔT
+///
+/// Ce que la ressource rend — le pair, notre compteur, le curseur appliqué —
+/// se lit de l'entrepôt au moment de la requête, et il n'y a pas à le
+/// recopier ici : une copie vieillirait. Ce que l'entrepôt ne sait PAS est si
+/// la connexion sortante est ouverte et prouvée dans les deux sens en ce
+/// moment — c'est ce que le tireur seul voit, et c'est ce qu'il publie.
+///
+/// `ouverte` passe à vrai après les deux preuves, et à faux dès que la
+/// session se rompt ; entre deux sessions, la voie est coupée, et la ressource
+/// le dit.
+#[derive(Debug, Default)]
+pub struct EtatDeLaVoie {
+    /// La connexion sortante est-elle ouverte et prouvée ?
+    ouverte: AtomicBool,
+}
+
+impl EtatDeLaVoie {
+    /// Une voie qu'on n'a pas encore ouverte.
+    #[must_use]
+    pub const fn nouvelle() -> Self {
+        Self {
+            ouverte: AtomicBool::new(false),
+        }
+    }
+
+    /// La connexion sortante est-elle ouverte et prouvée en ce moment ?
+    #[must_use]
+    pub fn ouverte(&self) -> bool {
+        self.ouverte.load(Ordering::Acquire)
+    }
+
+    /// Le tireur dit où il en est.
+    fn poser(&self, ouverte: bool) {
+        self.ouverte.store(ouverte, Ordering::Release);
+    }
+}
+
+/// Comment un flux tenu s'est terminé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FinDeFlux {
+    /// Le pair a fermé le flux : il a porté sa part, on le rouvre.
+    Coupe,
+    /// Le cadre de fin d'un instantané est passé.
+    Fin,
+    /// La connexion est tombée. **Le défaut** : une lecture qu'on n'a pas su
+    /// mener au bout est traitée comme une connexion perdue, et la reprise joue.
+    #[default]
+    Morte,
+}
 
 /// Ce que la voie entre racines a besoin de savoir pour tirer chez l'autre.
 ///
@@ -100,6 +179,8 @@ pub struct Tireur {
     pub fermetures: tokio::sync::mpsc::UnboundedSender<Identifiant>,
     /// Le plafond du recul, en millisecondes — la cadence de maintien.
     pub plafond_recul_ms: u64,
+    /// Où le tireur publie l'état de la voie, pour `GET /v1/replication`.
+    pub etat: Arc<EtatDeLaVoie>,
 }
 
 impl Tireur {
@@ -113,16 +194,29 @@ impl Tireur {
         let pair = identifiant_de_racine(&self.cle_du_pair);
         let mut reprise = Reprise::nouvelle(self.plafond_recul_ms.max(1));
         loop {
-            match self.une_session(pair).await {
+            let resultat = self.une_session(pair).await;
+            // **L'ÉTAT CHANGE, ET LE JOURNAL LE DIT** (§8) : la voie sortante
+            // vers ce pair est coupée, quelle qu'en soit la raison.
+            let etait_ouverte = self.etat.ouverte();
+            self.etat.poser(false);
+            match resultat {
                 Ok(()) => {
                     // La connexion s'est fermée proprement (le pair est parti,
                     // ou le flux s'est tari). On repart doucement.
+                    (self.journal)(format!(
+                        "voie vers {pair} fermée : la connexion s'est terminée — état : coupée"
+                    ));
                     reprise.reussite();
                 }
                 Err(quoi) => {
                     (self.journal)(format!(
-                        "voie vers {} ({pair}) rompue : {quoi} — reprise n° {}",
+                        "voie vers {} ({pair}) {} : {quoi} — état : coupée, reprise n° {}",
                         self.adresse,
+                        if etait_ouverte {
+                            "rompue"
+                        } else {
+                            "pas ouverte"
+                        },
                         reprise.essais().saturating_add(1),
                     ));
                 }
@@ -150,7 +244,11 @@ impl Tireur {
         connexion
             .verifier_le_pair(&self.cle_du_pair, pair, &defi)
             .await?;
-        (self.journal)(format!("voie vers {} ({pair}) ouverte", self.adresse));
+        self.etat.poser(true);
+        (self.journal)(format!(
+            "voie vers {} ({pair}) ouverte, prouvée dans les deux sens — état : ouverte",
+            self.adresse
+        ));
 
         self.tirer(&mut connexion, pair).await
     }
@@ -181,7 +279,12 @@ impl Tireur {
             .ok_or(Faute::SansAdresse)
     }
 
-    /// Le rattrapage, puis le flux sans fin — et l'amorçage sur `410`.
+    /// Le rattrapage, puis le flux vivant, part après part — et l'amorçage
+    /// sur `410`.
+    ///
+    /// **La fin d'un flux n'est pas une rupture** (voir l'en-tête) : le pair
+    /// ferme un flux qui a porté sa part, et l'on en rouvre un depuis le
+    /// curseur, sur la même connexion. Seule la connexion tombée rend la main.
     async fn tirer(&self, connexion: &mut Connexion, pair: Identifiant) -> Result<(), Faute> {
         loop {
             let curseur = self.entrepot.curseur(pair).map_err(Faute::Entrepot)?;
@@ -191,17 +294,33 @@ impl Tireur {
 
             match connexion.statut_du_flux(flux).await? {
                 200 => {
-                    (self.journal)(format!(
-                        "voie vers {pair} : lecture des opérations après {curseur}"
-                    ));
-                    self.lire_le_flux(connexion, pair, flux, false).await?;
-                    // Le flux des opérations ne se termine jamais ; s'il rend la
-                    // main, c'est que la connexion est tombée.
-                    return Ok(());
+                    let lu = self.lire_le_flux(connexion, pair, flux, false).await?;
+                    match lu.fin {
+                        // Le rattrapage se dit avec son nombre (§8) — une fois,
+                        // quand il y a eu quelque chose à rattraper.
+                        FinDeFlux::Coupe => {
+                            if lu.cadres == 0 {
+                                // Un pair qui coupe sans rien porter ne dit
+                                // rien : ne pas tourner en rond sur lui.
+                                return Err(Faute::FluxVide);
+                            }
+                            if lu.cadres > 0 && curseur > 0 && lu.rattrapes > 0 {
+                                (self.journal)(format!(
+                                    "voie vers {pair} : rattrapage de {} opérations après                                      {curseur}, la suite dans le flux suivant",
+                                    lu.rattrapes
+                                ));
+                            }
+                        }
+                        FinDeFlux::Morte => return Ok(()),
+                        // Un cadre de fin n'a rien à faire dans le flux des
+                        // opérations : le pair a fait quelque chose de
+                        // travers, et l'on rompt plutôt que de deviner.
+                        FinDeFlux::Fin => return Err(Faute::FinHorsInstantane),
+                    }
                 }
                 410 => {
                     (self.journal)(format!(
-                        "voie vers {pair} : 410 après {curseur}, amorçage par instantané"
+                        "voie vers {pair} : le journal ne remonte plus jusqu'à {curseur} (410),                          amorçage par instantané"
                     ));
                     self.amorcer(connexion, pair).await?;
                     // On boucle : `GET /v1/pair/operations` reprend au compteur
@@ -212,100 +331,189 @@ impl Tireur {
         }
     }
 
-    /// L'amorçage : lire l'instantané jusqu'au cadre de fin, tout appliquer.
+    /// L'amorçage : lire l'instantané jusqu'au cadre de fin, part après part,
+    /// et tout appliquer.
+    ///
+    /// Un flux qui se ferme SANS cadre de fin a porté sa part : la connexion
+    /// tient le reste, et `GET /v1/pair/instantane` sur elle continue là où
+    /// le flux s'est arrêté (`crate::h3`). Le cadre de fin pose le curseur.
     async fn amorcer(&self, connexion: &mut Connexion, pair: Identifiant) -> Result<(), Faute> {
-        let flux = connexion.ouvrir_flux(b"/v1/pair/instantane").await?;
-        match connexion.statut_du_flux(flux).await? {
-            200 => self.lire_le_flux(connexion, pair, flux, true).await,
-            autre => Err(Faute::Statut(autre)),
+        let mut cadres = 0_usize;
+        let mut octets = 0_usize;
+        let mut parts = 0_usize;
+        loop {
+            let flux = connexion.ouvrir_flux(b"/v1/pair/instantane").await?;
+            match connexion.statut_du_flux(flux).await? {
+                200 => {}
+                autre => return Err(Faute::Statut(autre)),
+            }
+            let lu = self.lire_le_flux(connexion, pair, flux, true).await?;
+            cadres = cadres.saturating_add(lu.cadres);
+            octets = octets.saturating_add(lu.octets);
+            parts = parts.saturating_add(1);
+            match lu.fin {
+                FinDeFlux::Fin => {
+                    // L'amorçage se dit avec sa taille (§8).
+                    (self.journal)(format!(
+                        "voie vers {pair} : amorcé par instantané — {cadres} cadres,                          {octets} octets, {parts} parts"
+                    ));
+                    return Ok(());
+                }
+                // Une part vide et sans fin : le pair n'a rien à continuer, et
+                // n'en dit pas la fin. On ne tourne pas en rond.
+                FinDeFlux::Coupe if lu.cadres == 0 => return Err(Faute::InstantaneTronque),
+                FinDeFlux::Coupe => {}
+                FinDeFlux::Morte => return Err(Faute::InstantaneTronque),
+            }
         }
     }
 
-    /// Lit les cadres d'un flux tenu, et les applique à mesure.
+    /// Lit les cadres d'un flux tenu, et les applique par lots, à mesure.
     ///
-    /// En mode instantané, le cadre de fin arrête la lecture et pose le curseur.
-    /// En mode flux, la lecture ne s'arrête que si la connexion tombe.
+    /// En mode instantané, le cadre de fin termine la lecture. Dans les deux
+    /// modes, un flux que le pair ferme rend [`FinDeFlux::Coupe`], et une
+    /// connexion qui tombe [`FinDeFlux::Morte`].
     async fn lire_le_flux(
         &self,
         connexion: &mut Connexion,
         pair: Identifiant,
         flux: StreamId,
         instantane: bool,
-    ) -> Result<(), Faute> {
+    ) -> Result<Lecture, Faute> {
         let mut reste: Vec<u8> = Vec::new();
+        let mut lecture = Lecture::default();
         loop {
-            reste.extend_from_slice(&connexion.prendre_le_corps(flux));
+            let arrive = connexion.prendre_le_corps(flux);
+            lecture.octets = lecture.octets.saturating_add(arrive.len());
+            reste.extend_from_slice(&arrive);
+            // **CE QUI EST ENTIER FORME UN LOT.** On découpe tout ce qu'on
+            // peut, puis on applique en une transaction.
+            let mut lot: Vec<Cadre> = Vec::new();
+            let mut fin_vue = false;
             loop {
                 // **RIEN À DÉCODER N'EST PAS UN CADRE ILLISIBLE.** `Cadre::lire`
                 // sur zéro octet lit un genre nul et rend une étiquette
                 // inconnue ; ce n'est pas une corruption, c'est un flux qui se
                 // tait. On attend d'autres octets.
-                if reste.is_empty() {
+                if reste.is_empty() || fin_vue {
                     break;
                 }
                 match Cadre::lire(&reste) {
                     Ok((cadre, combien)) => {
                         reste.drain(..combien.min(reste.len()));
-                        let fini = matches!(cadre, Cadre::Fin { .. });
-                        self.appliquer_un_cadre(pair, &cadre, instantane)?;
-                        if fini {
-                            // L'instantané est fini : le flux se ferme derrière.
-                            return Ok(());
-                        }
+                        fin_vue = matches!(cadre, Cadre::Fin { .. });
+                        lot.push(cadre);
                     }
                     // Il manque des octets : on en attend d'autres.
                     Err(asl_registre::Faute::Tronquee { .. }) => break,
                     // Un cadre illisible ferme la voie ; il ne se saute pas
                     // (§5.2). Le curseur n'a pas bougé, l'exploitant le lit, et
                     // la reprise réessaiera la même opération.
-                    Err(quoi) => return Err(Faute::CadreIllisible(quoi)),
+                    Err(quoi) => {
+                        (self.journal)(format!(
+                            "voie vers {pair} : un cadre ne se décode pas ({quoi:?}) — la voie                              se ferme, rien n'est sauté"
+                        ));
+                        return Err(Faute::CadreIllisible(quoi));
+                    }
                 }
             }
+            if !lot.is_empty() {
+                lecture.cadres = lecture.cadres.saturating_add(lot.len());
+                let appliques = self.appliquer_un_lot(pair, &lot, instantane)?;
+                lecture.rattrapes = lecture.rattrapes.saturating_add(appliques);
+            }
+            if fin_vue {
+                // L'instantané est fini : le flux se ferme derrière.
+                lecture.fin = FinDeFlux::Fin;
+                return Ok(lecture);
+            }
             // Le pair a-t-il fini d'écrire ce flux sans qu'on ait vu de fin ?
+            // Il a porté sa part ; le reste attend le flux suivant.
             if connexion.flux_fini(flux) && reste.is_empty() {
-                return if instantane {
-                    Err(Faute::InstantaneTronque)
-                } else {
-                    Ok(())
-                };
+                lecture.fin = FinDeFlux::Coupe;
+                return Ok(lecture);
             }
             connexion.entretenir(REPONSE_MS.min(500)).await?;
             if !connexion.vivante() {
-                return Ok(());
+                lecture.fin = FinDeFlux::Morte;
+                return Ok(lecture);
             }
         }
     }
 
-    /// Applique ce cadre, journalise un refus, et transmet ce qu'il faut fermer.
-    fn appliquer_un_cadre(
+    /// Applique ce lot en une transaction, journalise chaque refus avec son
+    /// genre et son compteur (§8), transmet ce qu'il faut fermer, et rend
+    /// combien d'opérations ont été appliquées.
+    fn appliquer_un_lot(
         &self,
         pair: Identifiant,
-        cadre: &Cadre,
+        lot: &[Cadre],
         instantane: bool,
-    ) -> Result<(), Faute> {
-        match self
+    ) -> Result<usize, Faute> {
+        let verdicts = self
             .entrepot
-            .appliquer(pair, cadre, instantane)
-            .map_err(Faute::Entrepot)?
-        {
-            Applique::Faite { effets, .. } => {
-                for quoi in effets.a_fermer {
-                    // Le récepteur est fermé quand le serveur s'éteint : il n'y
-                    // a alors plus personne pour fermer, et ce n'est pas une
-                    // faute.
-                    let _ = self.fermetures.send(quoi);
+            .appliquer_la_suite(pair, lot, instantane)
+            .map_err(Faute::Entrepot)?;
+        let mut appliquees = 0_usize;
+        for (cadre, verdict) in lot.iter().zip(verdicts) {
+            match verdict {
+                Applique::Faite { effets, .. } => {
+                    appliquees = appliquees.saturating_add(1);
+                    for quoi in effets.a_fermer {
+                        // Le récepteur est fermé quand le serveur s'éteint :
+                        // il n'y a alors plus personne pour fermer, et ce
+                        // n'est pas une faute.
+                        let _ = self.fermetures.send(quoi);
+                    }
+                }
+                Applique::Fin { curseur } => {
+                    (self.journal)(format!(
+                        "voie vers {pair} : cadre de fin, curseur posé à {curseur}"
+                    ));
+                }
+                // **UN REFUS NE FERME PAS LA VOIE** : un recul est une
+                // relivraison, un rejeu et une provenance hors périmètre sont
+                // des anomalies — on journalise avec le genre et le compteur
+                // (§8), sans rompre, et l'exploitant regarde.
+                Applique::Refusee(motif) => {
+                    if let Cadre::Operation {
+                        estampille,
+                        operation,
+                    } = cadre
+                    {
+                        (self.journal)(format!(
+                            "voie vers {pair} : opération refusée — {}, genre {:?},                              compteur {}",
+                            motif_en_mots(motif),
+                            operation.genre(),
+                            estampille.compteur
+                        ));
+                    }
                 }
             }
-            Applique::Fin { .. } => {}
-            // **UN REFUS NE FERME PAS LA VOIE** : un recul est une relivraison
-            // idempotente, un rejeu et une provenance hors périmètre sont des
-            // anomalies qu'on journalise sans rompre — l'exploitant regarde.
-            Applique::Refusee(MotifDeRefus::Recule) => {}
-            Applique::Refusee(motif) => {
-                (self.journal)(format!("voie vers {pair} : opération refusée ({motif:?})"));
-            }
         }
-        Ok(())
+        Ok(appliquees)
+    }
+}
+
+/// Ce qu'une lecture de flux a donné.
+#[derive(Debug, Default)]
+struct Lecture {
+    /// Comment le flux s'est terminé.
+    fin: FinDeFlux,
+    /// Combien de cadres il a portés.
+    cadres: usize,
+    /// Combien d'octets il a portés.
+    octets: usize,
+    /// Combien d'opérations ont été appliquées — les refus en moins.
+    rattrapes: usize,
+}
+
+/// Le motif d'un refus, en mots (§8).
+const fn motif_en_mots(motif: MotifDeRefus) -> &'static str {
+    match motif {
+        MotifDeRefus::Recule => "elle recule sur le curseur",
+        MotifDeRefus::Rejeu => "elle porte notre propre racine (rejeu)",
+        MotifDeRefus::HorsProvenance => "sa provenance n'est pas locale (C11)",
     }
 }
 
@@ -338,8 +546,13 @@ pub enum Faute {
     Illisible,
     /// Un cadre du flux ne se décode pas : la voie se ferme, il ne se saute pas.
     CadreIllisible(asl_registre::Faute),
-    /// Un instantané s'est terminé sans cadre de fin.
+    /// Un instantané s'est terminé sans cadre de fin, et le pair n'a rien à
+    /// continuer.
     InstantaneTronque,
+    /// Le pair a fermé un flux d'opérations sans y avoir rien porté.
+    FluxVide,
+    /// Un cadre de fin est arrivé sur le flux des opérations.
+    FinHorsInstantane,
     /// L'entrepôt a refusé.
     Entrepot(asl_store::Faute),
 }
@@ -363,6 +576,10 @@ impl core::fmt::Display for Faute {
             Self::Illisible => f.write_str("la réponse du pair ne se lit pas"),
             Self::CadreIllisible(quoi) => write!(f, "un cadre ne se décode pas : {quoi:?}"),
             Self::InstantaneTronque => f.write_str("l'instantané s'est terminé sans cadre de fin"),
+            Self::FluxVide => f.write_str("le pair a fermé un flux d'opérations vide"),
+            Self::FinHorsInstantane => {
+                f.write_str("un cadre de fin est arrivé sur le flux des opérations")
+            }
             Self::Entrepot(quoi) => write!(f, "l'entrepôt a refusé : {quoi}"),
         }
     }

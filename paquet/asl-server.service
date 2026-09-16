@@ -32,6 +32,21 @@
 # donnerait un argument VIDE, et l'annuaire dirait « attend `required` ou
 # `optional`, et non «  » ». Sans accolades, l'argument disparaît, et le
 # message est celui qu'on veut lire.
+#
+# ── LA RÉPLICATION EST OPTIONNELLE, ET SUIT LA MÊME MÉCANIQUE ────────────────
+#
+# `docs/replication.md` §8 : `--identity-key`, `--peer`, `--peer-key` et
+# `--peer-ca` mettent une racine en réplication avec l'autre. Aucun n'a de
+# valeur par défaut ici : `$ASL_REPLICATION`, NON CITÉ, est vide tant qu'un
+# drop-in ne le remplit pas — et une racine sans lui tourne SEULE, ce qui est
+# le cas nominal d'un banc isolé, pas un défaut. Un exemple est expédié sous
+# `/usr/share/doc/asl-server/replication.conf.exemple`.
+#
+# Non cité, comme `$ASL_ATTESTATION` : vide, l'argument disparaît, et rien ne
+# passe à `asl-server` ; rempli, systemd DÉCOUPE sur les espaces, et les quatre
+# `--peer…` arrivent séparés. C'est pourquoi le drop-in ne cite pas, lui non
+# plus — une valeur citée arriverait en UN seul argument que `asl-server`
+# refuserait.
 
 [Unit]
 Description=air-service-locator — annuaire de services
@@ -51,7 +66,8 @@ ExecStart=/usr/bin/asl-server \
     --store /var/lib/asl-server/annuaire.redb \
     --certificate /etc/asl-server/certificat.pem \
     --key /etc/asl-server/cle.pem \
-    --attestation $ASL_ATTESTATION
+    --attestation $ASL_ATTESTATION \
+    $ASL_REPLICATION
 
 # **PAS DE `Restart=always`.** Les fautes qui empêchent cet annuaire de démarrer
 # sont des fautes de configuration — un certificat absent, une posture non

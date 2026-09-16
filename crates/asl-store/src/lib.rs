@@ -42,11 +42,12 @@
 //! estampille venue de l'appelant serait une estampille qu'on ne peut pas
 //! vérifier.
 //!
-//! **L'application des opérations venues de l'autre racine n'est pas écrite.**
-//! Elle a ses règles (`replication.md` §3.2), elle hisse le compteur
-//! ([`Entrepot::hisser_le_compteur`]) et avance le curseur
-//! ([`Entrepot::poser_curseur`]) ; ce fichier porte ce qu'elle trouvera en
-//! arrivant, et rien de ce qu'elle décidera.
+//! **L'application des opérations venues de l'autre racine est ici aussi**
+//! ([`Entrepot::appliquer_la_suite`]) : la règle de conflit de
+//! `replication.md` §3.2, genre par genre, le compteur hissé et le curseur
+//! avancé dans la transaction qui applique — un lot de cadres par transaction.
+//! Et ce qu'une base a estampillé sans identité passe sous l'identité réelle
+//! à l'ouverture ([`RACINE_SANS_IDENTITE`]).
 
 use std::path::Path;
 
@@ -266,6 +267,26 @@ const CURSEURS: TableDefinition<'_, &[u8], u64> = TableDefinition::new("curseurs
 /// une racine en retard, c'est une racine à reconstruire — et la reconstruire
 /// est l'amorçage, la même procédure que pour une racine neuve.
 pub const RETENTION_DES_OPERATIONS_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
+
+/// L'identifiant sous lequel une racine estampille TANT QU'ELLE N'A PAS DE
+/// CLÉ D'IDENTITÉ : seize zéros.
+///
+/// # IL NE SE DÉDUIT D'AUCUNE CLÉ, ET C'EST CE QUI LE RÉSERVE
+///
+/// `docs/replication.md` §2.2 : le `n-…` d'une racine se déduit de sa clé
+/// d'identité Ed25519. Une racine sans `--identity-key` n'en a pas, et
+/// l'entrepôt ne sait pas écrire sans racine — chaque écriture porte
+/// `(compteur, racine)`. Elle estampille donc sous cet identifiant, que le
+/// journal d'exploitation nomme au démarrage, et qui ne sera jamais celui
+/// d'une racine réelle.
+///
+/// **Il ne traverse jamais la voie entre racines** : au premier démarrage AVEC
+/// une clé, tout ce qui est estampillé sous lui est ré-estampillé sous
+/// l'identité réelle ([`Entrepot::ouvrir`], `replication.md` §11.4). C'est ce
+/// qui fait qu'une base des bancs, reprise avant d'avoir une identité, se
+/// réplique ensuite comme si elle l'avait toujours eue.
+pub const RACINE_SANS_IDENTITE: Identifiant =
+    Identifiant::depuis_entropie(Genre::Annuaire, [0; 16]);
 
 /// Les tables de la forme d'avant l'estampille, par leur nom d'hier.
 ///
@@ -671,6 +692,9 @@ pub struct Entrepot {
     /// relire le journal sans y trouver l'opération, et ne plus jamais être
     /// prévenu pour elle.
     derniere_operation: std::sync::atomic::AtomicU64,
+    /// Combien d'enregistrements et d'opérations l'ouverture a ré-estampillés
+    /// sous l'identité réelle (`replication.md` §11.4) — zéro le plus souvent.
+    reestampilles: usize,
 }
 
 impl Entrepot {
@@ -692,6 +716,23 @@ impl Entrepot {
     /// une base reprise s'amorcera chez l'autre racine par instantané, jamais
     /// par rattrapage. Tout cela dans UNE transaction — une reprise
     /// interrompue n'a pas eu lieu, et recommencera.
+    ///
+    /// # ET CE QUI A ÉTÉ ESTAMPILLÉ SANS IDENTITÉ EST RÉ-ESTAMPILLÉ
+    ///
+    /// Une base reprise — ou écrite — par une racine sans `--identity-key`
+    /// porte des estampilles sous [`RACINE_SANS_IDENTITE`]. **Au premier
+    /// démarrage avec une clé, elles passent sous l'identité réelle**, le
+    /// compteur gardé : chaque enregistrement, chaque champ estampillé, chaque
+    /// réclamation d'alias de l'index, et chaque opération du journal. Dans la
+    /// même transaction que le reste, et une fois : une seconde ouverture ne
+    /// trouve plus rien à ré-estampiller, et [`Entrepot::reestampilles`] rend
+    /// zéro. Sans cela, seize zéros partiraient sur la voie, et l'autre racine
+    /// les ré-estampillerait sous SON identité au redémarrage suivant — deux
+    /// estampilles pour un même fait, et une règle de conflit qui ne calcule
+    /// plus la même chose des deux côtés.
+    ///
+    /// Une racine SANS clé ne ré-estampille rien : elle n'a pas d'identité à
+    /// donner.
     ///
     /// # Errors
     ///
@@ -720,6 +761,7 @@ impl Entrepot {
 
     /// Prépare les tables et lit le compteur, quel que soit le support.
     fn amorcer(base: Database, racine: Identifiant) -> Result<Self, Faute> {
+        let reestampilles;
         {
             let ecriture = base.begin_write()?;
             let format = {
@@ -762,6 +804,14 @@ impl Entrepot {
             ecriture.open_table(RANG)?;
             ecriture.open_table(OPERATIONS)?;
             ecriture.open_table(CURSEURS)?;
+            // **APRÈS QUE LES TABLES EXISTENT, DANS LA MÊME TRANSACTION** : ce
+            // que la racine sans identité a estampillé passe sous l'identité
+            // réelle, ou rien ne bouge.
+            reestampilles = if racine == RACINE_SANS_IDENTITE {
+                0
+            } else {
+                reestampiller(&ecriture, RACINE_SANS_IDENTITE, racine)?
+            };
             ecriture.commit()?;
         }
         // Le compteur de la racine majore ce que le journal porte : un lecteur
@@ -775,7 +825,19 @@ impl Entrepot {
             base,
             racine,
             derniere_operation: std::sync::atomic::AtomicU64::new(compteur),
+            reestampilles,
         })
+    }
+
+    /// Combien d'enregistrements et d'opérations l'ouverture a ré-estampillés
+    /// sous l'identité réelle (`docs/replication.md` §11.4).
+    ///
+    /// **C'est au journal d'exploitation de le dire, avec le nombre** : une
+    /// reprise qui a eu lieu se lit là où l'exploitant relit ses réglages, et
+    /// zéro se tait.
+    #[must_use]
+    pub const fn reestampilles(&self) -> usize {
+        self.reestampilles
     }
 
     /// Le compteur de la dernière opération journalisée, sans transaction.
@@ -2507,58 +2569,108 @@ impl Entrepot {
         cadre: &Cadre,
         instantane: bool,
     ) -> Result<Applique, Faute> {
-        let (estampille, operation) = match cadre {
-            // Le cadre de fin d'un instantané : le curseur reprend à la coupe,
-            // et le compteur se hisse au-dessus d'elle.
-            Cadre::Fin { coupe } => {
-                let ecriture = self.base.begin_write()?;
-                {
-                    hisser_dans(&ecriture, coupe.compteur)?;
-                    avancer_le_curseur(&ecriture, pair, coupe.compteur)?;
-                }
-                ecriture.commit()?;
-                return Ok(Applique::Fin {
-                    curseur: coupe.compteur,
-                });
-            }
-            Cadre::Operation {
-                estampille,
-                operation,
-            } => (*estampille, operation),
-        };
+        self.appliquer_la_suite(pair, core::slice::from_ref(cadre), instantane)
+            .map(|mut faites| {
+                faites
+                    .pop()
+                    .unwrap_or(Applique::Refusee(MotifDeRefus::Recule))
+            })
+    }
 
-        // 1. La provenance : C11 ne laisse passer que `locale` entre racines.
-        if provenance_de(operation).is_some_and(|quoi| quoi != Provenance::Ici) {
-            return Ok(Applique::Refusee(MotifDeRefus::HorsProvenance));
-        }
-        // 2. L'estampille — mais l'instantané rend les estampilles d'origine, y
-        //    compris les nôtres, et ne recule pas au sens du curseur.
-        if !instantane {
-            if estampille.racine == self.racine {
-                return Ok(Applique::Refusee(MotifDeRefus::Rejeu));
-            }
-            if estampille.compteur <= self.curseur(pair)? {
-                return Ok(Applique::Refusee(MotifDeRefus::Recule));
-            }
-        }
-
+    /// Applique ces cadres, dans l'ordre, **dans UNE transaction** — et rend ce
+    /// que chacun a donné, dans le même ordre.
+    ///
+    /// # UN LOT EST LE GRAIN DE L'ATOMICITÉ, ET C'EST LE MÊME INVARIANT
+    ///
+    /// [`Entrepot::appliquer`] tient « l'opération et le curseur dans la même
+    /// transaction » un cadre à la fois. Ici, ce sont `n` cadres et le curseur
+    /// au dernier appliqué, atomiquement : une coupure entre les deux relivre
+    /// le lot entier, et la règle d'application est idempotente. Ce qui change
+    /// est le coût — **une transaction par lot, et non par cadre**, donc un
+    /// `fsync` pour ce qu'un tour de boucle a reçu plutôt qu'un par
+    /// opération. Un instantané de quelques milliers d'enregistrements
+    /// s'applique en secondes au lieu de minutes.
+    ///
+    /// Un cadre refusé (rejeu, provenance, recul) ne fait pas échouer le lot :
+    /// il est rendu [`Applique::Refusee`] à son rang, et les suivants
+    /// s'appliquent. Une faute de l'entrepôt, elle, annule tout le lot.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn appliquer_la_suite(
+        &self,
+        pair: Identifiant,
+        cadres: &[Cadre],
+        instantane: bool,
+    ) -> Result<Vec<Applique>, Faute> {
         let ecriture = self.base.begin_write()?;
-        let mut effets = EffetsVivants::default();
+        let mut faites = Vec::with_capacity(cadres.len());
         {
-            appliquer_dans(&ecriture, estampille, operation, &mut effets)?;
-            // 5. Le compteur se hisse au-dessus de l'estampille appliquée (§4).
-            hisser_dans(&ecriture, estampille.compteur)?;
-            // 6. Le curseur avance — mais pas pendant un instantané, où c'est le
-            //    cadre de fin qui le pose (à la coupe).
-            if !instantane {
-                avancer_le_curseur(&ecriture, pair, estampille.compteur)?;
+            // Le curseur tel qu'il est DANS la transaction : un cadre du lot
+            // le fait avancer pour le suivant.
+            let mut curseur = ecriture
+                .open_table(CURSEURS)?
+                .get(clef(pair).as_slice())?
+                .map_or(0, |quoi| quoi.value());
+            for cadre in cadres {
+                let (estampille, operation) = match cadre {
+                    // Le cadre de fin d'un instantané : le curseur reprend à
+                    // la coupe, et le compteur se hisse au-dessus d'elle.
+                    Cadre::Fin { coupe } => {
+                        hisser_dans(&ecriture, coupe.compteur)?;
+                        avancer_le_curseur(&ecriture, pair, coupe.compteur)?;
+                        curseur = curseur.max(coupe.compteur);
+                        faites.push(Applique::Fin {
+                            curseur: coupe.compteur,
+                        });
+                        continue;
+                    }
+                    Cadre::Operation {
+                        estampille,
+                        operation,
+                    } => (*estampille, operation),
+                };
+
+                // 1. La provenance : C11 ne laisse passer que `locale` entre
+                //    racines.
+                if provenance_de(operation).is_some_and(|quoi| quoi != Provenance::Ici) {
+                    faites.push(Applique::Refusee(MotifDeRefus::HorsProvenance));
+                    continue;
+                }
+                // 2. L'estampille — mais l'instantané rend les estampilles
+                //    d'origine, y compris les nôtres, et ne recule pas au sens
+                //    du curseur.
+                if !instantane {
+                    if estampille.racine == self.racine {
+                        faites.push(Applique::Refusee(MotifDeRefus::Rejeu));
+                        continue;
+                    }
+                    if estampille.compteur <= curseur {
+                        faites.push(Applique::Refusee(MotifDeRefus::Recule));
+                        continue;
+                    }
+                }
+
+                let mut effets = EffetsVivants::default();
+                appliquer_dans(&ecriture, estampille, operation, &mut effets)?;
+                // 5. Le compteur se hisse au-dessus de l'estampille appliquée
+                //    (§4).
+                hisser_dans(&ecriture, estampille.compteur)?;
+                // 6. Le curseur avance — mais pas pendant un instantané, où
+                //    c'est le cadre de fin qui le pose (à la coupe).
+                if !instantane {
+                    avancer_le_curseur(&ecriture, pair, estampille.compteur)?;
+                    curseur = estampille.compteur;
+                }
+                faites.push(Applique::Faite {
+                    curseur: if instantane { 0 } else { estampille.compteur },
+                    effets,
+                });
             }
         }
         ecriture.commit()?;
-        Ok(Applique::Faite {
-            curseur: if instantane { 0 } else { estampille.compteur },
-            effets,
-        })
+        Ok(faites)
     }
 
     // ── La rupture de confiance (C17) ───────────────────────────────────────
@@ -3606,4 +3718,286 @@ fn reprendre(ecriture: &WriteTransaction, racine: Identifiant) -> Result<(), Fau
     table.insert(CLEF_DU_COMPTEUR, sequence.compteur)?;
     table.insert(CLEF_DES_RETIREES, sequence.compteur)?;
     Ok(())
+}
+
+// ── Le ré-estampillage sous l'identité réelle (`replication.md` §11.4) ───────
+//
+// Une base reprise par une racine SANS clé porte des estampilles sous
+// `RACINE_SANS_IDENTITE`. Au premier démarrage avec une clé, elles passent
+// sous l'identité réelle — le compteur gardé, la racine seule change. Ce qui
+// suit sait, type par type, où une estampille se cache : dans l'enregistrement,
+// dans ses champs estampillés à part, dans la clé d'une réclamation d'alias,
+// dans une opération du journal et dans l'enregistrement qu'elle porte.
+
+/// Cette estampille, passée sous `vers` si elle était sous `de`.
+fn sous(estampille: Estampille, de: Identifiant, vers: Identifiant) -> Estampille {
+    if estampille.racine == de {
+        Estampille {
+            compteur: estampille.compteur,
+            racine: vers,
+        }
+    } else {
+        estampille
+    }
+}
+
+/// Ce qui porte des estampilles, et sait les faire changer de racine.
+trait Reestampillable {
+    /// Passe sous `vers` chaque estampille sous `de`, et dit si l'une a bougé.
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool;
+}
+
+/// Passe ces champs d'estampille sous `vers`, et dit si l'un a bougé.
+macro_rules! reestampiller_les_champs {
+    ($soi:expr, $de:expr, $vers:expr, $($champ:ident),+ $(,)?) => {{
+        let mut bouge = false;
+        $(
+            let apres = sous($soi.$champ, $de, $vers);
+            bouge |= apres != $soi.$champ;
+            $soi.$champ = apres;
+        )+
+        bouge
+    }};
+}
+
+impl Reestampillable for Compte {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille, reclamation)
+    }
+}
+
+impl Reestampillable for Machine {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        let mut bouge = reestampiller_les_champs!(
+            self,
+            de,
+            vers,
+            estampille,
+            nom_estampille,
+            capacites_estampille
+        );
+        if let Some(liee) = self.cle.as_mut() {
+            bouge |= reestampiller_les_champs!(liee, de, vers, liaison, code);
+        }
+        bouge
+    }
+}
+
+impl Reestampillable for Appareil {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
+impl Reestampillable for JetonPoussee {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
+impl Reestampillable for Description {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
+impl Reestampillable for Enrolement {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
+impl Reestampillable for Service {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
+impl Reestampillable for Autorisation {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
+impl Reestampillable for Operation {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        match self {
+            Self::Compte { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::Appareil { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::Description { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::Poussee { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::Machine { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::Enrolement { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::Service { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::Autorisation { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::CleMachine { code, .. } => {
+                let apres = sous(*code, de, vers);
+                let bouge = apres != *code;
+                *code = apres;
+                bouge
+            }
+            Self::Alias { .. }
+            | Self::AppareilRevoque { .. }
+            | Self::MachineModifiee { .. }
+            | Self::CleMachineRevoquee { .. }
+            | Self::AutorisationRevoquee { .. } => false,
+        }
+    }
+}
+
+/// Ré-estampille une table d'enregistrements, et rend ceux qui ont bougé —
+/// tels qu'ils étaient, et tels qu'ils sont.
+///
+/// **Tout est relevé avant d'être réécrit** : on n'écrit pas dans une table
+/// qu'on parcourt.
+fn reestampiller_table<const N: usize, T: Reestampillable + Copy>(
+    ecriture: &WriteTransaction,
+    table: TableDefinition<'_, &[u8], &[u8; N]>,
+    lire: impl Fn(&[u8; N]) -> Result<T, asl_registre::Faute>,
+    ecrire: impl Fn(&T, &mut [u8; N]),
+    de: Identifiant,
+    vers: Identifiant,
+) -> Result<Vec<(Vec<u8>, T, T)>, Faute> {
+    let mut table = ecriture.open_table(table)?;
+    let mut bouges = Vec::new();
+    for entree in table.iter()? {
+        let (clef, valeur) = entree?;
+        let avant = lire(valeur.value())?;
+        let mut apres = avant;
+        if apres.reestampiller(de, vers) {
+            bouges.push((clef.value().to_vec(), avant, apres));
+        }
+    }
+    for (clef, _, apres) in &bouges {
+        let mut octets = [0_u8; N];
+        ecrire(apres, &mut octets);
+        table.insert(clef.as_slice(), &octets)?;
+    }
+    Ok(bouges)
+}
+
+/// Passe sous `vers` tout ce que `de` a estampillé, dans cette transaction, et
+/// rend combien d'enregistrements et d'opérations ont bougé.
+///
+/// # L'INDEX DES ALIAS SUIT, PARCE QUE L'ESTAMPILLE EST DANS SA CLÉ
+///
+/// [`ALIAS`] range la réclamation dans la clé, en gros-boutiste, pour que le
+/// titulaire soit la première de l'intervalle. Une réclamation qui change de
+/// racine change donc de clé : l'ancienne part, la neuve entre, et l'ordre
+/// entre réclamations d'un même alias est recalculé par la table elle-même.
+///
+/// # LE JOURNAL D'OPÉRATIONS AUSSI, CADRE PAR CADRE
+///
+/// Une opération journalisée sans identité partirait sur la voie sous seize
+/// zéros, et l'enregistrement qu'elle porte aussi. Chaque cadre est relu,
+/// ré-estampillé — l'en-tête et la charge —, et réécrit sous le même compteur,
+/// avec le même instant d'écriture : la rétention ne voit rien.
+fn reestampiller(
+    ecriture: &WriteTransaction,
+    de: Identifiant,
+    vers: Identifiant,
+) -> Result<usize, Faute> {
+    let mut combien = 0_usize;
+
+    let comptes = reestampiller_table(ecriture, COMPTES, Compte::lire, Compte::ecrire, de, vers)?;
+    {
+        let mut reclamations = ecriture.open_table(ALIAS)?;
+        for (clef, avant, apres) in &comptes {
+            if let Some(alias) = &avant.alias
+                && avant.reclamation != apres.reclamation
+            {
+                reclamations
+                    .remove(clef_de_reclamation(alias.octets(), avant.reclamation).as_slice())?;
+                reclamations.insert(
+                    clef_de_reclamation(alias.octets(), apres.reclamation).as_slice(),
+                    clef.as_slice(),
+                )?;
+            }
+        }
+    }
+    combien = combien.saturating_add(comptes.len());
+    combien = combien.saturating_add(
+        reestampiller_table(ecriture, MACHINES, Machine::lire, Machine::ecrire, de, vers)?.len(),
+    );
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            APPAREILS,
+            Appareil::lire,
+            Appareil::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            POUSSEES,
+            JetonPoussee::lire,
+            JetonPoussee::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            DESCRIPTIONS,
+            Description::lire,
+            Description::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            ENROLEMENTS,
+            Enrolement::lire,
+            Enrolement::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+    combien = combien.saturating_add(
+        reestampiller_table(ecriture, SERVICES, Service::lire, Service::ecrire, de, vers)?.len(),
+    );
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            AUTORISATIONS,
+            Autorisation::lire,
+            Autorisation::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+
+    // ── LE JOURNAL D'OPÉRATIONS ─────────────────────────────────────────────
+    let mut journal = ecriture.open_table(OPERATIONS)?;
+    let mut bouges = Vec::new();
+    for entree in journal.iter()? {
+        let (compteur, valeur) = entree?;
+        let valeur = valeur.value();
+        let (estampille, mut operation, _) = Operation::lire(valeur.get(8..).unwrap_or_default())?;
+        let apres = sous(estampille, de, vers);
+        let bouge = operation.reestampiller(de, vers);
+        if bouge || apres != estampille {
+            let mut cadre = [0_u8; OPERATION_OCTETS_MAX];
+            let ecrits = operation.ecrire(apres, &mut cadre);
+            let mut neuve = Vec::with_capacity(ecrits.saturating_add(8));
+            neuve.extend_from_slice(valeur.get(..8).unwrap_or_default());
+            neuve.extend_from_slice(cadre.get(..ecrits).unwrap_or_default());
+            bouges.push((compteur.value(), neuve));
+        }
+    }
+    for (compteur, valeur) in &bouges {
+        journal.insert(*compteur, valeur.as_slice())?;
+    }
+    Ok(combien.saturating_add(bouges.len()))
 }
