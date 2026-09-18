@@ -214,6 +214,14 @@ En pratique :
 - **Un point d'écoute UDP n'est jamais `joignable`**, parce qu'il ne se sonde
   pas. Il est `non_sondé`, et les applications le montrent différemment plutôt
   que de laisser croire à un échec.
+- **Un appareil qui se tait n'est pas mort.** La règle des orphelins
+  (`modele.md` §2.1, 2026-09-18) n'efface un compte que quand tous ses
+  appareils sont **révoqués** — un fait constaté —, jamais parce qu'aucun ne
+  s'est présenté depuis longtemps. Un téléphone dans un tiroir est un appareil
+  vivant, et un annuaire qui l'effacerait sur son silence affirmerait la mort
+  d'une clé qu'il n'a pas mesurée. Le prix est dit là-bas : un compte dont la
+  clé a été perdue sans révocation reste, et seul un humain qui le sait peut
+  l'effacer.
 
 Aucun contrôle automatique ne peut vérifier cela. C'est une règle de revue, et
 c'est pourquoi elle est écrite ici plutôt que supposée.
@@ -381,6 +389,30 @@ identifiant — jamais une machine, jamais un service, jamais un état.
 « pour la récupération de compte » ou un nom « pour l'affichage » violerait cette
 contrainte, et c'est par là qu'elle tombera si elle tombe — jamais par une
 décision explicite, toujours par une commodité.
+
+### Un compte effacé laisse un identifiant et une date — et ce n'est pas une donnée personnelle
+
+**Effacer un compte retire tout ce qu'il tenait et laisse le `u-…` marqué
+effacé, avec la date et la cause** (`modele.md` §2.1, 2026-09-18). Ce reste
+est compatible avec cette contrainte, et il faut dire pourquoi plutôt que le
+supposer : C13 interdit ce qui identifie une *personne*. Un identifiant tiré
+au hasard, dont la clé qui le prouvait, l'alias qui le nommait et tout ce
+qu'il possédait ont été retirés, ne désigne plus personne — il dit qu'un
+compte a existé et n'existe plus, ce qui est exactement ce que la réplication
+et les caches ont besoin de lire pour ne pas le ressusciter. C'est le même
+statut qu'un appareil révoqué : un état gardé pour empêcher une erreur, pas
+pour décrire quelqu'un.
+
+**Ce qui tomberait sous cette contrainte, et qu'on ne fait pas** : garder
+l'alias « pour que personne ne le reprenne » — l'alias est une réclamation,
+et l'effacement la retire ; garder les arêtes marquées « pour que les amis
+voient » — elles nommeraient le compte chez d'autres, indéfiniment ; garder
+les clés publiques des appareils « au cas où » — il n'y a pas de cas où. Et
+**la seule chose que l'effacement ajoute au schéma est ce dont la règle des
+orphelins a besoin** : `révoqué le` sur l'appareil, que `modele.md` §2.2
+promettait déjà, et `effacé le` sur le compte. Pas `enrôlé le`, dont rien n'a
+besoin — « pendant qu'on y est » est la commodité que le paragraphe précédent
+nomme.
 
 ## C14 — Aucune authentification par secret partagé
 
@@ -663,6 +695,15 @@ contrainte est ce qui l'empêche de devenir une archive comportementale.**
 - **Le journal n'est pas la porte par laquelle C13 tombe.** Une ligne qui
   emporterait un alias, un nom de machine ou un nom de service vers un système
   de statistiques externe hébergerait ailleurs ce qu'on refuse d'héberger ici.
+- **Un compte qui s'efface n'efface pas son journal** (`modele.md` §2.1,
+  2026-09-18). Les entrées brutes qui le nomment expirent à quatre-vingt-dix
+  jours comme toutes les autres — pas avant, pas à part. Les effacer au moment
+  de l'effacement détruirait la preuve au moment précis où l'on peut en avoir
+  besoin : un compte qui se ferme juste après un abus est le cas que la
+  rétention existe pour couvrir, et la même raison a fait survivre le journal
+  à une rupture (C17, `journal.md` §5 bis). Le prix est le même et il est dit :
+  pendant un trimestre, le journal sait encore ce que ce `u-…` a demandé — et
+  un `u-…` effacé ne désigne plus personne (C13).
 
 **Ce qui n'est PAS retenu par défaut** : l'adresse source du demandeur, et les
 candidats servis. Le premier est le champ le plus identifiant du lot ; le second

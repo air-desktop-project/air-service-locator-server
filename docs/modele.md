@@ -69,8 +69,8 @@ l'application iOS ou Android.
 | `identifiant` | `u-` + 26 caractères. **Public — c'est ce qu'on donne à un ami pour qu'il vous autorise.** |
 | `appareils` | Les téléphones enrôlés qui peuvent administrer ce compte. |
 | `machines` | Les machines en gestion — celles qui servent comme celles qui consomment. |
-
 | `alias` | **Facultatif.** Unique, public, choisi. Sert à être retrouvé (voir ci-dessous). |
+| `effacé le` | Date, ou vide — et la **cause** : `titulaire`, `orphelin`, `exploitant`. Un compte effacé n'a plus rien d'autre (voir « Effacer son compte », ci-dessous). |
 
 ### Aucune donnée personnelle n'est hébergée
 
@@ -102,6 +102,202 @@ qui ne l'enregistre pas n'est trouvable que par son identifiant, transmis de la
 main à la main — SMS, courriel, à voix haute. C'est le mode le plus discret, et
 il doit rester le défaut.
 
+### Effacer son compte — le geste, ce qui part, ce qui reste
+
+**Décidé le 2026-09-18.** Un compte s'ouvre depuis un appareil ; il se ferme
+depuis un appareil, et de la même main. Jusqu'ici l'annuaire savait révoquer
+un appareil, une clé de machine, une autorisation — jamais le compte qui les
+tient, et trois comptes de banc sans plus aucune clé derrière eux l'ont montré :
+un compte que personne ne peut plus administrer restait là, indéfiniment,
+parce que rien n'était écrit pour qu'il s'en aille.
+
+**Pourquoi c'est un geste du titulaire, et de lui seul.** Le compte est un jeu
+de clés ; qui détient une clé vivante détient le compte, et personne d'autre
+n'en détient rien — ni l'exploitant, qui ne tient que des clés publiques, ni
+une machine, qui agit *au nom* du compte sans en décider (§2.3). Effacer est
+donc un verbe de la voie appareil, sous biométrie, et **c'est le dernier acte
+de la clé qui le demande** : elle est révoquée dans la même transaction que
+tout le reste, et la connexion qui a porté la demande est fermée par
+l'annuaire. Le verbe est `DELETE /v1/compte` (`protocole.md` §2.2).
+
+**Ce qui part, dans UNE transaction** — un effacement à moitié fait serait un
+compte dans un état qu'aucun autre chemin ne produit :
+
+| | Ce qu'il en advient |
+|---|---|
+| Les **appareils** | Tous révoqués, celui qui demande compris ; leurs enregistrements, leurs jetons de poussée et leurs descriptions **effacés**. Il n'y a plus d'écran « Compte » à qui montrer ce qu'on a retiré. |
+| Les **machines** | Clés révoquées, connexions fermées, baux tombés (§2.3, « Révoquer ») ; les codes d'enrôlement en cours annulés ; les enregistrements **effacés**, et leurs **services** déclarés avec eux. |
+| Les **autorisations**, accordées ET reçues | **Retirées** — effacées, non marquées. L'autre partie ne voit **plus rien** : la ligne quitte sa liste, et ses machines ne résolvent plus rien de ce compte, à la seconde, comme après une révocation. Une ligne « révoquée » qui nommerait un compte qui n'existe plus lui montrerait un `u-…` sur lequel `GET /v1/utilisateurs/{u}` répond désormais `404` ; c'est ce qu'il faut lui épargner. |
+| L'**alias** | **Libéré.** L'alias est une réclamation (`replication.md` §3.2) ; l'effacement retire la réclamation, exactement comme `DELETE /v1/alias`. Si un autre compte l'attendait en file, il l'obtient. |
+
+**Ce qui reste, et pourquoi.** L'identifiant `u-…`, marqué **effacé**, avec la
+date et la cause — et rien d'autre : ni clé, ni alias, ni arête, ni machine.
+Il reste pour trois raisons qui tiennent chacune seule :
+
+- **la réplication doit converger.** Une racine qui applique l'effacement
+  après avoir reçu une écriture de ce compte doit pouvoir dire « effacé,
+  refusé » plutôt que « inconnu, créons-le » ; sans marque, une opération en
+  retard ressusciterait un compte que son titulaire a fermé
+  (`replication.md` §3.2) ;
+- **les caches doivent converger.** Une application qui tient encore ce
+  `u-…` dans une autorisation, un carnet, un écran, doit lire une réponse qui
+  ne se confond pas avec une coupure ;
+- **un identifiant ne se réattribue pas.** Cent vingt-huit bits ne
+  collisionnent pas ; mais un identifiant *libéré* est un identifiant qu'un
+  malchanceux pourrait un jour retirer, et hériter des arêtes que quelqu'un
+  aurait oublié de retirer chez lui. Marqué, il ne l'est pas.
+
+**Et c'est compatible avec C13, parce qu'un `u-…` sans rien derrière n'est pas
+une donnée personnelle.** C13 interdit ce qui *identifie une personne* — un
+courriel, un nom, un numéro. Un identifiant tiré au hasard, dont on a retiré la
+clé qui le prouvait, l'alias qui le nommait et tout ce qu'il possédait, ne
+désigne plus personne : il dit qu'un compte a existé et qu'il n'existe plus.
+C'est la même chose qu'un appareil révoqué, et pour la même raison — l'état
+qu'on garde est celui qui empêche une erreur, pas celui qui décrit quelqu'un.
+
+**Le journal (`journal.md`) n'est pas touché à part, et c'est voulu.** Les
+entrées brutes qui nomment ce compte expirent à quatre-vingt-dix jours comme
+toutes les autres (C18) ; les agrégats, qui ne nomment personne, survivent.
+Effacer le journal d'un compte au moment où il s'efface détruirait la preuve
+au moment précis où l'on peut en avoir besoin — un compte qui s'efface juste
+après un abus est exactement le cas que la rétention existe pour couvrir
+(`journal.md` §5 bis). Ce que cela coûte est dit : pendant un trimestre, le
+journal d'exploitation sait encore ce que ce `u-…` a demandé.
+
+**Un effacement ne se défait pas.** Il est de la classe des révocations
+(`replication.md` §3.2) : il gagne sur toute écriture concurrente, et une
+écriture pour ce compte qui arrive après — rejeu, retard, autre racine — est
+refusée. Il n'y a pas de « restaurer » : ce qui rendrait une restauration
+possible est précisément ce qu'on vient d'effacer.
+
+#### Un compte sans aucun appareil vivant s'efface tout seul — la règle des orphelins
+
+**Un compte dont aucun appareil n'est vivant ne peut plus rien décider** — ni
+enrôler, ni révoquer, ni rejoindre, ni s'effacer : il n'y a plus de clé pour
+signer. Ce n'est pas une limite qu'on pourrait lever, c'est la construction
+même du produit (§2.2, « il n'y a donc rien à exporter »). Un tel compte est
+un enregistrement que personne ne pourra plus jamais toucher, et qui tient
+un alias et des arêtes pour rien. **La racine l'efface elle-même, après un
+délai de grâce, et le dit au journal d'exploitation.**
+
+| | La règle |
+|---|---|
+| **Ce qui déclenche le décompte** | La révocation du **dernier appareil vivant** du compte. (La création du compte enrôle le premier appareil — `POST /v1/comptes` — donc un compte sans aucun appareil jamais enrôlé n'existe pas.) |
+| **Le délai** | **Trente jours**, cause `orphelin`. |
+| **Ce qui l'arrête** | Rien ne peut l'arrêter de l'intérieur — c'est le point : sans clé vivante, personne ne peut enrôler un appareil pour ce compte. Le délai n'est pas là pour que le titulaire réagisse. |
+| **Comment la racine sait la date** | Par `révoqué le` sur l'appareil (§2.2) — une date, celle de la racine qui a révoqué, répliquée telle quelle (§2.10). Le compte est orphelin depuis le `révoqué le` le plus récent de ses appareils. |
+| **Qui efface, à deux racines** | **Chacune peut.** L'opération est idempotente et de la classe « révocation, toujours » : la première qui passe le délai efface, l'autre applique ce qu'elle reçoit — ou, si elle a effacé de son côté dans la même minute, applique un effacement sur un compte déjà effacé, ce qui ne fait rien. Les deux tiennent la même date, donc la même échéance. |
+| **Ce qui se journalise** | Une ligne du journal d'exploitation, avec l'identifiant et la cause — comme toute révocation. |
+
+**Pourquoi trente jours, alors que le titulaire ne peut de toute façon rien
+faire.** Il faut être honnête sur ce que le délai n'achète pas : **il ne
+laisse pas au titulaire qui a perdu son dernier téléphone le temps de s'en
+apercevoir**, parce que s'en apercevoir ne lui servirait à rien — sans appareil
+vivant, il ne peut ni rejoindre son compte ni y enrôler quoi que ce soit. Ce
+que le délai achète est ailleurs :
+
+- **la fenêtre de propagation.** Une révocation prise sur une racine pendant
+  une coupure met du temps à atteindre l'autre ; un enrôlement pris sur
+  l'autre pendant la même coupure aussi. Un délai de quelques secondes
+  ferait effacer un compte dont un appareil venait d'être enrôlé ailleurs.
+  Trente jours couvrent toute coupure qu'on accepterait de tolérer, et
+  c'est la rétention du journal d'opérations (`replication.md` §5.4) : au-delà,
+  une racine ne se rattrape plus, elle se reconstruit ;
+- **la lisibilité.** Un compte qui disparaît à la seconde où l'on révoque son
+  dernier appareil est un compte qu'on efface par accident, depuis l'écran
+  d'un autre appareil qu'on est en train de retirer. Trente jours, c'est le
+  temps de voir dans le journal d'exploitation ce qui va s'effacer, et de
+  s'en étonner si l'on doit.
+
+**Ce que cela implique, et que l'application dit déjà : un compte à un seul
+appareil est un compte qu'un téléphone perdu ferme** (§2.2). La règle des
+orphelins ne change pas ce fait, elle en tire la conséquence : trente jours
+après la perte, le compte n'existe plus, son alias est libre, et ce que ses
+amis lui avaient accordé est retiré. **L'application doit le dire en ces
+termes, à l'enrôlement et dans l'écran Compte** — « avec un seul appareil,
+perdre ce téléphone efface ce compte » —, et non seulement pousser à enrôler
+un second appareil.
+
+**Le réglage d'exploitant : `--orphans <jours>`**, trente par défaut, **`0`
+pour jamais**. Une racine peut vouloir « jamais » pour une raison qui tient :
+son exploitant veut que tout effacement soit un acte humain — le sien, avec
+`--forget`, ci-dessous —, parce qu'il tient un annuaire où chaque compte a
+un visage, ou parce qu'il veut voir ses orphelins avant qu'ils partent. Ce
+qu'il y perd est dit : des comptes que personne ne peut plus administrer, qui
+tiennent des alias et des arêtes indéfiniment.
+
+#### Ce que la règle n'attrape pas, et le verbe d'exploitant qui le couvre
+
+**Un appareil qui ne s'est pas présenté depuis longtemps n'est pas « mort »
+pour autant.** Un téléphone rangé dans un tiroir six mois est un appareil
+vivant : sa clé existe, et il signera le jour où on le rallume. L'annuaire
+n'affirme que ce qu'il mesure (C6), et il ne mesure pas la mort d'une clé —
+il constate une révocation, ou rien. **La règle des orphelins ne compte donc
+que les révocations, jamais le silence.**
+
+C'est pourquoi elle **n'attrape pas** les trois comptes du banc `nitrogen`
+qui ont motivé ce chantier (`u-24MF…`, `u-6TEE…`, `u-6J5S…`) : leurs clés ont
+été effacées **côté appareil**, sans révocation — un simulateur remis à zéro,
+une app non sandboxée qui a écrit sa clé au mauvais endroit —, et l'annuaire
+les croit vivants depuis leur création. Il n'y a que deux sorties honnêtes :
+les laisser, ou un geste d'exploitant, **une fois**, par quelqu'un qui *sait*
+que la clé est perdue parce que c'est lui qui l'a perdue.
+
+**Le verbe : `asl-server --forget <u-…> --store <fichier>`.** Hors ligne,
+entrepôt arrêté, comme `--new-identity-key` (`replication.md` §8) : il ouvre
+l'entrepôt, écrit l'effacement du compte — le même, avec la cause
+`exploitant` — dans la même transaction et dans le journal d'opérations, pour
+que l'autre racine l'applique au prochain rattrapage, imprime ce qu'il a fait,
+et s'arrête. Il refuse de tourner si le daemon tient l'entrepôt, et il ne
+prend qu'un identifiant à la fois : c'est un geste qu'on fait en regardant.
+
+**C'est l'exception qui confirme la règle, et il faut la borner en le
+disant.** La règle est : *personne d'autre que le titulaire n'efface un
+compte, et la racine ne le fait qu'à sa place quand il ne peut plus rien
+faire, sur un fait qu'elle a constaté.* `--forget` est ce qui reste quand
+aucun des deux ne tient — la clé est perdue, et l'annuaire ne peut pas le
+savoir. Il n'est pas un outil de modération : l'exploitant d'une racine qui
+voudrait fermer le compte de quelqu'un a d'autres questions à se poser, et ce
+document ne les instruit pas. Ce qu'il coûte est dit : **il n'y a rien dans
+l'entrepôt qui distingue « la clé est perdue » de « l'exploitant l'a
+décidé »**, sinon la cause `exploitant` elle-même, qui dit exactement cela —
+un humain, sur la machine, l'a voulu.
+
+#### Ce que les applications font, et ce qu'`asl` ne fait pas
+
+**Un geste « Effacer mon compte » dans l'écran Compte** — iOS, macOS,
+Android —, sous biométrie, en bas et en rouge comme « Révoquer » l'est pour un
+appareil : visible, pas enfoui, parce que c'est le geste qu'on cherche quand
+on a une raison de le chercher. Avant de signer, **une confirmation qui dit ce
+qui part et ce qui ne revient pas**, dans ces termes et pas dans une page
+d'aide (c'est la règle de §2.5 : un utilisateur qui apprend après coup n'a pas
+consenti, il a cliqué) :
+
+- tous les appareils de ce compte, celui-ci compris ;
+- toutes ses machines, et les services qu'elles annoncent — les daemons qui
+  tournent perdront leur bail à la seconde ;
+- tous les accès, ceux qu'on a accordés et ceux qu'on a reçus ;
+- l'alias, qui redevient libre ;
+- et que rien de tout cela ne revient : il n'y a pas de « restaurer ».
+
+Puis `DELETE /v1/compte`, la lecture du `204`, et **le carnet local vidé** —
+identifiant, clé (détruite dans l'enclave ou le Keystore : elle est révoquée,
+et une clé révoquée qui traîne est une clé qui fera croire à un compte),
+noms locaux, préférences d'affichage — et **le retour à l'écran d'accueil**,
+celui qui propose d'ouvrir un compte ou d'en rejoindre un. La connexion tombe
+juste après le `204` ; l'application ne doit pas le lire comme une panne.
+
+**Sur le Mac, l'identité de machine part aussi.** L'app macOS tient dans son
+conteneur l'identité de la machine (`Application Support/asl/identite`) que
+`asl` lit par défaut sur cette machine ; sa clé est révoquée par l'effacement, et un fichier
+d'identité dont la clé ne vaut plus rien ferait rendre `401` à chaque `asl`
+sans dire pourquoi. L'app l'efface avec le carnet.
+
+**`asl` n'a rien à y faire, et n'aura pas de verbe.** Une machine ne décide
+pas du compte (§2.3) ; ce qu'elle voit d'un effacement est sa connexion
+fermée, puis `401` — comme d'une révocation de clé, et elle n'a pas à
+distinguer les deux. `asl diagnose` dira « clé refusée », ce qui est exact.
+
 ### 2.2 Appareil
 
 Le téléphone. Un compte en porte au moins un, et **c'est l'appareil qui signe**,
@@ -116,7 +312,23 @@ jamais l'utilisateur : il n'y a pas de mot de passe dans ce produit.
 | `plateforme` | `ios`, `android` ou `macos` — ce que l'appareil fait tourner. **Déclaré par l'appareil lui-même**, absent tant qu'il ne l'a pas fait. |
 | `modele` | « iPhone 17 », « MacBook Pro (2019) » — le nom de son **modèle**, libre, 1 à 64 octets, aux règles du nom de machine (§2.3). Déclaré avec la plate-forme, absent avec elle. |
 | `enrôlé le` | Date. |
-| `révoqué le` | Date, ou vide. |
+| `révoqué le` | Date, ou vide. **C'est la date que la règle des orphelins lit** (§2.1) : un compte est orphelin depuis le `révoqué le` le plus récent de ses appareils. |
+
+**Ces deux dates sont promises ici depuis le premier jour, et l'entrepôt n'en
+porte encore aucune** (2026-09-18 : `Appareil` porte un drapeau `revoque`, et
+l'estampille est un compteur, pas une heure — §2.10). Tant que rien n'en avait
+besoin, ce n'était pas un défaut : une colonne qui n'existe pas ne se remplit
+pas (C13). **La règle des orphelins a besoin de `révoqué le`**, et c'est la PR
+de code qui l'ajoute à l'enregistrement — un changement de format, donc un
+cran mineur en 0.x — en millisecondes d'époque, comme toute date de ce
+protocole (`protocole.md` §1.1). Une seule date, posée une fois, sur un
+enregistrement qui ne vaut déjà plus rien : elle ne dessine aucun graphe
+d'usage, et C18 n'a rien à en dire. `enrôlé le` n'est pas ajouté par la même
+occasion — rien n'en a besoin, et « pendant qu'on y est » est la porte que
+C13 nomme. **Les appareils déjà révoqués au moment du changement de format**
+reçoivent pour `révoqué le` la date de la reprise de l'entrepôt : l'annuaire
+ne sait pas mieux, et poser une date plus ancienne serait affirmer ce qu'il
+n'a pas mesuré (C6).
 
 **La plate-forme et le modèle sont une étiquette que l'appareil se pose
 lui-même, pas une preuve.** L'annuaire ne vérifie rien de ce qu'elle dit — un
@@ -149,7 +361,11 @@ toucher.
 
 **Un compte à un seul appareil est un compte qu'un téléphone perdu ferme
 définitivement.** L'application le dit à l'enrôlement et pousse à en enrôler un
-second ; elle ne l'impose pas.
+second ; elle ne l'impose pas. Depuis le 2026-09-18, « ferme » a un sens
+précis : trente jours après la révocation de son dernier appareil vivant, la
+racine efface le compte (§2.1, la règle des orphelins). Un téléphone perdu et
+non révoqué, lui, laisse un compte que l'annuaire croit vivant — la règle ne
+compte que ce qu'elle constate.
 
 **Un second appareil ne s'ajoute pas en « important » le compte : il s'ajoute
 en faisant enrôler SA clé par un appareil qui l'est déjà.** L'intuition
@@ -567,8 +783,10 @@ l'émission du code qui l'a liée.
 
 **Elle ne dit pas l'heure, et c'est une qualité** : répliquer n'ajoute aucune
 ligne de temps à ce que l'entrepôt porte déjà (C13, C18). Les dates que ce
-modèle porte — `enrôlé le`, `révoqué le` — restent celles de la racine qui a
-écrit, et se répliquent telles quelles.
+modèle porte — `enrôlé le`, `révoqué le`, `effacé le` — restent celles de la
+racine qui a écrit, et se répliquent telles quelles. C'est ce qui fait que
+deux racines calculent la même échéance pour un compte orphelin (§2.1) :
+elles lisent la même date, pas chacune leur pendule.
 
 ---
 
