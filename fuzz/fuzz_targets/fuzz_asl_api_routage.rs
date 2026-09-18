@@ -73,6 +73,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Utilisateur { compte } => format!("/v1/utilisateurs/{compte}"),
         Ressource::MachinesUtilisateur { compte } => format!("/v1/utilisateurs/{compte}/machines"),
         Ressource::Moi => "/v1/moi".to_owned(),
+        Ressource::AppareilsDuProprietaire => "/v1/moi/appareils".to_owned(),
         Ressource::Appareils => "/v1/appareils".to_owned(),
         Ressource::Appareil { appareil } => format!("/v1/appareils/{appareil}"),
         Ressource::PousseeAppareil { appareil } => format!("/v1/appareils/{appareil}/poussee"),

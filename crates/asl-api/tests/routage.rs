@@ -53,6 +53,10 @@ fn chaque_chemin_designe_sa_ressource() {
         Ressource::MachinesUtilisateur { .. }
     ));
     assert_eq!(resoudre_get("/v1/moi").unwrap(), Ressource::Moi);
+    assert_eq!(
+        resoudre_get("/v1/moi/appareils").unwrap(),
+        Ressource::AppareilsDuProprietaire
+    );
     assert!(matches!(
         resoudre_get(&format!("/v1/appareils/{a}")).unwrap(),
         Ressource::Appareil { .. }
@@ -747,6 +751,35 @@ fn moi_exige_une_machine_quelle_que_soit_sa_capacite() {
     for methode in [Methode::Post, Methode::Put, Methode::Patch, Methode::Delete] {
         assert!(!resoudre(methode, b"/v1/moi").unwrap().sert, "{methode:?}");
     }
+}
+
+#[test]
+fn les_appareils_du_proprietaire_exigent_une_machine_et_ne_se_lisent_que_par_get() {
+    // **`protocole.md` §3** : une machine voit les appareils du compte qui la
+    // possède — la même liste que `GET /v1/appareils` —, et RIEN à faire
+    // dessus : enrôler, révoquer, décrire restent sur la voie appareil. D'où
+    // `GET` seul, et l'exigence de `/v1/moi` — une machine, quelle que soit sa
+    // capacité, jamais un compte désigné.
+    let resolu = resoudre(Methode::Get, b"/v1/moi/appareils").expect("elle se route");
+    assert_eq!(resolu.ressource, Ressource::AppareilsDuProprietaire);
+    assert_eq!(resolu.exigence, Exigence::Machine);
+    assert!(resolu.sert);
+    for methode in [Methode::Post, Methode::Put, Methode::Patch, Methode::Delete] {
+        assert!(
+            !resoudre(methode, b"/v1/moi/appareils").unwrap().sert,
+            "{methode:?}"
+        );
+    }
+    // Un segment de plus n'est pas une ressource : `/v1/moi/appareils/{a}`
+    // désignerait UN appareil, et la voie machine n'en désigne aucun.
+    assert_eq!(
+        resoudre(
+            Methode::Get,
+            b"/v1/moi/appareils/a-0000000000000000000000000000"
+        )
+        .unwrap_err(),
+        Erreur::RessourceInconnue
+    );
 }
 
 // ── La voie entre racines (`docs/replication.md`, `protocole.md` §3 bis) ────

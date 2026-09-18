@@ -1007,7 +1007,7 @@ avec la description quand elle a été posée — **et rien faire dessus.** C'es
 une décision de produit, et elle abaisse à dessein la frontière entre les deux
 rôles : l'administrateur d'une machine, dans un terminal, doit pouvoir répondre
 à « quels appareils administrent ce compte ? » sans sortir un téléphone — c'est
-`asl devices`. Ce qu'elle coûte est dit : une clé de machine compromise, qui
+`asl enrolled`. Ce qu'elle coûte est dit : une clé de machine compromise, qui
 signe sans témoin, apprend désormais *qui* administre le compte — les `a-…`,
 les modèles. Ce qu'elle ne peut toujours pas : enrôler, révoquer, décrire —
 tout ce qui change le compte reste sur la voie appareil, sous biométrie. Une

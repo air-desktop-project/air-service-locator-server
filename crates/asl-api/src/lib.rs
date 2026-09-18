@@ -264,6 +264,19 @@ pub enum Ressource<'a> {
     /// `/v1/moi` — **qui je suis, et à qui j'appartiens**, sur la voie machine :
     /// `{"machine": "m-…", "proprietaire": "u-…"}`.
     Moi,
+    /// `/v1/moi/appareils` — **les appareils du compte qui possède la machine
+    /// qui demande**, révoqués compris et marqués, sur la voie machine
+    /// (`protocole.md` §3) : la liste que `GET /v1/appareils` rend à un
+    /// appareil, et rien à faire dessus.
+    ///
+    /// # SOUS `/v1/moi`, ET NON SOUS `/v1/utilisateurs/{u}`
+    ///
+    /// C'est la même règle que [`Ressource::Moi`] : la liste est celle du
+    /// PROPRIÉTAIRE de la clé qui demande, jamais d'un compte désigné. Un
+    /// chemin qui nommerait le compte laisserait croire qu'on peut en nommer
+    /// un autre — et la réponse à cette question est « non », par construction
+    /// (`modele.md` §2.2, C13) : un appareil ne sort pas de son compte.
+    AppareilsDuProprietaire,
     /// `/v1/appareils` — enrôler un appareil de plus.
     Appareils,
     /// `/v1/appareils/{a}` — révoquer.
@@ -395,6 +408,7 @@ impl Ressource<'_> {
             Self::Utilisateur { .. }
             | Self::MachinesUtilisateur { .. }
             | Self::Moi
+            | Self::AppareilsDuProprietaire
             | Self::Vu
             | Self::Version
             | Self::Poussees
@@ -458,7 +472,7 @@ impl Ressource<'_> {
             | Self::Utilisateur { .. } => Exigence::Aucune,
             Self::Annonce | Self::Poussees => Exigence::MachineAnnonce,
             Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
-            Self::Moi | Self::Replication => Exigence::Machine,
+            Self::Moi | Self::AppareilsDuProprietaire | Self::Replication => Exigence::Machine,
             Self::MachinesUtilisateur { .. } => Exigence::AppareilOuMachineLecture,
             Self::PairPreuve | Self::PairOperations { .. } | Self::PairInstantane => {
                 Exigence::Racine
@@ -749,6 +763,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
             compte: identifiant(compte, Genre::Utilisateur)?,
         }),
         ["v1", "moi"] => Ok(Ressource::Moi),
+        ["v1", "moi", "appareils"] => Ok(Ressource::AppareilsDuProprietaire),
         ["v1", "appareils"] => Ok(Ressource::Appareils),
         ["v1", "appareils", appareil] => Ok(Ressource::Appareil {
             appareil: identifiant(appareil, Genre::Appareil)?,

@@ -515,6 +515,7 @@ impl Service<'_> {
             Besoin::MesAutorisations => self.rassembler_les_autorisations(),
             Besoin::MachinesDe { compte } => self.rassembler_les_machines_de(*compte),
             Besoin::Moi => self.qui_je_suis(),
+            Besoin::AppareilsDuProprietaire => self.rassembler_les_appareils_du_proprietaire(),
             // **RIEN À CHERCHER** : ouvrir le flux ne dépend d'aucun état, et
             // ce qui s'y écrira ensuite n'est pas une réponse à une requête.
             Besoin::EcouterLesPoussees => Trouvaille::Rien,
@@ -1774,7 +1775,7 @@ impl Service<'_> {
         Trouvaille::Machines(elements)
     }
 
-    /// Les appareils du compte qui demande, révoqués compris.
+    /// Les appareils du compte qui demande, révoqués compris — voie appareil.
     fn rassembler_les_appareils(&self) -> Trouvaille {
         let Some(appareil) = self.session.appareil() else {
             return Trouvaille::Rien;
@@ -1782,7 +1783,41 @@ impl Service<'_> {
         let Ok(Some(rangee)) = self.entrepot.appareil(appareil) else {
             return Trouvaille::Rien;
         };
-        let Ok(appareils) = self.entrepot.appareils_de_compte(rangee.proprietaire) else {
+        self.rassembler_les_appareils_de(rangee.proprietaire)
+    }
+
+    /// Les appareils du compte qui possède la machine qui demande, révoqués
+    /// compris — voie machine (`protocole.md` §3).
+    ///
+    /// # LA MÊME LISTE, PAR UN AUTRE CHEMIN
+    ///
+    /// Un appareil remonte à son compte ; une machine remonte à son
+    /// propriétaire. Ce qui suit est [`Self::rassembler_les_appareils_de`],
+    /// le même, pour que la voie machine ne puisse pas dériver de l'écran
+    /// Compte — un champ ajouté ici l'est là-bas, par construction.
+    ///
+    /// **Une machine sans clé n'a plus de propriétaire à qui demander.** La
+    /// révocation ferme sa connexion au tour suivant ; une requête arrivée
+    /// dans l'intervalle trouve une rangée sans clé, et c'est `Rien` — que
+    /// l'étage 2 rend `401`, comme toute la voie.
+    fn rassembler_les_appareils_du_proprietaire(&self) -> Trouvaille {
+        let Some(machine) = self.session.machine() else {
+            return Trouvaille::Rien;
+        };
+        let Ok(Some(rangee)) = self.entrepot.machine(machine) else {
+            return Trouvaille::Rien;
+        };
+        if rangee.cle.is_none() {
+            return Trouvaille::Rien;
+        }
+        self.rassembler_les_appareils_de(rangee.proprietaire)
+    }
+
+    /// Les appareils d'un compte, chacun encodé par
+    /// `asl_api::corps::AppareilRendu` — l'objet de `GET /v1/appareils`, servi
+    /// tel quel sur les deux voies.
+    fn rassembler_les_appareils_de(&self, proprietaire: Identifiant) -> Trouvaille {
+        let Ok(appareils) = self.entrepot.appareils_de_compte(proprietaire) else {
             return Trouvaille::Rien;
         };
 
