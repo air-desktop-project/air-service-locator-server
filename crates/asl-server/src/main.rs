@@ -43,7 +43,7 @@ use asl_loop_tokio::{
 };
 use asl_store::{Entrepot, RACINE_SANS_IDENTITE};
 
-use crate::reglages::{Reglages, USAGE};
+use crate::reglages::{Oubli, Reglages, USAGE};
 
 /// Combien de temps entre deux passages d'expiration du journal.
 ///
@@ -105,6 +105,12 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
             return Err("--new-identity-key attend un chemin".into());
         };
         return nouvelle_identite(std::path::Path::new(chemin));
+    }
+    // **EFFACER UN COMPTE HORS LIGNE EST UN GESTE AUSSI** (`modele.md` §2.1,
+    // `replication.md` §8) : l'entrepôt, l'identité si on l'a, et rien
+    // d'autre — ni certificat, ni socket, ni posture.
+    if let Some(oubli) = Reglages::geste_d_oubli(&arguments).inspect_err(|_| eprint!("{USAGE}"))? {
+        return oublier(&oubli);
     }
     let reglages = Reglages::depuis(&arguments).inspect_err(|_| eprint!("{USAGE}"))?;
 
@@ -199,6 +205,31 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                 entrepot.racine(),
             );
         }
+        // **ET LA REPRISE DES DATES AUSSI** (`modele.md` §2.2) : les appareils
+        // déjà révoqués ont reçu la date de ce démarrage pour `révoqué le`,
+        // et c'est de là que la règle des orphelins comptera pour eux.
+        if entrepot.dates_de_reprise() > 0 {
+            eprintln!(
+                "asl-server : entrepôt repris au format des dates — {} appareil(s) déjà \
+                 révoqué(s) ont reçu la date de cette reprise pour « révoqué le » ; le journal \
+                 d'opérations repart vide, l'autre racine s'amorcera par instantané.",
+                entrepot.dates_de_reprise(),
+            );
+        }
+        // **LA RÈGLE DES ORPHELINS SE DIT AU DÉMARRAGE**, et « jamais » aussi
+        // (`replication.md` §8) : c'est là qu'on relit ce qu'on croyait avoir
+        // réglé.
+        match reglages.orphelins_ms() {
+            Some(_) => eprintln!(
+                "asl-server : orphelins (--orphans) : un compte dont tous les appareils sont \
+                 révoqués depuis plus de {} jours est effacé, cause orphelin.",
+                reglages.orphelins_jours,
+            ),
+            None => eprintln!(
+                "asl-server : orphelins (--orphans 0) : cette racine n'efface JAMAIS un compte \
+                 d'elle-même — seuls le titulaire et --forget le font."
+            ),
+        }
         match (&reglages.pair, &cle_du_pair) {
             (Some(pair), Some(cle)) => eprintln!(
                 "asl-server : pair {} à {} — il tire d'ici, et l'on tire chez lui \
@@ -286,6 +317,11 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
             bail,
             voie,
         );
+        // **LA RÈGLE DES ORPHELINS, SI ELLE EST RÉGLÉE** — et `--orphans 0`
+        // ne la règle pas : la racine n'efface alors jamais d'elle-même.
+        if let Some(delai) = reglages.orphelins_ms() {
+            application.effacer_les_orphelins_apres(delai);
+        }
 
         // **LE TIREUR : LA CONNEXION SORTANTE** (`docs/replication.md` §2.1).
         // Quand `--peer` est réglé, une tâche ouvre une connexion vers le pair,
@@ -382,6 +418,86 @@ fn nouvelle_identite(chemin: &std::path::Path) -> Result<(), Box<dyn std::error:
         asl_cle::identifiant_de_racine(&publique),
     );
     Ok(())
+}
+
+/// Efface ce compte, hors ligne, dit ce qui est parti, et s'arrête.
+///
+/// # ENTREPÔT ARRÊTÉ, ET C'EST `redb` QUI LE TIENT
+///
+/// Le daemon prend un verrou exclusif sur le fichier (`File::try_lock`) à
+/// l'ouverture, et `redb` refuse d'ouvrir un fichier qu'un autre processus
+/// tient — `DatabaseAlreadyOpen`. C'est ce refus qu'on traduit : le geste ne
+/// s'exécute pas pendant que l'annuaire sert, et il le dit plutôt que
+/// d'attendre. **Aucune connexion à fermer** : l'entrepôt étant arrêté, la
+/// clé d'un appareil ou d'une machine de ce compte n'existe plus au
+/// redémarrage, et sa connexion rend `401`.
+///
+/// **L'opération `compte-efface` est journalisée** dans le journal
+/// d'opérations, pour que l'autre racine l'applique au prochain rattrapage —
+/// sous l'identité de `--identity-key` si elle est donnée, sous seize zéros
+/// sinon, que le daemon fera passer sous la sienne au démarrage suivant.
+fn oublier(oubli: &Oubli) -> Result<(), Box<dyn std::error::Error>> {
+    let racine = match &oubli.identite {
+        Some(chemin) => asl_cle::identifiant_de_racine(&identite::lire_secrete(chemin)?.publique()),
+        None => RACINE_SANS_IDENTITE,
+    };
+    let entrepot = match Entrepot::ouvrir(&oubli.entrepot, racine) {
+        Ok(entrepot) => entrepot,
+        Err(quoi) if quoi.entrepot_tenu() => {
+            return Err(format!(
+                "l'entrepôt {} est tenu par un autre processus — l'annuaire tourne ? \
+                 --forget s'exécute entrepôt arrêté (systemctl stop asl-server), et jamais \
+                 pendant qu'il sert.",
+                oubli.entrepot.display()
+            )
+            .into());
+        }
+        Err(quoi) => return Err(quoi.into()),
+    };
+    let maintenant = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |ecoule| {
+            u64::try_from(ecoule.as_millis()).unwrap_or(u64::MAX)
+        });
+    match entrepot.effacer_compte(oubli.compte, asl_registre::Cause::Exploitant, maintenant)? {
+        Some(asl_store::Efface::Fait(retrait)) => {
+            eprintln!(
+                "asl-server : compte {} effacé, cause exploitant — {} appareil(s), {} machine(s), \
+                 {} service(s), {} autorisation(s) retirés{} ; l'opération est au journal, \
+                 l'autre racine l'appliquera au prochain rattrapage.",
+                oubli.compte,
+                retrait.appareils,
+                retrait.machines,
+                retrait.services,
+                retrait.autorisations,
+                if retrait.alias {
+                    ", alias libéré"
+                } else {
+                    ""
+                },
+            );
+            if oubli.identite.is_none() {
+                eprintln!(
+                    "asl-server : sans --identity-key, l'opération est estampillée \
+                     {RACINE_SANS_IDENTITE} ; le daemon la fera passer sous son identité au \
+                     prochain démarrage."
+                );
+            }
+            Ok(())
+        }
+        Some(asl_store::Efface::Deja(marque)) => {
+            eprintln!(
+                "asl-server : compte {} déjà effacé le {} (ms d'époque), cause {} : rien n'a été écrit.",
+                oubli.compte, marque.le, marque.cause,
+            );
+            Ok(())
+        }
+        None => Err(format!(
+            "compte {} inconnu de cet entrepôt : rien n'a été écrit.",
+            oubli.compte
+        )
+        .into()),
+    }
 }
 
 /// Attend le signal d'arrêt.

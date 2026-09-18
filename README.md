@@ -290,7 +290,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.10.1_amd64.deb
+sudo dpkg -i asl-server_0.11.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
@@ -356,6 +356,41 @@ systemctl edit asl-server
 L'affectation est **citée en entier**, comme celle de la réplication, et pour
 la même raison. Vide, `$ASL_ANDROID` laisse la racine refuser les attestations
 Android en le disant au journal.
+
+**Les comptes qui s'effacent** (`docs/modele.md` §2.1, depuis 0.11.0). Un
+compte se ferme depuis un appareil, de la même main qui l'a ouvert
+(`DELETE /v1/compte`) ; l'annuaire, lui, n'efface de lui-même que **les
+orphelins** — un compte dont TOUS les appareils sont révoqués, trente jours
+après la révocation du dernier, cause `orphelin`, une ligne au journal. Jamais
+sur le silence : un téléphone dans un tiroir est un appareil vivant (C6).
+
+- **`--orphans <jours>`**, trente par défaut, `0` pour jamais. **L'unité ne
+  change pas** : le défaut suffit, et le paquet ne le pose pas. Si vous le
+  réglez, **posez la même valeur sur les deux bancs** — la règle de conflit
+  tranche pour l'effacement, donc c'est le délai le plus court qui gagnerait.
+  Le passage a lieu au démarrage, puis toutes les heures.
+- **`asl-server --forget <u-…> --store /var/lib/asl-server/annuaire.redb
+  --identity-key /etc/asl-server/identite.key`** efface UN compte hors ligne,
+  cause `exploitant` : c'est l'exception pour une clé qu'on SAIT perdue — un
+  simulateur remis à zéro, une app qui a écrit sa clé au mauvais endroit —,
+  que la règle des orphelins n'attrape pas. Ce n'est pas un outil de
+  modération. Il s'exécute **service arrêté** (`systemctl stop asl-server` ;
+  il refuse en le disant si le daemon tient l'entrepôt) et **en tant que
+  `asl-server`** (`sudo -u asl-server …` : il refuse root, et le fichier est à
+  ce compte). Il écrit l'opération au journal d'opérations : **sur UN banc
+  suffit**, la réplication porte l'autre. Sans `--identity-key`, l'opération
+  est estampillée sous seize zéros et le daemon la fera passer sous son
+  identité au démarrage suivant — donnez la clé, c'est plus net.
+
+**La reprise au format des dates** (0.11.0) : à sa première ouverture par ce
+binaire, un entrepôt de 0.5.0 à 0.10.1 est repris dans une transaction — les
+appareils déjà révoqués reçoivent la date de la reprise pour « révoqué le »,
+c'est de là que la règle des orphelins comptera pour eux —, et **le journal
+d'opérations repart vide** : l'autre banc s'amorce par instantané, comme à la
+reprise de 0.5.0. Le journal le dit. Le temps que les deux bancs soient à la
+même version, la voie est coupée — une opération du nouveau format ne se lit
+pas avec l'ancien, et c'est dit plutôt que sauté ; elle se rouvre d'elle-même
+au second déploiement.
 
 Tant que la première manque, le service échoue en disant `--attestation attend
 une valeur` — un message qui nomme exactement ce qu'il reste à décider. Un paquet

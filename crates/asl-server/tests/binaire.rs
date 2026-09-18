@@ -24,8 +24,8 @@ use std::process::{Child, Command, Stdio};
 use ams_proto_h3::{FrameHeader, FrameKind, qpack};
 use asl_cle::{ClePublique, CleSecrete, identifiant_de_racine};
 use asl_id::{Genre, Identifiant};
-use asl_registre::{AliasRange, Cadre, Operation, Provenance};
-use asl_store::Entrepot;
+use asl_registre::{AliasRange, Cadre, Cause, Operation, Provenance};
+use asl_store::{Entrepot, Rattrapage};
 
 /// La racine du dépôt, depuis ce paquet.
 fn depot() -> PathBuf {
@@ -1400,6 +1400,433 @@ async fn un_entrepot_de_plusieurs_milliers_d_enregistrements_s_amorce() {
             && champ_json(&corps, "applique") == Some(compteur.to_string())
             && champ_json(&corps, "compteur") == Some(compteur.to_string())
     });
+
+    let _ = nitrogen.kill();
+    let _ = nitrogen.wait();
+    let _ = argon.kill();
+    let _ = argon.wait();
+    let _ = std::fs::remove_dir_all(&autorite);
+    for fichier in [
+        &base_nitrogen,
+        &base_argon,
+        &cle_nitrogen,
+        &pub_nitrogen,
+        &cle_argon,
+        &pub_argon,
+    ] {
+        let _ = std::fs::remove_file(fichier);
+    }
+}
+
+// ── `--forget` : effacer un compte hors ligne (`modele.md` §2.1) ─────────────
+
+/// Le statut d'un `GET` sans corps sur cette cible, depuis une connexion neuve.
+async fn statut_chez(vers: SocketAddr, racine_tls: &[u8], cible: &str) -> String {
+    let mut client = client_vers(vers, racine_tls).await;
+    ams_quic_client::envoyer_une_requete(&mut client, 0, 17, cible.as_bytes(), None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut client, 0).await;
+    statut(&client, 0)
+}
+
+/// Lance `asl-server --forget` sur ce compte et cet entrepôt, et rend le code
+/// de retour et la sortie d'erreur.
+fn oublier(compte: &str, base: &Path, en_plus: &[&str]) -> (bool, String) {
+    let sortie = Command::new(env!("CARGO_BIN_EXE_asl-server"))
+        .arg("--forget")
+        .arg(compte)
+        .arg("--store")
+        .arg(base)
+        .args(en_plus)
+        .output()
+        .expect("le binaire se lance");
+    (
+        sortie.status.success(),
+        String::from_utf8_lossy(&sortie.stderr).into_owned(),
+    )
+}
+
+#[tokio::test]
+async fn forget_efface_un_compte_hors_ligne_et_refuse_si_le_daemon_tient_l_entrepot() {
+    let (autorite, racine_tls) = materiel("forget");
+    let base = std::env::temp_dir().join(format!("asl-bin-{}-forget.redb", std::process::id()));
+    let _ = std::fs::remove_file(&base);
+    let (cle_identite, pub_identite, _, publique) = identite("forget");
+    let n = identifiant_de_racine(&publique);
+
+    // Un compte qui a tout : un alias, un appareil, une machine enrôlée — et un
+    // voisin qui doit rester.
+    let orphelin = Identifiant::depuis_entropie(Genre::Utilisateur, [0x24; 16]);
+    let voisin = Identifiant::depuis_entropie(Genre::Utilisateur, [0x25; 16]);
+    let appareil = Identifiant::depuis_entropie(Genre::Appareil, [0x24; 16]);
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0x24; 16]);
+    let secrete_machine = CleSecrete::depuis_entropie([0x24; 32]);
+    let compteur_avant;
+    {
+        let entrepot = Entrepot::ouvrir(&base, n).expect("un entrepôt");
+        entrepot
+            .creer_compte(
+                orphelin,
+                Provenance::Ici,
+                Some(AliasRange::nouveau("perdu").unwrap()),
+            )
+            .expect("compte");
+        entrepot
+            .creer_compte(
+                voisin,
+                Provenance::Ici,
+                Some(AliasRange::nouveau("voisin").unwrap()),
+            )
+            .expect("compte");
+        entrepot
+            .creer_appareil(
+                appareil,
+                Provenance::Ici,
+                orphelin,
+                [0x24; 33],
+                asl_registre::Attestation::Aucune,
+            )
+            .expect("appareil");
+        entrepot
+            .creer_machine(
+                machine,
+                Provenance::Ici,
+                orphelin,
+                asl_registre::NomRange::nouveau("perdue").unwrap(),
+                asl_registre::Capacites {
+                    annonce: true,
+                    lecture: true,
+                },
+            )
+            .expect("machine");
+        entrepot
+            .lier_cle(
+                machine,
+                secrete_machine.publique().octets(),
+                [0; 32],
+                asl_registre::Estampille {
+                    compteur: 0,
+                    racine: n,
+                },
+            )
+            .expect("clé");
+        compteur_avant = entrepot.compteur().expect("lisible");
+    }
+    let texte = orphelin.texte().as_str().to_owned();
+    let identite_arg = cle_identite.to_str().unwrap().to_owned();
+
+    // ── LE DAEMON TIENT L'ENTREPÔT : REFUS, ET IL LE DIT ────────────────────
+    let (mut serveur, ou) = lancer_avec(&autorite, &base, &["--identity-key", &identite_arg]);
+    let (ok, dit) = oublier(&texte, &base, &["--identity-key", &identite_arg]);
+    assert!(!ok, "il aurait dû refuser : {dit}");
+    assert!(
+        dit.contains("tenu par un autre processus"),
+        "il doit dire pourquoi : {dit}"
+    );
+    let vers = SocketAddr::from(([127, 0, 0, 1], ou.port()));
+    assert_eq!(
+        statut_chez(vers, &racine_tls, &format!("/v1/utilisateurs/{texte}")).await,
+        "200",
+        "rien n'a été écrit"
+    );
+    let _ = serveur.kill();
+    let _ = serveur.wait();
+
+    // ── ENTREPÔT ARRÊTÉ : LE COMPTE EST EFFACÉ, ET C'EST DIT ────────────────
+    let (ok, dit) = oublier(&texte, &base, &["--identity-key", &identite_arg]);
+    assert!(ok, "le geste passe : {dit}");
+    assert!(
+        dit.contains(&format!("compte {texte} effacé, cause exploitant")),
+        "la ligne du journal, avec l'identifiant et la cause : {dit}"
+    );
+    assert!(
+        dit.contains("1 appareil(s), 1 machine(s)") && dit.contains("alias libéré"),
+        "et ce qui est parti, en nombres : {dit}"
+    );
+    {
+        let entrepot = Entrepot::ouvrir(&base, n).expect("un entrepôt");
+        let marque = entrepot
+            .compte(orphelin)
+            .expect("lisible")
+            .expect("la marque reste");
+        assert_eq!(
+            marque.efface.map(|quoi| quoi.cause),
+            Some(Cause::Exploitant)
+        );
+        assert_eq!(
+            marque.estampille.racine, n,
+            "estampillé sous l'identité donnée"
+        );
+        assert!(entrepot.compte_vivant(orphelin).expect("lisible").is_none());
+        assert!(entrepot.compte_vivant(voisin).expect("lisible").is_some());
+        assert!(entrepot.appareil(appareil).expect("lisible").is_none());
+        assert!(entrepot.machine(machine).expect("lisible").is_none());
+        // **L'OPÉRATION EST AU JOURNAL**, pour l'autre racine.
+        match entrepot.operations_apres(compteur_avant).expect("lisible") {
+            Rattrapage::Operations(cadres) => {
+                assert_eq!(cadres.len(), 1);
+                let (_, operation, _) = Operation::lire(&cadres[0]).expect("un cadre");
+                assert!(
+                    matches!(
+                        operation,
+                        Operation::CompteEfface { compte, cause: Cause::Exploitant, .. } if compte == orphelin
+                    ),
+                    "{operation:?}"
+                );
+            }
+            autre => panic!("le journal doit porter l'effacement : {autre:?}"),
+        }
+    }
+
+    // ── DÉJÀ EFFACÉ : DIT TEL, RIEN D'ÉCRIT ; INCONNU : REFUSÉ ──────────────
+    let (ok, dit) = oublier(&texte, &base, &[]);
+    assert!(ok, "{dit}");
+    assert!(dit.contains("déjà effacé"), "{dit}");
+    let inconnu = Identifiant::depuis_entropie(Genre::Utilisateur, [0x99; 16]);
+    let (ok, dit) = oublier(inconnu.texte().as_str(), &base, &[]);
+    assert!(!ok, "un inconnu est refusé : {dit}");
+    assert!(dit.contains("inconnu"), "{dit}");
+    // Et un identifiant qui n'est pas un compte est refusé avant d'ouvrir quoi
+    // que ce soit.
+    let (ok, dit) = oublier(machine.texte().as_str(), &base, &[]);
+    assert!(!ok, "{dit}");
+    assert!(
+        dit.contains("--forget attend l'identifiant d'un compte"),
+        "{dit}"
+    );
+
+    // ── AU REDÉMARRAGE, LE COMPTE EST UN INCONNU ET SA MACHINE NE PASSE PLUS ─
+    let (mut serveur, ou) = lancer_avec(&autorite, &base, &["--identity-key", &identite_arg]);
+    let vers = SocketAddr::from(([127, 0, 0, 1], ou.port()));
+    assert_eq!(
+        statut_chez(vers, &racine_tls, &format!("/v1/utilisateurs/{texte}")).await,
+        "404"
+    );
+    assert_eq!(
+        statut_chez(vers, &racine_tls, "/v1/alias/perdu").await,
+        "404"
+    );
+    assert_eq!(
+        statut_chez(vers, &racine_tls, "/v1/alias/voisin").await,
+        "200"
+    );
+    let mut client = client_vers(vers, &racine_tls).await;
+    assert_eq!(
+        prouver(&mut client, machine, &secrete_machine, 0).await,
+        "401"
+    );
+    let _ = serveur.kill();
+    let _ = serveur.wait();
+    let _ = std::fs::remove_dir_all(&autorite);
+    for fichier in [&base, &cle_identite, &pub_identite] {
+        let _ = std::fs::remove_file(fichier);
+    }
+}
+
+// ── L'effacement, de bout en bout, à deux racines (`replication.md` §3.3) ───
+
+#[tokio::test]
+async fn l_effacement_d_un_compte_se_replique_de_bout_en_bout() {
+    // **DEUX BINAIRES, ET LE TIREUR QUI TOURNE.** Un compte créé chez nitrogen
+    // avec une machine enrôlée, effacé chez nitrogen par son appareil ; chez
+    // argon, la machine ne peut plus se connecter — celle qui tenait une
+    // connexion est fermée —, l'alias est libre, et le compte est un inconnu.
+    let (autorite, racine_tls) = materiel("efface-bout");
+    let (cle_nitrogen, pub_nitrogen, _sn, publique_nitrogen) = identite("efface-nitrogen");
+    let (cle_argon, pub_argon, _sa, _publique_argon) = identite("efface-argon");
+
+    let base_nitrogen = std::env::temp_dir().join(format!(
+        "asl-bin-{}-efface-nitrogen.redb",
+        std::process::id()
+    ));
+    let base_argon =
+        std::env::temp_dir().join(format!("asl-bin-{}-efface-argon.redb", std::process::id()));
+    let _ = std::fs::remove_file(&base_nitrogen);
+    let _ = std::fs::remove_file(&base_argon);
+
+    let thierry = Identifiant::depuis_entropie(Genre::Utilisateur, [0x61; 16]);
+    let iphone = Identifiant::depuis_entropie(Genre::Appareil, [0x62; 16]);
+    let grenier = Identifiant::depuis_entropie(Genre::Machine, [0x63; 16]);
+    let secrete_iphone =
+        asl_cle::CleSecreteAppareil::depuis_entropie([0x64; 32]).expect("un scalaire valide");
+    let secrete_grenier = CleSecrete::depuis_entropie([0x65; 32]);
+    {
+        let entrepot = Entrepot::ouvrir(&base_nitrogen, identifiant_de_racine(&publique_nitrogen))
+            .expect("un entrepôt");
+        entrepot
+            .creer_compte(
+                thierry,
+                Provenance::Ici,
+                Some(AliasRange::nouveau("qui-part").unwrap()),
+            )
+            .expect("compte");
+        entrepot
+            .creer_appareil(
+                iphone,
+                Provenance::Ici,
+                thierry,
+                secrete_iphone.publique().octets(),
+                asl_registre::Attestation::Aucune,
+            )
+            .expect("appareil");
+        entrepot
+            .creer_machine(
+                grenier,
+                Provenance::Ici,
+                thierry,
+                asl_registre::NomRange::nouveau("grenier").unwrap(),
+                asl_registre::Capacites {
+                    annonce: true,
+                    lecture: true,
+                },
+            )
+            .expect("machine");
+        let code = asl_cle::CodeEnrolement::analyser("4K9M2P7R1T")
+            .unwrap()
+            .empreinte();
+        entrepot
+            .emettre_enrolement(&code, Provenance::Ici, grenier, u64::MAX)
+            .expect("code");
+        let enrolement = entrepot.consommer_enrolement(&code).unwrap().unwrap();
+        entrepot
+            .lier_cle(
+                grenier,
+                secrete_grenier.publique().octets(),
+                code,
+                enrolement.estampille,
+            )
+            .expect("clé");
+    }
+
+    let ca = autorite.join("racine.crt");
+    let ca = ca.to_str().expect("utf-8");
+    let (mut nitrogen, ou_nitrogen) = lancer_avec(
+        &autorite,
+        &base_nitrogen,
+        &[
+            "--identity-key",
+            cle_nitrogen.to_str().unwrap(),
+            "--peer-key",
+            pub_argon.to_str().unwrap(),
+            "--peer-ca",
+            ca,
+            "--peer",
+            "127.0.0.1:6630",
+        ],
+    );
+    let vers_nitrogen = SocketAddr::from(([127, 0, 0, 1], ou_nitrogen.port()));
+    let (mut argon, ou_argon) = lancer_avec(
+        &autorite,
+        &base_argon,
+        &[
+            "--identity-key",
+            cle_argon.to_str().unwrap(),
+            "--peer-key",
+            pub_nitrogen.to_str().unwrap(),
+            "--peer-ca",
+            ca,
+            "--peer",
+            &vers_nitrogen.to_string(),
+        ],
+    );
+    let vers_argon = SocketAddr::from(([127, 0, 0, 1], ou_argon.port()));
+
+    // ── 1. LE COMPTE ET SA MACHINE SONT CHEZ ARGON ──────────────────────────
+    attendre!("le compte de nitrogen chez argon", {
+        alias_chez(vers_argon, &racine_tls, "qui-part")
+            .await
+            .is_some_and(|corps| corps.contains(thierry.texte().as_str()))
+    });
+    attendre!("la clé de machine acceptée chez argon", {
+        let mut client = client_vers(vers_argon, &racine_tls).await;
+        prouver(&mut client, grenier, &secrete_grenier, 0).await == "204"
+    });
+    // Une machine tient une connexion chez argon : c'est elle qui devra tomber.
+    let mut tenue = client_vers(vers_argon, &racine_tls).await;
+    assert_eq!(
+        prouver(&mut tenue, grenier, &secrete_grenier, 0).await,
+        "204",
+        "la machine tient une connexion chez argon"
+    );
+
+    // ── 2. LE TITULAIRE EFFACE SON COMPTE CHEZ NITROGEN ─────────────────────
+    {
+        let mut telephone = client_vers(vers_nitrogen, &racine_tls).await;
+        prouver_appareil(&mut telephone, iphone, &secrete_iphone, 0).await;
+        ams_quic_client::envoyer_une_requete(
+            &mut telephone,
+            8,
+            16, /* DELETE */
+            b"/v1/compte",
+            None,
+            b"",
+        )
+        .await;
+        let _ = ams_quic_client::attendre_la_reponse(&mut telephone, 8).await;
+        assert_eq!(
+            statut(&telephone, 8),
+            "204",
+            "le compte est effacé chez nitrogen"
+        );
+    }
+    assert_eq!(
+        statut_chez(
+            vers_nitrogen,
+            &racine_tls,
+            &format!("/v1/utilisateurs/{thierry}")
+        )
+        .await,
+        "404"
+    );
+
+    // ── 3. CHEZ ARGON : PLUS DE MACHINE, PLUS D'ALIAS, PLUS DE COMPTE ───────
+    attendre!("la clé de la machine refusée chez argon", {
+        let mut client = client_vers(vers_argon, &racine_tls).await;
+        prouver(&mut client, grenier, &secrete_grenier, 8).await == "401"
+    });
+    attendre!("la connexion tenue tombe chez argon", {
+        tenue.parler().await;
+        !tenue.ecouter().await
+    });
+    assert!(
+        alias_chez(vers_argon, &racine_tls, "qui-part")
+            .await
+            .is_none(),
+        "l'alias est libre chez argon"
+    );
+    assert_eq!(
+        statut_chez(
+            vers_argon,
+            &racine_tls,
+            &format!("/v1/utilisateurs/{thierry}")
+        )
+        .await,
+        "404",
+        "le compte effacé est un inconnu chez argon"
+    );
+    // Et l'appareil non plus ne passe plus, nulle part.
+    for vers in [vers_nitrogen, vers_argon] {
+        let mut client = client_vers(vers, &racine_tls).await;
+        let defi = un_defi(&mut client, 0).await;
+        let signature = secrete_iphone
+            .signer(iphone, &defi, &liaison_du_client(&client))
+            .expect("l'appareil signe");
+        let mut preuve = Vec::with_capacity(81);
+        preuve.push(Genre::Appareil.prefixe());
+        preuve.extend_from_slice(iphone.octets());
+        preuve.extend_from_slice(signature.octets());
+        ams_quic_client::envoyer_avec_media(
+            &mut client,
+            4,
+            20,
+            b"/v1/defi",
+            None,
+            &preuve,
+            b"application/octet-stream",
+        )
+        .await;
+        let _ = ams_quic_client::attendre_la_reponse(&mut client, 4).await;
+        assert_eq!(statut(&client, 4), "401", "chez {vers}");
+    }
 
     let _ = nitrogen.kill();
     let _ = nitrogen.wait();

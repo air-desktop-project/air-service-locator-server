@@ -164,7 +164,7 @@ async fn lever_avec_bail(
         entrepot,
         bail,
         asl_auth::Politique::AttestationFacultative,
-        None,
+        Attestations::AUCUNE,
         None,
     )
     .await
@@ -181,16 +181,16 @@ fn journaliser(ligne: &str) {
         .push(ligne.to_owned());
 }
 
-/// La plus générale : on choisit la posture et les configurations
-/// d'attestation.
+/// La plus générale : on choisit la posture, les configurations
+/// d'attestation, et le délai de la règle des orphelins (`None` : jamais).
 async fn lever_complet(
     chaine: &[u8],
     cle: &[u8],
     entrepot: Entrepot,
     bail: asl_proto::Bail,
     politique: asl_auth::Politique,
-    apple: Option<ConfigApple<'static>>,
-    android: Option<ConfigAndroid<'static>>,
+    attestations: Attestations<'static>,
+    orphelins: Option<u64>,
 ) -> (
     SocketAddr,
     tokio::sync::oneshot::Sender<()>,
@@ -219,13 +219,16 @@ async fn lever_complet(
             &tirer,
             &nommer,
             politique,
-            Attestations { apple, android },
+            attestations,
             bail,
             Voie {
                 journal: &journaliser,
                 ..Voie::AUCUNE
             },
         );
+        if let Some(delai) = orphelins {
+            application.effacer_les_orphelins_apres(delai);
+        }
         let arret = async {
             let _ = entendre_stop.await;
         };
@@ -1426,8 +1429,8 @@ async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
         base,
         bail,
         asl_auth::Politique::AttestationFacultative,
-        apple,
-        android,
+        Attestations { apple, android },
+        None,
     )
     .await;
     let mut client = connecter(&racine, adresse).await;
@@ -2978,6 +2981,432 @@ async fn un_daemon_qui_ne_fait_que_maintenir_garde_son_annonce() {
     );
     assert_ne!(compte, machine, "deux identifiants distincts");
 
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+// ── Effacer mon compte (`protocole.md` §2.2, `modele.md` §2.1) ───────────────
+
+/// Prouve la clé d'un appareil (P-256) sur cette connexion, et rend le statut.
+async fn prouver_l_appareil(
+    client: &mut ams_quic_client::Client,
+    appareil: Identifiant,
+    secrete: &asl_cle::CleSecreteAppareil,
+    flux: u64,
+) -> Vec<u8> {
+    let defi = tirer_le_defi(client, flux).await;
+    let signature = secrete
+        .signer(appareil, &defi, &liaison_du_client(client))
+        .expect("l'appareil signe");
+    let mut preuve = Vec::with_capacity(81);
+    preuve.push(Genre::Appareil.prefixe());
+    preuve.extend_from_slice(appareil.octets());
+    preuve.extend_from_slice(signature.octets());
+    let suivant = flux.saturating_add(4);
+    ams_quic_client::envoyer_avec_media(
+        client,
+        suivant,
+        20,
+        b"/v1/defi",
+        None,
+        &preuve,
+        b"application/octet-stream",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(client, suivant).await;
+    champ(&champs(client.recu(suivant)), b":status")
+        .expect("un statut")
+        .to_vec()
+}
+
+/// Le statut d'un `GET` sans corps sur cette cible, depuis une connexion neuve.
+async fn statut_de(racine: &[u8], adresse: SocketAddr, cible: &str) -> Vec<u8> {
+    let mut client = connecter(racine, adresse).await;
+    ams_quic_client::envoyer_une_requete(&mut client, 0, 17, cible.as_bytes(), None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut client, 0).await;
+    champ(&champs(client.recu(0)), b":status")
+        .expect("un statut")
+        .to_vec()
+}
+
+/// Laisse passer des tours de boucle jusqu'à ce que cette connexion tombe, ou
+/// que la patience s'épuise. Rend `true` si elle est tombée.
+async fn attendre_la_fermeture(client: &mut ams_quic_client::Client) -> bool {
+    for _ in 0..64_u32 {
+        client.parler().await;
+        if !client.ecouter().await {
+            break;
+        }
+    }
+    client.ferme().is_some()
+}
+
+#[tokio::test]
+async fn effacer_mon_compte_retire_tout_ferme_les_connexions_et_le_compte_devient_inconnu() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // `protocole.md` §2.2 : `DELETE /v1/compte`, depuis un appareil vivant,
+    // rend `204` puis l'annuaire ferme la connexion ; tout ce que le compte
+    // tenait part dans une transaction — la machine et ses services, l'alias,
+    // l'autorisation accordée à Bob — ; et le compte est un inconnu pour
+    // qui tient encore son `u-…`.
+    let (autorite, racine, chaine, cle) = materiel("effacer");
+    let (base, fichier) = entrepot("effacer");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    // Alice : un compte, un alias, une machine enrôlée qui annonce, une
+    // autorisation accordée à Bob.
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte, appareil, secrete_alice) = creer_un_compte(&mut alice, 0, 0xA7).await;
+    ams_quic_client::envoyer_avec_media(
+        &mut alice,
+        8,
+        21,
+        b"/v1/alias",
+        None,
+        br#"{"alias":"alice-qui-part"}"#,
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 8).await;
+    assert_eq!(champ(&champs(alice.recu(8)), b":status"), Some(&b"204"[..]));
+    let (statut, rendu) = poster(
+        &mut alice,
+        12,
+        b"/v1/machines",
+        br#"{"nom":"grenier","capacites":["annonce","lecture"]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let machine = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let code = valeur_json(&rendu, "code");
+
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_bob, _appareil_bob, _secrete_bob) = creer_un_compte(&mut bob, 0, 0xB7).await;
+    let demande = format!(
+        r#"{{"a":"{}","portee":"tout","etiquette":"pour Bob"}}"#,
+        compte_bob.texte()
+    );
+    let (statut, rendu) = poster(
+        &mut alice,
+        16,
+        b"/v1/autorisations",
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+
+    let mut daemon = connecter(&racine, adresse).await;
+    let secrete_daemon = asl_cle::CleSecrete::depuis_entropie([0xD7; 32]);
+    assert_eq!(
+        enroler(&mut daemon, 0, &code, &secrete_daemon).await,
+        machine
+    );
+    authentifier(&mut daemon, machine, &secrete_daemon, 8, 12).await;
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}]}}"#,
+        machine.texte()
+    );
+    let (statut, _) = poster(
+        &mut daemon,
+        16,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"200", "l'annonce est prise");
+
+    // Avant : le compte existe, l'alias répond, Bob voit son autorisation.
+    assert_eq!(
+        statut_de(
+            &racine,
+            adresse,
+            &format!("/v1/utilisateurs/{}", compte.texte())
+        )
+        .await,
+        b"200"
+    );
+    assert_eq!(
+        statut_de(&racine, adresse, "/v1/alias/alice-qui-part").await,
+        b"200"
+    );
+
+    // ── L'EFFACEMENT : `204`, PUIS LA CONNEXION TOMBE ───────────────────────
+    //
+    // `16` est l'index QPACK de `:method: DELETE`.
+    ams_quic_client::envoyer_une_requete(&mut alice, 20, 16, b"/v1/compte", None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 20).await;
+    assert_eq!(
+        champ(&champs(alice.recu(20)), b":status"),
+        Some(&b"204"[..]),
+        "le compte est effacé"
+    );
+    assert!(
+        attendre_la_fermeture(&mut alice).await,
+        "la connexion qui a porté la demande est fermée par l'annuaire"
+    );
+    assert!(
+        attendre_la_fermeture(&mut daemon).await,
+        "la connexion de la machine du compte est fermée — son bail tombe avec"
+    );
+    // Et le journal d'exploitation l'a dit, avec l'identifiant et la cause.
+    let dit = JOURNAL
+        .lock()
+        .expect("le journal n'est pas empoisonné")
+        .iter()
+        .any(|ligne| {
+            ligne.contains(&format!("compte {} effacé", compte.texte()))
+                && ligne.contains("cause titulaire")
+        });
+    assert!(
+        dit,
+        "le journal d'exploitation dit l'effacement et sa cause"
+    );
+
+    // ── APRÈS : UN INCONNU, UN ALIAS LIBRE, RIEN CHEZ BOB ───────────────────
+    assert_eq!(
+        statut_de(
+            &racine,
+            adresse,
+            &format!("/v1/utilisateurs/{}", compte.texte())
+        )
+        .await,
+        b"404",
+        "le même 404 qu'un identifiant qui n'a jamais existé"
+    );
+    assert_eq!(
+        statut_de(&racine, adresse, "/v1/alias/alice-qui-part").await,
+        b"404",
+        "l'alias est libéré"
+    );
+    ams_quic_client::envoyer_une_requete(&mut bob, 8, 17, b"/v1/autorisations", None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut bob, 8).await;
+    assert_eq!(champ(&champs(bob.recu(8)), b":status"), Some(&b"200"[..]));
+    assert_eq!(
+        String::from_utf8_lossy(&rendu),
+        "[]",
+        "l'autre partie ne voit plus rien — pas même une ligne révoquée"
+    );
+    // La clé de l'appareil ne vaut plus, celle de la machine non plus.
+    let mut encore = connecter(&racine, adresse).await;
+    assert_eq!(
+        prouver_l_appareil(&mut encore, appareil, &secrete_alice, 0).await,
+        b"401",
+        "la clé qui a demandé est révoquée"
+    );
+    let mut daemon = connecter(&racine, adresse).await;
+    ams_quic_client::envoyer_une_requete(&mut daemon, 0, 17, b"/v1/defi", None, b"").await;
+    let octets = ams_quic_client::attendre_la_reponse(&mut daemon, 0).await;
+    let mut brut = [0_u8; asl_cle::DEFI_OCTETS];
+    brut.copy_from_slice(&octets);
+    let defi = asl_cle::Defi::depuis_octets(brut);
+    let signature = secrete_daemon
+        .signer(machine, &defi, &liaison_du_client(&daemon))
+        .expect("elle signe");
+    let mut preuve = Vec::with_capacity(81);
+    preuve.push(Genre::Machine.prefixe());
+    preuve.extend_from_slice(machine.octets());
+    preuve.extend_from_slice(signature.octets());
+    ams_quic_client::envoyer_avec_media(
+        &mut daemon,
+        4,
+        20,
+        b"/v1/defi",
+        None,
+        &preuve,
+        b"application/octet-stream",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut daemon, 4).await;
+    assert_eq!(
+        champ(&champs(daemon.recu(4)), b":status"),
+        Some(&b"401"[..]),
+        "la machine du compte effacé ne peut plus se connecter"
+    );
+    // Bob, lui, est intact.
+    assert_eq!(
+        statut_de(
+            &racine,
+            adresse,
+            &format!("/v1/utilisateurs/{}", compte_bob.texte())
+        )
+        .await,
+        b"200"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn un_compte_orphelin_est_efface_au_passage_et_pas_un_compte_vivant() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // `modele.md` §2.1, la règle des orphelins : un compte dont TOUS les
+    // appareils sont révoqués depuis plus de `--orphans` jours est effacé par
+    // la racine, au premier passage — au démarrage — ; un compte dont un
+    // appareil est vivant ne l'est pas ; et `--orphans 0` n'efface jamais.
+    let (autorite, racine, chaine, cle) = materiel("orphelins");
+    let jour = 24 * 60 * 60 * 1_000_u64;
+    let maintenant = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |ecoule| {
+            u64::try_from(ecoule.as_millis()).unwrap_or(u64::MAX)
+        });
+    let orphelin = Identifiant::depuis_entropie(Genre::Utilisateur, [0x61; 16]);
+    let vivant = Identifiant::depuis_entropie(Genre::Utilisateur, [0x62; 16]);
+
+    /// Garnit l'entrepôt : l'orphelin a deux appareils révoqués il y a
+    /// quarante et trente et un jours ; le vivant en a un révoqué il y a
+    /// quarante jours, et un vivant.
+    fn garnir(base: &Entrepot, orphelin: Identifiant, vivant: Identifiant, maintenant: u64) {
+        let jour = 24 * 60 * 60 * 1_000_u64;
+        for (qui, graine, second_revoque) in [(orphelin, 0x61_u8, true), (vivant, 0x62, false)] {
+            base.creer_compte(
+                qui,
+                Provenance::Ici,
+                Some(AliasRange::nouveau(&format!("compte-{graine:x}")).unwrap()),
+            )
+            .expect("compte");
+            let premier = Identifiant::depuis_entropie(Genre::Appareil, [graine; 16]);
+            let second = Identifiant::depuis_entropie(Genre::Appareil, [graine ^ 0xFF; 16]);
+            for quel in [premier, second] {
+                base.creer_appareil(
+                    quel,
+                    Provenance::Ici,
+                    qui,
+                    [graine; 33],
+                    asl_registre::Attestation::Aucune,
+                )
+                .expect("appareil");
+            }
+            base.revoquer_appareil(premier, maintenant - 40 * jour)
+                .expect("révoqué");
+            if second_revoque {
+                base.revoquer_appareil(second, maintenant - 31 * jour)
+                    .expect("révoqué");
+            }
+            machine_enrolee(
+                base,
+                Identifiant::depuis_entropie(Genre::Machine, [graine; 16]),
+                qui,
+                asl_cle::CleSecrete::depuis_entropie([graine; 32])
+                    .publique()
+                    .octets(),
+                TOUT,
+            );
+        }
+    }
+
+    // ── `--orphans 30` : L'ORPHELIN PART AU PREMIER PASSAGE, LE VIVANT RESTE ─
+    let (base, fichier) = entrepot("orphelins-trente");
+    garnir(&base, orphelin, vivant, maintenant);
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        Some(30 * jour),
+    )
+    .await;
+    assert_eq!(
+        statut_de(
+            &racine,
+            adresse,
+            &format!("/v1/utilisateurs/{}", orphelin.texte())
+        )
+        .await,
+        b"404",
+        "l'orphelin est effacé au passage du démarrage"
+    );
+    assert_eq!(
+        statut_de(&racine, adresse, "/v1/alias/compte-61").await,
+        b"404",
+        "son alias est libre"
+    );
+    assert_eq!(
+        statut_de(
+            &racine,
+            adresse,
+            &format!("/v1/utilisateurs/{}", vivant.texte())
+        )
+        .await,
+        b"200",
+        "un appareil vivant suffit : le compte reste"
+    );
+    // Sa machine ne se connecte plus ; celle du vivant, si.
+    for (graine, attendu) in [(0x61_u8, &b"401"[..]), (0x62, &b"204"[..])] {
+        let mut client = connecter(&racine, adresse).await;
+        let machine = Identifiant::depuis_entropie(Genre::Machine, [graine; 16]);
+        let secrete = asl_cle::CleSecrete::depuis_entropie([graine; 32]);
+        ams_quic_client::envoyer_une_requete(&mut client, 0, 17, b"/v1/defi", None, b"").await;
+        let octets = ams_quic_client::attendre_la_reponse(&mut client, 0).await;
+        let mut brut = [0_u8; asl_cle::DEFI_OCTETS];
+        brut.copy_from_slice(&octets);
+        let defi = asl_cle::Defi::depuis_octets(brut);
+        let signature = secrete
+            .signer(machine, &defi, &liaison_du_client(&client))
+            .expect("elle signe");
+        let mut preuve = Vec::with_capacity(81);
+        preuve.push(Genre::Machine.prefixe());
+        preuve.extend_from_slice(machine.octets());
+        preuve.extend_from_slice(signature.octets());
+        ams_quic_client::envoyer_avec_media(
+            &mut client,
+            4,
+            20,
+            b"/v1/defi",
+            None,
+            &preuve,
+            b"application/octet-stream",
+        )
+        .await;
+        let _ = ams_quic_client::attendre_la_reponse(&mut client, 4).await;
+        assert_eq!(
+            champ(&champs(client.recu(4)), b":status"),
+            Some(attendu),
+            "machine {graine:x}"
+        );
+    }
+    let dit = JOURNAL
+        .lock()
+        .expect("le journal n'est pas empoisonné")
+        .iter()
+        .any(|ligne| {
+            ligne.contains(&format!("compte {} effacé", orphelin.texte()))
+                && ligne.contains("cause orphelin")
+        });
+    assert!(
+        dit,
+        "le journal d'exploitation dit l'effacement et sa cause"
+    );
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_file(&fichier);
+
+    // ── `--orphans 0` : JAMAIS ──────────────────────────────────────────────
+    let (base, fichier) = entrepot("orphelins-jamais");
+    garnir(&base, orphelin, vivant, maintenant);
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    assert_eq!(
+        statut_de(
+            &racine,
+            adresse,
+            &format!("/v1/utilisateurs/{}", orphelin.texte())
+        )
+        .await,
+        b"200",
+        "sans délai, la racine n'efface jamais"
+    );
     let _ = dire_stop.send(());
     let _ = tache.await;
     let _ = std::fs::remove_dir_all(&autorite);

@@ -12,15 +12,18 @@ use std::path::PathBuf;
 
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
-    AliasRange, Attestation, Cadre, Capacites, Compte, EntreeJournal, Estampille, JetonRange,
-    NomRange, Operation, Plateforme, Portee, Provenance, Systeme, Verdict,
+    AliasRange, Attestation, Cadre, Capacites, Cause, Compte, Effacement, EntreeJournal,
+    Estampille, JetonRange, NomRange, Operation, Plateforme, Portee, Provenance, Systeme, Verdict,
 };
-use asl_store::{Entrepot, Faute, RACINE_SANS_IDENTITE, Rattrapage};
+use asl_store::{Efface, Entrepot, Faute, RACINE_SANS_IDENTITE, Rattrapage, Retrait};
 
 /// La racine pour laquelle les essais écrivent.
 fn racine() -> Identifiant {
     Identifiant::depuis_entropie(Genre::Annuaire, [0xEE; 16])
 }
+
+/// Une date de révocation, en millisecondes d'époque.
+const REVOQUE_LE: u64 = 1_789_000_000_000;
 
 /// Un entrepôt neuf, dans un fichier à nous.
 ///
@@ -140,6 +143,7 @@ fn ce_qui_est_ecrit_survit_a_la_fermeture() {
                 estampille: e(1),
                 alias: Some(alias("thierry")),
                 reclamation: e(1),
+                efface: None,
             })
         );
         assert_eq!(
@@ -239,7 +243,7 @@ fn chaque_ecriture_avance_le_compteur_et_laisse_une_operation() {
     .expect("11");
     base.revoquer_autorisation(accordee).expect("12");
     base.revoquer_cle(grenier).expect("13");
-    base.revoquer_appareil(iphone).expect("14");
+    base.revoquer_appareil(iphone, REVOQUE_LE).expect("14");
 
     assert_eq!(base.compteur().expect("lisible"), 14);
     let journal = operations(&base, 0);
@@ -291,7 +295,7 @@ fn chaque_ecriture_avance_le_compteur_et_laisse_une_operation() {
     assert!(machine.cle.is_none());
     let appareil = base.appareil(iphone).expect("lisible").expect("il est là");
     assert_eq!(appareil.estampille, e(14));
-    assert!(appareil.revoque);
+    assert!(appareil.revoque());
     assert_eq!(
         base.autorisation(accordee)
             .expect("lisible")
@@ -642,7 +646,7 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
     )
     .expect("11");
     base.revoquer_autorisation(accordee).expect("12");
-    base.revoquer_appareil(iphone).expect("13");
+    base.revoquer_appareil(iphone, REVOQUE_LE).expect("13");
     base.emettre_enrolement(&en_attente, Provenance::Ici, grenier, 20_000)
         .expect("14");
     // **CE QUI NE VIENT PAS D'ICI NE SORT PAS** (C11) : une écriture de
@@ -749,7 +753,7 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
     // L'appareil révoqué : l'enregistrement, puis la révocation ; puis ce qu'il
     // dit de lui. Le jeton est parti avec la révocation.
     let appareil = base.appareil(iphone).expect("lisible").expect("il est là");
-    assert!(appareil.revoque);
+    assert!(appareil.revoque());
     assert_eq!(
         &operations[6..9],
         [
@@ -760,7 +764,13 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
                     enregistrement: appareil,
                 },
             ),
-            (e(13), Operation::AppareilRevoque { appareil: iphone }),
+            (
+                e(13),
+                Operation::AppareilRevoque {
+                    appareil: iphone,
+                    revoque_le: REVOQUE_LE,
+                },
+            ),
             (
                 e(4),
                 Operation::Description {
@@ -1029,11 +1039,11 @@ fn une_base_ancienne_est_reprise_sans_rien_perdre() {
     assert_eq!(appareil.proprietaire, thierry);
     assert_eq!(appareil.cle, [0x77; 33]);
     assert_eq!(appareil.atteste, Attestation::Apple);
-    assert!(!appareil.revoque);
+    assert!(!appareil.revoque());
     let appareil = base.appareil(pixel).expect("lisible").expect("le Pixel");
     assert_eq!(appareil.proprietaire, lea);
     assert_eq!(appareil.atteste, Attestation::Aucune);
-    assert!(appareil.revoque);
+    assert!(appareil.revoque());
     let description = base.description(iphone).expect("lisible").expect("décrit");
     assert_eq!(description.systeme, Systeme::Ios);
     assert_eq!(description.modele.octets(), b"iPhone 17");
@@ -1987,7 +1997,7 @@ fn un_appareil_se_pose_et_se_relit() {
     assert_eq!(appareil.proprietaire, un(Genre::Utilisateur, 1));
     assert_eq!(appareil.cle, [0x77; 33]);
     assert_eq!(appareil.atteste, Attestation::Aucune);
-    assert!(!appareil.revoque);
+    assert!(!appareil.revoque());
     assert!(matches!(
         base.creer_appareil(
             quel,
@@ -2203,10 +2213,10 @@ fn revoquer_un_appareil_garde_sa_description() {
     base.poser_description(quel, Provenance::Ici, Systeme::Ios, nom("iPhone 17"))
         .expect("écrit");
 
-    base.revoquer_appareil(quel).expect("révoqué");
+    base.revoquer_appareil(quel, REVOQUE_LE).expect("révoqué");
     let liste = base.appareils_de_compte(compte).expect("lisible");
     let (_, appareil, lue) = liste.first().expect("il reste");
-    assert!(appareil.revoque);
+    assert!(appareil.revoque());
     assert_eq!(
         lue.map(|quoi| quoi.systeme),
         Some(Systeme::Ios),
@@ -2281,12 +2291,12 @@ fn revoquer_un_appareil_emporte_son_jeton() {
     )
     .expect("écrit");
 
-    base.revoquer_appareil(quel).expect("révoqué");
+    base.revoquer_appareil(quel, REVOQUE_LE).expect("révoqué");
     assert!(
         base.appareil(quel)
             .expect("lisible")
             .expect("il reste")
-            .revoque
+            .revoque()
     );
     assert!(
         base.jeton(quel).expect("lisible").is_none(),
@@ -2306,7 +2316,9 @@ fn revoquer_un_appareil_le_marque_sans_l_effacer() {
     let (base, fichier) = entrepot("revoque-appareil");
     let quel = un(Genre::Appareil, 3);
     assert!(
-        base.revoquer_appareil(quel).expect("lisible").is_none(),
+        base.revoquer_appareil(quel, REVOQUE_LE)
+            .expect("lisible")
+            .is_none(),
         "révoquer ce qui n'existe pas ne crée rien"
     );
 
@@ -2319,14 +2331,14 @@ fn revoquer_un_appareil_le_marque_sans_l_effacer() {
     )
     .expect("écrit");
 
-    let avant = base.revoquer_appareil(quel).expect("révoqué");
+    let avant = base.revoquer_appareil(quel, REVOQUE_LE).expect("révoqué");
     assert_eq!(
-        avant.map(|quoi| quoi.revoque),
+        avant.map(|quoi| quoi.revoque()),
         Some(false),
         "ce qu'il ÉTAIT"
     );
     let apres = base.appareil(quel).expect("lisible").expect("il reste");
-    assert!(apres.revoque);
+    assert!(apres.revoque());
     assert_eq!(apres.cle, [0x77; 33], "la clé reste, et ne vaut plus");
 
     let _ = std::fs::remove_file(fichier);
@@ -2554,4 +2566,731 @@ fn une_autorisation_revoquee_reste_dans_la_liste() {
     assert!(miennes[0].1.revoquee, "et elle doit être marquée");
 
     let _ = std::fs::remove_file(chemin);
+}
+
+// ── La reprise d'une base d'avant les dates (`modele.md` §2.2, 0.10.1) ───────
+
+/// Une copie de la base écrite par 0.10.1 : l'estampille et le journal
+/// d'opérations sont là, `révoqué le` et `effacé le` non.
+///
+/// **LA FIXTURE A ÉTÉ ÉCRITE PAR LE CODE DE 0.10.1**, avec ses fonctions
+/// d'écriture d'alors, puis compactée — et non fabriquée par le code
+/// d'aujourd'hui, qui ne sait plus écrire cette forme. C'est ce que les bancs
+/// portent au moment de ce changement de format.
+fn base_sans_dates(quoi: &str) -> PathBuf {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/entrepot-0.10.1.redb");
+    let copie =
+        std::env::temp_dir().join(format!("asl-entrepot-{}-{quoi}.redb", std::process::id()));
+    let _ = std::fs::remove_file(&copie);
+    std::fs::copy(&fixture, &copie).expect("la fixture se copie");
+    copie
+}
+
+/// Maintenant, en millisecondes d'époque.
+fn maintenant_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |ecoule| {
+            u64::try_from(ecoule.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+#[test]
+fn une_base_sans_dates_est_reprise_et_les_revoques_recoivent_la_date_de_la_reprise() {
+    // **CE QUE LA FIXTURE CONTIENT** est ce que 0.10.1 y a écrit : trois
+    // comptes (Thierry avec l'alias `thierry`, Léa, un du pair avec `ailleurs`),
+    // deux machines (le grenier enrôlé, le portable avec un code en attente),
+    // deux appareils (l'iPhone de Thierry, décrit et avec un jeton ; le Pixel
+    // de Léa, RÉVOQUÉ), deux services, deux autorisations dont une révoquée,
+    // deux entrées de journal, dix-neuf écritures et dix-huit opérations.
+    let avant = maintenant_ms();
+    let chemin = base_sans_dates("reprise-dates");
+    let base = Entrepot::ouvrir(&chemin, racine()).expect("la base d'avant les dates se reprend");
+    let apres = maintenant_ms();
+    let thierry = un(Genre::Utilisateur, 1);
+    let lea = un(Genre::Utilisateur, 2);
+    let du_pair = un(Genre::Utilisateur, 3);
+    let grenier = un(Genre::Machine, 10);
+    let portable = un(Genre::Machine, 11);
+    let iphone = un(Genre::Appareil, 20);
+    let pixel = un(Genre::Appareil, 21);
+
+    // ── UN APPAREIL RÉVOQUÉ A REÇU LA DATE DE LA REPRISE, UN VIVANT RIEN ────
+    assert_eq!(base.dates_de_reprise(), 1, "le Pixel, et lui seul");
+    let pixel_range = base.appareil(pixel).expect("lisible").expect("le Pixel");
+    let quand = pixel_range.revoque_le.expect("révoqué, donc daté");
+    assert!(
+        (avant..=apres).contains(&quand),
+        "la date est celle de la reprise : {quand} hors de {avant}..={apres}"
+    );
+    assert_eq!(pixel_range.proprietaire, lea);
+    let iphone_range = base.appareil(iphone).expect("lisible").expect("l'iPhone");
+    assert_eq!(iphone_range.revoque_le, None);
+    assert_eq!(iphone_range.atteste, Attestation::Apple);
+    assert_eq!(iphone_range.cle, [0x77; 33]);
+
+    // ── AUCUN COMPTE N'EST EFFACÉ, ET RIEN N'A BOUGÉ ────────────────────────
+    for (qui, alias_attendu) in [
+        (thierry, Some("thierry")),
+        (lea, None),
+        (du_pair, Some("ailleurs")),
+    ] {
+        let compte = base.compte(qui).expect("lisible").expect("là");
+        assert!(!compte.est_efface(), "{qui}");
+        assert_eq!(compte.alias, alias_attendu.map(alias), "{qui}");
+        assert_eq!(base.compte_vivant(qui).expect("lisible"), Some(compte));
+        assert_eq!(
+            compte.estampille.racine,
+            racine(),
+            "l'estampille ne bouge pas"
+        );
+    }
+    assert_eq!(
+        base.compte(du_pair)
+            .expect("lisible")
+            .expect("là")
+            .provenance,
+        Provenance::Annuaire(un(Genre::Annuaire, 0xA0))
+    );
+    assert_eq!(
+        base.compte_par_alias("thierry").expect("lisible"),
+        Some(thierry)
+    );
+    assert_eq!(
+        base.compte_par_alias("ailleurs").expect("lisible"),
+        Some(du_pair)
+    );
+    let machine = base.machine(grenier).expect("lisible").expect("le grenier");
+    assert_eq!(machine.cle.map(|liee| liee.cle), Some([0x42; 32]));
+    assert_eq!(base.machines_de_compte(thierry).expect("lisible").len(), 2);
+    assert_eq!(base.appareils_de_compte(thierry).expect("lisible").len(), 1);
+    assert_eq!(base.appareils_de_compte(lea).expect("lisible").len(), 1);
+    assert_eq!(
+        base.description(iphone)
+            .expect("lisible")
+            .map(|quoi| quoi.systeme),
+        Some(Systeme::Ios)
+    );
+    assert_eq!(
+        base.jeton(iphone)
+            .expect("lisible")
+            .map(|quoi| quoi.plateforme),
+        Some(Plateforme::Apns)
+    );
+    assert!(
+        base.jeton(pixel).expect("lisible").is_none(),
+        "parti à la révocation, chez 0.10.1"
+    );
+    assert_eq!(base.services_de_machine(grenier).expect("lisible").len(), 2);
+    assert_eq!(base.autorisations_recues(lea).expect("lisible").len(), 1);
+    assert_eq!(base.autorisations_accordees(lea).expect("lisible").len(), 1);
+    assert_eq!(base.entrees_du_journal().expect("lisible"), 2);
+    let enrolement = base
+        .consommer_enrolement(&empreinte("4K9M2P7R1T"))
+        .expect("lisible")
+        .expect("le code du portable est là");
+    assert_eq!(enrolement.machine, portable);
+
+    // ── LE COMPTEUR NE BOUGE PAS, LE JOURNAL D'OPÉRATIONS REPART VIDE ───────
+    //
+    // Ce qu'il portait est de la forme d'hier ; l'autre racine s'amorce par
+    // instantané, et un rattrapage depuis moins que le compteur est refusé.
+    assert_eq!(base.compteur().expect("lisible"), 19);
+    assert_eq!(base.operations_gardees().expect("lisible"), 0);
+    assert_eq!(
+        base.operations_apres(18).expect("lisible"),
+        Rattrapage::HorsJournal {
+            retirees_jusqu_a: 19
+        }
+    );
+    assert_eq!(
+        base.operations_apres(19).expect("lisible"),
+        Rattrapage::Operations(Vec::new())
+    );
+    // Et l'instantané porte la révocation du Pixel avec sa date.
+    let revocations: Vec<u64> = instantane(&base)
+        .into_iter()
+        .filter_map(|cadre| match cadre {
+            Cadre::Operation {
+                operation:
+                    Operation::AppareilRevoque {
+                        appareil,
+                        revoque_le,
+                    },
+                ..
+            } if appareil == pixel => Some(revoque_le),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(revocations, vec![quand]);
+
+    // ── ET LA BASE REPRISE S'ÉCRIT COMME UNE NEUVE, UNE SEULE FOIS ──────────
+    base.reclamer_alias(lea, Some(alias("lea"))).expect("écrit");
+    assert_eq!(base.compteur().expect("lisible"), 20);
+    assert_eq!(operations(&base, 19).len(), 1);
+    drop(base);
+    let base = Entrepot::ouvrir(&chemin, racine()).expect("rouverte");
+    assert_eq!(base.dates_de_reprise(), 0, "une seule fois");
+    assert_eq!(
+        base.appareil(pixel)
+            .expect("lisible")
+            .expect("là")
+            .revoque_le,
+        Some(quand),
+        "la date posée à la reprise ne bouge plus"
+    );
+    assert_eq!(base.compteur().expect("lisible"), 20);
+    let _ = std::fs::remove_file(&chemin);
+}
+
+// ── L'effacement d'un compte (`modele.md` §2.1) ──────────────────────────────
+
+/// Une date d'effacement, en millisecondes d'époque.
+const EFFACE_LE: u64 = 1_790_000_000_000;
+
+/// Un compte garni de tout ce qu'un compte peut tenir : deux appareils (l'un
+/// décrit, avec un jeton), deux machines (l'une enrôlée avec deux services,
+/// l'autre avec un code en attente), un alias, une autorisation accordée à
+/// `autre` et une reçue de lui. Rend ce qu'il faudra ne plus trouver.
+struct Garni {
+    qui: Identifiant,
+    autre: Identifiant,
+    appareils: [Identifiant; 2],
+    machines: [Identifiant; 2],
+    services: [Identifiant; 2],
+    code: [u8; 32],
+    accordee: Identifiant,
+    recue: Identifiant,
+}
+
+fn garnir_un_compte(base: &Entrepot, graine: u8) -> Garni {
+    let qui = un(Genre::Utilisateur, graine);
+    let autre = un(Genre::Utilisateur, graine ^ 0xFF);
+    let appareils = [
+        un(Genre::Appareil, graine),
+        un(Genre::Appareil, graine ^ 0x0F),
+    ];
+    let machines = [
+        un(Genre::Machine, graine),
+        un(Genre::Machine, graine ^ 0x0F),
+    ];
+    let services = [
+        un(Genre::Service, graine),
+        un(Genre::Service, graine ^ 0x0F),
+    ];
+    let accordee = un(Genre::Autorisation, graine);
+    let recue = un(Genre::Autorisation, graine ^ 0x0F);
+    base.creer_compte(
+        qui,
+        Provenance::Ici,
+        Some(alias(&format!("compte-{graine}"))),
+    )
+    .expect("compte");
+    if base.compte(autre).expect("lisible").is_none() {
+        base.creer_compte(autre, Provenance::Ici, None)
+            .expect("l'autre");
+    }
+    for (rang, quel) in appareils.iter().enumerate() {
+        base.creer_appareil(
+            *quel,
+            Provenance::Ici,
+            qui,
+            [graine; 33],
+            Attestation::Aucune,
+        )
+        .expect("appareil");
+        if rang == 0 {
+            base.poser_description(*quel, Provenance::Ici, Systeme::Ios, nom("iPhone 17"))
+                .expect("description");
+            base.poser_jeton(
+                *quel,
+                Provenance::Ici,
+                Plateforme::Apns,
+                JetonRange::nouveau("c0ffee").unwrap(),
+            )
+            .expect("jeton");
+        }
+    }
+    for quelle in machines {
+        base.creer_machine(quelle, Provenance::Ici, qui, nom("machine"), TOUT)
+            .expect("machine");
+    }
+    let code_grenier = empreinte("2K9M2P7R1T");
+    base.emettre_enrolement(&code_grenier, Provenance::Ici, machines[0], u64::MAX)
+        .expect("code");
+    let enrolement = base.consommer_enrolement(&code_grenier).unwrap().unwrap();
+    base.lier_cle(
+        machines[0],
+        [graine; 32],
+        code_grenier,
+        enrolement.estampille,
+    )
+    .expect("clé");
+    for (rang, quel) in services.iter().enumerate() {
+        base.declarer_service(
+            *quel,
+            Provenance::Ici,
+            machines[0],
+            nom(&format!("svc{rang}")),
+        )
+        .expect("service");
+    }
+    let code = empreinte("4K9M2P7R1T");
+    base.emettre_enrolement(&code, Provenance::Ici, machines[1], u64::MAX)
+        .expect("code en attente");
+    base.accorder_autorisation(
+        accordee,
+        Provenance::Ici,
+        qui,
+        autre,
+        Portee::ToutLeCompte,
+        nom("à l'autre"),
+    )
+    .expect("accordée");
+    base.accorder_autorisation(
+        recue,
+        Provenance::Ici,
+        autre,
+        qui,
+        Portee::UneMachine(machines[0]),
+        nom("de l'autre"),
+    )
+    .expect("reçue");
+    Garni {
+        qui,
+        autre,
+        appareils,
+        machines,
+        services,
+        code,
+        accordee,
+        recue,
+    }
+}
+
+/// Plus rien de ce que ce compte tenait n'est là — et l'autre partie ne voit
+/// plus rien non plus.
+fn plus_rien(base: &Entrepot, garni: &Garni) {
+    for quel in garni.appareils {
+        assert!(
+            base.appareil(quel).expect("lisible").is_none(),
+            "appareil effacé"
+        );
+        assert!(base.jeton(quel).expect("lisible").is_none(), "jeton effacé");
+        assert!(
+            base.description(quel).expect("lisible").is_none(),
+            "description effacée"
+        );
+    }
+    assert!(
+        base.appareils_de_compte(garni.qui)
+            .expect("lisible")
+            .is_empty()
+    );
+    for quelle in garni.machines {
+        assert!(
+            base.machine(quelle).expect("lisible").is_none(),
+            "machine effacée"
+        );
+        assert!(
+            base.services_de_machine(quelle)
+                .expect("lisible")
+                .is_empty()
+        );
+    }
+    assert!(
+        base.machines_de_compte(garni.qui)
+            .expect("lisible")
+            .is_empty()
+    );
+    for quel in garni.services {
+        assert!(
+            base.service(quel).expect("lisible").is_none(),
+            "service effacé"
+        );
+    }
+    assert!(
+        base.service_par_nom(garni.machines[0], "svc0")
+            .expect("lisible")
+            .is_none()
+    );
+    assert!(
+        base.consommer_enrolement(&garni.code)
+            .expect("lisible")
+            .is_none(),
+        "le code en attente est annulé"
+    );
+    for quelle in [garni.accordee, garni.recue] {
+        assert!(
+            base.autorisation(quelle).expect("lisible").is_none(),
+            "arête retirée"
+        );
+    }
+    assert!(
+        base.autorisations_accordees(garni.qui)
+            .expect("lisible")
+            .is_empty()
+    );
+    assert!(
+        base.autorisations_recues_nommees(garni.qui)
+            .expect("lisible")
+            .is_empty()
+    );
+    // **L'AUTRE PARTIE NE VOIT PLUS RIEN** : ni ce qu'elle avait reçu, ni ce
+    // qu'elle avait accordé.
+    assert!(
+        base.autorisations_recues(garni.autre)
+            .expect("lisible")
+            .is_empty()
+    );
+    assert!(
+        base.autorisations_accordees(garni.autre)
+            .expect("lisible")
+            .is_empty()
+    );
+    // Le compte reste, marqué, sans alias ; l'alias est libre.
+    let compte = base
+        .compte(garni.qui)
+        .expect("lisible")
+        .expect("la marque reste");
+    assert!(compte.est_efface());
+    assert_eq!(compte.alias, None);
+    assert_eq!(
+        compte.reclamation, compte.estampille,
+        "la réclamation est retirée"
+    );
+    assert!(base.compte_vivant(garni.qui).expect("lisible").is_none());
+    // Et toute écriture pour lui est refusée.
+    assert!(
+        !base
+            .reclamer_alias(garni.qui, Some(alias("encore")))
+            .expect("lisible")
+    );
+}
+
+#[test]
+fn effacer_un_compte_retire_tout_dans_une_transaction_et_laisse_la_marque() {
+    let (base, chemin) = entrepot("effacer");
+    let garni = garnir_un_compte(&base, 0x31);
+    // Un autre compte réclame le même alias, en file — comme si l'autre
+    // racine l'avait accepté de son côté : à l'effacement, il l'obtient.
+    let en_file = un(Genre::Utilisateur, 0x77);
+    base.creer_compte(en_file, Provenance::Ici, None)
+        .expect("compte");
+    let reclamation = base
+        .appliquer(
+            un(Genre::Annuaire, 0xAA),
+            &Cadre::Operation {
+                estampille: Estampille {
+                    compteur: 1_000,
+                    racine: un(Genre::Annuaire, 0xAA),
+                },
+                operation: Operation::Alias {
+                    compte: en_file,
+                    alias: Some(alias("compte-49")),
+                },
+            },
+            false,
+        )
+        .expect("lisible");
+    assert!(matches!(reclamation, asl_store::Applique::Faite { .. }));
+    assert_eq!(
+        base.compte_par_alias("compte-49").expect("lisible"),
+        Some(garni.qui),
+        "le plus ancien tient"
+    );
+
+    // ── L'EFFACEMENT ────────────────────────────────────────────────────────
+    let operations_avant = base.operations_gardees().expect("lisible");
+    let compteur_avant = base.compteur().expect("lisible");
+    let efface = base
+        .effacer_compte(garni.qui, Cause::Titulaire, EFFACE_LE)
+        .expect("lisible")
+        .expect("le compte existe");
+    let Efface::Fait(retrait) = efface else {
+        panic!("attendu un effacement fait : {efface:?}");
+    };
+    assert_eq!(
+        retrait,
+        Retrait {
+            appareils: 2,
+            machines: 2,
+            codes: 1,
+            services: 2,
+            autorisations: 2,
+            alias: true,
+            a_fermer: retrait.a_fermer.clone(),
+        }
+    );
+    let mut a_fermer = retrait.a_fermer.clone();
+    a_fermer.sort();
+    let mut attendus: Vec<Identifiant> = garni
+        .appareils
+        .iter()
+        .chain(garni.machines.iter())
+        .copied()
+        .collect();
+    attendus.sort();
+    assert_eq!(
+        a_fermer, attendus,
+        "les machines et les appareils sont à fermer"
+    );
+    plus_rien(&base, &garni);
+    let compte = base.compte(garni.qui).expect("lisible").expect("là");
+    assert_eq!(
+        compte.efface,
+        Some(Effacement {
+            le: EFFACE_LE,
+            cause: Cause::Titulaire
+        })
+    );
+    assert_eq!(
+        compte.estampille,
+        e(compteur_avant + 1),
+        "une écriture, une estampille"
+    );
+    // L'alias est allé au compte en file.
+    assert_eq!(
+        base.compte_par_alias("compte-49").expect("lisible"),
+        Some(en_file)
+    );
+    // L'autre compte, lui, est intact.
+    assert!(base.compte_vivant(garni.autre).expect("lisible").is_some());
+
+    // ── UNE SEULE OPÉRATION, POUR TOUT LE COMPTE ────────────────────────────
+    assert_eq!(
+        base.operations_gardees().expect("lisible"),
+        operations_avant + 1
+    );
+    let derniere = operations(&base, compteur_avant);
+    assert_eq!(
+        derniere,
+        vec![(
+            e(compteur_avant + 1),
+            Operation::CompteEfface {
+                compte: garni.qui,
+                efface_le: EFFACE_LE,
+                cause: Cause::Titulaire,
+            }
+        )]
+    );
+    assert_eq!(base.derniere_operation(), compteur_avant + 1);
+    // Et l'instantané ne porte que la marque : ni `compte`, ni `alias`, ni
+    // rien de ce qu'il tenait.
+    let cadres = instantane(&base);
+    let sur_lui: Vec<Operation> = cadres
+        .iter()
+        .filter_map(|cadre| match cadre {
+            Cadre::Operation { operation, .. } => Some(*operation),
+            Cadre::Fin { .. } => None,
+        })
+        .filter(|operation| match operation {
+            Operation::Compte { compte, .. }
+            | Operation::Alias { compte, .. }
+            | Operation::CompteEfface { compte, .. } => *compte == garni.qui,
+            Operation::Appareil { enregistrement, .. } => enregistrement.proprietaire == garni.qui,
+            Operation::Machine { enregistrement, .. } => enregistrement.proprietaire == garni.qui,
+            Operation::Autorisation { enregistrement, .. } => {
+                enregistrement.par == garni.qui || enregistrement.a == garni.qui
+            }
+            _ => false,
+        })
+        .collect();
+    assert_eq!(
+        sur_lui,
+        vec![Operation::CompteEfface {
+            compte: garni.qui,
+            efface_le: EFFACE_LE,
+            cause: Cause::Titulaire,
+        }]
+    );
+
+    // ── UN EFFACEMENT NE SE REFAIT PAS, ET UN INCONNU N'EXISTE PAS ──────────
+    assert_eq!(
+        base.effacer_compte(garni.qui, Cause::Exploitant, EFFACE_LE + 1)
+            .expect("lisible"),
+        Some(Efface::Deja(Effacement {
+            le: EFFACE_LE,
+            cause: Cause::Titulaire
+        }))
+    );
+    assert_eq!(
+        base.operations_gardees().expect("lisible"),
+        operations_avant + 1,
+        "rien d'écrit"
+    );
+    assert_eq!(
+        base.effacer_compte(un(Genre::Utilisateur, 0x99), Cause::Exploitant, EFFACE_LE)
+            .expect("lisible"),
+        None
+    );
+    // Et cela survit à la fermeture.
+    drop(base);
+    let base = Entrepot::ouvrir(&chemin, racine()).expect("rouverte");
+    plus_rien(&base, &garni);
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn effacer_un_compte_venu_du_pair_ne_journalise_rien() {
+    // C11 : ce qui n'est pas de provenance locale n'entre pas dans le journal
+    // d'opérations — l'effacement d'un tel compte non plus. Le retrait, lui,
+    // a lieu.
+    let (base, chemin) = entrepot("effacer-du-pair");
+    let qui = un(Genre::Utilisateur, 0x41);
+    base.creer_compte(
+        qui,
+        Provenance::Annuaire(un(Genre::Annuaire, 7)),
+        Some(alias("du-pair")),
+    )
+    .expect("compte");
+    let avant = base.operations_gardees().expect("lisible");
+    let efface = base
+        .effacer_compte(qui, Cause::Exploitant, EFFACE_LE)
+        .expect("lisible");
+    assert!(matches!(efface, Some(Efface::Fait(_))));
+    assert_eq!(base.operations_gardees().expect("lisible"), avant);
+    assert!(base.compte_vivant(qui).expect("lisible").is_none());
+    assert!(base.compte_par_alias("du-pair").expect("lisible").is_none());
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn la_regle_des_orphelins_efface_apres_le_delai_et_jamais_sur_le_silence() {
+    // **CE QUE LA RÈGLE COMPTE** (`modele.md` §2.1, C6) : la révocation du
+    // dernier appareil vivant, et rien d'autre — ni le silence, ni l'absence
+    // d'appareil.
+    let (base, chemin) = entrepot("orphelins");
+    let jour = 24 * 60 * 60 * 1_000_u64;
+    let maintenant = 1_800_000_000_000_u64;
+    let seuil = maintenant - 30 * jour;
+
+    // A : deux appareils, révoqués il y a quarante et trente et un jours.
+    let a = garnir_un_compte(&base, 0x51);
+    base.revoquer_appareil(a.appareils[0], maintenant - 40 * jour)
+        .expect("révoqué");
+    base.revoquer_appareil(a.appareils[1], maintenant - 31 * jour)
+        .expect("révoqué");
+    // B : un appareil révoqué il y a trente et un jours, l'autre VIVANT.
+    let b = garnir_un_compte(&base, 0x52);
+    base.revoquer_appareil(b.appareils[0], maintenant - 31 * jour)
+        .expect("révoqué");
+    // C : aucun appareil — pas de date d'où compter.
+    let c = un(Genre::Utilisateur, 0x53);
+    base.creer_compte(c, Provenance::Ici, None).expect("compte");
+    // D : le dernier appareil révoqué hier — pas encore.
+    let d = garnir_un_compte(&base, 0x54);
+    base.revoquer_appareil(d.appareils[0], maintenant - 40 * jour)
+        .expect("révoqué");
+    base.revoquer_appareil(d.appareils[1], maintenant - jour)
+        .expect("révoqué");
+    // E : déjà effacé par son titulaire — pas deux fois.
+    let e_ = garnir_un_compte(&base, 0x55);
+    base.effacer_compte(e_.qui, Cause::Titulaire, maintenant - 2 * jour)
+        .expect("lisible");
+    let operations_avant = base.operations_gardees().expect("lisible");
+
+    // ── LE PASSAGE ──────────────────────────────────────────────────────────
+    let effaces = base
+        .effacer_les_orphelins(seuil, maintenant)
+        .expect("lisible");
+    assert_eq!(effaces.len(), 1, "A, et lui seul : {effaces:?}");
+    assert_eq!(effaces[0].0, a.qui);
+    assert_eq!(effaces[0].1.appareils, 2);
+    assert_eq!(effaces[0].1.machines, 2);
+    assert_eq!(effaces[0].1.a_fermer.len(), 4);
+    plus_rien(&base, &a);
+    assert_eq!(
+        base.compte(a.qui).expect("lisible").expect("là").efface,
+        Some(Effacement {
+            le: maintenant,
+            cause: Cause::Orphelin
+        })
+    );
+    // Une opération `compte-efface`, cause orphelin.
+    assert_eq!(
+        base.operations_gardees().expect("lisible"),
+        operations_avant + 1
+    );
+    let compteur = base.compteur().expect("lisible");
+    assert_eq!(
+        operations(&base, compteur - 1),
+        vec![(
+            e(compteur),
+            Operation::CompteEfface {
+                compte: a.qui,
+                efface_le: maintenant,
+                cause: Cause::Orphelin,
+            }
+        )]
+    );
+    // Les autres sont intacts.
+    for qui in [b.qui, c, d.qui] {
+        assert!(base.compte_vivant(qui).expect("lisible").is_some(), "{qui}");
+    }
+    assert_eq!(base.appareils_de_compte(b.qui).expect("lisible").len(), 2);
+    assert_eq!(base.appareils_de_compte(d.qui).expect("lisible").len(), 2);
+    // Un second passage ne trouve rien : la règle est idempotente.
+    assert!(
+        base.effacer_les_orphelins(seuil, maintenant)
+            .expect("lisible")
+            .is_empty()
+    );
+    assert_eq!(
+        base.operations_gardees().expect("lisible"),
+        operations_avant + 1
+    );
+    // Trente jours plus tard, D y passe ; B jamais, tant qu'un appareil vit.
+    let effaces = base
+        .effacer_les_orphelins(seuil + 30 * jour, maintenant + 30 * jour)
+        .expect("lisible");
+    assert_eq!(
+        effaces.iter().map(|(qui, _)| *qui).collect::<Vec<_>>(),
+        vec![d.qui]
+    );
+    assert!(base.compte_vivant(b.qui).expect("lisible").is_some());
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn revoquer_un_appareil_pose_sa_date_une_fois() {
+    // **UNE SEULE DATE, POSÉE UNE FOIS** : c'est d'elle que la règle des
+    // orphelins compte, et une seconde révocation ne la déplace pas — ni
+    // n'écrit, ni ne journalise.
+    let (base, chemin) = entrepot("revoque-date");
+    let qui = un(Genre::Utilisateur, 1);
+    let quel = un(Genre::Appareil, 2);
+    base.creer_compte(qui, Provenance::Ici, None)
+        .expect("compte");
+    base.creer_appareil(quel, Provenance::Ici, qui, [0x11; 33], Attestation::Aucune)
+        .expect("appareil");
+    let avant = base
+        .revoquer_appareil(quel, REVOQUE_LE)
+        .expect("lisible")
+        .expect("là");
+    assert_eq!(avant.revoque_le, None);
+    let apres = base.appareil(quel).expect("lisible").expect("là");
+    assert_eq!(apres.revoque_le, Some(REVOQUE_LE));
+    let compteur = base.compteur().expect("lisible");
+    let gardees = base.operations_gardees().expect("lisible");
+    let encore = base
+        .revoquer_appareil(quel, REVOQUE_LE + 1_000)
+        .expect("lisible")
+        .expect("là");
+    assert_eq!(
+        encore.revoque_le,
+        Some(REVOQUE_LE),
+        "rendu tel qu'il était : déjà révoqué"
+    );
+    assert_eq!(
+        base.appareil(quel)
+            .expect("lisible")
+            .expect("là")
+            .revoque_le,
+        Some(REVOQUE_LE)
+    );
+    assert_eq!(base.compteur().expect("lisible"), compteur);
+    assert_eq!(base.operations_gardees().expect("lisible"), gardees);
+    let _ = std::fs::remove_file(&chemin);
 }

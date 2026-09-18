@@ -455,11 +455,158 @@ impl Estampille {
     }
 }
 
+// ── L'effacement d'un compte (`docs/modele.md` §2.1) ────────────────────────
+
+/// Qui a voulu l'effacement d'un compte.
+///
+/// # TROIS, ET AUCUNE NE VAUT ZÉRO
+///
+/// `docs/modele.md` §2.1 : le titulaire, depuis un appareil vivant
+/// (`DELETE /v1/compte`) ; la racine, par la règle des orphelins, trente jours
+/// après la révocation du dernier appareil ; l'exploitant, à la main, hors
+/// ligne (`asl-server --forget`). Il n'y a qu'une façon d'effacer un compte ;
+/// ce qui change est qui l'a voulu, et c'est ce que la cause dit.
+///
+/// **Zéro ne désigne personne**, pour la raison écrite sur [`Attestation`] : sur
+/// le disque, c'est l'octet d'un compte qui n'est PAS effacé, et un tampon
+/// réemployé vaut zéro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    /// Le titulaire, depuis un appareil vivant du compte.
+    Titulaire,
+    /// La racine, parce qu'aucun appareil n'était plus vivant depuis le délai.
+    Orphelin,
+    /// L'exploitant, hors ligne, parce qu'il sait la clé perdue.
+    Exploitant,
+}
+
+impl Cause {
+    /// L'étiquette du titulaire.
+    const TITULAIRE: u8 = 1;
+    /// L'étiquette de l'orphelin.
+    const ORPHELIN: u8 = 2;
+    /// L'étiquette de l'exploitant.
+    const EXPLOITANT: u8 = 3;
+
+    /// Son étiquette rangée.
+    #[must_use]
+    pub const fn etiquette(self) -> u8 {
+        match self {
+            Self::Titulaire => Self::TITULAIRE,
+            Self::Orphelin => Self::ORPHELIN,
+            Self::Exploitant => Self::EXPLOITANT,
+        }
+    }
+
+    /// Relit une étiquette.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Etiquette`] si l'octet ne désigne aucune cause — zéro compris.
+    pub const fn depuis(octet: u8) -> Result<Self, Faute> {
+        match octet {
+            Self::TITULAIRE => Ok(Self::Titulaire),
+            Self::ORPHELIN => Ok(Self::Orphelin),
+            Self::EXPLOITANT => Ok(Self::Exploitant),
+            lue => Err(Faute::Etiquette { lue }),
+        }
+    }
+
+    /// Le mot que le journal d'exploitation écrit (`docs/replication.md` §8).
+    #[must_use]
+    pub const fn mot(self) -> &'static str {
+        match self {
+            Self::Titulaire => "titulaire",
+            Self::Orphelin => "orphelin",
+            Self::Exploitant => "exploitant",
+        }
+    }
+}
+
+impl core::fmt::Display for Cause {
+    fn fmt(&self, sortie: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        sortie.write_str(self.mot())
+    }
+}
+
+/// Ce qu'un effacement occupe : la date, puis la cause — l'ordre de la charge
+/// de `compte-efface` dans `docs/replication.md` §5.2, et le même sur le
+/// disque, pour qu'il n'y ait qu'une écriture de cette marque.
+pub const EFFACEMENT_OCTETS: usize = 8 + 1;
+
+/// La marque d'un compte effacé : quand, et par qui.
+///
+/// # C'EST TOUT CE QUI RESTE D'UN COMPTE, ET C'EST VOULU
+///
+/// `docs/modele.md` §2.1 : l'identifiant, marqué effacé, avec la date et la
+/// cause — et rien d'autre : ni clé, ni alias, ni arête, ni machine. Il reste
+/// pour que la réplication converge (une écriture en retard trouve « effacé,
+/// refusé » et non « inconnu, créons-le »), pour que les caches convergent,
+/// et pour qu'un identifiant ne se réattribue jamais. Un `u-…` sans rien
+/// derrière n'est pas une donnée personnelle (C13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Effacement {
+    /// Quand, en millisecondes d'époque — la date de la racine qui a effacé,
+    /// répliquée telle quelle (`docs/replication.md` §4).
+    pub le: u64,
+    /// Qui l'a voulu.
+    pub cause: Cause,
+}
+
+impl Effacement {
+    /// Écrit cette marque — ou rien, à zéro. Occupe [`EFFACEMENT_OCTETS`].
+    fn ecrire(marque: Option<Self>, sortie: &mut [u8]) {
+        match marque {
+            Some(quoi) => {
+                poser(sortie, &quoi.le.to_be_bytes());
+                poser_un(
+                    sortie.get_mut(8..).unwrap_or_default(),
+                    quoi.cause.etiquette(),
+                );
+            }
+            // Le bourrage à zéro, pour la raison écrite sur `bourrage_nul`.
+            None => sortie.fill(0),
+        }
+    }
+
+    /// Relit une marque, ou son absence.
+    ///
+    /// **Sans cause, pas de date** : un compte qui n'est pas effacé n'a pas
+    /// de date d'effacement, et une date sans cause est une corruption.
+    fn lire(octets: &[u8]) -> Result<Option<Self>, Faute> {
+        let date = octets.get(..8).unwrap_or_default();
+        let cause = octets.get(8).copied().unwrap_or(0);
+        if cause == 0 {
+            if !bourrage_nul(date) {
+                return Err(Faute::Bourrage);
+            }
+            return Ok(None);
+        }
+        Ok(Some(Self::lire_posee(octets)?))
+    }
+
+    /// Relit une marque qui est forcément là — la charge de `compte-efface`,
+    /// où zéro n'est pas une cause.
+    fn lire_posee(octets: &[u8]) -> Result<Self, Faute> {
+        let mut quand = [0_u8; 8];
+        poser(&mut quand, octets);
+        Ok(Self {
+            le: u64::from_be_bytes(quand),
+            cause: Cause::depuis(octets.get(8).copied().unwrap_or(0))?,
+        })
+    }
+}
+
 // ── Le compte ───────────────────────────────────────────────────────────────
 
 /// Ce qu'un compte occupe.
-pub const COMPTE_OCTETS: usize =
-    PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + ESTAMPILLE_OCTETS + 1 + 1 + ALIAS_OCTETS_MAX;
+pub const COMPTE_OCTETS: usize = PROVENANCE_OCTETS
+    + ESTAMPILLE_OCTETS
+    + ESTAMPILLE_OCTETS
+    + 1
+    + 1
+    + ALIAS_OCTETS_MAX
+    + EFFACEMENT_OCTETS;
 
 /// Un compte d'utilisateur.
 ///
@@ -469,6 +616,10 @@ pub const COMPTE_OCTETS: usize =
 /// — c'est la seule donnée que l'utilisateur choisit de rendre trouvable. C13 le
 /// dit, et le schéma est ce qui le tient : une colonne qui n'existe pas ne se
 /// remplit pas par mégarde.
+///
+/// **Et la marque d'effacement** (`docs/modele.md` §2.1, 2026-09-18) : un
+/// compte effacé n'a plus rien d'autre — ni alias, ni appareil, ni machine —,
+/// et il reste pour que rien ne le ressuscite. Voir [`Effacement`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Compte {
     /// D'où vient cet enregistrement.
@@ -486,11 +637,19 @@ pub struct Compte {
     /// C'est une fonction de l'ensemble des réclamations, pas de leur ordre
     /// d'arrivée — et pour la calculer, chaque compte doit porter QUAND il a
     /// réclamé. Sans alias, c'est l'estampille de son dernier retrait, ou de
-    /// sa création.
+    /// sa création — ou de son effacement, qui retire la réclamation.
     pub reclamation: Estampille,
+    /// Effacé le, et par qui — ou rien.
+    pub efface: Option<Effacement>,
 }
 
 impl Compte {
+    /// Ce compte est-il effacé ?
+    #[must_use]
+    pub const fn est_efface(&self) -> bool {
+        self.efface.is_some()
+    }
+
     /// Écrit ce compte.
     pub fn ecrire(&self, sortie: &mut [u8; COMPTE_OCTETS]) {
         let mut curseur = 0_usize;
@@ -508,14 +667,16 @@ impl Compte {
         let reclamation = tranche(ESTAMPILLE_OCTETS);
         self.reclamation
             .ecrire(sortie.get_mut(reclamation).unwrap_or_default());
-        let reste = sortie.get_mut(curseur..).unwrap_or_default();
+        let alias = tranche(1 + 1 + ALIAS_OCTETS_MAX);
+        let place = sortie.get_mut(alias).unwrap_or_default();
         match &self.alias {
             Some(alias) => {
-                poser_un(reste, 1);
-                alias.ecrire(reste.get_mut(1..).unwrap_or_default());
+                poser_un(place, 1);
+                alias.ecrire(place.get_mut(1..).unwrap_or_default());
             }
-            None => reste.fill(0),
+            None => place.fill(0),
         }
+        Effacement::ecrire(self.efface, sortie.get_mut(curseur..).unwrap_or_default());
     }
 
     /// Relit un compte.
@@ -536,11 +697,14 @@ impl Compte {
             Estampille::lire(octets.get(prendre(ESTAMPILLE_OCTETS)).unwrap_or_default())?;
         let reclamation =
             Estampille::lire(octets.get(prendre(ESTAMPILLE_OCTETS)).unwrap_or_default())?;
+        let alias = prendre(1 + 1 + ALIAS_OCTETS_MAX);
+        let efface = Effacement::lire(octets.get(curseur..).unwrap_or_default())?;
         Self::lire_corps(
             provenance,
             estampille,
             reclamation,
-            octets.get(curseur..).unwrap_or_default(),
+            octets.get(alias).unwrap_or_default(),
+            efface,
         )
     }
 
@@ -550,7 +714,7 @@ impl Compte {
     /// avant 0.5.0 n'a ni estampille ni réclamation, et chaque enregistrement
     /// en reçoit une, attribuée en séquence par la racine qui reprend. La
     /// réclamation reçoit la même : l'alias qu'un compte tenait est réclamé
-    /// depuis sa reprise.
+    /// depuis sa reprise. Aucun compte d'alors n'est effacé.
     ///
     /// # Errors
     ///
@@ -565,15 +729,46 @@ impl Compte {
             estampille,
             estampille,
             octets.get(PROVENANCE_OCTETS..).unwrap_or_default(),
+            None,
         )
     }
 
-    /// Ce qui suit la provenance et les estampilles : l'alias, ou rien.
+    /// Relit un compte de la forme d'avant les dates (0.5.0 à 0.10.1) : la
+    /// même, sans la marque d'effacement — aucun compte d'alors n'est effacé.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un compte de cette forme.
+    pub fn lire_sans_dates(octets: &[u8; sans_dates::COMPTE_OCTETS]) -> Result<Self, Faute> {
+        let mut curseur = 0_usize;
+        let mut prendre = |combien: usize| {
+            let debut = curseur;
+            curseur = curseur.saturating_add(combien);
+            debut..curseur
+        };
+        let provenance =
+            Provenance::lire(octets.get(prendre(PROVENANCE_OCTETS)).unwrap_or_default())?;
+        let estampille =
+            Estampille::lire(octets.get(prendre(ESTAMPILLE_OCTETS)).unwrap_or_default())?;
+        let reclamation =
+            Estampille::lire(octets.get(prendre(ESTAMPILLE_OCTETS)).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            reclamation,
+            octets.get(curseur..).unwrap_or_default(),
+            None,
+        )
+    }
+
+    /// Ce qui suit la provenance et les estampilles : l'alias, ou rien — et
+    /// la marque, que l'appelant a lue ou n'a pas eu à lire.
     fn lire_corps(
         provenance: Provenance,
         estampille: Estampille,
         reclamation: Estampille,
         reste: &[u8],
+        efface: Option<Effacement>,
     ) -> Result<Self, Faute> {
         let alias = match reste.first().copied().unwrap_or(0) {
             0 => {
@@ -590,6 +785,7 @@ impl Compte {
             estampille,
             alias,
             reclamation,
+            efface,
         })
     }
 }
@@ -970,19 +1166,20 @@ impl LiaisonRangee<'_> {
 
 /// Ce qu'un appareil occupe.
 pub const APPAREIL_OCTETS: usize =
-    PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS + 1 + 1;
+    PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS + 1 + 1 + 8;
 
 /// Un téléphone enrôlé, tel qu'il est rangé.
 ///
-/// # QUATRE CHAMPS, ET C'EST TOUT CE QU'UN APPAREIL EST
+/// # QUATRE CHAMPS ET UNE DATE, ET C'EST TOUT CE QU'UN APPAREIL EST
 ///
 /// Ni nom, ni adresse : rien de ce qui désignerait le porteur (C13). Un
 /// appareil, pour l'annuaire, est **une clé publique rattachée à un compte**,
 /// et rien d'autre.
 ///
-/// `docs/modele.md` §2.2 lui donne aussi deux dates. **Elles ne sont pas ici, et
-/// c'est un manque nommé** : rien ne les écrit ni ne les lit encore, et un champ
-/// qu'on range toujours vide ment sur ce que l'annuaire sait.
+/// `docs/modele.md` §2.2 lui donne deux dates. **Une seule est ici,
+/// `révoqué le`**, depuis le 2026-09-18 : la règle des orphelins la lit, et
+/// les deux racines doivent lire la même. `enrôlé le` n'y est pas — rien n'en
+/// a besoin, et « pendant qu'on y est » est la porte que C13 nomme.
 ///
 /// **Le jeton de poussée, lui, est ailleurs** — voir [`JetonPoussee`]. Il n'est
 /// pas ici parce qu'il ne tient pas dans une rangée de taille fixe, et parce
@@ -1018,9 +1215,9 @@ pub struct Appareil {
     /// lesquels sont entrés sans preuve. C'est ce qu'on regarde le jour où l'on
     /// resserre, pour savoir qui prévenir.
     pub atteste: Attestation,
-    /// A-t-il été révoqué ?
+    /// Révoqué le, en millisecondes d'époque — ou rien.
     ///
-    /// # POURQUOI UN DRAPEAU, ET NON UNE LIGNE SUPPRIMÉE
+    /// # POURQUOI UNE MARQUE, ET NON UNE LIGNE SUPPRIMÉE
     ///
     /// Supprimer marcherait — une clé qu'on ne trouve plus ne prouve plus rien.
     /// **Mais l'application doit pouvoir MONTRER ce qui a été révoqué** : c'est
@@ -1028,10 +1225,39 @@ pub struct Appareil {
     /// disparue n'y dit rien. Un appareil révoqué reste donc, et ne vaut plus.
     ///
     /// C'est le même choix que pour une autorisation, et pour la même raison.
-    pub revoque: bool,
+    ///
+    /// # ET POURQUOI UNE DATE, ET NON PLUS UN DRAPEAU
+    ///
+    /// **C'est la date que la règle des orphelins lit** (`docs/modele.md`
+    /// §2.1, §2.2) : un compte est orphelin depuis le `révoqué le` le plus
+    /// récent de ses appareils, et trente jours plus tard la racine l'efface.
+    /// C'est la date de la racine qui a révoqué, répliquée telle quelle
+    /// (`docs/replication.md` §4) — l'autre ne pose pas la sienne, sinon les
+    /// deux n'arriveraient pas à la même échéance. Une seule date, posée une
+    /// fois, sur un enregistrement qui ne vaut déjà plus rien : elle ne
+    /// dessine aucun graphe d'usage (C18).
+    pub revoque_le: Option<u64>,
+}
+
+/// D'où vient la date de révocation d'un appareil qu'on relit.
+enum DateRangee<'a> {
+    /// Lue sur le disque, dans la forme courante : les huit octets qui
+    /// suivent le drapeau.
+    Lue(&'a [u8]),
+    /// Attribuée par la reprise, qui n'en a pas lu : la date de la reprise
+    /// elle-même, pour un appareil déjà révoqué (`docs/modele.md` §2.2 —
+    /// l'annuaire ne sait pas mieux, et poser plus ancien serait affirmer ce
+    /// qu'il n'a pas mesuré, C6).
+    Reprise(u64),
 }
 
 impl Appareil {
+    /// Cet appareil est-il révoqué ?
+    #[must_use]
+    pub const fn revoque(&self) -> bool {
+        self.revoque_le.is_some()
+    }
+
     /// Écrit cet appareil.
     pub fn ecrire(&self, sortie: &mut [u8; APPAREIL_OCTETS]) {
         let mut curseur = 0_usize;
@@ -1058,10 +1284,17 @@ impl Appareil {
             sortie.get_mut(atteste).unwrap_or_default(),
             self.atteste.etiquette(),
         );
+        let revoque = tranche(1);
         poser_un(
-            sortie.get_mut(curseur..).unwrap_or_default(),
-            u8::from(self.revoque),
+            sortie.get_mut(revoque).unwrap_or_default(),
+            u8::from(self.revoque()),
         );
+        // La date, ou du bourrage nul : un appareil vivant n'a pas de date.
+        let date = sortie.get_mut(curseur..).unwrap_or_default();
+        match self.revoque_le {
+            Some(quand) => poser(date, &quand.to_be_bytes()),
+            None => date.fill(0),
+        }
     }
 
     /// Relit un appareil.
@@ -1074,15 +1307,22 @@ impl Appareil {
         let apres = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
         let estampille =
             Estampille::lire(octets.get(PROVENANCE_OCTETS..apres).unwrap_or_default())?;
+        let corps = octets.get(apres..).unwrap_or_default();
         Self::lire_corps(
             provenance,
             estampille,
-            octets.get(apres..).unwrap_or_default(),
+            corps,
+            DateRangee::Lue(
+                corps
+                    .get(sans_dates::CORPS_APPAREIL_OCTETS..)
+                    .unwrap_or_default(),
+            ),
         )
     }
 
     /// Relit un appareil de la forme d'avant l'estampille, et lui donne
-    /// celle-ci (`docs/replication.md` §11.4).
+    /// celle-ci (`docs/replication.md` §11.4) — et, s'il est révoqué, cette
+    /// date de révocation : celle de la reprise.
     ///
     /// # Errors
     ///
@@ -1090,21 +1330,47 @@ impl Appareil {
     pub fn lire_ancien(
         octets: &[u8; ancien::APPAREIL_OCTETS],
         estampille: Estampille,
+        revoque_le: u64,
     ) -> Result<Self, Faute> {
         let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
         Self::lire_corps(
             provenance,
             estampille,
             octets.get(PROVENANCE_OCTETS..).unwrap_or_default(),
+            DateRangee::Reprise(revoque_le),
+        )
+    }
+
+    /// Relit un appareil de la forme d'avant les dates (0.5.0 à 0.10.1) : la
+    /// même, avec un drapeau et sans date — et, s'il est révoqué, lui donne
+    /// celle de la reprise.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un appareil de cette forme.
+    pub fn lire_sans_dates(
+        octets: &[u8; sans_dates::APPAREIL_OCTETS],
+        revoque_le: u64,
+    ) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        let apres = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        let estampille =
+            Estampille::lire(octets.get(PROVENANCE_OCTETS..apres).unwrap_or_default())?;
+        Self::lire_corps(
+            provenance,
+            estampille,
+            octets.get(apres..).unwrap_or_default(),
+            DateRangee::Reprise(revoque_le),
         )
     }
 
     /// Ce qui suit l'estampille : le propriétaire, la clé, l'attestation, le
-    /// drapeau.
+    /// drapeau — puis la date, d'où qu'elle vienne.
     fn lire_corps(
         provenance: Provenance,
         estampille: Estampille,
         reste: &[u8],
+        date: DateRangee<'_>,
     ) -> Result<Self, Faute> {
         let proprietaire = lire_identifiant(
             reste.get(..IDENTIFIANT_OCTETS).unwrap_or_default(),
@@ -1125,13 +1391,29 @@ impl Appareil {
             1 => true,
             lue => return Err(Faute::Etiquette { lue }),
         };
+        let revoque_le = match date {
+            DateRangee::Lue(octets) => {
+                if revoque {
+                    let mut quand = [0_u8; 8];
+                    poser(&mut quand, octets);
+                    Some(u64::from_be_bytes(quand))
+                } else if bourrage_nul(octets) {
+                    None
+                } else {
+                    // **PAS DE DATE SANS RÉVOCATION** : une date qui traîne
+                    // sur un appareil vivant est une corruption, pas un fait.
+                    return Err(Faute::Bourrage);
+                }
+            }
+            DateRangee::Reprise(quand) => revoque.then_some(quand),
+        };
         Ok(Self {
             provenance,
             estampille,
             proprietaire,
             cle,
             atteste,
-            revoque,
+            revoque_le,
         })
     }
 }
@@ -2043,6 +2325,42 @@ pub mod ancien {
         + NOM_OCTETS_MAX;
 }
 
+// ── La forme d'avant les dates ──────────────────────────────────────────────
+
+pub mod sans_dates {
+    //! Ce que le compte et l'appareil occupaient AVANT les dates (0.5.0 à
+    //! 0.10.1) : avec l'estampille, sans `révoqué le` ni `effacé le`.
+    //!
+    //! # POURQUOI CES DEUX TAILLES SURVIVENT
+    //!
+    //! `docs/modele.md` §2.1 et §2.2 (2026-09-18) : la règle des orphelins lit
+    //! `révoqué le`, et l'effacement d'un compte laisse `effacé le` et sa
+    //! cause. Les bancs tournent avec des bases qui n'en portent aucune — et
+    //! qui portent de vrais comptes. Une base de cette forme est REPRISE à
+    //! l'ouverture, comme celle d'avant l'estampille l'avait été : les deux
+    //! tables changent de taille, et `redb` n'ouvre celle d'hier qu'avec la
+    //! taille d'hier.
+    //!
+    //! Seuls le compte et l'appareil ont bougé ; les autres enregistrements
+    //! sont ceux d'aujourd'hui. **Il n'y a pas d'`ecrire` de cette forme**,
+    //! pour la raison écrite sur [`super::ancien`].
+
+    use super::{
+        ALIAS_OCTETS_MAX, CLE_APPAREIL_OCTETS, ESTAMPILLE_OCTETS, IDENTIFIANT_OCTETS,
+        PROVENANCE_OCTETS,
+    };
+
+    /// Ce qu'un compte occupait.
+    pub const COMPTE_OCTETS: usize =
+        PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + ESTAMPILLE_OCTETS + 1 + 1 + ALIAS_OCTETS_MAX;
+    /// Ce que le corps d'un appareil — après sa provenance et son estampille
+    /// — occupait : le propriétaire, la clé, l'attestation, le drapeau.
+    pub const CORPS_APPAREIL_OCTETS: usize = IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS + 1 + 1;
+    /// Ce qu'un appareil occupait.
+    pub const APPAREIL_OCTETS: usize =
+        PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + CORPS_APPAREIL_OCTETS;
+}
+
 // ── Les opérations (`docs/replication.md` §5) ───────────────────────────────
 
 /// Ce que l'en-tête d'une opération occupe : le genre, puis l'estampille.
@@ -2068,12 +2386,13 @@ pub const OPERATION_OCTETS_MAX: usize = OPERATION_ENTETE_OCTETS + CHARGE_OCTETS_
 /// de la charge, donc **aucune longueur ne vient du réseau**, et il n'y a pas de
 /// second décodeur : ce qui se lit sur le fil est ce qui se lit sur le disque.
 ///
-/// # LES QUATORZE GENRES SONT CEUX DE `replication.md` §5.2
+/// # LES QUINZE GENRES SONT CEUX DE `replication.md` §5.2
 ///
 /// Un par écriture locale possible, et aucun pour ce qui ne se réplique pas —
 /// l'expiration d'un code, le retrait d'un jeton par son appareil n'ont pas
-/// d'opération. Il n'y a pas non plus d'effacement d'un compte, d'une machine ou
-/// d'un service : l'API n'en a pas.
+/// d'opération. Il n'y a pas d'effacement d'une machine ou d'un service :
+/// l'API n'en a pas. **Il y en a un pour un compte**, depuis le 2026-09-18
+/// ([`Operation::CompteEfface`]), et c'est le seul qui efface physiquement.
 ///
 /// **L'estampille n'est pas dans la variante** : elle est celle de l'opération,
 /// et [`Operation::ecrire`] la prend à part. Une opération est un fait daté par
@@ -2103,9 +2422,15 @@ pub enum Operation {
         enregistrement: Appareil,
     },
     /// Un appareil révoqué. Marquer, retirer le jeton. Toujours.
+    ///
+    /// **Il porte la date** (`docs/replication.md` §5.2, 2026-09-18) : la
+    /// règle des orphelins la lit, et les deux racines doivent lire la même —
+    /// celle de la racine qui a révoqué.
     AppareilRevoque {
         /// Lequel.
         appareil: Identifiant,
+        /// Quand, en millisecondes d'époque.
+        revoque_le: u64,
     },
     /// Ce qu'un appareil dit de lui-même. Le plus récent.
     Description {
@@ -2185,12 +2510,32 @@ pub enum Operation {
         /// Laquelle.
         autorisation: Identifiant,
     },
+    /// Un compte effacé. **Toujours** (`docs/replication.md` §3.2, §5.2) :
+    /// retirer tout ce que le compte tient — appareils, jetons, descriptions,
+    /// machines et leurs clés, codes, services, autorisations dans les deux
+    /// sens, réclamation d'alias — et poser la marque, avec la date et la
+    /// cause portées. Sur un compte déjà effacé : rien. Sur un compte inconnu :
+    /// poser la marque quand même, pour que ce qui arriverait ensuite pour lui
+    /// soit refusé.
+    CompteEfface {
+        /// Lequel.
+        compte: Identifiant,
+        /// Quand, en millisecondes d'époque — la date de la racine qui a
+        /// effacé.
+        efface_le: u64,
+        /// Qui l'a voulu.
+        cause: Cause,
+    },
 }
 
 /// Le genre d'une opération, tel qu'il s'écrit en tête du cadre.
 ///
 /// **Aucun ne vaut zéro**, pour la raison écrite sur [`Attestation`] : un
 /// tampon réemployé vaut zéro, et ne doit désigner aucune opération.
+///
+/// **Et aucun ne vaut quinze** : c'est [`ETIQUETTE_DE_FIN`], posée quand il
+/// n'y avait que quatorze genres. Le quinzième, `compte-efface`, a pris seize
+/// plutôt que de déplacer un cadre que les deux racines savaient déjà lire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenreOperation {
     /// `compte`.
@@ -2221,12 +2566,14 @@ pub enum GenreOperation {
     Autorisation,
     /// `autorisation-revoquee`.
     AutorisationRevoquee,
+    /// `compte-efface`.
+    CompteEfface,
 }
 
 impl GenreOperation {
-    /// Les quatorze, dans l'ordre de `replication.md` §5.2 — et l'ordre de
-    /// leurs étiquettes, de 1 à 14.
-    pub const TOUS: [Self; 14] = [
+    /// Les quinze, dans l'ordre de `replication.md` §5.2 — et l'ordre de
+    /// leurs étiquettes, de 1 à 14, puis 16 (voir l'en-tête du type).
+    pub const TOUS: [Self; 15] = [
         Self::Compte,
         Self::Alias,
         Self::Appareil,
@@ -2241,6 +2588,7 @@ impl GenreOperation {
         Self::Service,
         Self::Autorisation,
         Self::AutorisationRevoquee,
+        Self::CompteEfface,
     ];
 
     /// Son étiquette, en tête du cadre.
@@ -2261,6 +2609,7 @@ impl GenreOperation {
             Self::Service => 12,
             Self::Autorisation => 13,
             Self::AutorisationRevoquee => 14,
+            Self::CompteEfface => 16,
         }
     }
 
@@ -2268,7 +2617,8 @@ impl GenreOperation {
     ///
     /// # Errors
     ///
-    /// [`Faute::Etiquette`] si l'octet ne désigne aucun genre — zéro compris.
+    /// [`Faute::Etiquette`] si l'octet ne désigne aucun genre — zéro compris,
+    /// et le cadre de fin aussi.
     pub const fn depuis(octet: u8) -> Result<Self, Faute> {
         Ok(match octet {
             1 => Self::Compte,
@@ -2285,6 +2635,7 @@ impl GenreOperation {
             12 => Self::Service,
             13 => Self::Autorisation,
             14 => Self::AutorisationRevoquee,
+            16 => Self::CompteEfface,
             lue => return Err(Faute::Etiquette { lue }),
         })
     }
@@ -2298,7 +2649,9 @@ impl GenreOperation {
             Self::Compte => IDENTIFIANT_OCTETS + COMPTE_OCTETS,
             Self::Alias => IDENTIFIANT_OCTETS + 1 + 1 + ALIAS_OCTETS_MAX,
             Self::Appareil => IDENTIFIANT_OCTETS + APPAREIL_OCTETS,
-            Self::AppareilRevoque | Self::AutorisationRevoquee => IDENTIFIANT_OCTETS,
+            Self::AppareilRevoque => IDENTIFIANT_OCTETS + 8,
+            Self::AutorisationRevoquee => IDENTIFIANT_OCTETS,
+            Self::CompteEfface => IDENTIFIANT_OCTETS + EFFACEMENT_OCTETS,
             Self::Description => IDENTIFIANT_OCTETS + DESCRIPTION_OCTETS,
             Self::Poussee => IDENTIFIANT_OCTETS + POUSSEE_OCTETS,
             Self::Machine => IDENTIFIANT_OCTETS + MACHINE_OCTETS,
@@ -2344,6 +2697,7 @@ impl Operation {
             Self::Service { .. } => GenreOperation::Service,
             Self::Autorisation { .. } => GenreOperation::Autorisation,
             Self::AutorisationRevoquee { .. } => GenreOperation::AutorisationRevoquee,
+            Self::CompteEfface { .. } => GenreOperation::CompteEfface,
         }
     }
 
@@ -2396,7 +2750,16 @@ impl Operation {
                     &octets,
                 );
             }
-            Self::AppareilRevoque { appareil } => ecrire_identifiant(*appareil, charge),
+            Self::AppareilRevoque {
+                appareil,
+                revoque_le,
+            } => {
+                ecrire_identifiant(*appareil, charge);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &revoque_le.to_be_bytes(),
+                );
+            }
             Self::Description {
                 appareil,
                 enregistrement,
@@ -2519,6 +2882,20 @@ impl Operation {
             Self::AutorisationRevoquee { autorisation } => {
                 ecrire_identifiant(*autorisation, charge);
             }
+            Self::CompteEfface {
+                compte,
+                efface_le,
+                cause,
+            } => {
+                ecrire_identifiant(*compte, charge);
+                Effacement::ecrire(
+                    Some(Effacement {
+                        le: *efface_le,
+                        cause: *cause,
+                    }),
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                );
+            }
         }
         genre.octets()
     }
@@ -2574,9 +2951,14 @@ impl Operation {
                 appareil: lire_identifiant(charge, Genre::Appareil)?,
                 enregistrement: Appareil::lire(&copie(apres_identifiant))?,
             },
-            GenreOperation::AppareilRevoque => Self::AppareilRevoque {
-                appareil: lire_identifiant(charge, Genre::Appareil)?,
-            },
+            GenreOperation::AppareilRevoque => {
+                let mut quand = [0_u8; 8];
+                poser(&mut quand, apres_identifiant);
+                Self::AppareilRevoque {
+                    appareil: lire_identifiant(charge, Genre::Appareil)?,
+                    revoque_le: u64::from_be_bytes(quand),
+                }
+            }
             GenreOperation::Description => Self::Description {
                 appareil: lire_identifiant(charge, Genre::Appareil)?,
                 enregistrement: Description::lire(&copie(apres_identifiant))?,
@@ -2677,6 +3059,14 @@ impl Operation {
             GenreOperation::AutorisationRevoquee => Self::AutorisationRevoquee {
                 autorisation: lire_identifiant(charge, Genre::Autorisation)?,
             },
+            GenreOperation::CompteEfface => {
+                let marque = Effacement::lire_posee(apres_identifiant)?;
+                Self::CompteEfface {
+                    compte: lire_identifiant(charge, Genre::Utilisateur)?,
+                    efface_le: marque.le,
+                    cause: marque.cause,
+                }
+            }
         };
         Ok((estampille, operation, attendus))
     }
@@ -2698,13 +3088,17 @@ fn copie<const N: usize>(tranche: &[u8]) -> [u8; N] {
 
 // ── Le cadre de fin d'un instantané (`docs/replication.md` §5.4) ────────────
 
-/// L'étiquette du cadre de fin : la quinzième, juste après les quatorze genres
-/// d'opération, et **ce n'est pas un genre d'opération**.
+/// L'étiquette du cadre de fin : quinze, posée juste après les quatorze
+/// premiers genres d'opération, et **ce n'est pas un genre d'opération**.
 ///
 /// [`GenreOperation::depuis`] la refuse, et c'est voulu : une opération est un
 /// fait à appliquer, le cadre de fin est un signal de coupe. Le lecteur qui
 /// applique ne doit jamais le prendre pour un fait, et celui qui lit un
 /// instantané doit savoir le reconnaître AVANT de demander une opération.
+///
+/// **Elle n'a pas bougé quand le quinzième genre est arrivé** (`compte-efface`,
+/// seize) : déplacer un cadre que les deux racines savaient lire aurait coûté
+/// une rupture de plus pour rien.
 pub const ETIQUETTE_DE_FIN: u8 = 15;
 
 /// Ce qu'un cadre de fin occupe : l'en-tête seul, sans charge.
@@ -2991,18 +3385,21 @@ impl EntreeJournal {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use asl_id::{Genre, Identifiant};
 
     use super::{
         ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
         Autorisation, CADRE_DE_FIN_OCTETS, CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS,
-        COMPTE_OCTETS, Cadre, Capacites, CleLiee, Compte, Court, DESCRIPTION_OCTETS, Description,
-        EMPREINTE_OCTETS, ENROLEMENT_OCTETS, ENTREE_OCTETS, ESTAMPILLE_OCTETS, ETIQUETTE_DE_FIN,
-        Enrolement, EntreeJournal, Estampille, Faute, GenreOperation, IDENTIFIANT_OCTETS,
-        JETON_OCTETS_MAX, JetonPoussee, JetonRange, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX,
-        NomRange, OPERATION_ENTETE_OCTETS, OPERATION_OCTETS_MAX, Operation, PORTEE_OCTETS,
-        POUSSEE_OCTETS, PROVENANCE_OCTETS, Plateforme, Portee, Provenance, SERVICE_OCTETS, Service,
-        Systeme, Verdict, ancien,
+        COMPTE_OCTETS, Cadre, Capacites, Cause, CleLiee, Compte, Court, DESCRIPTION_OCTETS,
+        Description, EFFACEMENT_OCTETS, EMPREINTE_OCTETS, ENROLEMENT_OCTETS, ENTREE_OCTETS,
+        ESTAMPILLE_OCTETS, ETIQUETTE_DE_FIN, Effacement, Enrolement, EntreeJournal, Estampille,
+        Faute, GenreOperation, IDENTIFIANT_OCTETS, JETON_OCTETS_MAX, JetonPoussee, JetonRange,
+        MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, OPERATION_ENTETE_OCTETS,
+        OPERATION_OCTETS_MAX, Operation, PORTEE_OCTETS, POUSSEE_OCTETS, PROVENANCE_OCTETS,
+        Plateforme, Portee, Provenance, SERVICE_OCTETS, Service, Systeme, Verdict, ancien,
+        sans_dates,
     };
 
     /// Un identifiant de ce genre, reproductible.
@@ -3034,6 +3431,7 @@ mod tests {
             estampille: e(3),
             alias: alias.map(|texte| AliasRange::nouveau(texte).expect("il tient")),
             reclamation: e(3),
+            efface: None,
         }
     }
 
@@ -3053,14 +3451,25 @@ mod tests {
     }
 
     /// Un appareil, reproductible.
-    fn un_appareil(atteste: Attestation, revoque: bool) -> Appareil {
+    fn un_appareil(atteste: Attestation, revoque_le: Option<u64>) -> Appareil {
         Appareil {
             provenance: Provenance::Ici,
             estampille: e(2),
             proprietaire: un(Genre::Utilisateur, 7),
             cle: [0x33; CLE_APPAREIL_OCTETS],
             atteste,
-            revoque,
+            revoque_le,
+        }
+    }
+
+    /// Une date de révocation, en millisecondes d'époque.
+    const REVOQUE_LE: u64 = 1_789_000_000_000;
+
+    /// Une marque d'effacement, reproductible.
+    fn effacement(cause: Cause) -> Effacement {
+        Effacement {
+            le: 1_790_000_000_000,
+            cause,
         }
     }
 
@@ -3086,7 +3495,11 @@ mod tests {
         let mut vieux = [0_u8; VIEUX];
         vieux[..PROVENANCE_OCTETS].copy_from_slice(&neuf[..PROVENANCE_OCTETS]);
         let corps = PROVENANCE_OCTETS.saturating_add(estampilles.saturating_mul(ESTAMPILLE_OCTETS));
-        vieux[PROVENANCE_OCTETS..].copy_from_slice(&neuf[corps..]);
+        // **CE QUE LA FORME D'HIER TENAIT, ET RIEN DE PLUS** : la marque
+        // d'effacement d'un compte, la date d'un appareil viennent APRÈS, et
+        // n'y étaient pas.
+        let combien = VIEUX.saturating_sub(PROVENANCE_OCTETS);
+        vieux[PROVENANCE_OCTETS..].copy_from_slice(&neuf[corps..corps.saturating_add(combien)]);
         vieux
     }
 
@@ -3452,6 +3865,112 @@ mod tests {
             Compte::lire_ancien(&vieux, e(1)),
             Err(Faute::Etiquette { lue: 9 })
         );
+    }
+
+    #[test]
+    fn un_compte_sans_dates_se_reprend_tel_quel_et_non_efface() {
+        // **LA FORME DE 0.5.0 À 0.10.1** : estampilles et réclamation sont là,
+        // la marque d'effacement non — aucun compte d'alors n'est effacé.
+        for alias in [None, Some("thierry")] {
+            let mut attendu = un_compte(Provenance::Ici, alias);
+            attendu.reclamation = e(1);
+            let mut neuf = [0_u8; COMPTE_OCTETS];
+            attendu.ecrire(&mut neuf);
+            let mut vieux = [0_u8; sans_dates::COMPTE_OCTETS];
+            vieux.copy_from_slice(&neuf[..sans_dates::COMPTE_OCTETS]);
+            assert_eq!(Compte::lire_sans_dates(&vieux), Ok(attendu), "{alias:?}");
+        }
+        // Et la corruption se voit : la provenance, une estampille, l'alias.
+        let mut vieux = [0_u8; sans_dates::COMPTE_OCTETS];
+        vieux[0] = 9;
+        assert_eq!(
+            Compte::lire_sans_dates(&vieux),
+            Err(Faute::Etiquette { lue: 9 })
+        );
+        let mut neuf = [0_u8; COMPTE_OCTETS];
+        un_compte(Provenance::Ici, Some("x")).ecrire(&mut neuf);
+        let mut vieux = [0_u8; sans_dates::COMPTE_OCTETS];
+        vieux.copy_from_slice(&neuf[..sans_dates::COMPTE_OCTETS]);
+        // Les deux estampilles, l'une après l'autre.
+        for place in [
+            PROVENANCE_OCTETS + 8,
+            PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + 8,
+        ] {
+            let mut corrompu = vieux;
+            corrompu[place] = Genre::Machine.prefixe();
+            assert_eq!(
+                Compte::lire_sans_dates(&corrompu),
+                Err(Faute::Genre {
+                    attendu: Genre::Annuaire
+                }),
+                "à l'octet {place}"
+            );
+        }
+        let mut corrompu = vieux;
+        corrompu[PROVENANCE_OCTETS + 2 * ESTAMPILLE_OCTETS + 1] = 250;
+        assert_eq!(
+            Compte::lire_sans_dates(&corrompu),
+            Err(Faute::Longueur {
+                annoncee: 250,
+                maximum: ALIAS_OCTETS_MAX,
+            })
+        );
+    }
+
+    /// Où la marque d'effacement commence dans un compte.
+    const EFFACE: usize = COMPTE_OCTETS - EFFACEMENT_OCTETS;
+
+    #[test]
+    fn un_compte_efface_se_relit_avec_sa_date_et_sa_cause() {
+        // **LES TROIS CAUSES FONT L'ALLER-RETOUR**, sur un compte sans alias —
+        // un compte effacé n'a plus rien d'autre (`modele.md` §2.1).
+        for cause in [Cause::Titulaire, Cause::Orphelin, Cause::Exploitant] {
+            let compte = Compte {
+                efface: Some(effacement(cause)),
+                ..un_compte(Provenance::Ici, None)
+            };
+            assert!(compte.est_efface());
+            let mut octets = [0_u8; COMPTE_OCTETS];
+            compte.ecrire(&mut octets);
+            assert_eq!(Compte::lire(&octets), Ok(compte), "{cause:?}");
+            assert_eq!(octets[EFFACE + 8], cause.etiquette());
+            assert_eq!(
+                &octets[EFFACE..EFFACE + 8],
+                &effacement(cause).le.to_be_bytes()
+            );
+            assert_eq!(Cause::depuis(cause.etiquette()), Ok(cause));
+            assert!(!cause.mot().is_empty());
+        }
+        assert!(!un_compte(Provenance::Ici, None).est_efface());
+        // Les mots du journal d'exploitation sont ceux de `replication.md` §8.
+        assert_eq!(Cause::Titulaire.mot(), "titulaire");
+        assert_eq!(Cause::Orphelin.mot(), "orphelin");
+        assert_eq!(Cause::Exploitant.mot(), "exploitant");
+        assert_eq!(std::format!("{}", Cause::Exploitant), "exploitant");
+    }
+
+    #[test]
+    fn une_marque_d_effacement_corrompue_refuse_le_compte() {
+        let mut octets = [0_u8; COMPTE_OCTETS];
+        Compte {
+            efface: Some(effacement(Cause::Orphelin)),
+            ..un_compte(Provenance::Ici, None)
+        }
+        .ecrire(&mut octets);
+        // Une cause inconnue.
+        octets[EFFACE + 8] = 4;
+        assert_eq!(Compte::lire(&octets), Err(Faute::Etiquette { lue: 4 }));
+        assert_eq!(Cause::depuis(4), Err(Faute::Etiquette { lue: 4 }));
+        // **ZÉRO N'EST PAS UNE CAUSE** : sur le disque, c'est « pas effacé »,
+        // et une date sans cause est une corruption.
+        octets[EFFACE + 8] = 0;
+        assert_eq!(Compte::lire(&octets), Err(Faute::Bourrage));
+        assert_eq!(Cause::depuis(0), Err(Faute::Etiquette { lue: 0 }));
+        // Réécrire un compte vivant par-dessus un effacé n'en laisse rien.
+        let vivant = un_compte(Provenance::Ici, None);
+        vivant.ecrire(&mut octets);
+        assert!(octets[EFFACE..].iter().all(|o| *o == 0));
+        assert_eq!(Compte::lire(&octets), Ok(vivant));
     }
 
     // ── Machine ─────────────────────────────────────────────────────────────
@@ -4331,7 +4850,7 @@ mod tests {
 
     #[test]
     fn un_appareil_fait_l_aller_retour() {
-        let appareil = un_appareil(Attestation::Apple, false);
+        let appareil = un_appareil(Attestation::Apple, None);
         let mut octets = [0_u8; APPAREIL_OCTETS];
         appareil.ecrire(&mut octets);
         assert_eq!(Appareil::lire(&octets), Ok(appareil));
@@ -4346,7 +4865,7 @@ mod tests {
             cle: [0; CLE_APPAREIL_OCTETS],
             // **ENTRÉ SANS PREUVE**, sous une posture facultative, et
             // **RÉVOQUÉ**, pour que les deux états fassent l'aller-retour.
-            ..un_appareil(Attestation::Aucune, true)
+            ..un_appareil(Attestation::Aucune, Some(REVOQUE_LE))
         };
         let mut octets = [0_u8; APPAREIL_OCTETS];
         appareil.ecrire(&mut octets);
@@ -4356,7 +4875,7 @@ mod tests {
     #[test]
     fn un_proprietaire_d_appareil_qui_n_est_pas_un_utilisateur_est_refuse() {
         let mut octets = [0_u8; APPAREIL_OCTETS];
-        un_appareil(Attestation::Apple, false).ecrire(&mut octets);
+        un_appareil(Attestation::Apple, None).ecrire(&mut octets);
         octets[PROVENANCE_OCTETS + ESTAMPILLE_OCTETS] = Genre::Machine.prefixe();
         assert_eq!(
             Appareil::lire(&octets),
@@ -4367,22 +4886,100 @@ mod tests {
     }
 
     #[test]
-    fn un_appareil_ancien_se_reprend_avec_l_estampille_qu_on_lui_donne() {
-        let attendu = Appareil {
-            estampille: e(40),
-            ..un_appareil(Attestation::Android, true)
-        };
-        let mut neuf = [0_u8; APPAREIL_OCTETS];
-        attendu.ecrire(&mut neuf);
-        let vieux: [u8; ancien::APPAREIL_OCTETS] = ancien(&neuf, 1);
-        assert_eq!(Appareil::lire_ancien(&vieux, e(40)), Ok(attendu));
+    fn un_appareil_ancien_se_reprend_avec_l_estampille_et_la_date_qu_on_lui_donne() {
+        // **UN APPAREIL DÉJÀ RÉVOQUÉ REÇOIT LA DATE DE LA REPRISE** (`modele.md`
+        // §2.2, C6) : l'annuaire ne sait pas mieux. Un appareil vivant n'en
+        // reçoit aucune.
+        for revoque_le in [None, Some(REVOQUE_LE)] {
+            let attendu = Appareil {
+                estampille: e(40),
+                revoque_le,
+                ..un_appareil(Attestation::Android, None)
+            };
+            let mut neuf = [0_u8; APPAREIL_OCTETS];
+            attendu.ecrire(&mut neuf);
+            let vieux: [u8; ancien::APPAREIL_OCTETS] = ancien(&neuf, 1);
+            assert_eq!(
+                Appareil::lire_ancien(&vieux, e(40), REVOQUE_LE),
+                Ok(attendu),
+                "{revoque_le:?}"
+            );
+        }
 
         let mut vieux = [0_u8; ancien::APPAREIL_OCTETS];
         vieux[0] = 9;
         assert_eq!(
-            Appareil::lire_ancien(&vieux, e(1)),
+            Appareil::lire_ancien(&vieux, e(1), REVOQUE_LE),
             Err(Faute::Etiquette { lue: 9 })
         );
+    }
+
+    #[test]
+    fn un_appareil_sans_date_se_reprend_avec_celle_qu_on_lui_donne() {
+        // **LA FORME DE 0.5.0 À 0.10.1** : l'estampille est là, la date non.
+        // Un appareil révoqué reçoit celle de la reprise, un vivant rien.
+        for revoque_le in [None, Some(REVOQUE_LE)] {
+            let attendu = Appareil {
+                revoque_le,
+                ..un_appareil(Attestation::Apple, None)
+            };
+            let mut neuf = [0_u8; APPAREIL_OCTETS];
+            attendu.ecrire(&mut neuf);
+            let mut vieux = [0_u8; sans_dates::APPAREIL_OCTETS];
+            vieux.copy_from_slice(&neuf[..sans_dates::APPAREIL_OCTETS]);
+            assert_eq!(
+                Appareil::lire_sans_dates(&vieux, REVOQUE_LE),
+                Ok(attendu),
+                "{revoque_le:?}"
+            );
+        }
+        // Et la corruption se voit dans cette forme aussi.
+        let mut vieux = [0_u8; sans_dates::APPAREIL_OCTETS];
+        vieux[0] = 9;
+        assert_eq!(
+            Appareil::lire_sans_dates(&vieux, REVOQUE_LE),
+            Err(Faute::Etiquette { lue: 9 })
+        );
+        let mut neuf = [0_u8; APPAREIL_OCTETS];
+        un_appareil(Attestation::Apple, None).ecrire(&mut neuf);
+        let mut vieux = [0_u8; sans_dates::APPAREIL_OCTETS];
+        vieux.copy_from_slice(&neuf[..sans_dates::APPAREIL_OCTETS]);
+        vieux[PROVENANCE_OCTETS + 8] = Genre::Machine.prefixe();
+        assert_eq!(
+            Appareil::lire_sans_dates(&vieux, REVOQUE_LE),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+    }
+
+    #[test]
+    fn la_date_de_revocation_fait_l_aller_retour_et_ne_traine_pas_sur_un_vivant() {
+        // Révoqué : la date est là, et se relit.
+        let revoque = un_appareil(Attestation::Aucune, Some(REVOQUE_LE));
+        assert!(revoque.revoque());
+        let mut octets = [0_u8; APPAREIL_OCTETS];
+        revoque.ecrire(&mut octets);
+        assert_eq!(Appareil::lire(&octets), Ok(revoque));
+        assert_eq!(
+            &octets[APPAREIL_OCTETS - 8..],
+            &REVOQUE_LE.to_be_bytes(),
+            "la date est en gros-boutiste, en queue"
+        );
+
+        // Vivant : la date est nulle — et réécrire un vivant par-dessus un
+        // révoqué n'en laisse rien.
+        let vivant = un_appareil(Attestation::Aucune, None);
+        assert!(!vivant.revoque());
+        vivant.ecrire(&mut octets);
+        assert!(octets[APPAREIL_OCTETS - 8..].iter().all(|o| *o == 0));
+        assert_eq!(Appareil::lire(&octets), Ok(vivant));
+
+        // **UNE DATE SANS RÉVOCATION EST UNE CORRUPTION**, pas un fait : un
+        // appareil vivant n'a pas de date, et une qui traîne ferait compter
+        // la règle des orphelins sur un appareil qui vaut encore.
+        octets[APPAREIL_OCTETS - 1] = 1;
+        assert_eq!(Appareil::lire(&octets), Err(Faute::Bourrage));
     }
 
     #[test]
@@ -4459,7 +5056,7 @@ mod tests {
             Appareil::lire(&appareil),
             Err(Faute::Etiquette { lue: 0x7F })
         );
-        un_appareil(Attestation::Aucune, false).ecrire(&mut appareil);
+        un_appareil(Attestation::Aucune, None).ecrire(&mut appareil);
         appareil[PROVENANCE_OCTETS + 8] = Genre::Machine.prefixe();
         assert_eq!(
             Appareil::lire(&appareil),
@@ -4489,11 +5086,13 @@ mod tests {
         // **UN BOOLÉEN N'A QUE DEUX ÉCRITURES.** En accepter une troisième
         // rendrait l'encodage non canonique : un enregistrement relu se
         // réécrirait différemment de lui-même, et c'est le fuzz qui le dirait.
-        let appareil = un_appareil(Attestation::Android, false);
+        let appareil = un_appareil(Attestation::Android, None);
         let mut octets = [0_u8; APPAREIL_OCTETS];
         appareil.ecrire(&mut octets);
-        let dernier = APPAREIL_OCTETS.saturating_sub(1);
-        octets[dernier] = 2;
+        // Le drapeau est juste avant la date — plus le dernier octet depuis
+        // que la date existe.
+        let drapeau = APPAREIL_OCTETS.saturating_sub(1 + 8);
+        octets[drapeau] = 2;
         assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 2 }));
     }
 
@@ -4504,7 +5103,7 @@ mod tests {
             Attestation::Apple,
             Attestation::Android,
         ] {
-            let appareil = un_appareil(atteste, false);
+            let appareil = un_appareil(atteste, None);
             let mut octets = [0_u8; APPAREIL_OCTETS];
             appareil.ecrire(&mut octets);
             assert_eq!(Appareil::lire(&octets), Ok(appareil), "pour {atteste:?}");
@@ -4516,7 +5115,7 @@ mod tests {
         // **ZÉRO NE DÉSIGNE PERSONNE**, ici, à la différence du fil : un octet
         // oublié dans un tampon réemployé vaut zéro, et un appareil à demi
         // écrit ne doit pas se relire comme un appareil non attesté.
-        let appareil = un_appareil(Attestation::Aucune, false);
+        let appareil = un_appareil(Attestation::Aucune, None);
         let mut octets = [0_u8; APPAREIL_OCTETS];
         appareil.ecrire(&mut octets);
         // L'octet d'attestation est juste après la clé.
@@ -4531,7 +5130,7 @@ mod tests {
     // ── Les opérations ──────────────────────────────────────────────────────
 
     /// Une opération de chaque genre, dans l'ordre de `replication.md` §5.2.
-    fn une_de_chaque() -> [Operation; 14] {
+    fn une_de_chaque() -> [Operation; 15] {
         [
             Operation::Compte {
                 compte: un(Genre::Utilisateur, 1),
@@ -4543,10 +5142,11 @@ mod tests {
             },
             Operation::Appareil {
                 appareil: un(Genre::Appareil, 2),
-                enregistrement: un_appareil(Attestation::Apple, false),
+                enregistrement: un_appareil(Attestation::Apple, None),
             },
             Operation::AppareilRevoque {
                 appareil: un(Genre::Appareil, 2),
+                revoque_le: REVOQUE_LE,
             },
             Operation::Description {
                 appareil: un(Genre::Appareil, 2),
@@ -4593,6 +5193,11 @@ mod tests {
             Operation::AutorisationRevoquee {
                 autorisation: un(Genre::Autorisation, 5),
             },
+            Operation::CompteEfface {
+                compte: un(Genre::Utilisateur, 1),
+                efface_le: effacement(Cause::Titulaire).le,
+                cause: Cause::Titulaire,
+            },
         ]
     }
 
@@ -4601,9 +5206,16 @@ mod tests {
         for (rang, operation) in une_de_chaque().into_iter().enumerate() {
             let genre = operation.genre();
             assert_eq!(genre, GenreOperation::TOUS[rang], "{operation:?}");
+            // Les étiquettes suivent l'ordre de la table — sauf la dernière,
+            // qui saute le cadre de fin (voir `GenreOperation`).
+            let attendue = if genre == GenreOperation::CompteEfface {
+                16
+            } else {
+                rang + 1
+            };
             assert_eq!(
                 usize::from(genre.etiquette()),
-                rang + 1,
+                attendue,
                 "les étiquettes suivent l'ordre de la table"
             );
             assert_eq!(GenreOperation::depuis(genre.etiquette()), Ok(genre));
@@ -4670,11 +5282,59 @@ mod tests {
 
     #[test]
     fn un_genre_inconnu_est_refuse_zero_compris() {
-        for lue in [0_u8, 15, 200] {
+        // Quinze est le cadre de fin, dix-sept le premier au-delà du dernier
+        // genre : aucun des deux n'est une opération.
+        for lue in [0_u8, 15, 17, 200] {
             let mut octets = [0_u8; OPERATION_OCTETS_MAX];
             octets[0] = lue;
             assert_eq!(Operation::lire(&octets), Err(Faute::Etiquette { lue }));
             assert_eq!(GenreOperation::depuis(lue), Err(Faute::Etiquette { lue }));
+        }
+    }
+
+    #[test]
+    fn un_appareil_revoque_porte_sa_date_et_un_compte_efface_sa_cause() {
+        // **`appareil-revoque` porte la date** (`replication.md` §5.2) : elle
+        // se relit telle quelle, en gros-boutiste, après l'identifiant.
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        let combien = une_de_chaque()[3].ecrire(e(1), &mut sortie);
+        assert_eq!(combien, OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS + 8);
+        assert_eq!(
+            &sortie[OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS..combien],
+            &REVOQUE_LE.to_be_bytes()
+        );
+
+        // **`compte-efface` porte la date puis la cause**, et une cause
+        // inconnue — zéro compris — refuse l'opération.
+        let combien = une_de_chaque()[14].ecrire(e(1), &mut sortie);
+        assert_eq!(
+            combien,
+            OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS + EFFACEMENT_OCTETS
+        );
+        let cause = combien - 1;
+        assert_eq!(sortie[cause], Cause::Titulaire.etiquette());
+        for lue in [0_u8, 4, 200] {
+            let mut corrompue = sortie;
+            corrompue[cause] = lue;
+            assert_eq!(
+                Operation::lire(&corrompue),
+                Err(Faute::Etiquette { lue }),
+                "{lue}"
+            );
+        }
+        // Et les trois causes font l'aller-retour.
+        for cause in [Cause::Titulaire, Cause::Orphelin, Cause::Exploitant] {
+            let operation = Operation::CompteEfface {
+                compte: un(Genre::Utilisateur, 1),
+                efface_le: effacement(cause).le,
+                cause,
+            };
+            let combien = operation.ecrire(e(2), &mut sortie);
+            assert_eq!(
+                Operation::lire(&sortie[..combien]),
+                Ok((e(2), operation, combien)),
+                "{cause:?}"
+            );
         }
     }
 
@@ -4697,7 +5357,7 @@ mod tests {
         }
         // Un seul octet — le genre — n'est pas une opération non plus.
         assert_eq!(
-            Operation::lire(&[GenreOperation::AppareilRevoque.etiquette()]),
+            Operation::lire(&[GenreOperation::AutorisationRevoquee.etiquette()]),
             Err(Faute::Tronquee {
                 attendus: OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS,
                 obtenus: 1,
@@ -4737,6 +5397,7 @@ mod tests {
             Genre::Service,
             Genre::Autorisation,
             Genre::Autorisation,
+            Genre::Utilisateur,
         ];
         for (operation, attendu) in une_de_chaque().into_iter().zip(attendus) {
             let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
@@ -4967,6 +5628,7 @@ mod tests {
         // ce que le lecteur du flux lit.
         let operation = Operation::AppareilRevoque {
             appareil: un(Genre::Appareil, 3),
+            revoque_le: REVOQUE_LE,
         };
         let cadre = Cadre::Operation {
             estampille: e(2),

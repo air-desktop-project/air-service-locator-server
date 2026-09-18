@@ -111,6 +111,38 @@ pub struct Reglages {
     /// (`annuaires.md` §2) ; et l'un ou l'autre sans `--identity-key` aussi,
     /// parce qu'une racine sans identité ne peut ni prouver ni être prouvée.
     pub pair: Option<ReglagePair>,
+    /// Le délai de la règle des orphelins (`--orphans`), en jours — zéro
+    /// pour jamais.
+    ///
+    /// `docs/modele.md` §2.1 (2026-09-18) : un compte dont tous les appareils
+    /// sont révoqués est effacé par la racine tant de jours après la
+    /// révocation du dernier, cause `orphelin`. **Trente par défaut** — la
+    /// fenêtre de propagation la plus longue qu'on tolère, et la rétention du
+    /// journal d'opérations. `0` : la racine n'efface jamais d'elle-même, et
+    /// le dit au démarrage ; tout effacement est alors un acte humain, le
+    /// titulaire ou `--forget`. **Les deux racines doivent porter la même
+    /// valeur** (`replication.md` §8) : c'est une consigne de déploiement.
+    pub orphelins_jours: u64,
+}
+
+/// Le geste `--forget` : effacer CE compte, hors ligne, et s'arrêter.
+///
+/// `docs/modele.md` §2.1, `replication.md` §8 : l'exception pour « la clé est
+/// perdue et l'on le sait » — un simulateur remis à zéro, une app qui a écrit
+/// sa clé au mauvais endroit —, que la règle des orphelins n'attrape pas
+/// parce qu'elle ne compte que les révocations (C6). **Un identifiant à la
+/// fois, et pas de liste** : c'est un geste qu'on fait en regardant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Oubli {
+    /// Le compte à effacer.
+    pub compte: asl_id::Identifiant,
+    /// Le fichier de l'entrepôt (`--store`).
+    pub entrepot: PathBuf,
+    /// La clé d'identité de cette racine (`--identity-key`), si elle est
+    /// donnée : l'opération est alors estampillée sous la bonne racine tout
+    /// de suite. Sans elle, sous seize zéros — et le daemon la fera passer
+    /// sous son identité au démarrage suivant (`replication.md` §11.4).
+    pub identite: Option<PathBuf>,
 }
 
 /// L'autre racine, telle qu'on la joint et telle qu'on la reconnaît.
@@ -198,6 +230,8 @@ pub enum Faute {
     PairSansIdentite,
     /// `--peer` n'a pas la forme `hôte:port`.
     PairInvalide(String),
+    /// `--forget` a reçu autre chose qu'un identifiant de compte `u-…`.
+    CompteInvalide(String),
     /// Un drapeau de l'ancienne grammaire, en français, qui a son
     /// équivalent en anglais.
     ///
@@ -256,6 +290,10 @@ impl core::fmt::Display for Faute {
                 sortie,
                 "--peer attend `hôte:port` (une adresse IPv6 entre crochets), et non « {quoi} »"
             ),
+            Self::CompteInvalide(quoi) => write!(
+                sortie,
+                "--forget attend l'identifiant d'un compte, `u-` et 26 caractères, et non « {quoi} »"
+            ),
             Self::Manque(quoi) => write!(sortie, "il manque {quoi}"),
             Self::Ancien { ancien, nouveau } => {
                 write!(sortie, "{ancien} n'existe plus : {nouveau}")
@@ -289,8 +327,14 @@ asl-server — an air-service-locator service directory.
   --peer         <host:port> the other root                      (with --peer-key)
   --peer-key     <path>     the other root's public identity key, 32 raw bytes
   --peer-ca      <path>     the CA that validates the peer's TLS cert, PEM
+  --orphans      <days>     erase an account once ALL its devices have been
+                            revoked for that many days; 0 = never (default: 30)
   --new-identity-key <path> write a new identity key there (0600), print the
                             public key and the `n-…` it gives, then exit
+  --forget <u-…> --store <path> [--identity-key <path>]
+                            erase THAT account offline — the store must not be
+                            held by a running directory —, log what was
+                            removed, then exit; one account at a time
   --version                 print the version and commit, then exit
   --help                    this
 
@@ -308,6 +352,11 @@ Without `--identity-key`, the root runs alone and stamps its writes under
 sixteen zeros, and says so. `--peer`, `--peer-key` and `--identity-key` go
 together; `--new-identity-key` writes `<path>` (the private key) and
 `<path>.pub` (the public key, to carry to the other root as its `--peer-key`).
+
+`--orphans` only counts REVOCATIONS, never silence: a phone in a drawer is a
+living device. Both roots must carry the same value. `--forget` is the human
+exception for a key known to be lost — not a moderation tool; run it as the
+directory's user, with the daemon stopped.
 
   scripts/ca.sh racine
   scripts/ca.sh serveur nitrogen nitrogen.air-desktop.org 2001:41d0:20a:900::1dd4
@@ -361,6 +410,8 @@ impl Reglages {
         let mut android_paquet: Option<String> = None;
         let mut android_signataire: Option<[u8; 32]> = None;
         let mut identite = None;
+        // Trente jours : `docs/modele.md` §2.1. Zéro pour jamais.
+        let mut orphelins_jours = 30_u64;
         let mut pair_adresse: Option<String> = None;
         let mut pair_cle: Option<PathBuf> = None;
         let mut pair_ca: Option<PathBuf> = None;
@@ -405,6 +456,7 @@ impl Reglages {
                 "--android-app" => android_paquet = Some(valeur()?.as_ref().to_owned()),
                 "--android-signer" => android_signataire = Some(empreinte(valeur()?.as_ref())?),
                 "--identity-key" => identite = Some(PathBuf::from(valeur()?.as_ref())),
+                "--orphans" => orphelins_jours = nombre(drapeau, valeur()?.as_ref())?,
                 "--peer" => pair_adresse = Some(adresse_de_pair(valeur()?.as_ref())?),
                 "--peer-key" => pair_cle = Some(PathBuf::from(valeur()?.as_ref())),
                 "--peer-ca" => pair_ca = Some(PathBuf::from(valeur()?.as_ref())),
@@ -469,7 +521,66 @@ impl Reglages {
                 _ => return Err(Faute::PairIncomplet),
             },
             identite,
+            orphelins_jours,
         })
+    }
+
+    /// Le délai de la règle des orphelins en millisecondes, comme la boucle
+    /// le veut — `None` pour jamais.
+    #[must_use]
+    pub const fn orphelins_ms(&self) -> Option<u64> {
+        if self.orphelins_jours == 0 {
+            None
+        } else {
+            Some(self.orphelins_jours.saturating_mul(24 * 60 * 60 * 1_000))
+        }
+    }
+
+    /// Le geste `--forget`, s'il est demandé dans ces arguments.
+    ///
+    /// **Lu à part des réglages**, comme `--new-identity-key` : c'est un geste,
+    /// pas un service, et il ne demande ni certificat, ni clé TLS, ni
+    /// posture — seulement l'entrepôt, et l'identité si on l'a. Rend `None`
+    /// sans `--forget`.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::SansValeur`] sans identifiant, [`Faute::CompteInvalide`] si ce
+    /// n'en est pas un, [`Faute::Manque`] sans `--store`.
+    pub fn geste_d_oubli<S: AsRef<str>>(arguments: &[S]) -> Result<Option<Oubli>, Faute> {
+        let Some(rang) = arguments
+            .iter()
+            .position(|quoi| quoi.as_ref() == "--forget")
+        else {
+            return Ok(None);
+        };
+        let donnee = arguments
+            .get(rang.saturating_add(1))
+            .map(AsRef::as_ref)
+            .ok_or_else(|| Faute::SansValeur("--forget".to_owned()))?;
+        let compte = asl_id::Identifiant::analyser(donnee)
+            .ok()
+            .filter(|quoi| quoi.genre() == asl_id::Genre::Utilisateur)
+            .ok_or_else(|| Faute::CompteInvalide(donnee.to_owned()))?;
+        let valeur_de = |drapeau: &str| {
+            arguments
+                .iter()
+                .position(|quoi| quoi.as_ref() == drapeau)
+                .map(|rang| {
+                    arguments
+                        .get(rang.saturating_add(1))
+                        .map(|quoi| PathBuf::from(quoi.as_ref()))
+                        .ok_or_else(|| Faute::SansValeur(drapeau.to_owned()))
+                })
+                .transpose()
+        };
+        let entrepot = valeur_de("--store")?.ok_or(Faute::Manque("--store"))?;
+        let identite = valeur_de("--identity-key")?;
+        Ok(Some(Oubli {
+            compte,
+            entrepot,
+            identite,
+        }))
     }
 
     /// L'inactivité en microsecondes, comme la boucle la veut.
@@ -575,7 +686,7 @@ fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute
 
 #[cfg(test)]
 mod tests {
-    use super::{Faute, ReglageAndroid, ReglageApple, ReglagePair, Reglages};
+    use super::{Faute, Oubli, ReglageAndroid, ReglageApple, ReglagePair, Reglages};
 
     /// Les quatre réglages obligatoires, et rien d'autre.
     fn minimum() -> Vec<String> {
@@ -1092,5 +1203,88 @@ mod tests {
             let dit = format!("{faute}");
             assert!(!dit.is_empty(), "{faute:?}");
         }
+    }
+
+    // ── Les orphelins, et le geste d'oubli ──────────────────────────────────
+
+    #[test]
+    fn les_orphelins_sont_a_trente_jours_par_defaut_et_zero_veut_dire_jamais() {
+        let lus = Reglages::depuis(minimum()).expect("le minimum suffit");
+        assert_eq!(lus.orphelins_jours, 30);
+        assert_eq!(lus.orphelins_ms(), Some(30 * 24 * 60 * 60 * 1_000));
+
+        let lus = Reglages::depuis(avec(&["--orphans", "7"])).expect("sept jours");
+        assert_eq!(lus.orphelins_ms(), Some(7 * 24 * 60 * 60 * 1_000));
+
+        // **ZÉRO EST « JAMAIS »**, et non un délai nul qui effacerait à la
+        // seconde.
+        let lus = Reglages::depuis(avec(&["--orphans", "0"])).expect("jamais");
+        assert_eq!(lus.orphelins_jours, 0);
+        assert_eq!(lus.orphelins_ms(), None);
+
+        assert_eq!(
+            Reglages::depuis(avec(&["--orphans", "trente"])).map(|_| ()),
+            Err(Faute::PasUnNombre {
+                drapeau: "--orphans".to_owned(),
+                donnee: "trente".to_owned(),
+            })
+        );
+        assert_eq!(
+            Reglages::depuis(avec(&["--orphans"])).map(|_| ()),
+            Err(Faute::SansValeur("--orphans".to_owned()))
+        );
+    }
+
+    #[test]
+    fn le_geste_d_oubli_se_lit_a_part_et_exige_un_compte_et_un_entrepot() {
+        let u = asl_id::Identifiant::depuis_entropie(asl_id::Genre::Utilisateur, [0x24; 16]);
+        let texte = u.texte().as_str().to_owned();
+
+        // Sans `--forget`, rien : ce sont des réglages ordinaires.
+        assert_eq!(Reglages::geste_d_oubli(&minimum()), Ok(None));
+
+        // Avec, le compte et l'entrepôt — et l'identité si elle est là.
+        assert_eq!(
+            Reglages::geste_d_oubli(&["--forget", &texte, "--store", "/a"]),
+            Ok(Some(Oubli {
+                compte: u,
+                entrepot: std::path::PathBuf::from("/a"),
+                identite: None,
+            }))
+        );
+        assert_eq!(
+            Reglages::geste_d_oubli(&["--store", "/a", "--identity-key", "/k", "--forget", &texte]),
+            Ok(Some(Oubli {
+                compte: u,
+                entrepot: std::path::PathBuf::from("/a"),
+                identite: Some(std::path::PathBuf::from("/k")),
+            }))
+        );
+
+        // Ce qui est refusé, et nommé.
+        assert_eq!(
+            Reglages::geste_d_oubli(&["--forget"]),
+            Err(Faute::SansValeur("--forget".to_owned()))
+        );
+        assert_eq!(
+            Reglages::geste_d_oubli(&["--forget", &texte]),
+            Err(Faute::Manque("--store"))
+        );
+        assert_eq!(
+            Reglages::geste_d_oubli(&["--forget", &texte, "--store"]),
+            Err(Faute::SansValeur("--store".to_owned()))
+        );
+        // Un identifiant d'un autre genre n'est pas un compte.
+        let m = asl_id::Identifiant::depuis_entropie(asl_id::Genre::Machine, [0x24; 16]);
+        let machine = m.texte().as_str().to_owned();
+        assert_eq!(
+            Reglages::geste_d_oubli(&["--forget", &machine, "--store", "/a"]),
+            Err(Faute::CompteInvalide(machine.clone()))
+        );
+        assert_eq!(
+            Reglages::geste_d_oubli(&["--forget", "thierry", "--store", "/a"]),
+            Err(Faute::CompteInvalide("thierry".to_owned()))
+        );
+        assert!(!Faute::CompteInvalide("x".to_owned()).to_string().is_empty());
     }
 }

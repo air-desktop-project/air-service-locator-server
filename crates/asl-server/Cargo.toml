@@ -20,6 +20,9 @@ asl-cle.workspace = true
 asl-id.workspace = true
 asl-loop-tokio.workspace = true
 asl-proto.workspace = true
+# `asl-registre` POUR LA CAUSE D'UN EFFACEMENT — `--forget` écrit
+# `Cause::Exploitant` (`docs/modele.md` §2.1).
+asl-registre.workspace = true
 asl-store.workspace = true
 
 libc.workspace = true
@@ -33,7 +36,6 @@ ams-quic-client.workspace = true
 # QPACK, il ne voyage pas en clair — et découper les trames `DATA` d'un flux
 # tenu, celui de la voie entre racines.
 ams-proto-h3.workspace = true
-asl-registre.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]
