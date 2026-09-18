@@ -691,6 +691,7 @@ qu'on touche à quoi que ce soit de vivant.
 | L'objet n'existe pas | `404` |
 | L'objet existe et **n'est pas à nous** | `404`, le même |
 | Un appareil se révoque lui-même | `403` |
+| Le compte s'efface (`DELETE /v1/compte`) | `204`, puis la connexion est fermée — la clé qui a demandé n'existe plus |
 | L'alias demandé est pris | `409` |
 
 **Les deux `404` sont le même `404`, et c'est la propriété qui compte.** Les
@@ -711,7 +712,8 @@ l'empêcherait de comprendre.
 | `GET /v1/appareils` | Les appareils de MON compte, révoqués compris et marqués : l'écran « Compte ». Chacun rend `appareil`, `attestation`, `revoque`, et — s'il les a posés — `plateforme` et `modele`. |
 | `PUT /v1/appareils/{a}/poussee` | Dépose ou renouvelle le jeton APNs / FCM. **Pour soi seulement** ; voir ci-dessous. |
 | `PUT /v1/appareils/{a}/description` | Dit ce que cet appareil est : `{"plateforme": "macos", "modele": "MacBook Pro (2019)"}`, la plate-forme parmi `ios`, `android`, `macos`. **Pour soi seulement**, même règle que la poussée ; voir ci-dessous. |
-| `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. **Il est marqué, non effacé** : l'écran qu'on regarde après avoir perdu un téléphone doit montrer ce qu'on a retiré. |
+| `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. **Il est marqué, non effacé** : l'écran qu'on regarde après avoir perdu un téléphone doit montrer ce qu'on a retiré. La révocation du **dernier** appareil vivant ouvre le délai des orphelins (`modele.md` §2.1). |
+| `DELETE /v1/compte` | **Efface MON compte** — celui de la clé qui signe. Tout part dans une transaction : appareils, machines et services, autorisations dans les deux sens, alias libéré ; reste l'identifiant marqué effacé. `204`, puis l'annuaire ferme la connexion : la clé qui a demandé est révoquée. Voir ci-dessous. |
 | `POST /v1/machines` | Déclare une machine, avec son **nom** et ses **capacités** (`annonce`, `lecture`). **Rend un code d'enrôlement** — dix symboles, à usage unique, valable dix minutes. La machine n'a **pas encore de clé**. |
 | `GET /v1/machines` | Les machines de MON compte : l'écran « Machines ». Chacune rend `machine`, `nom`, `capacites`, et `cle` (`enrolee` ou `attendue`). |
 | `PATCH /v1/machines/{m}` | Change le nom ou les capacités. **Ce qui est absent ne change pas** ; voir ci-dessous. |
@@ -853,6 +855,88 @@ pas.
 d'après une perte doit montrer ce qu'on a retiré, et « iPhone 17, révoqué » le
 dit mieux que « Autre, révoqué ». Elle ne donne aucun droit, donc rien ne presse
 de l'effacer.
+
+### Effacer mon compte — le dernier acte d'une clé
+
+```
+DELETE /v1/compte
+        (sur la voie appareil, signé par un appareil vivant du compte ;
+         sans corps)
+
+        → 204, sans corps ; puis l'annuaire ferme la connexion
+```
+
+**Décidé le 2026-09-18** ; le fond — pourquoi c'est un geste du titulaire, ce
+qui part, ce qui reste, la règle des orphelins — est dans `modele.md` §2.1.
+Ce qui tient ici est ce qui se voit sur le fil.
+
+**`/v1/compte`, au singulier, et non `/v1/moi` ni `/v1/comptes/{u}`.** La
+grammaire de cette voie ne nomme jamais le compte : `/v1/alias` est *mon*
+alias, `/v1/appareils` *mes* appareils, `/v1/machines` *mes* machines — la
+connexion désigne le compte, et rien dans le chemin ne peut le contredire.
+`/v1/compte` est *mon* compte, de la même façon. `/v1/comptes/{u}` aurait
+obligé l'appelant à se nommer, et l'annuaire à répondre quelque chose quand
+`{u}` n'est pas lui — un `404` de plus à justifier, pour un cas qui n'a aucune
+raison d'exister. Et `/v1/moi` est déjà pris : c'est une ressource de la **voie
+machine** (`Exigence::Machine`, §3), et **l'exigence est une propriété de la
+ressource, pas du verbe** — une ressource qui exigerait une machine en `GET` et
+un appareil en `DELETE` serait la première du genre, et une machine ne décide
+pas du compte. Deux voies, deux ressources.
+
+**Il ne porte pas de corps, et il n'y a rien à confirmer côté protocole.** La
+confirmation est le geste biométrique qui débloque la clé — c'est ce que
+« sous biométrie » veut dire ici (`modele.md` §5) —, et le texte qui dit ce qui
+va partir est l'affaire de l'application, avant qu'elle signe. Un champ
+`{"confirme": true}` serait un booléen que le client transporte, précisément
+ce que C7 refuse de croire.
+
+**Ce qu'il fait, dans UNE transaction, puis ce qu'il ferme.** L'entrepôt
+révoque tous les appareils du compte — **celui qui demande compris** —, efface
+leurs enregistrements, jetons et descriptions ; révoque les clés de toutes ses
+machines, annule leurs codes d'enrôlement en cours, efface les machines et
+leurs services ; efface les autorisations dans les deux sens ; retire la
+réclamation d'alias ; marque le compte effacé, avec la date et la cause
+`titulaire`. Puis, comme pour toute révocation (§2.1 quater), l'annuaire
+**ferme les connexions** de tout ce qui vient d'être révoqué : les machines du
+compte — leurs baux tombent par le chemin ordinaire d'un départ —, ses autres
+appareils, et **la connexion qui a porté la demande**, au tour de boucle
+suivant le `204`. L'application n'a rien à fermer elle-même ; elle lit `204`,
+puis la connexion tombe, et c'est l'ordre attendu.
+
+**Les réponses, et il n'y en a que deux.** `204` : c'est fait. `401` : la clé
+qui signe n'est pas celle d'un appareil vivant — révoqué, ou d'un compte déjà
+effacé. Il n'y a pas de `404` : la ressource est le compte de la connexion, et
+une connexion authentifiée a toujours un compte. Un second `DELETE` après le
+premier ne peut pas arriver sur la même connexion (elle est fermée), et sur
+une nouvelle il rend `401`, puisque la clé est révoquée : **l'effacement est
+idempotent par construction**, sans qu'il y ait à l'écrire.
+
+**Ce que l'autre partie d'une autorisation voit : plus rien.** La ligne quitte
+`GET /v1/autorisations` chez celui qui avait accordé comme chez celui qui avait
+reçu ; ses machines `lecture` ne résolvent plus rien de ce compte, à la
+seconde, sans qu'aucune connexion ait à être fermée chez lui (la résolution
+relit l'entrepôt, §2.1 quater). `GET /v1/utilisateurs/{u}` sur l'identifiant
+effacé rend `404` — le même `404` qu'un identifiant qui n'a jamais existé :
+l'existence passée d'un compte n'est pas une information qu'on rend à qui
+tient un `u-…` au hasard. **Aucune notification ne part** : « vous a retiré
+l'accès » n'existe pas pour une révocation ordinaire, et n'existe pas
+davantage ici.
+
+**Et `GET /v1/alias/{alias}` rend le nouveau titulaire, ou `404`.** L'alias est
+libéré dans la transaction ; s'il était réclamé en file par un autre compte,
+c'est lui que la résolution rend désormais (`replication.md` §3.2).
+
+**Sur la voie machine, rien.** Une machine ne décide pas du compte
+(`modele.md` §2.3) ; `asl` n'a pas de verbe pour ça, et n'en aura pas. Ce
+qu'une machine voit d'un effacement est le sien : sa connexion fermée, puis
+`401` à la suivante — exactement ce qu'elle voit d'une révocation de clé, et
+elle n'a pas à distinguer les deux.
+
+**L'effacement automatique et le verbe d'exploitant passent par le même
+chemin d'entrepôt** — la règle des orphelins (`--orphans`, `modele.md` §2.1)
+et `asl-server --forget <u-…>` écrivent la même opération, avec leur cause,
+et produisent les mêmes effets vivants. Il n'y a qu'une façon d'effacer un
+compte ; ce qui change est qui l'a voulu, et c'est dit dans la cause.
 
 ### Ce qu'un `PATCH` change, et ce qu'il ferme
 

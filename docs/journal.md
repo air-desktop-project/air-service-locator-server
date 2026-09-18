@@ -100,6 +100,13 @@ personne ne tranche.
 a produites n'a pas à survivre avec elles. Un compteur « 4 812 résolutions cette
 semaine » ne dit rien de personne, et c'est pourtant lui qu'on regarde.
 
+**Et un compte qui s'efface ne raccourcit rien** (`modele.md` §2.1,
+2026-09-18) : ses entrées brutes expirent à quatre-vingt-dix jours comme les
+autres, ni avant, ni à part — les effacer avec le compte détruirait la preuve
+au moment où l'on peut en avoir besoin, la raison même qui fait survivre le
+journal à une rupture (§5 bis). L'effacement lui-même est une ligne du journal
+d'exploitation, avec l'identifiant et la cause (`replication.md` §8).
+
 ### Quatre-vingt-dix jours — ce que ça achète, ce que ça coûte
 
 **Ce que ça achète.** Un trimestre couvre une saison entière : on voit un cycle,

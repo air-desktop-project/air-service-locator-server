@@ -35,6 +35,7 @@ serait faux dès son arrivée chez l'autre.
 | **Codes d'enrôlement en attente** | **Oui** | L'application émet le code chez une racine ; `asl enroll` le présente à celle que l'alias lui donne. Sans réplication, un code sur deux serait « inconnu ». Le code est un secret partagé, court, à usage unique (`modele.md` §2.3) — c'est son EMPREINTE qui circule, comme sur le disque, et le disque de l'autre racine n'est pas moins sûr que le nôtre. |
 | Services **déclarés** — identifiant, machine, nom | **Oui** | Un service est identifié par `(machine, nom)` et son `s-…` est attribué à la première annonce ; le client qui a mémorisé un `s-…` doit le retrouver après bascule. |
 | Autorisations, et leurs révocations | **Oui** | C'est l'arête qui ouvre la résolution ; elle doit être vue de la racine qui résout. |
+| **L'effacement d'un compte** — par son titulaire, par la règle des orphelins, ou par l'exploitant (`modele.md` §2.1) | **Oui** | Un compte effacé chez l'une doit l'être chez l'autre, avec tout ce qu'il tenait ; et c'est la marque « effacé » qui circule, pour que l'autre refuse ce qui arriverait en retard (§3.2). |
 | Le bail, l'état `annoncé`, les points d'écoute annoncés | **NON** | `annuaires.md` §3 : l'état vivant se reconstruit en un keepalive. |
 | La joignabilité, les candidats, `vu_depuis` | **NON** | Mesurés par une racine, depuis elle. Vrais là, et nulle part ailleurs. |
 | **Le journal** (`journal.md`) | **NON** | Il dit ce que CETTE racine a servi. Le répliquer doublerait un actif que C18 veut le plus petit possible, et le doublerait au moment où l'on s'apprête à le jeter. |
@@ -162,6 +163,7 @@ l'heure d'arrivée.
 | Le conflit | La règle | Ce qui est perdu |
 |---|---|---|
 | **Une révocation d'un côté, une écriture de l'autre** — appareil, clé de machine, autorisation | **La révocation l'emporte toujours.** Elle nomme ce qu'elle révoque — CET appareil, CETTE clé, CETTE autorisation — et s'applique quel que soit l'ordre. Une écriture sur l'objet révoqué arrivée après est refusée comme elle le serait localement ; arrivée avant, la révocation la couvre. | Un jeton de poussée déposé pendant la fenêtre, une capacité changée. Rien qu'on regrette : une révocation est irréversible par construction, et ce qu'on écrivait sur l'objet ne valait plus. |
+| **L'effacement d'un compte d'un côté, une écriture du même compte de l'autre** — un appareil enrôlé, une machine déclarée, un alias réclamé, une autorisation accordée à lui ou par lui (décidé le 2026-09-18) | **L'effacement l'emporte toujours** : c'est une révocation, qui nomme le compte entier. Arrivée avant, l'écriture est couverte — l'effacement retire ce qu'elle avait posé ; arrivée après, elle est **refusée, le compte est effacé**, et le curseur avance : c'est le refus local d'une écriture sur un objet révoqué, pas une opération illisible. Deux effacements du même compte — les deux racines passent le délai des orphelins à la même minute — n'en font qu'un : le second ne trouve plus rien à retirer, et la marque porte la date et la cause du premier appliqué. **Un effacement ne se défait pas**, comme une révocation. | Un appareil enrôlé sur l'autre racine pendant la fenêtre : son porteur a reçu son `a-…`, et sa prochaine connexion rend `401`. Une autorisation accordée à un compte qui s'effaçait : l'autre partie ne la voit jamais. Un alias réclamé : la réclamation tombe avec le compte. C'est le prix exact d'une révocation, sur un objet plus large. |
 | **Un alias pris des deux côtés** | **Un alias est une RÉCLAMATION, et la plus ancienne tient.** Chaque compte porte au plus une réclamation courante (son dernier `PUT`/`DELETE /v1/alias`, le plus récent gagne). Pour un alias donné, le titulaire est le compte dont la réclamation courante porte la plus petite estampille. Les deux racines calculent le même titulaire, parce que c'est une fonction de l'ensemble des réclamations, pas de leur ordre. | Le perdant a reçu `204` et n'a pas l'alias. Il l'apprend en lisant `GET /v1/alias/{alias}` — l'application le fait après un `PUT` par l'alias, et le dit. Sa réclamation reste en file : si le titulaire lâche l'alias, il le tient. |
 | **Un `PATCH` de machine des deux côtés** | **Le plus récent gagne, CHAMP PAR CHAMP** — le nom a son estampille, les capacités ont la leur. `PATCH` est champ par champ (`protocole.md` §2.2) ; une règle par enregistrement ferait perdre un nom parce qu'une capacité a gagné. | Un renommage, ou un jeu de capacités, écrit dans la fenêtre. Il se réécrit. |
 | **Un code d'enrôlement consommé d'un côté, présenté de l'autre** | Un code consommé est **supprimé partout dès que la consommation est répliquée** — c'est la même opération que la liaison de la clé (§5.2). Entre-temps, l'autre racine n'a pas encore vu la consommation et **l'accepte** : elle ne peut pas refuser ce qu'elle ne sait pas. D'où le cas suivant. | Rien, dans le cas nominal : la consommation arrive en moins d'une seconde. |
@@ -171,7 +173,8 @@ l'heure d'arrivée.
 émis, et la consommation SUIT l'émission sur cette même racine : les deux ne
 peuvent pas arriver dans l'ordre inverse chez un pair, contrairement à un alias
 que deux racines réclament chacune de son côté. L'invariant de §3.1 s'éprouve
-donc sur les cas VRAIMENT réordonnables (les six autres lignes), et ce cas-ci
+donc sur les cas VRAIMENT réordonnables (les sept autres lignes — l'effacement
+d'un compte compris, depuis le 2026-09-18), et ce cas-ci
 par une régression dirigée qui rejoue « émettre, consommer, présenter ailleurs
 avant la propagation » — la fenêtre —, non par les permutations. Ce qui la
 ferme reste la règle du cas suivant : à code égal, la première consommation
@@ -182,10 +185,11 @@ gagne.
 | **Une description ou un jeton déposés des deux côtés** | Le plus récent gagne — la règle locale, « le neuf remplace l'ancien ». | Une étiquette. |
 
 **Ce que les règles ont en commun, et qui les rend explicables** : ce qui est
-irréversible chez soi (une révocation, une consommation) est irréversible
-partout ; ce qui se remplace chez soi (un nom, un jeton, un code) se remplace
-partout, par le plus récent ; ce qui est unique chez soi (un alias, un couple
-`(machine, nom)`, une clé par code) va au plus ancien. **Trois règles, et
+irréversible chez soi (une révocation, une consommation, un effacement de
+compte) est irréversible partout ; ce qui se remplace chez soi (un nom, un
+jeton, un code) se remplace partout, par le plus récent ; ce qui est unique
+chez soi (un alias, un couple `(machine, nom)`, une clé par code) va au plus
+ancien. **Trois règles, et
 chacune est celle qu'on aurait devinée** — c'est le critère.
 
 ### 3.3 Les effets d'une opération appliquée
@@ -196,6 +200,15 @@ connexions de cette machine ICI aussi, retirer `annonce` fait tomber ses baux
 ICI aussi (`protocole.md` §2.1 quater). Sans cela, une machine révoquée chez
 `nitrogen` continuerait de servir chez `argon` jusqu'à ce que sa connexion
 tombe d'elle-même — la fenêtre exacte que « effet immédiat » ferme.
+
+**L'effacement d'un compte se rejoue de la même façon** (2026-09-18) : la
+racine qui l'applique ferme ICI les connexions de toutes les machines et de
+tous les appareils de ce compte — un daemon du compte qui tenait son bail chez
+`argon` pendant que le titulaire effaçait chez `nitrogen` part par le chemin
+ordinaire, à la seconde où l'opération arrive. Et **elle ne le journalise pas
+comme un effacement à elle** : une ligne du journal d'exploitation, avec
+l'identifiant, la cause portée par l'opération et « appliqué » — pas
+« effacé ». Qui a effacé est dit par l'estampille.
 
 **Et AUCUN effet vers l'extérieur.** La notification d'une autorisation part de
 la racine qui a pris l'écriture ; celle qui l'applique ne notifie pas. Un
@@ -322,13 +335,36 @@ le disque.
 | `service` | identifiant ‖ service | Insérer ; si `(machine, nom)` est déjà tenu, le plus ancien reste. |
 | `autorisation` | identifiant ‖ autorisation | Insérer si absent. |
 | `autorisation-revoquee` | identifiant | Marquer. Toujours. |
+| `compte-efface` | identifiant ‖ effacé le (8) ‖ cause (1) | **Toujours.** Retirer tout ce que le compte tient — appareils, jetons, descriptions, machines et leurs clés, codes, services, autorisations dans les deux sens, réclamation d'alias — et marquer le compte effacé avec la date et la cause portées. Fermer les connexions de ses machines et appareils ici aussi (§3.3). Sur un compte déjà effacé : rien. Sur un compte inconnu : poser la marque quand même — ce qui arriverait ensuite pour lui est refusé (§3.2). Décidé le 2026-09-18. |
 
-**Il n'y a pas d'opération d'effacement d'un compte, d'une machine ou d'un
-service** : l'API n'en a pas. Les seules choses qui disparaissent physiquement
-sont un code — consommé par `cle-machine`, ou expiré par chaque racine à sa
-propre horloge, sans opération — et un jeton, qui suit la révocation de son
-appareil. Tout le reste est marqué, jamais effacé, et c'est ce qui rend
-l'instantané (§5.4) complet sans qu'il ait à dire ce qui n'est plus là.
+**Il n'y a pas d'opération d'effacement d'une machine ou d'un service** :
+l'API n'en a pas. **Il y en a une pour un compte, depuis le 2026-09-18, et
+c'est la seule qui efface physiquement des enregistrements** — tout ce que le
+compte tenait part, et seul le compte reste, marqué (`modele.md` §2.1). C'est
+ce qui rend cette opération compatible avec l'instantané (§5.4) : un compte
+effacé y figure par sa marque, une seule opération `compte-efface`, et rien de
+ce qu'il tenait n'a besoin d'être dit puisque l'autre racine, en l'appliquant,
+retire ce qu'elle en avait. Sans la marque, l'instantané serait muet sur ce
+compte, et une racine qui l'aurait gardé ne le saurait jamais. Les autres
+disparitions physiques restent celles d'avant : un code — consommé par
+`cle-machine`, ou expiré par chaque racine à sa propre horloge, sans
+opération — et un jeton, qui suit la révocation de son appareil. Tout le
+reste est marqué, jamais effacé.
+
+**`appareil-revoque` porte désormais la date** — `identifiant ‖ révoqué le
+(8)` —, parce que la règle des orphelins la lit (`modele.md` §2.1, §2.2) et
+que les deux racines doivent lire la même. C'est la date de la racine qui a
+révoqué, répliquée telle quelle (§4) ; l'autre ne pose pas la sienne.
+
+**Le décompte des orphelins se fait à l'horloge de chaque racine**, comme
+l'expiration des codes : chacune regarde, à son rythme, les comptes sans
+appareil vivant dont le `révoqué le` le plus récent a plus de `--orphans`
+jours, et écrit `compte-efface` avec la cause `orphelin` pour chacun. Elles
+lisent la même date, donc arrivent à la même échéance à quelques secondes
+près, et la première qui écrit fait appliquer l'autre ; si les deux écrivent,
+la seconde opération ne trouve rien à retirer (§3.2). Un compte est « sans
+appareil vivant » quand tous ses appareils sont révoqués — jamais quand ils se
+taisent (C6).
 
 **Une opération illisible arrête le flux ; elle ne se saute pas.** La racine
 qui la reçoit ferme, journalise (§8), et ne fait pas avancer son curseur. Sauter
@@ -533,11 +569,47 @@ personne n'a copiée nulle part, et deux racines qui ne se connaissent pas.
 `--identity-key` et non `--identity` : c'est une clé PRIVÉE, et son nom le
 dit — comme `--key` le dit pour celle de TLS.
 
+```
+asl-server … --orphans <days>                # efface un compte sans appareil vivant
+                                             # après tant de jours ; 0 = jamais
+                                             # (default: 30)
+asl-server --forget <u-…> --store <fichier>  # efface CE compte, hors ligne, et s'arrête
+```
+
+**Deux réglages de plus, depuis le 2026-09-18** (`modele.md` §2.1). `--orphans`
+est la règle : une racine sans `--orphans` efface à trente jours ; `--orphans
+0` n'efface jamais, et le journal d'exploitation le dit au démarrage, comme il
+dit « sans pair ». Ce n'est pas un réglage de réplication, mais il vit ici
+parce que **les deux racines doivent porter la même valeur** : deux racines à
+délais différents feraient effacer par l'une ce que l'autre garderait encore
+un mois — la règle de conflit tranche en faveur de l'effacement, donc c'est
+la plus courte qui gagne, et l'autre n'a pas eu son mot. Ce n'est pas vérifié
+sur la voie — une racine ne lit pas les réglages de l'autre —, c'est une
+consigne de déploiement, et le drop-in des bancs la porte une fois pour les
+deux.
+
+**`--forget` est un verbe hors ligne, comme `--new-identity-key`** : il ouvre
+l'entrepôt — et refuse, en le disant, si le daemon le tient —, écrit
+`compte-efface` avec la cause `exploitant` dans la même transaction que le
+retrait de tout ce que le compte tenait, ajoute l'opération au journal
+d'opérations pour que l'autre racine l'applique au prochain rattrapage,
+imprime l'identifiant et ce qui a été retiré (des nombres : tant d'appareils,
+tant de machines, tant d'autorisations), et s'arrête. Un `u-…` inconnu est
+refusé ; un `u-…` déjà effacé est dit tel, sans rien écrire. **Un identifiant
+à la fois, et pas de liste** : c'est un geste qu'on fait en regardant, pas un
+nettoyage. L'entrepôt étant arrêté, les effets vivants n'ont rien à fermer ;
+au redémarrage, la clé d'un appareil ou d'une machine de ce compte n'existe
+plus, et sa connexion rend `401`.
+
 **Ce qui se journalise, dans le journal d'exploitation (`stderr`)** :
 l'ouverture et la fermeture de chaque sens, avec l'identifiant du pair ; un
 rattrapage, avec le nombre d'opérations ; un amorçage, avec sa taille ; chaque
 refus — opération illisible, qui recule, hors provenance — avec son genre et
-son compteur ; et l'état, à chaque changement. **Jamais une opération par
+son compteur ; l'état, à chaque changement ; **et chaque effacement de compte,
+avec l'identifiant et la cause** — `titulaire`, `orphelin`, `exploitant` —,
+qu'il soit écrit ici ou appliqué de l'autre racine (« appliqué », alors, et
+non « effacé »). Un `u-…` seul n'est pas une donnée personnelle
+(`modele.md` §2.1), et la ligne ne porte rien d'autre. **Jamais une opération par
 ligne** : le journal d'opérations est déjà la trace, et une ligne par écriture
 répétée sur `stderr` doublerait ce que C18 veut voir jeté.
 
@@ -593,6 +665,7 @@ d'exploitation dit la même chose, à qui sait lire la machine.
 | `modele.md` §2.10 (neuf) | L'estampille — une colonne de plus, sur le modèle de l'origine. |
 | `journal.md` §2.2 | Ce qui se journalise d'une réplication entre racines. |
 | `contraintes.md` C11, C17 | Ce que chacune devient entre racines (§7). |
+| L'entrepôt (2026-09-18) | `révoqué le` sur l'appareil ; `effacé le` et la cause sur le compte ; le retrait de tout ce qu'un compte tient, dans une transaction — le balayage par compte que `oublier_ce_qui_vient_de` fait déjà par origine (C17). Un changement de format de plus, cran mineur, à porter par la PR de code du chantier « effacer mon compte ». |
 | L'entrepôt | Trois choses de plus : l'estampille sur les enregistrements, le journal d'opérations, le curseur par pair. **C'est un changement de format d'enregistrement** — une rupture, et en 0.x une rupture est un cran MINEUR, comme la grammaire des outils l'a été ; le cran majeur est réservé au jour où la version dira « prêt ». À porter par la PR de code, avec la reprise des entrepôts existants (§11.4), pas par celle-ci. |
 
 ---
@@ -622,6 +695,9 @@ d'exploitation dit la même chose, à qui sait lire la machine.
 | 19 | `--identity-key`, `--peer`, `--peer-key` ; `--new-identity-key` pour générer. **`--peer-ca` ajouté par la PR de code (0.7.0)** : valider le certificat TLS du pair demande son autorité, que sa chaîne ne porte pas. | **Décidé** (2026-09-15) — `--identity-key`, parce que c'est une clé privée ; `--peer-ca` amendé (2026-09-16) |
 | 20 | `GET /v1/replication`, **sur la voie machine** — pas sans exigence : l'état de la voie dit à un inconnu quand une unicité se gagne. **La réponse : `voie` vaut `ouverte`, `coupée` ou `seule` ; `seule` n'a ni `pair` ni `applique`** (PR de code, 4/4). | **Décidé** (2026-09-15), amendé |
 | 21 | **La reprise d'un entrepôt sans identité : ré-estampillage sous l'identité réelle au premier démarrage avec une clé, une fois, dans une transaction** (§11.4). | **Décidé** (2026-09-16) |
+| 22 | **L'effacement d'un compte se réplique, comme une révocation** : l'opération `compte-efface` (identifiant, date, cause) gagne sur toute écriture concurrente du même compte, se rejoue comme effet vivant chez l'autre, sans notification ; une écriture arrivée après est refusée, le curseur avance. C'est la seule opération qui efface physiquement ; la marque du compte reste, et c'est elle qui figure dans l'instantané. `appareil-revoque` porte désormais `révoqué le`. | **Décidé** (2026-09-18, Thierry) |
+| 23 | **La règle des orphelins** : un compte sans aucun appareil vivant — tous révoqués, jamais « silencieux » (C6) — est effacé par la racine **trente jours** après la révocation du dernier, cause `orphelin`, journalisé ; `--orphans <days>`, `0` = jamais, même valeur sur les deux racines ; chacune peut écrire, la première fait appliquer l'autre. | **Décidé** (2026-09-18, Thierry) — la règle plutôt qu'un verbe d'exploitant |
+| 24 | **`asl-server --forget <u-…>`**, hors ligne, entrepôt arrêté, un identifiant à la fois, cause `exploitant`, journalisé : l'exception pour « la clé est perdue et l'on le sait », pas un outil de modération. Couvre les trois orphelins de `nitrogen` que la règle n'attrape pas. | **Décidé** (2026-09-18) |
 
 ---
 
