@@ -139,7 +139,7 @@ exactement la « commodité » par laquelle C13 dit qu'elle tombera** ; s'il en
 faut un, il vit dans le carnet local de l'application, et n'en sort pas.
 
 **Les machines d'un compte voient ses appareils, sans rien pouvoir dessus.**
-`asl devices`, sur une machine, rend la même liste que l'écran Compte —
+`asl enrolled`, sur une machine, rend la même liste que l'écran Compte —
 identifiants, modèles, révoqués marqués (`protocole.md` §3,
 `GET /v1/moi/appareils`). C'est une décision de produit : l'administrateur
 d'une machine doit pouvoir répondre depuis un terminal à « quels appareils

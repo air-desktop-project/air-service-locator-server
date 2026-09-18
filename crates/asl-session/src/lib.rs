@@ -280,6 +280,23 @@ pub enum Besoin<'a> {
     },
     /// Qui je suis, et à qui j'appartiens — sur la voie machine.
     Moi,
+    /// Les appareils du compte qui possède la machine qui demande, **révoqués
+    /// compris** — sur la voie machine.
+    ///
+    /// # LA MÊME LISTE QUE [`Besoin::MesAppareils`], ET UN AUTRE DEMANDEUR
+    ///
+    /// `protocole.md` §3 : ce qu'un appareil lit à l'écran « Compte », une
+    /// machine peut le lire dans un terminal — et rien faire dessus. L'étage 3
+    /// part de la machine qui a prouvé sa clé, remonte à son propriétaire, et
+    /// rapporte les MÊMES objets que pour un appareil ([`Trouvaille::Appareils`],
+    /// encodés par `asl_api::corps::AppareilRendu`) : un seul encodeur, une
+    /// seule forme, et un client qui lit l'un lit l'autre.
+    ///
+    /// Ce qui diffère est ce qui se passe quand rien ne vient : un appareil
+    /// sans appareils n'existe pas, mais une MACHINE dont la clé vient d'être
+    /// révoquée n'a plus de propriétaire à qui poser la question — c'est
+    /// `401`, comme tout le reste de la voie, et non une liste vide.
+    AppareilsDuProprietaire,
     /// Ouvrir le flux par lequel les verdicts arriveront.
     ///
     /// # IL NE DEMANDE RIEN À L'ÉTAGE 3, ET C'EST POURQUOI IL EST ICI
@@ -1072,6 +1089,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         Ressource::Utilisateur { compte } => Besoin::Compte(compte),
         Ressource::MachinesUtilisateur { compte } => Besoin::MachinesDe { compte },
         Ressource::Moi => Besoin::Moi,
+        Ressource::AppareilsDuProprietaire => Besoin::AppareilsDuProprietaire,
         Ressource::Annonce => Besoin::Annoncer,
         Ressource::Ou { machine, service } => Besoin::Ou {
             machine,
@@ -1603,6 +1621,20 @@ pub fn repondre<'o>(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 PROBLEME_MEDIA,
                 probleme(StatusCode::INTERNAL_SERVER_ERROR),
+                sortie,
+            ),
+        },
+        // **LE MÊME TABLEAU QUE `MesAppareils`**, assemblé des mêmes objets ;
+        // ce qui change est le repli. Ici, « rien » ne veut pas dire « aucun
+        // appareil » — un compte en a toujours un — mais « plus de
+        // propriétaire » : la clé de cette machine a été révoquée entre sa
+        // preuve et cette requête, et `protocole.md` §3 dit `401`.
+        Besoin::AppareilsDuProprietaire => match trouvaille {
+            Trouvaille::Appareils(quoi) => composer_une_liste(quoi, sortie),
+            _ => composer(
+                StatusCode::UNAUTHORIZED,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::UNAUTHORIZED),
                 sortie,
             ),
         },
@@ -4202,7 +4234,7 @@ mod creations {
     use super::{
         Besoin, CLE_SEULE_OCTETS, CleTrouvee, ENROLEMENT_CORPS_OCTETS, EtatDeLaReplication,
         MachineRassemblee, POSSESSION_APPAREIL_OCTETS, REPLICATION_CORPS_MAX, Session, Trouvaille,
-        VoieVersLePair, besoin, repondre,
+        VoieVersLePair, besoin, probleme, repondre,
     };
 
     fn liaison() -> LiaisonDeCanal {
@@ -4994,6 +5026,64 @@ mod creations {
             rendre(&mut session, &Besoin::Moi, &Trouvaille::Rien).0,
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    #[test]
+    fn les_appareils_du_proprietaire_exigent_une_machine_et_rendent_la_meme_liste() {
+        // **`protocole.md` §3** : sur la voie machine, comme `/v1/moi` — un
+        // appareil, lui, a `GET /v1/appareils` ; un inconnu n'a rien.
+        assert_eq!(
+            besoin(
+                &session_de_machine(),
+                &tete(b"GET", b"/v1/moi/appareils"),
+                b""
+            ),
+            Besoin::AppareilsDuProprietaire
+        );
+        for session in [session_d_appareil(), Session::new(liaison())] {
+            assert_eq!(
+                besoin(&session, &tete(b"GET", b"/v1/moi/appareils"), b""),
+                Besoin::Deja(StatusCode::UNAUTHORIZED)
+            );
+        }
+
+        // **LES MÊMES OBJETS QUE `MesAppareils`**, assemblés de la même façon :
+        // l'étage 3 les a encodés avec `AppareilRendu`, l'étage 2 n'ajoute que
+        // les crochets. Un client qui lit l'écran Compte lit ceci.
+        let objet = br#"{"appareil":"a-x","attestation":"aucune","revoque":true}"#.to_vec();
+        let mut session = session_de_machine();
+        let (statut, rendu) = rendre(
+            &mut session,
+            &Besoin::AppareilsDuProprietaire,
+            &Trouvaille::Appareils(vec![objet.clone(), objet.clone()]),
+        );
+        assert_eq!(statut, StatusCode::OK);
+        let mut attendu = alloc::vec![b'['];
+        attendu.extend_from_slice(&objet);
+        attendu.push(b',');
+        attendu.extend_from_slice(&objet);
+        attendu.push(b']');
+        assert_eq!(rendu, attendu);
+        assert_eq!(
+            rendre(
+                &mut session,
+                &Besoin::MesAppareils,
+                &Trouvaille::Appareils(vec![objet.clone(), objet])
+            )
+            .1,
+            attendu,
+            "une seule forme, sur les deux voies"
+        );
+
+        // **RIEN N'EST `401`, PAS `[]`** : une machine dont la clé vient d'être
+        // révoquée n'a plus de propriétaire à qui poser la question.
+        let (statut, rendu) = rendre(
+            &mut session,
+            &Besoin::AppareilsDuProprietaire,
+            &Trouvaille::Rien,
+        );
+        assert_eq!(statut, StatusCode::UNAUTHORIZED);
+        assert_eq!(rendu, probleme(StatusCode::UNAUTHORIZED));
     }
 
     #[test]

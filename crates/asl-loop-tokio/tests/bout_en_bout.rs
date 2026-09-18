@@ -1815,6 +1815,205 @@ async fn une_autorisation_donne_a_voir_les_machines_et_une_machine_sait_qui_elle
 }
 
 #[tokio::test]
+async fn une_machine_voit_les_appareils_de_son_compte_et_d_aucun_autre() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // `protocole.md` §3, `GET /v1/moi/appareils` : une machine enrôlée lit la
+    // liste des appareils du compte qui la possède — OCTET POUR OCTET celle
+    // que `GET /v1/appareils` rend à un appareil de ce compte : révoqués
+    // marqués, description quand elle a été posée. Un compte étranger n'y
+    // apparaît pas ; un appareil n'a pas ce verbe ; et une machine dont la clé
+    // est révoquée n'a plus de propriétaire à qui poser la question.
+    let (autorite, racine, chaine, cle) = materiel("appareils-du-proprietaire");
+    let (base, fichier) = entrepot("appareils-du-proprietaire");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    // ── ALICE : DEUX APPAREILS, DONT UN RÉVOQUÉ, ET UNE MACHINE ─────────────
+    let mut alice = connecter(&racine, adresse).await;
+    let (_compte_a, premier, _secrete_a) = creer_un_compte(&mut alice, 0, 0xA4).await;
+    // Le premier se décrit : c'est ce que l'écran Compte montre, et ce que la
+    // machine doit voir aussi. `21` est l'index QPACK de `:method: PUT`.
+    let cible = format!("/v1/appareils/{}/description", premier.texte());
+    ams_quic_client::envoyer_avec_media(
+        &mut alice,
+        8,
+        21,
+        cible.as_bytes(),
+        None,
+        br#"{"plateforme":"macos","modele":"MacBookPro15,2"}"#,
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 8).await;
+    assert_eq!(champ(&champs(alice.recu(8)), b":status"), Some(&b"204"[..]));
+    // Un second appareil entre — une clé nue, signée par le premier —, puis
+    // il est révoqué : il doit RESTER dans la liste, marqué.
+    let seconde = asl_cle::CleSecreteAppareil::depuis_entropie([0xA5; 32]).expect("un scalaire");
+    let (statut, rendu) = poster(
+        &mut alice,
+        12,
+        b"/v1/appareils",
+        &seconde.publique().octets(),
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let second = Identifiant::analyser(&valeur_json(&rendu, "appareil")).expect("un appareil");
+    let cible = format!("/v1/appareils/{}", second.texte());
+    // `16` est l'index QPACK de `:method: DELETE`.
+    ams_quic_client::envoyer_une_requete(&mut alice, 16, 16, cible.as_bytes(), None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 16).await;
+    assert_eq!(
+        champ(&champs(alice.recu(16)), b":status"),
+        Some(&b"204"[..]),
+        "le second appareil est révoqué"
+    );
+    let (statut, rendu) = poster(
+        &mut alice,
+        20,
+        b"/v1/machines",
+        br#"{"nom":"grenier","capacites":[]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let machine = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let code = valeur_json(&rendu, "code");
+
+    // ── BOB : UN COMPTE ÉTRANGER, QUI NE DOIT PAS APPARAÎTRE ────────────────
+    let mut bob = connecter(&racine, adresse).await;
+    let (_compte_b, etranger, _secrete_b) = creer_un_compte(&mut bob, 0, 0xB4).await;
+
+    // ── LA MACHINE S'ENRÔLE, PROUVE SA CLÉ, ET LIT LES APPAREILS ────────────
+    let mut daemon = connecter(&racine, adresse).await;
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xD4; 32]);
+    assert_eq!(enroler(&mut daemon, 0, &code, &secrete).await, machine);
+    authentifier(&mut daemon, machine, &secrete, 8, 12).await;
+    ams_quic_client::envoyer_une_requete(&mut daemon, 16, 17, b"/v1/moi/appareils", None, b"")
+        .await;
+    let vu_par_la_machine = ams_quic_client::attendre_la_reponse(&mut daemon, 16).await;
+    assert_eq!(
+        champ(&champs(daemon.recu(16)), b":status"),
+        Some(&b"200"[..]),
+        "{}",
+        String::from_utf8_lossy(&vu_par_la_machine)
+    );
+    let texte = String::from_utf8_lossy(&vu_par_la_machine).into_owned();
+    assert!(
+        texte.contains(&format!(
+            r#"{{"appareil":"{}","attestation":"aucune","revoque":false,"plateforme":"macos","modele":"MacBookPro15,2"}}"#,
+            premier.texte()
+        )),
+        "le premier, décrit : {texte}"
+    );
+    assert!(
+        texte.contains(&format!(
+            r#"{{"appareil":"{}","attestation":"aucune","revoque":true}}"#,
+            second.texte()
+        )),
+        "le second, révoqué et marqué : {texte}"
+    );
+    assert!(
+        !texte.contains(etranger.texte().as_str()),
+        "un appareil d'un autre compte n'y est pas : {texte}"
+    );
+    // Et chaque objet se relit avec le décodeur de `GET /v1/appareils` : c'est
+    // LE MÊME objet, pas un cousin.
+    let objets = texte
+        .strip_prefix('[')
+        .and_then(|reste| reste.strip_suffix(']'))
+        .unwrap_or_else(|| panic!("une liste : {texte}"));
+    let mut lus = 0_usize;
+    for objet in objets.split("},{") {
+        let entier = format!(
+            "{}{}{}",
+            if objet.starts_with('{') { "" } else { "{" },
+            objet,
+            if objet.ends_with('}') { "" } else { "}" }
+        );
+        let lu = asl_api::corps::AppareilRendu::decoder(entier.as_bytes())
+            .unwrap_or_else(|faute| panic!("{entier} : {faute:?}"));
+        assert!(lu.appareil == premier || lu.appareil == second);
+        lus = lus.saturating_add(1);
+    }
+    assert_eq!(lus, 2, "{texte}");
+
+    // ── OCTET POUR OCTET CE QUE L'APPAREIL LIT LUI-MÊME ─────────────────────
+    ams_quic_client::envoyer_une_requete(&mut alice, 24, 17, b"/v1/appareils", None, b"").await;
+    let vu_par_l_appareil = ams_quic_client::attendre_la_reponse(&mut alice, 24).await;
+    assert_eq!(
+        vu_par_la_machine, vu_par_l_appareil,
+        "la voie machine rend la liste de l'écran Compte, sans une virgule de différence"
+    );
+
+    // ── UN APPAREIL N'A PAS CE VERBE ; UN INCONNU NON PLUS ──────────────────
+    ams_quic_client::envoyer_une_requete(&mut bob, 12, 17, b"/v1/moi/appareils", None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut bob, 12).await;
+    assert_eq!(champ(&champs(bob.recu(12)), b":status"), Some(&b"401"[..]));
+    let mut inconnu = connecter(&racine, adresse).await;
+    ams_quic_client::envoyer_une_requete(&mut inconnu, 0, 17, b"/v1/moi/appareils", None, b"")
+        .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut inconnu, 0).await;
+    assert_eq!(
+        champ(&champs(inconnu.recu(0)), b":status"),
+        Some(&b"401"[..])
+    );
+
+    // ── LA CLÉ RÉVOQUÉE : PLUS DE PROPRIÉTAIRE, DONC `401` ──────────────────
+    //
+    // La révocation ferme la connexion du daemon ; celle qu'il rouvrirait ne
+    // peut plus prouver une clé que l'annuaire ne tient plus. Ici, la preuve
+    // est rejouée avec l'ancienne clé, et c'est elle qui est refusée.
+    let cible = format!("/v1/machines/{}/cle", machine.texte());
+    ams_quic_client::envoyer_une_requete(&mut alice, 28, 16, cible.as_bytes(), None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 28).await;
+    assert_eq!(
+        champ(&champs(alice.recu(28)), b":status"),
+        Some(&b"204"[..]),
+        "la clé est retirée"
+    );
+    for _ in 0..32_u32 {
+        daemon.parler().await;
+        if !daemon.ecouter().await {
+            break;
+        }
+    }
+    assert!(daemon.ferme().is_some(), "la révocation ferme la connexion");
+    let mut revenant = connecter(&racine, adresse).await;
+    let defi = tirer_le_defi(&mut revenant, 0).await;
+    let liaison = liaison_du_client(&revenant);
+    let signature = secrete
+        .signer(machine, &defi, &liaison)
+        .expect("elle signe");
+    let mut preuve = Vec::with_capacity(81);
+    preuve.push(Genre::Machine.prefixe());
+    preuve.extend_from_slice(machine.octets());
+    preuve.extend_from_slice(signature.octets());
+    let (statut, _) = poster(
+        &mut revenant,
+        4,
+        b"/v1/defi",
+        &preuve,
+        b"application/octet-stream",
+    )
+    .await;
+    assert_ne!(statut, b"204", "une clé révoquée ne prouve plus rien");
+    ams_quic_client::envoyer_une_requete(&mut revenant, 8, 17, b"/v1/moi/appareils", None, b"")
+        .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut revenant, 8).await;
+    assert_eq!(
+        champ(&champs(revenant.recu(8)), b":status"),
+        Some(&b"401"[..]),
+        "sans propriétaire, pas de liste"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
 async fn revoquer_la_cle_d_une_machine_ferme_sa_connexion_et_fait_tomber_son_bail() {
     // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
     //
