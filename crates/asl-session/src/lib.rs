@@ -487,6 +487,25 @@ pub enum Besoin<'a> {
     },
     /// Retirer l'alias public du compte.
     RetirerAlias,
+    /// Effacer le compte de cette connexion — celui de la clé qui signe.
+    ///
+    /// # LE DERNIER ACTE D'UNE CLÉ (`protocole.md` §2.2, `modele.md` §2.1)
+    ///
+    /// Un compte s'ouvre depuis un appareil ; il se ferme depuis un appareil,
+    /// et de la même main. **Aucun argument, aucun corps** : la connexion
+    /// désigne le compte, et la confirmation est le geste biométrique qui a
+    /// débloqué la clé, pas un booléen que le client transporte (C7). L'étage
+    /// 3 fait tout dans une transaction — appareils, machines et services,
+    /// autorisations dans les deux sens, alias libéré, la marque posée avec
+    /// la cause `titulaire` — puis **ferme les connexions** de tout ce qui
+    /// vient d'être révoqué, la connexion qui a porté la demande comprise,
+    /// au tour de boucle suivant le `204`.
+    ///
+    /// **Deux réponses, et pas de `404`** : `204`, c'est fait ; `401`, la clé
+    /// qui signe n'est plus celle d'un appareil vivant — révoqué, ou d'un
+    /// compte déjà effacé. La ressource est le compte de la connexion, et une
+    /// connexion authentifiée a toujours un compte.
+    EffacerMonCompte,
     /// L'autre racine pose un défi, et cette racine-ci doit le signer.
     ///
     /// # LE SECOND TEMPS DE `replication.md` §2.2
@@ -1179,6 +1198,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
                 Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
         },
+        Ressource::Compte => Besoin::EffacerMonCompte,
         // ── LA VOIE ENTRE RACINES ───────────────────────────────────────
         Ressource::PairPreuve => lire_un_defi(corps),
         Ressource::PairOperations { apres } => Besoin::LireLesOperations { apres },
@@ -1789,6 +1809,31 @@ pub fn repondre<'o>(
                 StatusCode::NOT_FOUND,
                 PROBLEME_MEDIA,
                 probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+        },
+
+        // ── EFFACER MON COMPTE ──────────────────────────────────────────
+        //
+        // **DEUX RÉPONSES, ET PAS DE `404`** (`protocole.md` §2.2) : `204`
+        // quand c'est fait — et la connexion tombe au tour suivant —, `401`
+        // quand la clé qui signe n'est plus celle d'un appareil vivant :
+        // révoqué entre sa preuve et cette requête, ou d'un compte déjà
+        // effacé. C'est l'étage 3 qui le constate (`Refus`). Et `Rien` reste
+        // ce qu'il est partout où une preuve est exigée : une panne de notre
+        // côté, `500`, qu'un inconnu ne peut pas fabriquer.
+        Besoin::EffacerMonCompte => match trouvaille {
+            Trouvaille::Fait => composer(StatusCode::NO_CONTENT, JSON_MEDIA, &[], sortie),
+            Trouvaille::Refus => composer(
+                StatusCode::UNAUTHORIZED,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::UNAUTHORIZED),
+                sortie,
+            ),
+            _ => composer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::INTERNAL_SERVER_ERROR),
                 sortie,
             ),
         },
@@ -5847,6 +5892,62 @@ mod retraits {
         assert_eq!(
             rendre(&Besoin::RetirerAlias, &Trouvaille::Rien).0,
             StatusCode::NOT_FOUND
+        );
+    }
+
+    // ── Effacer mon compte ──────────────────────────────────────────────────
+
+    #[test]
+    fn effacer_mon_compte_se_route_depuis_un_appareil_et_de_lui_seul() {
+        // `DELETE /v1/compte`, sans corps, depuis un appareil : le besoin.
+        assert_eq!(
+            besoin(&session_d_appareil(), &tete(b"DELETE", b"/v1/compte"), b""),
+            Besoin::EffacerMonCompte
+        );
+        // Sans preuve, `401` ; **depuis une machine, `401` aussi** : une
+        // machine ne décide pas du compte (`modele.md` §2.3), et `asl` n'a pas
+        // de verbe pour cela.
+        assert_eq!(
+            besoin(
+                &Session::new(liaison()),
+                &tete(b"DELETE", b"/v1/compte"),
+                b""
+            ),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+        let mut machine = Session::new(liaison());
+        machine.pair = Some(un(Genre::Machine, 4));
+        assert_eq!(
+            besoin(&machine, &tete(b"DELETE", b"/v1/compte"), b""),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+        // Et les autres verbes ne sont pas servis.
+        for verbe in [&b"GET"[..], b"POST", b"PUT", b"PATCH"] {
+            assert_eq!(
+                besoin(&session_d_appareil(), &tete(verbe, b"/v1/compte"), b""),
+                Besoin::Deja(StatusCode::METHOD_NOT_ALLOWED)
+            );
+        }
+    }
+
+    #[test]
+    fn effacer_mon_compte_rend_204_ou_401_et_jamais_404() {
+        let (statut, corps) = rendre(&Besoin::EffacerMonCompte, &Trouvaille::Fait);
+        assert_eq!(statut, StatusCode::NO_CONTENT);
+        assert!(corps.is_empty(), "`204` ne porte pas de corps");
+        // La clé n'est plus celle d'un appareil vivant : `401`, et non `403`
+        // ni `404` — il n'y a pas d'objet visé qui puisse manquer.
+        let (statut, corps) = rendre(&Besoin::EffacerMonCompte, &Trouvaille::Refus);
+        assert_eq!(statut, StatusCode::UNAUTHORIZED);
+        assert!(corps.windows(3).any(|f| f == b"401"));
+        // Une panne de notre côté est dite comme telle.
+        assert_eq!(
+            rendre(&Besoin::EffacerMonCompte, &Trouvaille::Rien).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            rendre(&Besoin::EffacerMonCompte, &Trouvaille::Conflit).0,
+            StatusCode::INTERNAL_SERVER_ERROR
         );
     }
 

@@ -21,9 +21,9 @@ use std::path::PathBuf;
 
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
-    Appareil, Attestation, Autorisation, Cadre, Capacites, Compte, Description, Enrolement,
-    Estampille, JetonPoussee, JetonRange, Machine, NomRange, Operation, Plateforme, Portee,
-    Provenance, Service, Systeme,
+    Appareil, Attestation, Autorisation, Cadre, Capacites, Cause, Compte, Description, Effacement,
+    Enrolement, Estampille, JetonPoussee, JetonRange, Machine, NomRange, Operation, Plateforme,
+    Portee, Provenance, Service, Systeme,
 };
 use asl_store::{Applique, Entrepot, MotifDeRefus};
 
@@ -105,6 +105,7 @@ fn compte(estampille: Estampille, alias: Option<&str>) -> Compte {
         estampille,
         alias: alias.map(|texte| asl_registre::AliasRange::nouveau(texte).expect("un alias")),
         reclamation: estampille,
+        efface: None,
     }
 }
 
@@ -129,7 +130,7 @@ fn appareil(estampille: Estampille, proprietaire: Identifiant) -> Appareil {
         proprietaire,
         cle: [0x02; 33],
         atteste: Attestation::Aucune,
-        revoque: false,
+        revoque_le: None,
     }
 }
 
@@ -178,12 +179,55 @@ fn prelude() -> Vec<(Estampille, Operation)> {
     let d1 = un(Genre::Appareil, 1);
     let d2 = un(Genre::Appareil, 2);
     let g1 = un(Genre::Autorisation, 1);
+    // Le compte que la ligne « effacement » effacera, et ce qu'il tient :
+    // un alias que c4 attend en file, une machine, un appareil, une arête
+    // reçue de c4.
+    let c3 = un(Genre::Utilisateur, 3);
+    let c4 = un(Genre::Utilisateur, 4);
+    let m5 = un(Genre::Machine, 5);
+    let d3 = un(Genre::Appareil, 3);
+    let g2 = un(Genre::Autorisation, 2);
     vec![
         (
             est(pair(), 1),
             Operation::Compte {
                 compte: c1,
                 enregistrement: compte(est(pair(), 1), None),
+            },
+        ),
+        (
+            est(pair(), 10),
+            Operation::Compte {
+                compte: c3,
+                enregistrement: compte(est(pair(), 10), Some("trois")),
+            },
+        ),
+        (
+            est(pair(), 11),
+            Operation::Compte {
+                compte: c4,
+                enregistrement: compte(est(pair(), 11), None),
+            },
+        ),
+        (
+            est(pair(), 12),
+            Operation::Machine {
+                machine: m5,
+                enregistrement: machine(est(pair(), 12), c3, "m5"),
+            },
+        ),
+        (
+            est(pair(), 13),
+            Operation::Appareil {
+                appareil: d3,
+                enregistrement: appareil(est(pair(), 13), c3),
+            },
+        ),
+        (
+            est(pair(), 14),
+            Operation::Autorisation {
+                autorisation: g2,
+                enregistrement: autorisation(est(pair(), 14), c4, c3),
             },
         ),
         (
@@ -262,16 +306,25 @@ fn prelude() -> Vec<(Estampille, Operation)> {
 fn conflits() -> Vec<(Estampille, Operation)> {
     let c1 = un(Genre::Utilisateur, 1);
     let c2 = un(Genre::Utilisateur, 2);
+    let c3 = un(Genre::Utilisateur, 3);
+    let c4 = un(Genre::Utilisateur, 4);
     let m1 = un(Genre::Machine, 1);
     let m3 = un(Genre::Machine, 3);
     let m4 = un(Genre::Machine, 4);
+    let m5 = un(Genre::Machine, 5);
+    let m6 = un(Genre::Machine, 6);
     let d1 = un(Genre::Appareil, 1);
     let d2 = un(Genre::Appareil, 2);
+    let d3 = un(Genre::Appareil, 3);
+    let d5 = un(Genre::Appareil, 5);
     vec![
         // Ligne 1 — révocation d'un côté, écriture de l'autre (appareil).
         (
             est(autre(), 100),
-            Operation::AppareilRevoque { appareil: d1 },
+            Operation::AppareilRevoque {
+                appareil: d1,
+                revoque_le: 1_789_000_000_000,
+            },
         ),
         (
             est(pair(), 101),
@@ -406,6 +459,131 @@ fn conflits() -> Vec<(Estampille, Operation)> {
                 },
             },
         ),
+        // Ligne 1 bis — d2 révoqué des deux côtés, à deux dates. La plus
+        // ancienne tient : 4 000 — c'est de là que les orphelins comptent.
+        (
+            est(pair(), 116),
+            Operation::AppareilRevoque {
+                appareil: d2,
+                revoque_le: 5_000,
+            },
+        ),
+        (
+            est(autre(), 117),
+            Operation::AppareilRevoque {
+                appareil: d2,
+                revoque_le: 4_000,
+            },
+        ),
+        // Ligne « effacement » (2026-09-18) — c3 effacé d'un côté, écrit de
+        // l'autre : un appareil enrôlé, une machine déclarée, un alias
+        // réclamé, une arête accordée par lui et une à lui, un service et un
+        // code sur sa machine, une description et une révocation sur son
+        // appareil, une clé liée. **L'effacement l'emporte toujours** : rien
+        // de tout cela ne reste, et c4 obtient l'alias qu'il attendait. Deux
+        // effacements — titulaire chez `autre`, orphelin chez le pair —
+        // n'en font qu'un, et la marque est celle de la plus petite
+        // estampille : 120, titulaire.
+        (
+            est(autre(), 120),
+            Operation::CompteEfface {
+                compte: c3,
+                efface_le: 7_000,
+                cause: Cause::Titulaire,
+            },
+        ),
+        (
+            est(pair(), 125),
+            Operation::CompteEfface {
+                compte: c3,
+                efface_le: 8_000,
+                cause: Cause::Orphelin,
+            },
+        ),
+        (
+            est(pair(), 121),
+            Operation::Appareil {
+                appareil: d5,
+                enregistrement: appareil(est(pair(), 121), c3),
+            },
+        ),
+        (
+            est(autre(), 122),
+            Operation::Machine {
+                machine: m6,
+                enregistrement: machine(est(autre(), 122), c3, "m6"),
+            },
+        ),
+        (
+            est(pair(), 123),
+            Operation::Alias {
+                compte: c4,
+                alias: Some(asl_registre::AliasRange::nouveau("trois").expect("un alias")),
+            },
+        ),
+        (
+            est(pair(), 124),
+            Operation::Alias {
+                compte: c3,
+                alias: Some(asl_registre::AliasRange::nouveau("encore").expect("un alias")),
+            },
+        ),
+        (
+            est(autre(), 126),
+            Operation::Autorisation {
+                autorisation: un(Genre::Autorisation, 3),
+                enregistrement: autorisation(est(autre(), 126), c3, c4),
+            },
+        ),
+        (
+            est(pair(), 127),
+            Operation::Autorisation {
+                autorisation: un(Genre::Autorisation, 4),
+                enregistrement: autorisation(est(pair(), 127), c1, c3),
+            },
+        ),
+        (
+            est(pair(), 128),
+            Operation::Service {
+                service: un(Genre::Service, 3),
+                enregistrement: service(est(pair(), 128), m5, "svc"),
+            },
+        ),
+        (
+            est(autre(), 129),
+            Operation::Description {
+                appareil: d3,
+                enregistrement: Description {
+                    provenance: Provenance::Ici,
+                    estampille: est(autre(), 129),
+                    systeme: Systeme::Android,
+                    modele: nom("Pixel"),
+                },
+            },
+        ),
+        (
+            est(pair(), 130),
+            Operation::Enrolement {
+                empreinte: empreinte(0x30),
+                enregistrement: enrolement(est(pair(), 130), m5),
+            },
+        ),
+        (
+            est(pair(), 131),
+            Operation::AppareilRevoque {
+                appareil: d3,
+                revoque_le: 6_000,
+            },
+        ),
+        (
+            est(autre(), 132),
+            Operation::CleMachine {
+                machine: m5,
+                cle: [0xC5; 32],
+                empreinte: empreinte(0x30),
+                code: est(pair(), 130),
+            },
+        ),
     ]
 }
 
@@ -506,7 +684,7 @@ fn l_invariant_de_convergence() {
         .appareil(un(Genre::Appareil, 1))
         .expect("lisible")
         .expect("d1");
-    assert!(d1.revoque, "l'appareil est révoqué");
+    assert!(d1.revoque(), "l'appareil est révoqué");
     assert!(
         base.jeton(un(Genre::Appareil, 1))
             .expect("lisible")
@@ -547,6 +725,77 @@ fn l_invariant_de_convergence() {
         desc.modele.octets(),
         b"iPad",
         "la description la plus récente gagne"
+    );
+    // Ligne 1 bis : la date de révocation la plus ancienne.
+    assert_eq!(
+        base.appareil(un(Genre::Appareil, 2))
+            .expect("lisible")
+            .expect("d2")
+            .revoque_le,
+        Some(4_000),
+        "la plus ancienne des deux dates tient"
+    );
+    // Ligne « effacement » : c3 n'a plus rien, et reste marqué — de la
+    // marque à la plus petite estampille.
+    let c3 = un(Genre::Utilisateur, 3);
+    let c4 = un(Genre::Utilisateur, 4);
+    let marque = base.compte(c3).expect("lisible").expect("la marque reste");
+    assert_eq!(
+        marque.efface,
+        Some(Effacement {
+            le: 7_000,
+            cause: Cause::Titulaire
+        })
+    );
+    assert_eq!(marque.estampille, est(autre(), 120));
+    assert_eq!(marque.alias, None);
+    assert!(base.compte_vivant(c3).expect("lisible").is_none());
+    assert_eq!(
+        base.compte_par_alias("trois").expect("lisible"),
+        Some(c4),
+        "l'alias libéré va au compte en file"
+    );
+    assert!(base.compte_par_alias("encore").expect("lisible").is_none());
+    assert!(base.appareils_de_compte(c3).expect("lisible").is_empty());
+    assert!(base.machines_de_compte(c3).expect("lisible").is_empty());
+    for quel in [un(Genre::Appareil, 3), un(Genre::Appareil, 5)] {
+        assert!(base.appareil(quel).expect("lisible").is_none(), "{quel}");
+        assert!(base.description(quel).expect("lisible").is_none(), "{quel}");
+    }
+    for quelle in [un(Genre::Machine, 5), un(Genre::Machine, 6)] {
+        assert!(base.machine(quelle).expect("lisible").is_none(), "{quelle}");
+    }
+    assert!(
+        base.service(un(Genre::Service, 3))
+            .expect("lisible")
+            .is_none()
+    );
+    assert!(
+        base.consommer_enrolement(&empreinte(0x30))
+            .expect("lisible")
+            .is_none()
+    );
+    for quelle in [
+        un(Genre::Autorisation, 2),
+        un(Genre::Autorisation, 3),
+        un(Genre::Autorisation, 4),
+    ] {
+        assert!(
+            base.autorisation(quelle).expect("lisible").is_none(),
+            "{quelle}"
+        );
+    }
+    assert!(base.autorisations_recues(c4).expect("lisible").is_empty());
+    assert!(
+        base.autorisations_accordees(c4)
+            .expect("lisible")
+            .is_empty()
+    );
+    assert!(
+        base.autorisations_accordees(un(Genre::Utilisateur, 1))
+            .expect("lisible")
+            .iter()
+            .all(|(quelle, _)| *quelle != un(Genre::Autorisation, 4))
     );
     let _ = std::fs::remove_file(&chemin);
 }
@@ -719,6 +968,7 @@ fn ce_qui_n_est_pas_de_provenance_locale_est_refuse() {
         estampille: est(pair(), 3),
         alias: None,
         reclamation: est(pair(), 3),
+        efface: None,
     };
     let refus = base
         .appliquer(
@@ -795,6 +1045,124 @@ fn appliquer_avance_le_compteur_et_ferme_ce_qui_doit_l_etre() {
         base.machine(m).expect("lisible").expect("m").cle.is_none(),
         "la clé révoquée s'efface"
     );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn appliquer_un_effacement_ferme_ce_que_le_compte_tenait_et_marque_un_inconnu() {
+    // §3.3 : la racine qui applique `compte-efface` ferme ICI les connexions
+    // des machines et appareils du compte — un daemon qui tenait son bail
+    // chez elle part par le chemin ordinaire.
+    let (base, chemin) = entrepot("efface-effets");
+    let c = un(Genre::Utilisateur, 7);
+    let m = un(Genre::Machine, 7);
+    let d = un(Genre::Appareil, 7);
+    appliquer(
+        &base,
+        est(pair(), 1),
+        Operation::Compte {
+            compte: c,
+            enregistrement: compte(est(pair(), 1), Some("sept")),
+        },
+    );
+    appliquer(
+        &base,
+        est(pair(), 2),
+        Operation::Machine {
+            machine: m,
+            enregistrement: machine(est(pair(), 2), c, "m"),
+        },
+    );
+    appliquer(
+        &base,
+        est(pair(), 3),
+        Operation::Appareil {
+            appareil: d,
+            enregistrement: appareil(est(pair(), 3), c),
+        },
+    );
+    let applique = base
+        .appliquer(
+            pair(),
+            &Cadre::Operation {
+                estampille: est(pair(), 4),
+                operation: Operation::CompteEfface {
+                    compte: c,
+                    efface_le: 9_000,
+                    cause: Cause::Titulaire,
+                },
+            },
+            false,
+        )
+        .expect("lisible");
+    match applique {
+        Applique::Faite { effets, .. } => {
+            let mut a_fermer = effets.a_fermer;
+            a_fermer.sort();
+            let mut attendus = vec![m, d];
+            attendus.sort();
+            assert_eq!(a_fermer, attendus, "la machine et l'appareil du compte");
+        }
+        autre => panic!("attendu appliquée : {autre:?}"),
+    }
+    assert!(base.compte_vivant(c).expect("lisible").is_none());
+    assert!(base.compte_par_alias("sept").expect("lisible").is_none());
+    // Un second effacement du même compte ne ferme plus rien : il n'y a plus
+    // rien à retirer.
+    let encore = base
+        .appliquer(
+            pair(),
+            &Cadre::Operation {
+                estampille: est(pair(), 5),
+                operation: Operation::CompteEfface {
+                    compte: c,
+                    efface_le: 9_500,
+                    cause: Cause::Orphelin,
+                },
+            },
+            false,
+        )
+        .expect("lisible");
+    assert!(matches!(encore, Applique::Faite { effets, .. } if effets.a_fermer.is_empty()));
+    assert_eq!(
+        base.compte(c).expect("lisible").expect("là").efface,
+        Some(Effacement {
+            le: 9_000,
+            cause: Cause::Titulaire
+        }),
+        "la marque de la plus petite estampille reste"
+    );
+
+    // **UN COMPTE INCONNU EST MARQUÉ QUAND MÊME** (§5.2) : son `compte`, qui
+    // arrive après, est refusé — sans alias à l'index, sans rien.
+    let inconnu = un(Genre::Utilisateur, 8);
+    appliquer(
+        &base,
+        est(pair(), 6),
+        Operation::CompteEfface {
+            compte: inconnu,
+            efface_le: 9_600,
+            cause: Cause::Exploitant,
+        },
+    );
+    let marque = base.compte(inconnu).expect("lisible").expect("marqué");
+    assert_eq!(
+        marque.efface,
+        Some(Effacement {
+            le: 9_600,
+            cause: Cause::Exploitant
+        })
+    );
+    appliquer(
+        &base,
+        est(pair(), 7),
+        Operation::Compte {
+            compte: inconnu,
+            enregistrement: compte(est(pair(), 7), Some("huit")),
+        },
+    );
+    assert!(base.compte_vivant(inconnu).expect("lisible").is_none());
+    assert!(base.compte_par_alias("huit").expect("lisible").is_none());
     let _ = std::fs::remove_file(&chemin);
 }
 

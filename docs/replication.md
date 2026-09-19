@@ -737,6 +737,20 @@ d'exploitation dit la même chose, à qui sait lire la machine.
      redémarrage suivant — deux estampilles pour un même fait, et la règle de
      conflit ne calculerait plus la même chose des deux côtés.
 
+   - **La reprise au format des dates (0.11.0, PR de code « effacer mon
+     compte »)** suit le même modèle : à la première ouverture d'une base de
+     0.5.0 à 0.10.1, le compte et l'appareil sont réécrits sous leur forme
+     nouvelle dans une transaction — `effacé le` vide partout, `révoqué le`
+     posé à la date de la reprise sur les appareils déjà révoqués
+     (`modele.md` §2.2, C6) —, les estampilles et le curseur du pair ne
+     bougent pas, **et le journal d'opérations est vidé, marqué retiré
+     jusqu'au compteur** : ce qu'il portait est de la forme d'hier, que
+     l'autre racine ne saurait plus lire, et elle s'amorce par instantané au
+     rattrapage suivant. Le temps que les deux bancs soient à la même
+     version, la voie est coupée — une opération du nouveau format ne se
+     décode pas avec l'ancien, et c'est dit, jamais sauté (§5.2) ; elle se
+     rouvre d'elle-même au second déploiement.
+
    **Ce que l'exploitant verra, et qui n'est pas un défaut.** Les deux bancs
    ont créé des comptes chacun de son côté, avec des identifiants tirés
    indépendamment : ce sont des comptes DIFFÉRENTS pour les mêmes personnes. La

@@ -54,11 +54,12 @@ use std::path::Path;
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
     APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation, Autorisation,
-    CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Cadre, Capacites, CleLiee,
-    Compte, DESCRIPTION_OCTETS, Description, EMPREINTE_OCTETS, ENROLEMENT_OCTETS, ENTREE_OCTETS,
-    ESTAMPILLE_OCTETS, Enrolement, EntreeJournal, Estampille, IDENTIFIANT_OCTETS, JetonPoussee,
-    JetonRange, MACHINE_OCTETS, Machine, NomRange, OPERATION_OCTETS_MAX, Operation, POUSSEE_OCTETS,
-    Plateforme, Portee, Provenance, SERVICE_OCTETS, Service, Systeme,
+    CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Cadre, Capacites, Cause,
+    CleLiee, Compte, DESCRIPTION_OCTETS, Description, EMPREINTE_OCTETS, ENROLEMENT_OCTETS,
+    ENTREE_OCTETS, ESTAMPILLE_OCTETS, Effacement, Enrolement, EntreeJournal, Estampille,
+    IDENTIFIANT_OCTETS, JetonPoussee, JetonRange, MACHINE_OCTETS, Machine, NomRange,
+    OPERATION_OCTETS_MAX, Operation, POUSSEE_OCTETS, Plateforme, Portee, Provenance,
+    SERVICE_OCTETS, Service, Systeme,
 };
 use redb::{
     Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableHandle,
@@ -233,11 +234,17 @@ const CLEF_DU_COMPTEUR: &str = "compteur";
 /// La clé du dernier compteur dont l'opération a été retirée du journal.
 const CLEF_DES_RETIREES: &str = "operations-retirees-jusqu-a";
 
-/// Le format de cet entrepôt : le second, celui de l'estampille.
+/// Le format de cet entrepôt : le troisième, celui des dates.
 ///
 /// Le premier n'était pas numéroté — il n'y avait rien d'autre —, et c'est son
-/// absence qui le désigne.
-const FORMAT: u64 = 2;
+/// absence qui le désigne. Le second est celui de l'estampille (0.5.0 à
+/// 0.10.1). Le troisième ajoute `révoqué le` à l'appareil, `effacé le` et sa
+/// cause au compte (`docs/modele.md` §2.1, §2.2, 2026-09-18) — et chacun se
+/// reprend depuis le précédent, à l'ouverture, dans une transaction.
+const FORMAT: u64 = 3;
+
+/// Le format d'avant les dates.
+const FORMAT_SANS_DATES: u64 = 2;
 
 /// Le journal d'opérations (`docs/replication.md` §5), **par compteur**.
 ///
@@ -323,6 +330,21 @@ mod anciennes {
         TableDefinition::new("autorisations");
     /// L'index des alias d'hier : `alias → compte`, sans réclamation.
     pub const ALIAS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("alias");
+
+    /// Les deux tables de la forme d'avant les DATES (0.5.0 à 0.10.1) :
+    /// l'estampille est là, `révoqué le` et `effacé le` non. Les autres
+    /// tables n'ont pas bougé.
+    pub mod sans_dates {
+        use asl_registre::sans_dates;
+        use redb::TableDefinition;
+
+        /// Les comptes d'avant les dates.
+        pub const COMPTES: TableDefinition<'_, &[u8], &[u8; sans_dates::COMPTE_OCTETS]> =
+            TableDefinition::new("comptes");
+        /// Les appareils d'avant les dates.
+        pub const APPAREILS: TableDefinition<'_, &[u8], &[u8; sans_dates::APPAREIL_OCTETS]> =
+            TableDefinition::new("appareils");
+    }
 }
 
 // ── Les fautes ──────────────────────────────────────────────────────────────
@@ -384,6 +406,20 @@ impl core::fmt::Display for Faute {
                 "l'entrepôt est au format {lu}, que ce binaire ne connaît pas (il connaît {FORMAT})"
             ),
         }
+    }
+}
+
+impl Faute {
+    /// L'entrepôt est-il tenu par un autre processus ?
+    ///
+    /// **C'est `redb` qui le sait** : le daemon prend un verrou exclusif sur
+    /// le fichier à l'ouverture (`File::try_lock`), et ouvrir un fichier
+    /// qu'un autre tient rend `DatabaseAlreadyOpen`. Un geste hors ligne —
+    /// `asl-server --forget` — le demande pour refuser de tourner pendant que
+    /// l'annuaire sert, et le dire (`replication.md` §8).
+    #[must_use]
+    pub const fn entrepot_tenu(&self) -> bool {
+        matches!(self, Self::Base(redb::Error::DatabaseAlreadyOpen))
     }
 }
 
@@ -643,6 +679,40 @@ pub enum Applique {
     Refusee(MotifDeRefus),
 }
 
+/// Ce que l'effacement d'un compte a retiré (`docs/modele.md` §2.1).
+///
+/// **Des nombres, et ce qu'il faut fermer** — rien qui nomme ce qui est parti :
+/// `--forget` imprime les nombres, la boucle ferme les connexions, et ni l'un
+/// ni l'autre n'a besoin d'une liste de ce qui n'existe plus.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Retrait {
+    /// Combien d'appareils ont été effacés — révoqués et effacés, avec leur
+    /// jeton et leur description.
+    pub appareils: usize,
+    /// Combien de machines ont été effacées, avec leur clé.
+    pub machines: usize,
+    /// Combien de codes d'enrôlement en cours ont été annulés.
+    pub codes: usize,
+    /// Combien de services déclarés sont partis avec leurs machines.
+    pub services: usize,
+    /// Combien d'autorisations ont été retirées, dans les deux sens.
+    pub autorisations: usize,
+    /// L'alias a-t-il été libéré ?
+    pub alias: bool,
+    /// Les machines et appareils du compte : ce dont les connexions doivent
+    /// tomber ici, comme après une révocation (`protocole.md` §2.1 quater).
+    pub a_fermer: Vec<Identifiant>,
+}
+
+/// Ce qu'un effacement local a donné.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Efface {
+    /// Le compte vient d'être effacé, et voici ce qui est parti.
+    Fait(Retrait),
+    /// Il l'était déjà — le, et par qui — et rien n'a été écrit.
+    Deja(Effacement),
+}
+
 /// Ce qu'un instantané accumule : des cadres, dans l'ordre d'émission.
 #[derive(Default)]
 struct Suite {
@@ -695,6 +765,10 @@ pub struct Entrepot {
     /// Combien d'enregistrements et d'opérations l'ouverture a ré-estampillés
     /// sous l'identité réelle (`replication.md` §11.4) — zéro le plus souvent.
     reestampilles: usize,
+    /// Combien d'appareils déjà révoqués ont reçu, à l'ouverture, la date de
+    /// la reprise pour `révoqué le` (`docs/modele.md` §2.2) — zéro le plus
+    /// souvent, et une fois seulement.
+    dates_de_reprise: usize,
 }
 
 impl Entrepot {
@@ -734,6 +808,22 @@ impl Entrepot {
     /// Une racine SANS clé ne ré-estampille rien : elle n'a pas d'identité à
     /// donner.
     ///
+    /// # ET UNE BASE D'AVANT LES DATES EST REPRISE AUSSI
+    ///
+    /// `docs/modele.md` §2.2 (2026-09-18) : le compte et l'appareil ont
+    /// changé de forme — `effacé le` et sa cause, `révoqué le`. Une base au
+    /// format 2 est reprise à l'ouverture, dans une transaction : les deux
+    /// tables sont relues sous leur définition d'hier et réécrites sous
+    /// celle d'aujourd'hui ; **les appareils déjà révoqués reçoivent pour
+    /// `révoqué le` la date de la reprise** — l'annuaire ne sait pas mieux,
+    /// et poser plus ancien serait affirmer ce qu'il n'a pas mesuré (C6) —,
+    /// aucun compte n'est effacé ; et **le journal d'opérations est vidé,
+    /// marqué retiré jusqu'au compteur**, comme à la première reprise : ce
+    /// qu'il portait est de la forme d'hier, que l'autre racine ne saurait
+    /// plus lire, et une base reprise s'amorce chez l'autre par instantané.
+    /// Le curseur du pair ne bouge pas. [`Entrepot::dates_de_reprise`] dit
+    /// combien d'appareils ont reçu une date, pour le journal d'exploitation.
+    ///
     /// # Errors
     ///
     /// [`Faute::Base`] si le fichier ne peut être ni ouvert ni créé,
@@ -762,14 +852,23 @@ impl Entrepot {
     /// Prépare les tables et lit le compteur, quel que soit le support.
     fn amorcer(base: Database, racine: Identifiant) -> Result<Self, Faute> {
         let reestampilles;
+        let mut dates_de_reprise = 0_usize;
         {
             let ecriture = base.begin_write()?;
             let format = {
                 let table = ecriture.open_table(RACINE)?;
                 table.get(CLEF_DU_FORMAT)?.map(|quoi| quoi.value())
             };
+            // La date de la reprise : celle que reçoivent les appareils déjà
+            // révoqués, faute de mieux.
+            let quand = maintenant_ms();
             match format {
                 Some(FORMAT) => {}
+                Some(FORMAT_SANS_DATES) => {
+                    dates_de_reprise = reprendre_les_dates(&ecriture, quand)?;
+                    let mut table = ecriture.open_table(RACINE)?;
+                    table.insert(CLEF_DU_FORMAT, FORMAT)?;
+                }
                 Some(lu) => return Err(Faute::Format { lu }),
                 None => {
                     // **PAS DE FORMAT, MAIS DES TABLES : C'EST UNE BASE
@@ -779,7 +878,7 @@ impl Entrepot {
                         .list_tables()?
                         .any(|table| table.name() == COMPTES.name());
                     if ancienne {
-                        reprendre(&ecriture, racine)?;
+                        dates_de_reprise = reprendre(&ecriture, racine, quand)?;
                     }
                     let mut table = ecriture.open_table(RACINE)?;
                     table.insert(CLEF_DU_FORMAT, FORMAT)?;
@@ -826,6 +925,7 @@ impl Entrepot {
             racine,
             derniere_operation: std::sync::atomic::AtomicU64::new(compteur),
             reestampilles,
+            dates_de_reprise,
         })
     }
 
@@ -838,6 +938,15 @@ impl Entrepot {
     #[must_use]
     pub const fn reestampilles(&self) -> usize {
         self.reestampilles
+    }
+
+    /// Combien d'appareils déjà révoqués ont reçu, à l'ouverture, la date de
+    /// la reprise pour `révoqué le` (`docs/modele.md` §2.2) — et c'est aussi
+    /// au journal d'exploitation de le dire : c'est de cette date que la
+    /// règle des orphelins comptera pour eux.
+    #[must_use]
+    pub const fn dates_de_reprise(&self) -> usize {
+        self.dates_de_reprise
     }
 
     /// Le compteur de la dernière opération journalisée, sans transaction.
@@ -952,6 +1061,7 @@ impl Entrepot {
                 estampille,
                 alias,
                 reclamation: estampille,
+                efface: None,
             };
             let mut octets = [0_u8; COMPTE_OCTETS];
             compte.ecrire(&mut octets);
@@ -987,7 +1097,9 @@ impl Entrepot {
     /// tient (`replication.md` §3.2), et la rafraîchir ferait perdre un alias
     /// qu'on gagnait.
     ///
-    /// Rend `false` si le compte n'existe pas.
+    /// Rend `false` si le compte n'existe pas — **ou s'il est effacé** : un
+    /// compte effacé ne réclame plus rien, et toute écriture pour lui est
+    /// refusée (`docs/modele.md` §2.1).
     ///
     /// # Errors
     ///
@@ -1008,6 +1120,9 @@ impl Entrepot {
                 Some(brut) => Compte::lire(brut.value())?,
                 None => return Ok(false),
             };
+            if ancien.est_efface() {
+                return Ok(false);
+            }
             if ancien.alias == alias {
                 return Ok(true);
             }
@@ -1048,7 +1163,12 @@ impl Entrepot {
         Ok(true)
     }
 
-    /// Rend ce compte, s'il existe.
+    /// Rend ce compte, s'il existe — **effacé compris**, marqué.
+    ///
+    /// C'est la lecture de l'entrepôt, pas celle de l'API : `GET
+    /// /v1/utilisateurs/{u}` passe par [`Entrepot::compte_vivant`], qui ne
+    /// rend pas un compte effacé. Celle-ci sert à qui doit VOIR la marque —
+    /// `--forget`, qui dit « déjà effacé » plutôt que d'écrire.
     ///
     /// # Errors
     ///
@@ -1060,6 +1180,21 @@ impl Entrepot {
             Some(trouve) => Ok(Some(Compte::lire(trouve.value())?)),
             None => Ok(None),
         }
+    }
+
+    /// Rend ce compte s'il existe **et n'est pas effacé**.
+    ///
+    /// **Un compte effacé est un inconnu pour l'API** (`protocole.md` §2.2) :
+    /// `GET /v1/utilisateurs/{u}` rend le même `404` qu'un identifiant qui n'a
+    /// jamais existé, et une autorisation ne s'accorde pas à lui. L'existence
+    /// passée d'un compte n'est pas une information qu'on rend à qui tient un
+    /// `u-…` au hasard.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn compte_vivant(&self, qui: Identifiant) -> Result<Option<Compte>, Faute> {
+        Ok(self.compte(qui)?.filter(|compte| !compte.est_efface()))
     }
 
     /// À qui appartient cet alias ?
@@ -1075,6 +1210,167 @@ impl Entrepot {
         let lecture = self.base.begin_read()?;
         let table = lecture.open_table(ALIAS)?;
         titulaire(&table, alias.as_bytes())
+    }
+
+    // ── L'effacement d'un compte (`docs/modele.md` §2.1) ────────────────────
+
+    /// Efface ce compte : tout ce qu'il tient part, dans UNE transaction, et
+    /// reste l'identifiant marqué effacé, avec la date et la cause.
+    ///
+    /// # CE QUI PART, ET C'EST TOUT
+    ///
+    /// Les appareils, avec leurs jetons et leurs descriptions ; les machines,
+    /// avec leur clé, leurs codes d'enrôlement en cours et leurs services ;
+    /// les autorisations, accordées ET reçues — effacées, non marquées :
+    /// l'autre partie ne doit plus rien voir ; la réclamation d'alias, que la
+    /// file hérite. La marque prend l'estampille de l'effacement, et la
+    /// réclamation aussi — c'est `DELETE /v1/alias`, en plus large.
+    ///
+    /// **La date vient de l'appelant**, comme pour une révocation ; **la cause
+    /// aussi** : le titulaire depuis son appareil, la racine par la règle des
+    /// orphelins, l'exploitant hors ligne — un seul chemin d'entrepôt pour les
+    /// trois (`protocole.md` §2.2). L'opération `compte-efface` est
+    /// journalisée pour l'autre racine, une seule pour tout le compte
+    /// (`replication.md` §5.2).
+    ///
+    /// Rend `None` si le compte n'existe pas, [`Efface::Deja`] s'il l'était
+    /// déjà — sans rien écrire : un effacement ne se refait pas.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn effacer_compte(
+        &self,
+        qui: Identifiant,
+        cause: Cause,
+        efface_le: u64,
+    ) -> Result<Option<Efface>, Faute> {
+        let ecriture = self.base.begin_write()?;
+        let journalisee;
+        let retrait;
+        {
+            let avant = match compte_dans(&ecriture, qui)? {
+                Some(compte) => compte,
+                None => return Ok(None),
+            };
+            if let Some(marque) = avant.efface {
+                return Ok(Some(Efface::Deja(marque)));
+            }
+            let estampille = estampiller(&ecriture, self.racine)?;
+            let marque = Effacement {
+                le: efface_le,
+                cause,
+            };
+            retrait = effacer_dans(&ecriture, qui, avant.provenance, marque, estampille)?;
+            journalisee = journaliser_l_operation(
+                &ecriture,
+                estampille,
+                avant.provenance,
+                &Operation::CompteEfface {
+                    compte: qui,
+                    efface_le,
+                    cause,
+                },
+            )?;
+        }
+        self.commettre_une_operation(ecriture, journalisee)?;
+        Ok(Some(Efface::Fait(retrait)))
+    }
+
+    /// Efface les comptes orphelins — ceux dont TOUS les appareils sont
+    /// révoqués, le plus récent avant `revoques_avant` —, avec la cause
+    /// `orphelin`, à cette date, dans UNE transaction ; et rend lesquels,
+    /// avec ce que chacun a retiré.
+    ///
+    /// # LA RÈGLE, ET CE QU'ELLE NE COMPTE PAS (`docs/modele.md` §2.1, C6)
+    ///
+    /// Un compte est orphelin depuis le `révoqué le` le plus récent de ses
+    /// appareils, **jamais depuis leur silence** : un téléphone dans un tiroir
+    /// est un appareil vivant. Un compte sans aucun appareil enregistré n'est
+    /// pas orphelin non plus — il n'a pas de date d'où compter, et ce peut
+    /// être un compte dont l'appareil arrive par la voie. Un compte déjà
+    /// effacé ne l'est pas deux fois.
+    ///
+    /// **Chaque racine peut** : l'opération est de la classe « révocation,
+    /// toujours », et la seconde ne trouve rien à retirer (`replication.md`
+    /// §5.2). Une opération `compte-efface` par compte est journalisée.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn effacer_les_orphelins(
+        &self,
+        revoques_avant: u64,
+        efface_le: u64,
+    ) -> Result<Vec<(Identifiant, Retrait)>, Faute> {
+        let ecriture = self.base.begin_write()?;
+        let mut effaces = Vec::new();
+        let mut derniere = None;
+        {
+            // Relevés avant d'être effacés : on n'écrit pas dans une table
+            // qu'on parcourt.
+            let mut orphelins = Vec::new();
+            {
+                let comptes = ecriture.open_table(COMPTES)?;
+                let index = ecriture.open_table(APPAREILS_PAR_COMPTE)?;
+                let appareils = ecriture.open_table(APPAREILS)?;
+                for entree in comptes.iter()? {
+                    let (clef_compte, valeur) = entree?;
+                    let compte = Compte::lire(valeur.value())?;
+                    if compte.est_efface() {
+                        continue;
+                    }
+                    let qui = depuis_clef(clef_compte.value())?;
+                    let (debut, fin) = intervalle(qui);
+                    let mut dernier_revoque: Option<u64> = None;
+                    let mut tous_revoques = true;
+                    for entree in index.range(debut.as_slice()..fin.as_slice())? {
+                        let (_, clef_appareil) = entree?;
+                        let Some(brut) = appareils.get(clef_appareil.value())? else {
+                            continue;
+                        };
+                        match Appareil::lire(brut.value())?.revoque_le {
+                            Some(quand) => {
+                                dernier_revoque =
+                                    Some(dernier_revoque.map_or(quand, |d| d.max(quand)));
+                            }
+                            None => {
+                                tous_revoques = false;
+                                break;
+                            }
+                        }
+                    }
+                    if tous_revoques && dernier_revoque.is_some_and(|quand| quand < revoques_avant)
+                    {
+                        orphelins.push((qui, compte.provenance));
+                    }
+                }
+            }
+            for (qui, provenance) in orphelins {
+                let estampille = estampiller(&ecriture, self.racine)?;
+                let cause = Cause::Orphelin;
+                let marque = Effacement {
+                    le: efface_le,
+                    cause,
+                };
+                let retrait = effacer_dans(&ecriture, qui, provenance, marque, estampille)?;
+                if let Some(journalisee) = journaliser_l_operation(
+                    &ecriture,
+                    estampille,
+                    provenance,
+                    &Operation::CompteEfface {
+                        compte: qui,
+                        efface_le,
+                        cause,
+                    },
+                )? {
+                    derniere = Some(journalisee);
+                }
+                effaces.push((qui, retrait));
+            }
+        }
+        self.commettre_une_operation(ecriture, derniere)?;
+        Ok(effaces)
     }
 
     // ── Les machines ────────────────────────────────────────────────────────
@@ -1385,7 +1681,7 @@ impl Entrepot {
                 proprietaire,
                 cle,
                 atteste,
-                revoque: false,
+                revoque_le: None,
             };
             let mut octets = [0_u8; APPAREIL_OCTETS];
             appareil.ecrire(&mut octets);
@@ -1457,19 +1753,30 @@ impl Entrepot {
         Ok(trouves)
     }
 
-    /// Marque cet appareil révoqué, et rend ce qu'il était.
+    /// Marque cet appareil révoqué à cette date, et rend ce qu'il était.
     ///
     /// **LE JETON PART AVEC L'APPAREIL, ET DANS LA MÊME ÉCRITURE.**
     /// `docs/modele.md` §2.6 : il est lié à l'appareil et se révoque avec lui.
     /// L'appareil, lui, reste marqué : l'écran d'après une perte doit MONTRER
     /// ce qu'on a retiré. **La description reste** aussi, pour la même raison.
     ///
+    /// **La date vient de l'appelant**, en millisecondes d'époque, comme
+    /// l'expiration d'un code : c'est la boucle qui tient l'horloge, et un
+    /// essai qui fabrique un appareil révoqué depuis trente et un jours n'a
+    /// pas à attendre. Elle se pose UNE fois : un appareil déjà révoqué garde
+    /// la sienne, et rien n'est écrit ni journalisé — c'est de cette date que
+    /// la règle des orphelins compte (`docs/modele.md` §2.1).
+    ///
     /// Rend `None` si aucun appareil ne répond à cet identifiant.
     ///
     /// # Errors
     ///
     /// [`Faute::Base`] ou [`Faute::Enregistrement`].
-    pub fn revoquer_appareil(&self, quel: Identifiant) -> Result<Option<Appareil>, Faute> {
+    pub fn revoquer_appareil(
+        &self,
+        quel: Identifiant,
+        revoque_le: u64,
+    ) -> Result<Option<Appareil>, Faute> {
         let clef_appareil = clef(quel);
         let ecriture = self.base.begin_write()?;
         let journalisee;
@@ -1480,11 +1787,14 @@ impl Entrepot {
                 Some(brut) => Appareil::lire(brut.value())?,
                 None => return Ok(None),
             };
+            if avant.revoque() {
+                return Ok(Some(avant));
+            }
             let estampille = estampiller(&ecriture, self.racine)?;
             let mut octets = [0_u8; APPAREIL_OCTETS];
             Appareil {
                 estampille,
-                revoque: true,
+                revoque_le: Some(revoque_le),
                 ..avant
             }
             .ecrire(&mut octets);
@@ -1495,7 +1805,10 @@ impl Entrepot {
                 &ecriture,
                 estampille,
                 avant.provenance,
-                &Operation::AppareilRevoque { appareil: quel },
+                &Operation::AppareilRevoque {
+                    appareil: quel,
+                    revoque_le,
+                },
             )?;
         }
         self.commettre_une_operation(ecriture, journalisee)?;
@@ -2227,6 +2540,21 @@ impl Entrepot {
                 continue;
             }
             let qui = depuis_clef(clef.value())?;
+            // **UN COMPTE EFFACÉ FIGURE PAR SA MARQUE, ET PAR ELLE SEULE**
+            // (`replication.md` §5.2) : une opération `compte-efface`, et rien
+            // de ce qu'il tenait — l'autre racine, en l'appliquant, retire ce
+            // qu'elle en avait.
+            if let Some(marque) = compte.efface {
+                suite.ajouter(
+                    compte.estampille,
+                    &Operation::CompteEfface {
+                        compte: qui,
+                        efface_le: marque.le,
+                        cause: marque.cause,
+                    },
+                );
+                continue;
+            }
             suite.ajouter(
                 compte.estampille,
                 &Operation::Compte {
@@ -2319,10 +2647,13 @@ impl Entrepot {
                     enregistrement: appareil,
                 },
             );
-            if appareil.revoque {
+            if let Some(revoque_le) = appareil.revoque_le {
                 suite.ajouter(
                     appareil.estampille,
-                    &Operation::AppareilRevoque { appareil: quel },
+                    &Operation::AppareilRevoque {
+                        appareil: quel,
+                        revoque_le,
+                    },
                 );
             }
         }
@@ -2873,9 +3204,181 @@ fn avancer_le_curseur(
     Ok(())
 }
 
+/// Ce compte, tel qu'il est dans cette transaction — effacé compris.
+fn compte_dans(ecriture: &WriteTransaction, qui: Identifiant) -> Result<Option<Compte>, Faute> {
+    let comptes = ecriture.open_table(COMPTES)?;
+    match comptes.get(clef(qui).as_slice())? {
+        Some(brut) => Ok(Some(Compte::lire(brut.value())?)),
+        None => Ok(None),
+    }
+}
+
+/// Ce compte est-il marqué effacé, dans cette transaction ?
+///
+/// **C'est la garde de toute règle d'application qui écrit pour un compte**
+/// (`docs/replication.md` §3.2) : une écriture du compte arrivée après son
+/// effacement est refusée — le compte est effacé —, et le curseur avance. Un
+/// compte ABSENT n'est pas effacé : son opération `compte` viendra peut-être
+/// après celle de son appareil, et l'effacement, s'il vient, retirera les deux.
+fn compte_efface_dans(ecriture: &WriteTransaction, qui: Identifiant) -> Result<bool, Faute> {
+    Ok(compte_dans(ecriture, qui)?.is_some_and(|compte| compte.est_efface()))
+}
+
+/// Efface ce compte dans cette transaction : tout ce qu'il tient part, et
+/// reste l'identifiant marqué, sous cette estampille. Rend ce qui est parti.
+///
+/// # C'EST LE SEUL CHEMIN, POUR LES TROIS CAUSES ET POUR L'AUTRE RACINE
+///
+/// `DELETE /v1/compte`, la règle des orphelins, `--forget` et l'application
+/// de `compte-efface` passent tous ici (`protocole.md` §2.2). C'est le balayage
+/// par compte que [`Entrepot::oublier_ce_qui_vient_de`] fait déjà par origine
+/// — mais par les INDEX, pas par un parcours des tables : les appareils, les
+/// machines et les autorisations d'un compte sont des intervalles.
+///
+/// **Le compte absent est marqué quand même** (`replication.md` §5.2) : ce
+/// qui arriverait ensuite pour lui — son `compte`, un appareil — est refusé,
+/// et les index sont balayés au cas où une écriture serait arrivée avant lui.
+///
+/// **La marque prend l'estampille qu'on lui donne, et non le maximum** : c'est
+/// ce qui rend l'entrepôt identique dans les deux ordres — une écriture du
+/// compte appliquée avant l'effacement a été retirée, appliquée après elle est
+/// refusée, et l'estampille du compte est dans les deux cas celle de
+/// l'effacement.
+fn effacer_dans(
+    ecriture: &WriteTransaction,
+    qui: Identifiant,
+    provenance: Provenance,
+    marque: Effacement,
+    estampille: Estampille,
+) -> Result<Retrait, Faute> {
+    let clef_compte = clef(qui);
+    let mut retrait = Retrait::default();
+
+    // ── LES APPAREILS : effacés, avec leur jeton et leur description ────────
+    {
+        let mut index = ecriture.open_table(APPAREILS_PAR_COMPTE)?;
+        let mut appareils = ecriture.open_table(APPAREILS)?;
+        let mut poussees = ecriture.open_table(POUSSEES)?;
+        let mut descriptions = ecriture.open_table(DESCRIPTIONS)?;
+        let (debut, fin) = intervalle(qui);
+        let mut condamnes = Vec::new();
+        for entree in index.range(debut.as_slice()..fin.as_slice())? {
+            let (clef_index, clef_appareil) = entree?;
+            condamnes.push((clef_index.value().to_vec(), clef_appareil.value().to_vec()));
+        }
+        for (clef_index, clef_appareil) in &condamnes {
+            index.remove(clef_index.as_slice())?;
+            appareils.remove(clef_appareil.as_slice())?;
+            poussees.remove(clef_appareil.as_slice())?;
+            descriptions.remove(clef_appareil.as_slice())?;
+            retrait.a_fermer.push(depuis_clef(clef_appareil)?);
+        }
+        retrait.appareils = condamnes.len();
+    }
+
+    // ── LES MACHINES : effacées, avec leur clé, leurs codes, leurs services ─
+    {
+        let mut index = ecriture.open_table(MACHINES_PAR_COMPTE)?;
+        let mut machines = ecriture.open_table(MACHINES)?;
+        let mut codes = ecriture.open_table(ENROLEMENTS)?;
+        let mut codes_par_machine = ecriture.open_table(ENROLEMENTS_PAR_MACHINE)?;
+        let mut services = ecriture.open_table(SERVICES)?;
+        let mut par_nom = ecriture.open_table(SERVICES_PAR_NOM)?;
+        let (debut, fin) = intervalle(qui);
+        let mut condamnees = Vec::new();
+        for entree in index.range(debut.as_slice()..fin.as_slice())? {
+            let (clef_index, clef_machine) = entree?;
+            condamnees.push((clef_index.value().to_vec(), clef_machine.value().to_vec()));
+        }
+        for (clef_index, clef_machine) in &condamnees {
+            let quelle = depuis_clef(clef_machine)?;
+            index.remove(clef_index.as_slice())?;
+            machines.remove(clef_machine.as_slice())?;
+            if let Some(empreinte) = codes_par_machine.remove(clef_machine.as_slice())? {
+                codes.remove(empreinte.value())?;
+                retrait.codes = retrait.codes.saturating_add(1);
+            }
+            let (debut, fin) = intervalle(quelle);
+            let mut siens = Vec::new();
+            for entree in par_nom.range(debut.as_slice()..fin.as_slice())? {
+                let (clef_nom, clef_service) = entree?;
+                siens.push((clef_nom.value().to_vec(), clef_service.value().to_vec()));
+            }
+            for (clef_nom, clef_service) in &siens {
+                par_nom.remove(clef_nom.as_slice())?;
+                services.remove(clef_service.as_slice())?;
+            }
+            retrait.services = retrait.services.saturating_add(siens.len());
+            retrait.a_fermer.push(quelle);
+        }
+        retrait.machines = condamnees.len();
+    }
+
+    // ── LES AUTORISATIONS, DANS LES DEUX SENS : retirées, non marquées ──────
+    {
+        let mut autorisations = ecriture.open_table(AUTORISATIONS)?;
+        let mut recues = ecriture.open_table(AUTORISATIONS_RECUES)?;
+        let mut accordees = ecriture.open_table(AUTORISATIONS_ACCORDEES)?;
+        let (debut, fin) = intervalle(qui);
+        let mut condamnees = Vec::new();
+        for entree in accordees.range(debut.as_slice()..fin.as_slice())? {
+            let (clef_index, clef_autorisation) = entree?;
+            condamnees.push((
+                clef_index.value().to_vec(),
+                clef_autorisation.value().to_vec(),
+            ));
+        }
+        for entree in recues.range(debut.as_slice()..fin.as_slice())? {
+            let (clef_index, clef_autorisation) = entree?;
+            condamnees.push((
+                clef_index.value().to_vec(),
+                clef_autorisation.value().to_vec(),
+            ));
+        }
+        for (_, clef_autorisation) in &condamnees {
+            // L'arête, puis ses deux entrées d'index — dont celle de l'AUTRE
+            // compte, qui ne doit plus rien voir. Une arête vue par les deux
+            // sens n'est retirée qu'une fois.
+            let Some(brut) = autorisations.remove(clef_autorisation.as_slice())? else {
+                continue;
+            };
+            let autorisation = Autorisation::lire(brut.value())?;
+            let quelle = depuis_clef(clef_autorisation)?;
+            recues.remove(paire(autorisation.a, quelle).as_slice())?;
+            accordees.remove(paire(autorisation.par, quelle).as_slice())?;
+            retrait.autorisations = retrait.autorisations.saturating_add(1);
+        }
+    }
+
+    // ── LE COMPTE : sa réclamation retirée, sa marque posée ─────────────────
+    {
+        let mut comptes = ecriture.open_table(COMPTES)?;
+        let mut reclamations = ecriture.open_table(ALIAS)?;
+        if let Some(brut) = comptes.get(clef_compte.as_slice())? {
+            let avant = Compte::lire(brut.value())?;
+            if let Some(alias) = &avant.alias {
+                reclamations
+                    .remove(clef_de_reclamation(alias.octets(), avant.reclamation).as_slice())?;
+                retrait.alias = true;
+            }
+        }
+        let compte = Compte {
+            provenance,
+            estampille,
+            alias: None,
+            reclamation: estampille,
+            efface: Some(marque),
+        };
+        let mut octets = [0_u8; COMPTE_OCTETS];
+        compte.ecrire(&mut octets);
+        comptes.insert(clef_compte.as_slice(), &octets)?;
+    }
+    Ok(retrait)
+}
+
 /// La provenance de l'enregistrement que porte cette opération, s'il en porte
 /// un. Les opérations qui ne nomment qu'un identifiant (révocation, alias,
-/// `PATCH`) n'ont pas de provenance à vérifier.
+/// `PATCH`, effacement) n'ont pas de provenance à vérifier.
 fn provenance_de(operation: &Operation) -> Option<Provenance> {
     match operation {
         Operation::Compte { enregistrement, .. } => Some(enregistrement.provenance),
@@ -2891,7 +3394,8 @@ fn provenance_de(operation: &Operation) -> Option<Provenance> {
         | Operation::MachineModifiee { .. }
         | Operation::CleMachine { .. }
         | Operation::CleMachineRevoquee { .. }
-        | Operation::AutorisationRevoquee { .. } => None,
+        | Operation::AutorisationRevoquee { .. }
+        | Operation::CompteEfface { .. } => None,
     }
 }
 
@@ -2921,9 +3425,10 @@ fn appliquer_dans(
             appareil,
             enregistrement,
         } => appliquer_appareil(ecriture, *appareil, enregistrement),
-        Operation::AppareilRevoque { appareil } => {
-            appliquer_appareil_revoque(ecriture, *appareil, estampille, effets)
-        }
+        Operation::AppareilRevoque {
+            appareil,
+            revoque_le,
+        } => appliquer_appareil_revoque(ecriture, *appareil, *revoque_le, estampille, effets),
         Operation::Description {
             appareil,
             enregistrement,
@@ -2965,7 +3470,62 @@ fn appliquer_dans(
         Operation::AutorisationRevoquee { autorisation } => {
             appliquer_autorisation_revoquee(ecriture, *autorisation, estampille)
         }
+        Operation::CompteEfface {
+            compte,
+            efface_le,
+            cause,
+        } => appliquer_compte_efface(
+            ecriture,
+            *compte,
+            Effacement {
+                le: *efface_le,
+                cause: *cause,
+            },
+            estampille,
+            effets,
+        ),
     }
+}
+
+/// `compte-efface` — TOUJOURS (`docs/replication.md` §3.2, §5.2) : retirer
+/// tout ce que le compte tient, poser la marque avec la date et la cause
+/// portées, et fermer ici les connexions de ses machines et appareils (§3.3).
+///
+/// **Sur un compte déjà effacé, la plus PETITE estampille tient la marque.**
+/// §3.2 dit « la marque porte la date et la cause du premier appliqué » ; le
+/// premier au sens de l'arrivée dépendrait de l'ordre, et deux racines qui
+/// s'effacent le même orphelin à la même minute doivent finir avec la même
+/// marque. Le premier au sens des estampilles est le seul qui converge, et
+/// c'est aussi, à horloge égale, celui qui a écrit le premier. Rien d'autre
+/// ne bouge : il n'y a plus rien à retirer.
+fn appliquer_compte_efface(
+    ecriture: &WriteTransaction,
+    qui: Identifiant,
+    marque: Effacement,
+    estampille: Estampille,
+    effets: &mut EffetsVivants,
+) -> Result<(), Faute> {
+    if let Some(avant) = compte_dans(ecriture, qui)?
+        && avant.est_efface()
+    {
+        if estampille < avant.estampille {
+            let compte = Compte {
+                estampille,
+                reclamation: estampille,
+                efface: Some(marque),
+                ..avant
+            };
+            let mut octets = [0_u8; COMPTE_OCTETS];
+            compte.ecrire(&mut octets);
+            ecriture
+                .open_table(COMPTES)?
+                .insert(clef(qui).as_slice(), &octets)?;
+        }
+        return Ok(());
+    }
+    let retrait = effacer_dans(ecriture, qui, Provenance::Ici, marque, estampille)?;
+    effets.a_fermer.extend(retrait.a_fermer);
+    Ok(())
 }
 
 /// `compte` — insérer si absent, et poser sa réclamation d'alias initiale
@@ -3016,6 +3576,11 @@ fn appliquer_alias(
         // portera sa réclamation de création. Rien à faire ici.
         None => return Ok(()),
     };
+    // **UN COMPTE EFFACÉ NE RÉCLAME PLUS RIEN** : l'effacement l'emporte,
+    // quel que soit l'ordre (§3.2).
+    if ancien.est_efface() {
+        return Ok(());
+    }
     // **LE PLUS RÉCENT GAGNE** : une réclamation plus ancienne que celle qu'on
     // tient déjà ne change rien. C'est ce qui rend la règle indépendante de
     // l'ordre — deux réclamations d'un même compte convergent vers la plus
@@ -3032,6 +3597,7 @@ fn appliquer_alias(
         estampille: ancien.estampille.max(estampille),
         alias: alias.copied(),
         reclamation: estampille,
+        efface: None,
     };
     let mut octets = [0_u8; COMPTE_OCTETS];
     compte.ecrire(&mut octets);
@@ -3051,6 +3617,11 @@ fn appliquer_appareil(
     quel: Identifiant,
     enregistrement: &Appareil,
 ) -> Result<(), Faute> {
+    // **LE COMPTE EFFACÉ L'EMPORTE** (§3.2) : un appareil enrôlé sur l'autre
+    // racine pendant la fenêtre n'entre pas — son porteur lira `401`.
+    if compte_efface_dans(ecriture, enregistrement.proprietaire)? {
+        return Ok(());
+    }
     let clef_appareil = clef(quel);
     let mut table = ecriture.open_table(APPAREILS)?;
     if table.get(clef_appareil.as_slice())?.is_some() {
@@ -3074,9 +3645,15 @@ fn appliquer_appareil(
 /// `appareil-revoque` — marquer, retirer le jeton, TOUJOURS
 /// (`docs/replication.md` §5.2) ; et fermer les connexions de cet appareil ici
 /// (§3.3).
+///
+/// **La date est celle de la racine qui a révoqué, et la plus ANCIENNE tient**
+/// si deux révocations du même appareil se croisent : c'est ce qui fait lire
+/// la même date aux deux racines, dans les deux ordres — et c'est de là que
+/// la règle des orphelins compte.
 fn appliquer_appareil_revoque(
     ecriture: &WriteTransaction,
     quel: Identifiant,
+    revoque_le: u64,
     estampille: Estampille,
     effets: &mut EffetsVivants,
 ) -> Result<(), Faute> {
@@ -3089,7 +3666,11 @@ fn appliquer_appareil_revoque(
     let mut octets = [0_u8; APPAREIL_OCTETS];
     Appareil {
         estampille: avant.estampille.max(estampille),
-        revoque: true,
+        revoque_le: Some(
+            avant
+                .revoque_le
+                .map_or(revoque_le, |deja| deja.min(revoque_le)),
+        ),
         ..avant
     }
     .ecrire(&mut octets);
@@ -3108,6 +3689,16 @@ fn appliquer_description(
     enregistrement: &Description,
 ) -> Result<(), Faute> {
     let clef_appareil = clef(appareil);
+    // **UN APPAREIL QU'ON N'A PAS NE SE DÉCRIT PAS** — révoqué, si ; effacé
+    // avec son compte, non : c'est ce qui rend la description convergente
+    // avec l'effacement, dans les deux ordres (§3.2).
+    if ecriture
+        .open_table(APPAREILS)?
+        .get(clef_appareil.as_slice())?
+        .is_none()
+    {
+        return Ok(());
+    }
     let mut table = ecriture.open_table(DESCRIPTIONS)?;
     if let Some(brut) = table.get(clef_appareil.as_slice())?
         && Description::lire(brut.value())?.estampille >= enregistrement.estampille
@@ -3138,7 +3729,7 @@ fn appliquer_poussee(
         .open_table(APPAREILS)?
         .get(clef_appareil.as_slice())?
     {
-        Some(brut) if !Appareil::lire(brut.value())?.revoque => {}
+        Some(brut) if !Appareil::lire(brut.value())?.revoque() => {}
         _ => return Ok(()),
     }
     let mut table = ecriture.open_table(POUSSEES)?;
@@ -3165,6 +3756,11 @@ fn appliquer_machine(
     quelle: Identifiant,
     enregistrement: &Machine,
 ) -> Result<(), Faute> {
+    // **LE COMPTE EFFACÉ L'EMPORTE** (§3.2) : une machine déclarée sur l'autre
+    // racine pendant la fenêtre n'entre pas.
+    if compte_efface_dans(ecriture, enregistrement.proprietaire)? {
+        return Ok(());
+    }
     let clef_machine = clef(quelle);
     let mut machines = ecriture.open_table(MACHINES)?;
     if machines.get(clef_machine.as_slice())?.is_some() {
@@ -3239,6 +3835,15 @@ fn appliquer_enrolement(
     enregistrement: &Enrolement,
 ) -> Result<(), Faute> {
     let clef_machine = clef(enregistrement.machine);
+    // **UN CODE POUR UNE MACHINE QU'ON N'A PAS NE SE RANGE PAS** : une machine
+    // effacée avec son compte ne se ré-enrôle pas, dans aucun ordre (§3.2).
+    if ecriture
+        .open_table(MACHINES)?
+        .get(clef_machine.as_slice())?
+        .is_none()
+    {
+        return Ok(());
+    }
     let mut index = ecriture.open_table(ENROLEMENTS_PAR_MACHINE)?;
     let mut codes = ecriture.open_table(ENROLEMENTS)?;
     if let Some(ancienne) = index.get(clef_machine.as_slice())? {
@@ -3364,6 +3969,15 @@ fn appliquer_service(
 ) -> Result<(), Faute> {
     let clef_service = clef(quel);
     let clef_nom = clef_de_nom(enregistrement.machine, enregistrement.nom.octets());
+    // **UN SERVICE D'UNE MACHINE QU'ON N'A PAS NE SE DÉCLARE PAS** : les
+    // services partent avec la machine, et la machine avec son compte (§3.2).
+    if ecriture
+        .open_table(MACHINES)?
+        .get(clef(enregistrement.machine).as_slice())?
+        .is_none()
+    {
+        return Ok(());
+    }
     let mut services = ecriture.open_table(SERVICES)?;
     let mut par_nom = ecriture.open_table(SERVICES_PAR_NOM)?;
 
@@ -3409,6 +4023,13 @@ fn appliquer_autorisation(
     quelle: Identifiant,
     enregistrement: &Autorisation,
 ) -> Result<(), Faute> {
+    // **UN COMPTE EFFACÉ N'ACCORDE NI NE REÇOIT PLUS RIEN** (§3.2) : l'autre
+    // partie ne doit jamais voir une arête vers un compte qui n'existe plus.
+    if compte_efface_dans(ecriture, enregistrement.par)?
+        || compte_efface_dans(ecriture, enregistrement.a)?
+    {
+        return Ok(());
+    }
     let clef_autorisation = clef(quelle);
     let mut table = ecriture.open_table(AUTORISATIONS)?;
     if table.get(clef_autorisation.as_slice())?.is_some() {
@@ -3573,7 +4194,12 @@ fn vider(
 ///
 /// Le journal des requêtes (C18) et son rang ne bougent pas : ils ne portent
 /// pas d'estampille, et ne se répliquent pas.
-fn reprendre(ecriture: &WriteTransaction, racine: Identifiant) -> Result<(), Faute> {
+///
+/// **Elle reprend directement dans la forme d'aujourd'hui**, dates comprises :
+/// un appareil déjà révoqué reçoit `quand` — la date de la reprise — pour
+/// `révoqué le`, aucun compte n'est effacé. Rend combien d'appareils ont reçu
+/// une date.
+fn reprendre(ecriture: &WriteTransaction, racine: Identifiant, quand: u64) -> Result<usize, Faute> {
     let mut sequence = Sequence {
         compteur: 0,
         racine,
@@ -3600,9 +4226,13 @@ fn reprendre(ecriture: &WriteTransaction, racine: Identifiant) -> Result<(), Fau
         anciennes::APPAREILS,
         APPAREILS,
         &mut sequence,
-        Appareil::lire_ancien,
+        |octets, estampille| Appareil::lire_ancien(octets, estampille, quand),
         Appareil::ecrire,
     )?;
+    let dates = appareils
+        .iter()
+        .filter(|(_, appareil)| appareil.revoque())
+        .count();
     reprendre_table(
         ecriture,
         anciennes::POUSSEES,
@@ -3717,7 +4347,80 @@ fn reprendre(ecriture: &WriteTransaction, racine: Identifiant) -> Result<(), Fau
     let mut table = ecriture.open_table(RACINE)?;
     table.insert(CLEF_DU_COMPTEUR, sequence.compteur)?;
     table.insert(CLEF_DES_RETIREES, sequence.compteur)?;
-    Ok(())
+    Ok(dates)
+}
+
+/// Reprend une base d'avant les dates (format 2), dans cette transaction, et
+/// rend combien d'appareils ont reçu une date.
+///
+/// # CE QUE LA REPRISE FAIT, DANS L'ORDRE
+///
+/// 1. Les comptes sont relus sous leur forme d'hier et réécrits sous celle
+///    d'aujourd'hui, **sans marque d'effacement** : aucun compte d'alors
+///    n'est effacé. Les estampilles ne bougent pas, l'index des alias non plus.
+/// 2. Les appareils de même ; **ceux qui sont déjà révoqués reçoivent `quand`
+///    pour `révoqué le`** — la date de la reprise, faute de mieux (C6). Les
+///    index ne bougent pas : les clés sont les mêmes.
+/// 3. **Le journal d'opérations est vidé, et marqué retiré jusqu'au
+///    compteur.** Ce qu'il portait — `compte`, `appareil`, `appareil-revoque`
+///    — est de la forme d'hier, que l'autre racine ne saurait plus lire ; et
+///    une base reprise s'amorce chez l'autre par instantané, comme à la
+///    première reprise. Le compteur ne bouge pas, le curseur du pair non
+///    plus : ce que le pair a écrit reste appliqué, ce qu'on a écrit reste
+///    dans les tables — seule la trace à tirer repart d'ici.
+fn reprendre_les_dates(ecriture: &WriteTransaction, quand: u64) -> Result<usize, Faute> {
+    {
+        let mut relevees = Vec::new();
+        {
+            let table = ecriture.open_table(anciennes::sans_dates::COMPTES)?;
+            for entree in table.iter()? {
+                let (clef, valeur) = entree?;
+                relevees.push((
+                    clef.value().to_vec(),
+                    Compte::lire_sans_dates(valeur.value())?,
+                ));
+            }
+        }
+        ecriture.delete_table(anciennes::sans_dates::COMPTES)?;
+        let mut table = ecriture.open_table(COMPTES)?;
+        for (clef, compte) in relevees {
+            let mut octets = [0_u8; COMPTE_OCTETS];
+            compte.ecrire(&mut octets);
+            table.insert(clef.as_slice(), &octets)?;
+        }
+    }
+    let dates;
+    {
+        let mut relevees = Vec::new();
+        {
+            let table = ecriture.open_table(anciennes::sans_dates::APPAREILS)?;
+            for entree in table.iter()? {
+                let (clef, valeur) = entree?;
+                relevees.push((
+                    clef.value().to_vec(),
+                    Appareil::lire_sans_dates(valeur.value(), quand)?,
+                ));
+            }
+        }
+        ecriture.delete_table(anciennes::sans_dates::APPAREILS)?;
+        let mut table = ecriture.open_table(APPAREILS)?;
+        dates = relevees
+            .iter()
+            .filter(|(_, appareil)| appareil.revoque())
+            .count();
+        for (clef, appareil) in relevees {
+            let mut octets = [0_u8; APPAREIL_OCTETS];
+            appareil.ecrire(&mut octets);
+            table.insert(clef.as_slice(), &octets)?;
+        }
+    }
+    // ── LE JOURNAL VIDE, ET PAS DEPUIS ZÉRO ─────────────────────────────────
+    ecriture.delete_table(OPERATIONS)?;
+    ecriture.open_table(OPERATIONS)?;
+    let mut racine = ecriture.open_table(RACINE)?;
+    let compteur = racine.get(CLEF_DU_COMPTEUR)?.map_or(0, |quoi| quoi.value());
+    racine.insert(CLEF_DES_RETIREES, compteur)?;
+    Ok(dates)
 }
 
 // ── Le ré-estampillage sous l'identité réelle (`replication.md` §11.4) ───────
@@ -3840,7 +4543,8 @@ impl Reestampillable for Operation {
             | Self::AppareilRevoque { .. }
             | Self::MachineModifiee { .. }
             | Self::CleMachineRevoquee { .. }
-            | Self::AutorisationRevoquee { .. } => false,
+            | Self::AutorisationRevoquee { .. }
+            | Self::CompteEfface { .. } => false,
         }
     }
 }

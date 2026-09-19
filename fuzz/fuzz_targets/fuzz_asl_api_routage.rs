@@ -69,6 +69,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Vu => "/v1/vu".to_owned(),
         Ressource::Version => "/v1/version".to_owned(),
         Ressource::Comptes => "/v1/comptes".to_owned(),
+        Ressource::Compte => "/v1/compte".to_owned(),
         Ressource::Enrolement => "/v1/enrolement".to_owned(),
         Ressource::Utilisateur { compte } => format!("/v1/utilisateurs/{compte}"),
         Ressource::MachinesUtilisateur { compte } => format!("/v1/utilisateurs/{compte}/machines"),

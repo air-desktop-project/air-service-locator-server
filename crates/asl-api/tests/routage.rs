@@ -31,8 +31,9 @@ fn chaque_chemin_designe_sa_ressource() {
     let g = ident(Genre::Autorisation);
     let n = ident(Genre::Annuaire);
 
-    let cas: [(String, Ressource<'_>); 6] = [
+    let cas: [(String, Ressource<'_>); 7] = [
         ("/v1/comptes".to_owned(), Ressource::Comptes),
+        ("/v1/compte".to_owned(), Ressource::Compte),
         ("/v1/appareils".to_owned(), Ressource::Appareils),
         ("/v1/machines".to_owned(), Ressource::Machines),
         ("/v1/autorisations".to_owned(), Ressource::Autorisations),
@@ -179,6 +180,7 @@ fn chaque_ressource_sert_ce_qu_elle_annonce_et_rien_d_autre() {
     let m = ident(Genre::Machine);
     let cibles = [
         "/v1/comptes".to_owned(),
+        "/v1/compte".to_owned(),
         "/v1/appareils".to_owned(),
         "/v1/machines".to_owned(),
         "/v1/autorisations".to_owned(),
@@ -260,9 +262,12 @@ fn trois_ressources_seulement_n_exigent_rien() {
         );
     }
 
-    // Tout le reste exige un appareil enrôlé.
+    // Tout le reste exige un appareil enrôlé — `/v1/compte` compris : un
+    // compte se ferme de la même main qu'il s'ouvre, et une machine ne décide
+    // pas du compte.
     for cible in [
         "/v1/appareils".to_owned(),
+        "/v1/compte".to_owned(),
         "/v1/machines".to_owned(),
         "/v1/autorisations".to_owned(),
         "/v1/alias".to_owned(),
@@ -905,4 +910,28 @@ fn l_etat_de_la_replication_exige_une_machine_et_ne_se_lit_que_par_get() {
             "{methode:?}"
         );
     }
+}
+
+// ── Effacer mon compte ──────────────────────────────────────────────────────
+
+#[test]
+fn effacer_mon_compte_est_un_delete_sur_v1_compte_et_rien_d_autre() {
+    // `/v1/compte`, au singulier : *mon* compte, comme `/v1/alias` est *mon*
+    // alias. Un seul verbe, et un appareil exigé.
+    let resolu = resoudre(Methode::Delete, b"/v1/compte").expect("il se route");
+    assert_eq!(resolu.ressource, Ressource::Compte);
+    assert!(resolu.sert, "DELETE est le verbe");
+    assert_eq!(resolu.exigence, Exigence::Appareil);
+    assert_eq!(Ressource::Compte.verbes(), &[Methode::Delete]);
+    for methode in [Methode::Get, Methode::Post, Methode::Put, Methode::Patch] {
+        let resolu = resoudre(methode, b"/v1/compte").expect("il se route quand même");
+        assert!(!resolu.sert, "{methode:?}");
+    }
+    // Et `/v1/comptes/{u}` n'existe pas : nommer le compte n'est pas la
+    // grammaire de cette voie.
+    let u = ident(Genre::Utilisateur);
+    assert_eq!(
+        resoudre_get(&format!("/v1/comptes/{u}")),
+        Err(Erreur::RessourceInconnue)
+    );
 }

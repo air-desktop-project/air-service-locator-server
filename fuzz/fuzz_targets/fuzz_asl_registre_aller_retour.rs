@@ -47,6 +47,12 @@
 //!    les mêmes octets, et reconnaît la fin — que `Operation::lire` refuse —
 //!    sans jamais la prendre pour une opération. Ce qui applique ne verra donc
 //!    jamais un signal de coupe comme un fait.
+//! 7. **LES FORMES D'HIER SE RELISENT SANS PANIQUER.** Un compte et un
+//!    appareil de la forme d'avant les dates (0.5.0 à 0.10.1) se relisent
+//!    depuis des octets quelconques, ou refusent par une faute nommée — et ce
+//!    qui se relit se réécrit dans la forme d'aujourd'hui, puis se relit
+//!    identique. C'est la reprise des bancs (`docs/modele.md` §2.2), et un
+//!    appareil révoqué y reçoit la date qu'on lui donne, jamais une autre.
 
 #![no_main]
 
@@ -56,11 +62,11 @@ use libfuzzer_sys::fuzz_target;
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
     ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
-    Autorisation, CADRE_DE_FIN_OCTETS, COMPTE_OCTETS, Cadre, Capacites, CleLiee, Compte,
+    Autorisation, CADRE_DE_FIN_OCTETS, COMPTE_OCTETS, Cadre, Capacites, Cause, CleLiee, Compte,
     DESCRIPTION_OCTETS, Description, ENROLEMENT_OCTETS, ENTREE_OCTETS, ETIQUETTE_DE_FIN,
-    Enrolement, EntreeJournal, Estampille, Faute, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX,
-    NomRange, OPERATION_OCTETS_MAX, Operation, Portee, Provenance, SERVICE_OCTETS, Service,
-    Systeme, Verdict,
+    Effacement, Enrolement, EntreeJournal, Estampille, Faute, MACHINE_OCTETS, Machine,
+    NOM_OCTETS_MAX, NomRange, OPERATION_OCTETS_MAX, Operation, Portee, Provenance, SERVICE_OCTETS,
+    Service, Systeme, Verdict, sans_dates,
 };
 
 /// Ce qu'on soumet.
@@ -106,6 +112,12 @@ struct Entree {
     compteur: u64,
     /// Quelle opération construire, pour l'autre sens.
     quelle_operation: u8,
+    /// Les octets d'un compte de la forme d'avant les dates.
+    compte_sans_dates: [u8; sans_dates::COMPTE_OCTETS],
+    /// Les octets d'un appareil de la forme d'avant les dates.
+    appareil_sans_dates: [u8; sans_dates::APPAREIL_OCTETS],
+    /// Une date — de révocation, d'effacement, de reprise.
+    date: u64,
 }
 
 /// Une faute d'enregistrement est toujours l'une des cinq, et jamais une
@@ -258,6 +270,14 @@ fuzz_target!(|entree: Entree| {
         racine: Identifiant::depuis_entropie(Genre::Annuaire, [entree.graine ^ 0x5A; 16]),
     };
 
+    // **LES TROIS CAUSES, ET L'ABSENCE** : un compte effacé garde sa marque,
+    // un vivant n'en a pas.
+    let cause = match entree.graine % 4 {
+        0 => None,
+        1 => Some(Cause::Titulaire),
+        2 => Some(Cause::Orphelin),
+        _ => Some(Cause::Exploitant),
+    };
     if let Ok(alias) = AliasRange::nouveau(&entree.alias) {
         assert!(alias.longueur() <= ALIAS_OCTETS_MAX);
         let compte = Compte {
@@ -268,10 +288,15 @@ fuzz_target!(|entree: Entree| {
                 compteur: entree.quand,
                 ..estampille
             },
+            efface: cause.map(|cause| Effacement {
+                le: entree.date,
+                cause,
+            }),
         };
         let mut octets = [0_u8; COMPTE_OCTETS];
         compte.ecrire(&mut octets);
         assert_eq!(Compte::lire(&octets), Ok(compte));
+        assert_eq!(compte.est_efface(), cause.is_some());
     }
 
     if let Ok(service) = NomRange::nouveau(&entree.service) {
@@ -381,11 +406,47 @@ fuzz_target!(|entree: Entree| {
         proprietaire: Identifiant::depuis_entropie(Genre::Utilisateur, [entree.graine; 16]),
         cle: [entree.graine; 33],
         atteste,
-        revoque: entree.graine & 16 != 0,
+        revoque_le: (entree.graine & 16 != 0).then_some(entree.date),
     };
     let mut octets = [0_u8; APPAREIL_OCTETS];
     appareil.ecrire(&mut octets);
     assert_eq!(Appareil::lire(&octets), Ok(appareil));
+    assert_eq!(appareil.revoque(), entree.graine & 16 != 0);
+
+    // ── PROPRIÉTÉ 7 : les formes d'hier se relisent, et se réécrivent ───────
+    match Compte::lire_sans_dates(&entree.compte_sans_dates) {
+        Ok(compte) => {
+            // Aucun compte d'alors n'est effacé, et la forme d'aujourd'hui est
+            // celle d'hier suivie de la marque à zéro.
+            assert!(!compte.est_efface());
+            let mut refait = [0_u8; COMPTE_OCTETS];
+            compte.ecrire(&mut refait);
+            assert_eq!(
+                &refait[..sans_dates::COMPTE_OCTETS],
+                &entree.compte_sans_dates[..]
+            );
+            assert!(refait[sans_dates::COMPTE_OCTETS..].iter().all(|o| *o == 0));
+            assert_eq!(Compte::lire(&refait), Ok(compte));
+        }
+        Err(faute) => nommee(faute),
+    }
+    match Appareil::lire_sans_dates(&entree.appareil_sans_dates, entree.date) {
+        Ok(appareil) => {
+            // Un révoqué reçoit la date donnée, un vivant aucune.
+            assert_eq!(
+                appareil.revoque_le,
+                appareil.revoque().then_some(entree.date)
+            );
+            let mut refait = [0_u8; APPAREIL_OCTETS];
+            appareil.ecrire(&mut refait);
+            assert_eq!(
+                &refait[..sans_dates::APPAREIL_OCTETS],
+                &entree.appareil_sans_dates[..]
+            );
+            assert_eq!(Appareil::lire(&refait), Ok(appareil));
+        }
+        Err(faute) => nommee(faute),
+    }
 
     let enrolement = Enrolement {
         provenance,
@@ -445,7 +506,7 @@ fuzz_target!(|entree: Entree| {
     // un enregistrement — ceux-là sont déjà éprouvés ci-dessus, et l'opération
     // n'y ajoute qu'un identifiant.
     let identifiant = |genre| Identifiant::depuis_entropie(genre, [entree.graine; 16]);
-    let operation = match entree.quelle_operation % 5 {
+    let operation = match entree.quelle_operation % 6 {
         0 => Operation::Alias {
             compte: identifiant(Genre::Utilisateur),
             alias: AliasRange::nouveau(&entree.alias).ok(),
@@ -469,6 +530,12 @@ fuzz_target!(|entree: Entree| {
         },
         3 => Operation::AppareilRevoque {
             appareil: identifiant(Genre::Appareil),
+            revoque_le: entree.date,
+        },
+        4 => Operation::CompteEfface {
+            compte: identifiant(Genre::Utilisateur),
+            efface_le: entree.date,
+            cause: cause.unwrap_or(Cause::Orphelin),
         },
         _ => Operation::Machine {
             machine: identifiant(Genre::Machine),

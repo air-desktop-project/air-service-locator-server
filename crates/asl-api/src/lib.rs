@@ -230,6 +230,24 @@ pub enum Ressource<'a> {
     Defi,
     /// `/v1/comptes` — créer un compte et enrôler son premier appareil.
     Comptes,
+    /// `/v1/compte` — **effacer MON compte**, celui de la clé qui signe
+    /// (`protocole.md` §2.2, « Effacer mon compte », 2026-09-18).
+    ///
+    /// # AU SINGULIER, ET SANS NOMMER LE COMPTE
+    ///
+    /// La grammaire de la voie appareil ne nomme jamais le compte : `/v1/alias`
+    /// est *mon* alias, `/v1/appareils` *mes* appareils — la connexion désigne
+    /// le compte, et rien dans le chemin ne peut la contredire. `/v1/compte`
+    /// est *mon* compte, de la même façon. `/v1/comptes/{u}` aurait obligé
+    /// l'appelant à se nommer, et l'annuaire à répondre quelque chose quand
+    /// `{u}` n'est pas lui. Et `/v1/moi` est pris : c'est une ressource de la
+    /// voie MACHINE, et l'exigence est une propriété de la ressource, pas du
+    /// verbe — une machine ne décide pas du compte.
+    ///
+    /// **Un seul verbe, `DELETE`, et pas de corps** : la confirmation est le
+    /// geste biométrique qui débloque la clé, pas un booléen que le client
+    /// transporte (C7).
+    Compte,
     /// `/v1/enrolement` — une MACHINE présente son code et sa clé publique.
     ///
     /// # ELLE MANQUAIT, ET SON ABSENCE ÉTAIT UN TROU DANS LA SPÉCIFICATION
@@ -422,6 +440,7 @@ impl Ressource<'_> {
             | Self::Replication => &[Methode::Get],
             Self::PairPreuve => &[Methode::Post],
             Self::Appareil { .. }
+            | Self::Compte
             | Self::CleMachine { .. }
             | Self::Autorisation { .. }
             | Self::Exposition { .. } => &[Methode::Delete],
@@ -755,6 +774,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "annonce"] => Ok(Ressource::Annonce),
         ["v1", "defi"] => Ok(Ressource::Defi),
         ["v1", "comptes"] => Ok(Ressource::Comptes),
+        ["v1", "compte"] => Ok(Ressource::Compte),
         ["v1", "enrolement"] => Ok(Ressource::Enrolement),
         ["v1", "utilisateurs", compte] => Ok(Ressource::Utilisateur {
             compte: identifiant(compte, Genre::Utilisateur)?,

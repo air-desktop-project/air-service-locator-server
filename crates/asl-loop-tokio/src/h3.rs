@@ -42,7 +42,7 @@ use asl_id::Identifiant;
 use asl_session::{
     Besoin, CleTrouvee, EtatDeLaReplication, Resolution, Session, Trouvaille, VoieVersLePair,
 };
-use asl_store::{Entrepot, Rattrapage};
+use asl_store::{Efface, Entrepot, Rattrapage};
 use sha2::{Digest, Sha256};
 
 use crate::sonde::{self, Verdict};
@@ -484,7 +484,9 @@ impl Service<'_> {
                     None => Trouvaille::Rien,
                 },
             },
-            Besoin::Compte(qui) => match self.entrepot.compte(*qui) {
+            // **UN COMPTE EFFACÉ EST UN INCONNU** (`protocole.md` §2.2) : le
+            // même `404` qu'un identifiant qui n'a jamais existé.
+            Besoin::Compte(qui) => match self.entrepot.compte_vivant(*qui) {
                 Ok(Some(compte)) => Trouvaille::Compte {
                     qui: *qui,
                     alias: compte.alias,
@@ -573,6 +575,7 @@ impl Service<'_> {
             }
             Besoin::PoserAlias { alias } => self.poser_l_alias(Some(alias)),
             Besoin::RetirerAlias => self.poser_l_alias(None),
+            Besoin::EffacerMonCompte => self.effacer_mon_compte(),
 
             // ── LA VOIE ENTRE RACINES ───────────────────────────────────
             //
@@ -637,7 +640,7 @@ impl Service<'_> {
             // avait authentifiée avant. La connexion est fermée par ailleurs,
             // mais s'en remettre à cette fermeture seule ferait dépendre une
             // règle d'autorisation du bon déroulement d'un tour de boucle.
-            .filter(|rangee| !rangee.revoque)
+            .filter(|rangee| !rangee.revoque())
             .map(|rangee| rangee.proprietaire)
     }
 
@@ -1050,7 +1053,7 @@ impl Service<'_> {
             let Ok(Some(rangee)) = self.entrepot.appareil(appareil) else {
                 return Trouvaille::Rien;
             };
-            if rangee.revoque {
+            if rangee.revoque() {
                 return Trouvaille::Rien;
             }
             (rangee.proprietaire, true)
@@ -1144,11 +1147,13 @@ impl Service<'_> {
             return Trouvaille::Rien;
         };
 
-        // **LE BÉNÉFICIAIRE DOIT EXISTER.** Une autorisation vers un compte
-        // inexistant est MUETTE : elle s'affiche comme accordée et n'ouvre rien.
-        // `protocole.md` §2.2 donne `GET /v1/utilisateurs/{u}` pour qu'une faute
-        // de frappe se voie ; le vérifier ici est ce qui la rend impossible.
-        match self.entrepot.compte(a) {
+        // **LE BÉNÉFICIAIRE DOIT EXISTER — ET NE PAS ÊTRE EFFACÉ.** Une
+        // autorisation vers un compte inexistant est MUETTE : elle s'affiche
+        // comme accordée et n'ouvre rien. `protocole.md` §2.2 donne
+        // `GET /v1/utilisateurs/{u}` pour qu'une faute de frappe se voie ; le
+        // vérifier ici est ce qui la rend impossible. Un compte effacé est un
+        // inconnu, ici comme là.
+        match self.entrepot.compte_vivant(a) {
             Ok(Some(_)) => {}
             Ok(None) => return Trouvaille::Refus,
             Err(_) => return Trouvaille::Rien,
@@ -1240,12 +1245,58 @@ impl Service<'_> {
         if asl_auth::decider_gestion(compte, rangee.proprietaire) == asl_auth::Decision::Refuser {
             return Trouvaille::Rien;
         }
-        match self.entrepot.revoquer_appareil(vise) {
+        // **LA DATE EST CELLE DE CETTE RACINE**, en millisecondes d'époque, et
+        // elle se réplique telle quelle : c'est de là que la règle des
+        // orphelins compte, des deux côtés (`modele.md` §2.2).
+        match self
+            .entrepot
+            .revoquer_appareil(vise, maintenant().saturating_div(1_000))
+        {
             Ok(Some(_)) => {
                 self.a_fermer.push(vise);
                 Trouvaille::Fait
             }
             Ok(None) => Trouvaille::Rien,
+            Err(_) => Trouvaille::Rien,
+        }
+    }
+
+    /// Efface le compte de cette connexion — le dernier acte de sa clé.
+    ///
+    /// # TOUT DANS UNE TRANSACTION, PUIS TOUT SE FERME (`protocole.md` §2.2)
+    ///
+    /// L'entrepôt retire ce que le compte tient et pose la marque, cause
+    /// `titulaire` ; ce qu'il rend à fermer — les machines du compte, ses
+    /// appareils, **celui qui demande compris** — rejoint la file des
+    /// révocations, et `au_tour` ferme au tour suivant le `204`. Aucune
+    /// requête de plus n'est servie entre les deux.
+    ///
+    /// **`Refus` quand la clé n'est plus celle d'un appareil vivant** — révoqué
+    /// entre sa preuve et cette requête, ou d'un compte déjà effacé — et
+    /// c'est `401` ; `Rien` quand l'entrepôt refuse, et c'est `500`.
+    ///
+    /// Et une ligne au journal d'exploitation, avec l'identifiant et la
+    /// cause (`replication.md` §8) — rien d'autre : un `u-…` seul n'est pas
+    /// une donnée personnelle.
+    fn effacer_mon_compte(&mut self) -> Trouvaille {
+        let Some(compte) = self.compte_de_la_connexion() else {
+            return Trouvaille::Refus;
+        };
+        match self.entrepot.effacer_compte(
+            compte,
+            asl_registre::Cause::Titulaire,
+            maintenant().saturating_div(1_000),
+        ) {
+            Ok(Some(Efface::Fait(retrait))) => {
+                (self.voie.journal)(&format!(
+                    "compte {compte} effacé, cause titulaire — {} appareil(s), {} machine(s), \
+                     {} service(s), {} autorisation(s) retirés",
+                    retrait.appareils, retrait.machines, retrait.services, retrait.autorisations,
+                ));
+                self.a_fermer.extend(retrait.a_fermer);
+                Trouvaille::Fait
+            }
+            Ok(Some(Efface::Deja(_)) | None) => Trouvaille::Refus,
             Err(_) => Trouvaille::Rien,
         }
     }
@@ -1851,7 +1902,7 @@ impl Service<'_> {
                             asl_api::corps::PlateformeAttestation::Android
                         }
                     },
-                    revoque: enregistre.revoque,
+                    revoque: enregistre.revoque(),
                     description,
                 };
                 let mut sortie = alloc_reponse();
@@ -2061,6 +2112,16 @@ fn instant() -> asl_annuaire::Instant {
 /// quinze à sa mort, et il est refusé pendant tout ce temps.
 const BALAYAGE_DES_CODES_MS: u64 = 5 * 60 * 1_000;
 
+/// Combien de temps entre deux passages de la règle des orphelins, en
+/// millisecondes.
+///
+/// **Une heure, et le premier passage au démarrage.** Le délai se compte en
+/// jours (`modele.md` §2.1) : une heure de retard sur trente jours ne change
+/// rien à personne, et c'est la cadence de l'expiration du journal. Au
+/// démarrage, parce qu'un annuaire qui a été arrêté longtemps doit rattraper
+/// ce qu'il aurait effacé — et parce qu'un essai n'attend pas une heure.
+pub const BALAYAGE_DES_ORPHELINS_MS: u64 = 60 * 60 * 1_000;
+
 /// Le port qu'on note quand un pair prétend parler depuis le zéro.
 const PORT_DE_SECOURS: asl_proto::Port = match asl_proto::Port::depuis_u16(1) {
     Ok(port) => port,
@@ -2121,6 +2182,18 @@ pub struct Annuaire<'a> {
     bail: asl_proto::Bail,
     /// Quand les codes expirés ont été balayés pour la dernière fois.
     dernier_balayage: u64,
+    /// Le délai de la règle des orphelins (`--orphans`), en millisecondes —
+    /// `None` pour jamais.
+    ///
+    /// `docs/modele.md` §2.1 : un compte dont TOUS les appareils sont révoqués
+    /// est effacé par la racine tant de temps après la révocation du dernier,
+    /// cause `orphelin`. Jamais sur le silence (C6). Les deux racines doivent
+    /// porter la même valeur — c'est une consigne de déploiement, pas une
+    /// vérification.
+    orphelins: Option<u64>,
+    /// Quand la règle des orphelins est passée pour la dernière fois — zéro
+    /// au démarrage, pour qu'elle passe au premier tour.
+    dernier_passage_des_orphelins: u64,
     /// Les pairs révoqués dont il reste des connexions à fermer.
     revoques: Vec<Identifiant>,
     /// Ce que le tireur demande de fermer ici : une clé de machine révoquée,
@@ -2156,6 +2229,10 @@ impl<'a> Annuaire<'a> {
     /// a refusé — auquel cas la réponse sera `500`, jamais un défi de repli.
     ///
     /// `voie` porte les clés de la voie entre racines, ou [`Voie::AUCUNE`].
+    ///
+    /// **La règle des orphelins ne passe pas tant qu'on ne l'a pas réglée**
+    /// ([`Annuaire::effacer_les_orphelins_apres`]) : une application montée
+    /// sans délai n'efface jamais un compte d'elle-même.
     #[must_use]
     pub fn new(
         entrepot: &'a Entrepot,
@@ -2182,12 +2259,25 @@ impl<'a> Annuaire<'a> {
             attestations,
             bail,
             dernier_balayage: 0,
+            orphelins: None,
+            dernier_passage_des_orphelins: 0,
             revoques: Vec::new(),
             voie,
             pair_attendu,
             suite: None,
             fermetures: None,
         }
+    }
+
+    /// Règle le délai de la règle des orphelins, en millisecondes
+    /// (`--orphans`, `docs/modele.md` §2.1).
+    ///
+    /// **APPELÉ UNE FOIS, AU MONTAGE**, comme [`Annuaire::ecouter_les_fermetures`]
+    /// — et pas du tout pour `--orphans 0` : sans délai, la racine n'efface
+    /// jamais un compte d'elle-même. Le premier passage a lieu au premier
+    /// tour, puis toutes les heures.
+    pub const fn effacer_les_orphelins_apres(&mut self, delai_ms: u64) {
+        self.orphelins = Some(delai_ms);
     }
 
     /// Écoute ce que le tireur demande de fermer ici (`docs/replication.md`
@@ -2384,6 +2474,60 @@ impl<'a> Annuaire<'a> {
         let _ = self.entrepot.expirer_les_enrolements(maintenant_ms);
     }
 
+    /// Efface les comptes orphelins, au démarrage puis de loin en loin
+    /// (`docs/modele.md` §2.1, la règle des orphelins).
+    ///
+    /// # ICI, ET NON DANS UNE TÂCHE À PART
+    ///
+    /// Comme le balayage des codes : c'est un passage de table, rare, qui ne
+    /// change aucune décision de requête. Mais lui a des EFFETS VIVANTS — les
+    /// machines et appareils d'un compte effacé doivent voir leurs connexions
+    /// tomber ici (`protocole.md` §2.1 quater) —, et c'est cette boucle qui
+    /// tient les connexions. Une tâche à part devrait les lui renvoyer par un
+    /// canal ; un passage dans `au_tour` les verse dans la file des révocations
+    /// directement, comme une révocation locale.
+    ///
+    /// **Chaque effacement est dit**, avec l'identifiant et la cause
+    /// (`replication.md` §8) — et rien d'autre.
+    fn effacer_les_orphelins(&mut self) {
+        let Some(delai) = self.orphelins else {
+            return;
+        };
+        let maintenant_ms = maintenant().saturating_div(1_000);
+        if maintenant_ms.saturating_sub(self.dernier_passage_des_orphelins)
+            < BALAYAGE_DES_ORPHELINS_MS
+            && self.dernier_passage_des_orphelins != 0
+        {
+            return;
+        }
+        self.dernier_passage_des_orphelins = maintenant_ms;
+        // Une base qui refuse ne doit pas arrêter la boucle : le passage
+        // reviendra, et il est dit.
+        match self
+            .entrepot
+            .effacer_les_orphelins(maintenant_ms.saturating_sub(delai), maintenant_ms)
+        {
+            Ok(effaces) => {
+                for (compte, retrait) in effaces {
+                    (self.voie.journal)(&format!(
+                        "compte {compte} effacé, cause orphelin — {} appareil(s), {} machine(s), \
+                         {} service(s), {} autorisation(s) retirés",
+                        retrait.appareils,
+                        retrait.machines,
+                        retrait.services,
+                        retrait.autorisations,
+                    ));
+                    self.revoques.extend(retrait.a_fermer);
+                }
+            }
+            Err(quoi) => {
+                (self.voie.journal)(&format!(
+                    "la règle des orphelins n'a pas pu passer : {quoi}"
+                ));
+            }
+        }
+    }
+
     /// Ferme cette connexion sur une faute d'HTTP/3.
     ///
     /// §8.1 : le code applicatif dit au pair ce qu'il a fait de travers. Sans
@@ -2422,6 +2566,7 @@ impl Application for Annuaire<'_> {
         // tombée sans qu'on l'apprenne n'a personne pour la retirer.
         self.vivier.oublier_les_expirees(instant());
         self.balayer_les_codes();
+        self.effacer_les_orphelins();
         // **LA VOIE ENTRE RACINES SUIT LE JOURNAL ICI** : c'est le seul
         // rendez-vous qui n'appartienne à aucune connexion, et une écriture
         // faite sur une connexion se pousse sur une autre.

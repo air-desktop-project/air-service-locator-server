@@ -62,7 +62,7 @@ use ams_quic::RecvState;
 use ams_quic_tls::Connection;
 use asl_cle::{ClePublique, CleSecrete, Defi, LiaisonDeCanal, Signature, identifiant_de_racine};
 use asl_id::{Genre, Identifiant};
-use asl_registre::Cadre;
+use asl_registre::{Cadre, Operation};
 use asl_store::{Applique, Entrepot, MotifDeRefus};
 use tokio::net::UdpSocket;
 
@@ -459,6 +459,20 @@ impl Tireur {
             match verdict {
                 Applique::Faite { effets, .. } => {
                     appliquees = appliquees.saturating_add(1);
+                    // **UN EFFACEMENT DE COMPTE SE DIT, « APPLIQUÉ » ET NON
+                    // « EFFACÉ »** (`replication.md` §3.3, §8) : l'identifiant,
+                    // la cause portée par l'opération, et rien d'autre. Qui a
+                    // effacé est dit par l'estampille. C'est la seule opération
+                    // qui ait sa ligne — jamais une ligne par opération.
+                    if let Cadre::Operation {
+                        operation: Operation::CompteEfface { compte, cause, .. },
+                        ..
+                    } = cadre
+                    {
+                        (self.journal)(format!(
+                            "compte {compte} appliqué : effacé chez {pair}, cause {cause}"
+                        ));
+                    }
                     for quoi in effets.a_fermer {
                         // Le récepteur est fermé quand le serveur s'éteint :
                         // il n'y a alors plus personne pour fermer, et ce
