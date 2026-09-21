@@ -763,7 +763,13 @@ pas promettre.
   optional | invitation`), et **aucune n'est une condition du service** : une
   racine en `optional` ou en `invitation` rend tout ce qu'une racine en
   `required` rend. L'attestation qualifie l'entrée d'un appareil (`modele.md`
-  §2.2, la valeur `attestation`) ; elle ne conditionne rien d'autre.
+  §2.2, la valeur `attestation`) ; elle ne conditionne rien d'autre. **Et
+  elle qualifie CHAQUE entrée, pas seulement la première** (2026-09-21) : un
+  appareil qui rejoint un compte présente sa chaîne comme le premier l'a
+  fait, à sa preuve (`POST /v1/attestation`, `protocole.md` §2.2), et une
+  racine en `required` ne le tient pour entré qu'à ce moment-là — d'où la
+  valeur `attendue`. Une posture qui ne jugerait que le premier appareil
+  serait une posture qu'un second appareil contourne.
 - **Les racines de confiance sont des fichiers épinglés par l'exploitant**
   (`--android-roots`, et la racine App Attest dans le binaire), comme
   `--peer-ca` l'est pour la réplication. Aucune ne demande un compte, une

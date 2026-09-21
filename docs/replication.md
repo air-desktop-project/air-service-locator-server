@@ -173,8 +173,9 @@ l'heure d'arrivée.
 émis, et la consommation SUIT l'émission sur cette même racine : les deux ne
 peuvent pas arriver dans l'ordre inverse chez un pair, contrairement à un alias
 que deux racines réclament chacune de son côté. L'invariant de §3.1 s'éprouve
-donc sur les cas VRAIMENT réordonnables (les sept autres lignes — l'effacement
-d'un compte compris, depuis le 2026-09-18), et ce cas-ci
+donc sur les cas VRAIMENT réordonnables (les huit autres lignes — l'effacement
+d'un compte compris, depuis le 2026-09-18, et l'attestation d'un appareil
+révoqué, depuis le 2026-09-21), et ce cas-ci
 par une régression dirigée qui rejoue « émettre, consommer, présenter ailleurs
 avant la propagation » — la fenêtre —, non par les permutations. Ce qui la
 ferme reste la règle du cas suivant : à code égal, la première consommation
@@ -183,6 +184,7 @@ gagne.
 | **Deux codes émis pour la même machine** | Le plus récent gagne, l'autre meurt — c'est déjà la règle locale (« le code précédent meurt à l'émission du suivant »). | Un code affiché sur un écran ne marche plus. Il se réémet. |
 | **Le même service déclaré des deux côtés** — un daemon bascule pendant une coupure et réannonce `(machine, nom)` chez l'autre, qui lui attribue un second `s-…` | **Le plus ancien gagne, l'autre s'efface.** Un service ne bouge jamais et ne se retire jamais ; les deux racines finissent donc avec le même, dans tous les ordres. | Un `s-…` qu'un client a pu voir disparaît. Les clients résolvent par le NOM (`protocole.md` §3), et l'identifiant n'est qu'attribué à la première annonce : la perte est un identifiant, pas un service. |
 | **Une description ou un jeton déposés des deux côtés** | Le plus récent gagne — la règle locale, « le neuf remplace l'ancien ». | Une étiquette. |
+| **Un appareil attesté d'un côté, révoqué de l'autre** — le nouveau téléphone prouve chez `argon` pendant que l'ancien le révoque chez `nitrogen` (2026-09-21) | **Les deux s'appliquent, quel que soit l'ordre.** L'attestation est un fait sur la clé — elle ne va que d'`aucune` ou `attendue` vers une valeur prouvée, jamais en arrière — et la révocation un fait sur l'appareil ; ils ne se contredisent pas, et les deux racines finissent avec `android, révoqué`. Ne pas poser l'attestation sur un appareil révoqué aurait fait diverger la valeur selon l'ordre d'arrivée. | Rien : l'appareil est révoqué, et sa connexion fermée par la révocation (§3.3). Que sa clé ait été attestée est ce que l'écran d'après une perte montre, comme le modèle. |
 
 **Ce que les règles ont en commun, et qui les rend explicables** : ce qui est
 irréversible chez soi (une révocation, une consommation, un effacement de
@@ -325,6 +327,7 @@ le disque.
 | `alias` | compte ‖ alias ou rien | Réclamation courante du compte : le plus récent. Le titulaire d'un alias se recalcule (§3.2). |
 | `appareil` | identifiant ‖ appareil | Insérer si absent. |
 | `appareil-revoque` | identifiant | Marquer, retirer le jeton. Toujours. |
+| `appareil-atteste` | identifiant ‖ attestation (1) | **Toujours**, révoqué ou non (§3.2) — poser la valeur si l'appareil est `aucune` ou `attendue` ; s'il porte déjà une valeur prouvée, rien : une clé ne s'atteste qu'une fois, et deux racines ne peuvent en avoir vu qu'une. Un appareil `attendue` qui devient `android` ou `apple` est désormais vivant ici aussi : sa prochaine preuve est servie. Décidé le 2026-09-21. |
 | `description` | appareil ‖ description | Le plus récent. |
 | `poussee` | appareil ‖ jeton | Le plus récent ; refusé si l'appareil est révoqué. |
 | `machine` | identifiant ‖ machine, sans clé | Insérer si absent. |
@@ -698,6 +701,7 @@ d'exploitation dit la même chose, à qui sait lire la machine.
 | 22 | **L'effacement d'un compte se réplique, comme une révocation** : l'opération `compte-efface` (identifiant, date, cause) gagne sur toute écriture concurrente du même compte, se rejoue comme effet vivant chez l'autre, sans notification ; une écriture arrivée après est refusée, le curseur avance. C'est la seule opération qui efface physiquement ; la marque du compte reste, et c'est elle qui figure dans l'instantané. `appareil-revoque` porte désormais `révoqué le`. | **Décidé** (2026-09-18, Thierry) |
 | 23 | **La règle des orphelins** : un compte sans aucun appareil vivant — tous révoqués, jamais « silencieux » (C6) — est effacé par la racine **trente jours** après la révocation du dernier, cause `orphelin`, journalisé ; `--orphans <days>`, `0` = jamais, même valeur sur les deux racines ; chacune peut écrire, la première fait appliquer l'autre. | **Décidé** (2026-09-18, Thierry) — la règle plutôt qu'un verbe d'exploitant |
 | 24 | **`asl-server --forget <u-…>`**, hors ligne, entrepôt arrêté, un identifiant à la fois, cause `exploitant`, journalisé : l'exception pour « la clé est perdue et l'on le sait », pas un outil de modération. Couvre les trois orphelins de `nitrogen` que la règle n'attrape pas. | **Décidé** (2026-09-18) |
+| 25 | **L'attestation d'un appareil qui rejoint se réplique comme un fait sur la clé** : l'opération `appareil-atteste` (identifiant, attestation) ne va que d'`aucune` ou `attendue` vers une valeur prouvée, s'applique toujours — révoqué ou non, pour converger quel que soit l'ordre —, et rend vivant chez l'autre racine un appareil qu'elle tenait `attendue`. `attendue` est une valeur d'`attestation` portée par l'opération `appareil` (format, cran mineur à la PR de code) ; elle ne s'expire pas. Le défi de la chaîne n'est pas répliqué : il vit dans la connexion du nouvel appareil, et la preuve se fait là. | **Décidé** (2026-09-21) |
 
 ---
 
