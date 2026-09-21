@@ -750,12 +750,14 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
         ]
     );
 
-    // L'appareil révoqué : l'enregistrement, puis la révocation ; puis ce qu'il
-    // dit de lui. Le jeton est parti avec la révocation.
+    // L'appareil révoqué : l'enregistrement, puis la révocation, puis son
+    // attestation — elle voyage à part, parce que l'autre racine le tient
+    // peut-être `attendue` ; puis ce qu'il dit de lui. Le jeton est parti
+    // avec la révocation.
     let appareil = base.appareil(iphone).expect("lisible").expect("il est là");
     assert!(appareil.revoque());
     assert_eq!(
-        &operations[6..9],
+        &operations[6..10],
         [
             (
                 e(13),
@@ -769,6 +771,13 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
                 Operation::AppareilRevoque {
                     appareil: iphone,
                     revoque_le: REVOQUE_LE,
+                },
+            ),
+            (
+                e(13),
+                Operation::AppareilAtteste {
+                    appareil: iphone,
+                    atteste: Attestation::Apple,
                 },
             ),
             (
@@ -792,7 +801,7 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
 
     // Le code en attente, le service, l'autorisation révoquée.
     assert_eq!(
-        &operations[9..],
+        &operations[10..],
         [
             (
                 e(14),
@@ -3292,5 +3301,80 @@ fn revoquer_un_appareil_pose_sa_date_une_fois() {
     );
     assert_eq!(base.compteur().expect("lisible"), compteur);
     assert_eq!(base.operations_gardees().expect("lisible"), gardees);
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn attester_un_appareil_pose_une_preuve_une_fois_et_jamais_en_arriere() {
+    // **UNE CLÉ NE S'ATTESTE QU'UNE FOIS** (`replication.md` §5.2,
+    // `appareil-atteste`) : `attendue` devient `android`, l'opération est
+    // journalisée ; une seconde chaîne ne change rien — ni n'écrit, ni ne
+    // journalise —, et `aucune` ou `attendue` ne s'écrivent pas par ce verbe.
+    let (base, chemin) = entrepot("atteste");
+    let qui = un(Genre::Utilisateur, 1);
+    let quel = un(Genre::Appareil, 2);
+    base.creer_compte(qui, Provenance::Ici, None)
+        .expect("compte");
+    base.creer_appareil(
+        quel,
+        Provenance::Ici,
+        qui,
+        [0x11; 33],
+        Attestation::Attendue,
+    )
+    .expect("appareil");
+    let avant = base
+        .attester_appareil(quel, Attestation::Android)
+        .expect("lisible")
+        .expect("là");
+    assert_eq!(
+        avant.atteste,
+        Attestation::Attendue,
+        "rendu tel qu'il était"
+    );
+    let apres = base.appareil(quel).expect("lisible").expect("là");
+    assert_eq!(apres.atteste, Attestation::Android);
+    assert_eq!(apres.estampille, e(3), "une écriture de plus");
+    let compteur = base.compteur().expect("lisible");
+    let gardees = base.operations_gardees().expect("lisible");
+    assert_eq!(
+        operations(&base, 2),
+        [(
+            e(3),
+            Operation::AppareilAtteste {
+                appareil: quel,
+                atteste: Attestation::Android,
+            }
+        )],
+        "l'opération est journalisée"
+    );
+
+    let encore = base
+        .attester_appareil(quel, Attestation::Apple)
+        .expect("lisible")
+        .expect("là");
+    assert_eq!(encore.atteste, Attestation::Android, "déjà prouvé : rien");
+    assert_eq!(
+        base.appareil(quel).expect("lisible").expect("là").atteste,
+        Attestation::Android
+    );
+    assert_eq!(base.compteur().expect("lisible"), compteur);
+    assert_eq!(base.operations_gardees().expect("lisible"), gardees);
+
+    for pas_une_preuve in [Attestation::Aucune, Attestation::Attendue] {
+        assert!(
+            matches!(
+                base.attester_appareil(quel, pas_une_preuve),
+                Err(Faute::Enregistrement(asl_registre::Faute::Etiquette { .. }))
+            ),
+            "{pas_une_preuve:?}"
+        );
+    }
+    assert!(
+        base.attester_appareil(un(Genre::Appareil, 9), Attestation::Android)
+            .expect("lisible")
+            .is_none(),
+        "un inconnu rend rien"
+    );
     let _ = std::fs::remove_file(&chemin);
 }

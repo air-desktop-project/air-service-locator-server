@@ -338,6 +338,27 @@ fn conflits() -> Vec<(Estampille, Operation)> {
                 },
             },
         ),
+        // Ligne « attesté d'un côté, révoqué de l'autre » (2026-09-21) — d1
+        // prouve sa chaîne chez le pair pendant qu'`autre` le révoque : les
+        // deux s'appliquent, quel que soit l'ordre, et d1 finit `android,
+        // révoqué`. Une seconde attestation, Apple, ne change rien : une clé
+        // ne s'atteste qu'une fois, et c'est la première appliquée qui tient
+        // — ici la seule que les deux racines aient pu voir, puisqu'elles
+        // convergent : Android par les deux estampilles ci-dessous.
+        (
+            est(pair(), 133),
+            Operation::AppareilAtteste {
+                appareil: d1,
+                atteste: Attestation::Android,
+            },
+        ),
+        (
+            est(autre(), 134),
+            Operation::AppareilAtteste {
+                appareil: d1,
+                atteste: Attestation::Android,
+            },
+        ),
         // Ligne 2 — un alias pris des deux côtés. Le plus ancien tient : c1.
         (
             est(pair(), 102),
@@ -690,6 +711,13 @@ fn l_invariant_de_convergence() {
             .expect("lisible")
             .is_none(),
         "le jeton déposé pendant la fenêtre est parti avec la révocation"
+    );
+    // Ligne « attesté, révoqué » : les deux faits tiennent, dans les deux
+    // ordres — l'écran d'après une perte montre que la clé était attestée.
+    assert_eq!(
+        d1.atteste,
+        Attestation::Android,
+        "l'attestation est posée sur l'appareil révoqué"
     );
     // Ligne 3 : le nom le plus récent, l'annonce retirée.
     let m1 = base

@@ -290,7 +290,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.12.0_amd64.deb
+sudo dpkg -i asl-server_0.13.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
@@ -381,6 +381,23 @@ sur le silence : un téléphone dans un tiroir est un appareil vivant (C6).
   suffit**, la réplication porte l'autre. Sans `--identity-key`, l'opération
   est estampillée sous seize zéros et le daemon la fera passer sous son
   identité au démarrage suivant — donnez la clé, c'est plus net.
+
+**Un appareil qui rejoint s'atteste lui-même** (`docs/protocole.md` §2.2,
+depuis 0.13.0). Le premier appareil d'un compte entre attesté à sa création ;
+le second n'avait aucun moyen de l'être — `POST /v1/appareils` ne porte que la
+clé, et l'ancien appareil ne peut pas apporter une chaîne liée au canal du
+nouveau. Le nouvel appareil tire donc un défi sur sa connexion nue AVANT de
+générer sa clé, la montre à l'ancien (qui l'apporte), puis prouve sa clé ET
+présente sa chaîne d'un même défi par **`POST /v1/attestation`**, sur la
+connexion tenue depuis le début. Sous `--attestation optional`, l'appareil
+apporté entre `aucune` et sa chaîne le fait passer à `android`/`apple` (refusée,
+`204` quand même) ; sous `required`, il entre **`attendue`** — visible,
+révocable, `401` à toute preuve nue — jusqu'à ce que sa chaîne tienne (sinon
+`403`). **Rien à faire au déploiement** : `attendue` est une cinquième valeur
+d'attestation, un octet dans un champ qui existait déjà — un entrepôt d'avant
+se relit tel quel, et seule une version ANCIENNE relisant une base neuve
+buterait sur l'octet, comme pour tout retour arrière. `attendue` ne s'expire
+pas.
 
 **La reprise au format des dates** (0.11.0) : à sa première ouverture par ce
 binaire, un entrepôt de 0.5.0 à 0.10.1 est repris dans une transaction — les

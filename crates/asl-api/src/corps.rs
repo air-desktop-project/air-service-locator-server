@@ -266,6 +266,154 @@ impl<'a> CreationDeCompte<'a> {
     }
 }
 
+// ── Attester un appareil qui rejoint ────────────────────────────────────────
+
+/// Ce qu'occupe un identifiant sur le fil : le genre, puis seize octets.
+const IDENTIFIANT_OCTETS: usize = 1 + 16;
+
+/// Ce que fait la partie de LONGUEUR FIXE du corps de `POST /v1/attestation` :
+/// l'identifiant de l'appareil (genre `a` compris), la preuve, la plate-forme.
+/// La chaîne, variable, vient après.
+pub const ATTESTATION_PREFIXE_OCTETS: usize = IDENTIFIANT_OCTETS + PREUVE_APPAREIL_OCTETS + 1;
+
+/// Le plus long corps de `POST /v1/attestation` : le préfixe, puis la chaîne.
+pub const ATTESTATION_CORPS_MAX: usize = ATTESTATION_PREFIXE_OCTETS + ATTESTATION_MAX;
+
+/// Le corps de `POST /v1/attestation`, tel qu'il arrive sur le fil
+/// (`protocole.md` §2.2, « Attester un appareil qui rejoint », 2026-09-21).
+///
+/// # LA PREUVE DE `POST /v1/defi`, AUGMENTÉE DE LA CHAÎNE
+///
+/// ```text
+/// genre `a` ‖ identifiant (16) ‖ signature (64) ‖ plate-forme (1) ‖ attestation (0…8 Kio)
+/// ```
+///
+/// Les quatre-vingt-un premiers octets sont exactement ce que `POST /v1/defi`
+/// reçoit d'un appareil : c'est la MÊME preuve, sur le MÊME défi — celui que
+/// la connexion a tiré avant que la clé soit générée. Puis la plate-forme et
+/// la chaîne, comme dans [`CreationDeCompte`] : un seul défi couvre la preuve
+/// et l'attestation.
+///
+/// **Le genre est exigé, et c'est `a`** : ce verbe ne sert qu'un appareil.
+/// Une machine ou une racine n'ont rien à attester, et lire leur preuve ici
+/// ouvrirait une seconde porte vers `Session::verifier` pour rien.
+///
+/// # CE QUE CE CODEC NE FAIT PAS
+///
+/// Comme [`CreationDeCompte`] : il n'interprète NI la signature NI la chaîne.
+/// Il rend l'identifiant et trois tranches, et refuse ce qui n'a pas la forme
+/// d'un corps — plate-forme inconnue, `0` suivi d'une chaîne, `1`, `2` ou `3`
+/// sans rien derrière.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttestationDAppareil<'a> {
+    /// L'appareil qui prouve — et dont la clé rangée doit vérifier la preuve.
+    pub appareil: Identifiant,
+    /// La signature du genre `a` sur le défi de cette connexion,
+    /// [`PREUVE_APPAREIL_OCTETS`] octets, non interprétée.
+    pub preuve: &'a [u8],
+    /// La plate-forme d'attestation déclarée.
+    pub plateforme: PlateformeAttestation,
+    /// L'attestation, telle quelle — ou vide quand la plate-forme est
+    /// [`PlateformeAttestation::Aucune`].
+    pub attestation: &'a [u8],
+}
+
+impl<'a> AttestationDAppareil<'a> {
+    /// Décode le corps de `POST /v1/attestation`.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::CorpsTropCourt`] sous le préfixe, [`Erreur::CorpsTropLong`]
+    /// au-delà de [`ATTESTATION_CORPS_MAX`], [`Erreur::IdentifiantInvalide`]
+    /// si le premier octet n'est pas le genre `a`, et les fautes de cohérence
+    /// de [`CreationDeCompte::decoder`] entre la plate-forme et la chaîne.
+    pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
+        if octets.len() < ATTESTATION_PREFIXE_OCTETS {
+            return Err(Erreur::CorpsTropCourt {
+                obtenue: octets.len(),
+                attendue: ATTESTATION_PREFIXE_OCTETS,
+            });
+        }
+        if octets.len() > ATTESTATION_CORPS_MAX {
+            return Err(Erreur::CorpsTropLong {
+                obtenue: octets.len(),
+                maximum: ATTESTATION_CORPS_MAX,
+            });
+        }
+        // **L'OCTET EXACT**, comme le registre relit un genre : ces octets
+        // sont ceux qu'une application a écrits, et `a` n'a qu'une écriture.
+        if octets[0] != Genre::Appareil.prefixe() {
+            return Err(Erreur::IdentifiantInvalide { position: 0 });
+        }
+        let mut entropie = [0_u8; 16];
+        entropie.copy_from_slice(&octets[1..IDENTIFIANT_OCTETS]);
+        let apres_preuve = IDENTIFIANT_OCTETS + PREUVE_APPAREIL_OCTETS;
+        let preuve = &octets[IDENTIFIANT_OCTETS..apres_preuve];
+        let plateforme = PlateformeAttestation::depuis(octets[apres_preuve])?;
+        let attestation = &octets[ATTESTATION_PREFIXE_OCTETS..];
+
+        if plateforme.attend_une_attestation() {
+            if attestation.is_empty() {
+                return Err(Erreur::AttestationManquante);
+            }
+        } else if !attestation.is_empty() {
+            return Err(Erreur::AttestationInattendue {
+                obtenue: attestation.len(),
+            });
+        }
+
+        Ok(Self {
+            appareil: Identifiant::depuis_entropie(Genre::Appareil, entropie),
+            preuve,
+            plateforme,
+            attestation,
+        })
+    }
+
+    /// Encode ce corps, et rend le nombre d'octets écrits.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`] si `sortie` ne suffit pas,
+    /// [`Erreur::IdentifiantInvalide`] si l'identifiant n'est pas un `a-…`,
+    /// et les mêmes fautes de cohérence que [`Self::decoder`].
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        if self.appareil.genre() != Genre::Appareil {
+            return Err(Erreur::IdentifiantInvalide { position: 0 });
+        }
+        if self.preuve.len() != PREUVE_APPAREIL_OCTETS {
+            return Err(Erreur::CorpsTropCourt {
+                obtenue: self.preuve.len(),
+                attendue: PREUVE_APPAREIL_OCTETS,
+            });
+        }
+        if self.plateforme.attend_une_attestation() == self.attestation.is_empty() {
+            return Err(if self.attestation.is_empty() {
+                Erreur::AttestationManquante
+            } else {
+                Erreur::AttestationInattendue {
+                    obtenue: self.attestation.len(),
+                }
+            });
+        }
+        let total = ATTESTATION_PREFIXE_OCTETS.saturating_add(self.attestation.len());
+        if total > ATTESTATION_CORPS_MAX {
+            return Err(Erreur::CorpsTropLong {
+                obtenue: total,
+                maximum: ATTESTATION_CORPS_MAX,
+            });
+        }
+        let place = sortie.get_mut(..total).ok_or(Erreur::TamponTropPetit)?;
+        place[0] = Genre::Appareil.prefixe();
+        place[1..IDENTIFIANT_OCTETS].copy_from_slice(self.appareil.octets());
+        let apres_preuve = IDENTIFIANT_OCTETS + PREUVE_APPAREIL_OCTETS;
+        place[IDENTIFIANT_OCTETS..apres_preuve].copy_from_slice(self.preuve);
+        place[apres_preuve] = self.plateforme.etiquette();
+        place[ATTESTATION_PREFIXE_OCTETS..].copy_from_slice(self.attestation);
+        Ok(total)
+    }
+}
+
 // ── Déclarer une machine ────────────────────────────────────────────────────
 
 /// Les champs de `POST /v1/machines`, dans l'ordre où l'encodeur les écrit.
@@ -1151,27 +1299,59 @@ impl<'a> MachineVue<'a> {
 
 // ── Ce qu'une liste d'appareils rend ────────────────────────────────────────
 
-/// Le mot JSON d'une attestation, tel qu'une liste le rend.
-const fn mot_d_attestation(plateforme: PlateformeAttestation) -> &'static str {
-    match plateforme {
-        PlateformeAttestation::Aucune => "aucune",
-        PlateformeAttestation::Apple => "apple",
-        PlateformeAttestation::Android => "android",
-        PlateformeAttestation::Invitation => "invitation",
-    }
+/// Sous quoi un appareil est entré, tel qu'une liste le rend
+/// (`docs/modele.md` §2.2, la valeur `attestation`).
+///
+/// # CINQ VALEURS, ET CE N'EST PAS [`PlateformeAttestation`]
+///
+/// Une plate-forme est ce qu'une application DÉCLARE en présentant une
+/// chaîne ; ceci est ce que l'annuaire a RETENU de l'entrée d'un appareil. Les
+/// quatre premières se recouvrent ; la cinquième, **`attendue`**, n'est pas une
+/// plate-forme : c'est une clé apportée par un autre appareil du compte sous
+/// une posture exigée, que son porteur n'a pas encore prouvée ni attestée
+/// (`protocole.md` §2.2, « Attester un appareil qui rejoint », 2026-09-21).
+/// Il n'est pas entré ; l'écran le dit « en attente d'attestation », et il se
+/// révoque comme un autre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestationRendue {
+    /// Entré sans preuve, sous une posture facultative.
+    Aucune,
+    /// Cautionné par Apple App Attest.
+    Apple,
+    /// Cautionné par l'attestation de clé d'Android.
+    Android,
+    /// Entré sur un code d'invitation émis par l'exploitant.
+    Invitation,
+    /// Apporté, pas encore prouvé ni attesté — sous une posture exigée.
+    Attendue,
 }
 
-/// L'attestation que ce mot désigne, ou un refus.
-fn attestation_du_mot(texte: &str, position: usize) -> Result<PlateformeAttestation, Erreur> {
-    match texte {
-        "aucune" => Ok(PlateformeAttestation::Aucune),
-        "apple" => Ok(PlateformeAttestation::Apple),
-        "android" => Ok(PlateformeAttestation::Android),
-        "invitation" => Ok(PlateformeAttestation::Invitation),
-        _ => Err(Erreur::JsonAttendu {
-            position,
-            attendu: "aucune, apple, android ou invitation",
-        }),
+impl AttestationRendue {
+    /// Son mot JSON, tel qu'une liste le rend.
+    #[must_use]
+    pub const fn mot(self) -> &'static str {
+        match self {
+            Self::Aucune => "aucune",
+            Self::Apple => "apple",
+            Self::Android => "android",
+            Self::Invitation => "invitation",
+            Self::Attendue => "attendue",
+        }
+    }
+
+    /// L'attestation que ce mot désigne, ou un refus.
+    fn depuis_le_mot(texte: &str, position: usize) -> Result<Self, Erreur> {
+        match texte {
+            "aucune" => Ok(Self::Aucune),
+            "apple" => Ok(Self::Apple),
+            "android" => Ok(Self::Android),
+            "invitation" => Ok(Self::Invitation),
+            "attendue" => Ok(Self::Attendue),
+            _ => Err(Erreur::JsonAttendu {
+                position,
+                attendu: "aucune, apple, android, invitation ou attendue",
+            }),
+        }
     }
 }
 
@@ -1189,8 +1369,9 @@ pub struct AppareilRendu<'a> {
     /// `DELETE /v1/appareils/{a}`.**
     pub appareil: Identifiant,
     /// Sous quelle attestation il est entré (`docs/modele.md` §2.2 : ce qu'on
-    /// regarde le jour où l'on resserre la posture).
-    pub attestation: PlateformeAttestation,
+    /// regarde le jour où l'on resserre la posture) — ou `attendue`, s'il
+    /// n'est pas encore entré.
+    pub attestation: AttestationRendue,
     /// A-t-il été révoqué ? **Un appareil révoqué reste rendu** — c'est l'écran
     /// qu'on regarde après avoir perdu un téléphone, et une ligne disparue n'y
     /// dirait rien.
@@ -1222,7 +1403,7 @@ impl<'a> AppareilRendu<'a> {
         ecrivain.pousser(b"{\"appareil\":\"");
         ecrivain.pousser(self.appareil.texte().as_str().as_bytes());
         ecrivain.pousser(b"\",\"attestation\":\"");
-        ecrivain.pousser(mot_d_attestation(self.attestation).as_bytes());
+        ecrivain.pousser(self.attestation.mot().as_bytes());
         ecrivain.pousser(b"\",\"revoque\":");
         ecrivain.pousser(if self.revoque { b"true" } else { b"false" });
         if let Some(description) = &self.description {
@@ -1272,7 +1453,11 @@ impl<'a> AppareilRendu<'a> {
                 "attestation" => {
                     let ou = lecteur.position();
                     let texte = lecteur.chaine()?;
-                    poser(&mut attestation, attestation_du_mot(texte, ou)?, position)?;
+                    poser(
+                        &mut attestation,
+                        AttestationRendue::depuis_le_mot(texte, ou)?,
+                        position,
+                    )?;
                 }
                 "revoque" => poser(&mut revoque, lire_booleen(&mut lecteur)?, position)?,
                 "plateforme" => {

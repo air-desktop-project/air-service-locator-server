@@ -132,7 +132,8 @@ pub enum Exigence {
     /// satisfait est ce qui la ferme à tout le reste — et il n'y a qu'une
     /// clé qui la satisfasse, celle de `--peer-key`.
     Racine,
-    /// **Rien.** Trois ressources seulement, et chacune pour une raison écrite.
+    /// **Rien.** Sept ressources, plus `/v1/defi` qui produit la preuve, et
+    /// chacune pour une raison écrite — voir [`Ressource::exigence`].
     Aucune,
 }
 
@@ -230,6 +231,30 @@ pub enum Ressource<'a> {
     Defi,
     /// `/v1/comptes` — créer un compte et enrôler son premier appareil.
     Comptes,
+    /// `/v1/attestation` — **un appareil qui rejoint prouve sa clé ET
+    /// présente sa chaîne, d'un même défi** (`protocole.md` §2.2, « Attester
+    /// un appareil qui rejoint », 2026-09-21).
+    ///
+    /// # ELLE N'EXIGE RIEN, ET C'EST LA SEPTIÈME
+    ///
+    /// C'est une preuve, comme `POST /v1/defi` : la signature du genre `a`
+    /// sur le défi de cette connexion, suivie de la plate-forme et de la
+    /// chaîne d'attestation. Exiger un appareil authentifié serait exiger ce
+    /// qu'elle produit. Et c'est bien LA connexion du nouvel appareil qui la
+    /// porte — celle où le défi a été tiré avant de générer la clé —, pas
+    /// celle de l'appareil qui l'a apporté : une chaîne du Keystore est liée
+    /// au défi de son canal, et l'ancien appareil n'en sait rien.
+    ///
+    /// # AU SINGULIER, COMME `/v1/compte`
+    ///
+    /// *Mon* attestation, celle de la clé qui signe. Pas
+    /// `PUT /v1/appareils/{a}/attestation` : une attestation ne se remplace
+    /// pas — une clé est attestée à sa génération, une fois —, et rien dans
+    /// le chemin ne nomme l'appareil deux fois. Pas `POST /v1/defi` allongé
+    /// non plus : ce corps-là fait quatre-vingt-un octets pour trois genres,
+    /// et une queue variable pour le seul genre `a` ferait d'un corps fixe un
+    /// corps qui l'est parfois.
+    Attestation,
     /// `/v1/compte` — **effacer MON compte**, celui de la clé qui signe
     /// (`protocole.md` §2.2, « Effacer mon compte », 2026-09-18).
     ///
@@ -422,7 +447,7 @@ impl Ressource<'_> {
         match self {
             Self::Annonce => &[Methode::Post],
             Self::Defi => &[Methode::Get, Methode::Post],
-            Self::Comptes | Self::Enrolement => &[Methode::Post],
+            Self::Comptes | Self::Attestation | Self::Enrolement => &[Methode::Post],
             Self::Utilisateur { .. }
             | Self::MachinesUtilisateur { .. }
             | Self::Moi
@@ -462,10 +487,13 @@ impl Ressource<'_> {
 
     /// Ce qu'il faut prouver pour l'atteindre.
     ///
-    /// # LES SIX RESSOURCES SANS EXIGENCE, ET POURQUOI CHACUNE
+    /// # LES SEPT RESSOURCES SANS EXIGENCE, ET POURQUOI CHACUNE
     ///
     /// - **`/v1/comptes`** : on n'a pas encore de compte. C'est l'attestation de
     ///   la plate-forme qui protège ce chemin, pas une signature de compte.
+    /// - **`/v1/attestation`** : c'est une PREUVE, comme `/v1/defi` — la
+    ///   signature d'un appareil qui rejoint, avec sa chaîne. Voir
+    ///   [`Ressource::Attestation`].
     /// - **`/v1/enrolement`** : la machine n'a pas encore de clé — c'est
     ///   justement ce qu'elle vient poser. **Le code d'enrôlement EST le
     ///   justificatif**, et il est nommé comme tel (C14) : à usage unique,
@@ -484,6 +512,7 @@ impl Ressource<'_> {
         match self {
             Self::Defi
             | Self::Comptes
+            | Self::Attestation
             | Self::Enrolement
             | Self::AliasResolu { .. }
             | Self::Vu
@@ -774,6 +803,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "annonce"] => Ok(Ressource::Annonce),
         ["v1", "defi"] => Ok(Ressource::Defi),
         ["v1", "comptes"] => Ok(Ressource::Comptes),
+        ["v1", "attestation"] => Ok(Ressource::Attestation),
         ["v1", "compte"] => Ok(Ressource::Compte),
         ["v1", "enrolement"] => Ok(Ressource::Enrolement),
         ["v1", "utilisateurs", compte] => Ok(Ressource::Utilisateur {

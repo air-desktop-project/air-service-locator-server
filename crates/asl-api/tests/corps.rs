@@ -1327,7 +1327,7 @@ fn une_description_ne_tient_pas_dans_un_tampon_trop_court() {
 // ── Ce qu'une liste de machines rend ────────────────────────────────────────
 
 use asl_api::corps::{
-    AppareilRendu, DescriptionAppareil, MachineRendue, PlateformeAttestation, Systeme,
+    AppareilRendu, AttestationRendue, DescriptionAppareil, MachineRendue, Systeme,
 };
 
 /// Encode une machine rendue, et rend les octets.
@@ -1744,7 +1744,7 @@ fn encoder_appareil(quoi: &AppareilRendu) -> Vec<u8> {
 }
 
 /// Un appareil rendu, reproductible, qui ne s'est pas décrit.
-fn un_appareil_rendu(attestation: PlateformeAttestation, revoque: bool) -> AppareilRendu<'static> {
+fn un_appareil_rendu(attestation: AttestationRendue, revoque: bool) -> AppareilRendu<'static> {
     AppareilRendu {
         appareil: Identifiant::depuis_entropie(Genre::Appareil, [0x55; 16]),
         attestation,
@@ -1757,17 +1757,18 @@ fn un_appareil_rendu(attestation: PlateformeAttestation, revoque: bool) -> Appar
 fn un_appareil_decrit(systeme: Systeme, modele: &str) -> AppareilRendu<'_> {
     AppareilRendu {
         description: Some(DescriptionAppareil { systeme, modele }),
-        ..un_appareil_rendu(PlateformeAttestation::Apple, false)
+        ..un_appareil_rendu(AttestationRendue::Apple, false)
     }
 }
 
 #[test]
 fn un_appareil_rendu_fait_l_aller_et_le_retour() {
     for attestation in [
-        PlateformeAttestation::Aucune,
-        PlateformeAttestation::Apple,
-        PlateformeAttestation::Android,
-        PlateformeAttestation::Invitation,
+        AttestationRendue::Aucune,
+        AttestationRendue::Apple,
+        AttestationRendue::Android,
+        AttestationRendue::Invitation,
+        AttestationRendue::Attendue,
     ] {
         for revoque in [false, true] {
             let avant = un_appareil_rendu(attestation, revoque);
@@ -1783,8 +1784,8 @@ fn un_appareil_rendu_fait_l_aller_et_le_retour() {
 fn une_revocation_d_appareil_se_lit_dans_la_liste() {
     // **L'ÉCRAN QU'ON REGARDE APRÈS AVOIR PERDU UN TÉLÉPHONE.** Un appareil
     // révoqué reste rendu, et le dit.
-    let vif = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
-    let mort = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, true));
+    let vif = encoder_appareil(&un_appareil_rendu(AttestationRendue::Apple, false));
+    let mort = encoder_appareil(&un_appareil_rendu(AttestationRendue::Apple, true));
     assert!(
         core::str::from_utf8(&vif)
             .unwrap()
@@ -1800,7 +1801,7 @@ fn une_revocation_d_appareil_se_lit_dans_la_liste() {
 
 #[test]
 fn une_attestation_inconnue_est_refusee() {
-    let bon = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+    let bon = encoder_appareil(&un_appareil_rendu(AttestationRendue::Apple, false));
     let texte = core::str::from_utf8(&bon).unwrap();
     let faux = texte.replacen(
         r#""attestation":"apple""#,
@@ -1819,7 +1820,7 @@ fn un_appareil_rendu_a_ses_champs_manquants_nommes() {
         (r#","revoque":false"#, "revoque"),
         (r#","attestation":"apple""#, "attestation"),
     ] {
-        let bon = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+        let bon = encoder_appareil(&un_appareil_rendu(AttestationRendue::Apple, false));
         let texte = core::str::from_utf8(&bon).unwrap();
         let ampute = texte.replacen(retire, "", 1);
         assert_eq!(
@@ -1832,7 +1833,7 @@ fn un_appareil_rendu_a_ses_champs_manquants_nommes() {
 
 #[test]
 fn un_champ_d_appareil_rendu_en_double_est_refuse() {
-    let bon = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+    let bon = encoder_appareil(&un_appareil_rendu(AttestationRendue::Apple, false));
     let texte = core::str::from_utf8(&bon).unwrap();
     let faux = texte.replacen(
         r#""revoque":false"#,
@@ -1847,7 +1848,7 @@ fn un_champ_d_appareil_rendu_en_double_est_refuse() {
 
 #[test]
 fn un_champ_d_appareil_rendu_inconnu_est_refuse() {
-    let bon = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+    let bon = encoder_appareil(&un_appareil_rendu(AttestationRendue::Apple, false));
     let texte = core::str::from_utf8(&bon).unwrap();
     let faux = texte.replacen(r#"{"appareil":"#, r#"{"xyz":"z","appareil":"#, 1);
     assert!(matches!(
@@ -1858,7 +1859,7 @@ fn un_champ_d_appareil_rendu_inconnu_est_refuse() {
 
 #[test]
 fn un_appareil_rendu_veut_un_genre_d_appareil() {
-    let bon = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+    let bon = encoder_appareil(&un_appareil_rendu(AttestationRendue::Apple, false));
     let texte = core::str::from_utf8(&bon).unwrap();
     let appareil = Identifiant::depuis_entropie(Genre::Appareil, [0x55; 16]);
     let machine = Identifiant::depuis_entropie(Genre::Machine, [0x55; 16]);
@@ -1871,7 +1872,7 @@ fn un_appareil_rendu_veut_un_genre_d_appareil() {
 
 #[test]
 fn un_appareil_rendu_refuse_chaque_forme_cassee() {
-    let modele = un_appareil_rendu(PlateformeAttestation::Apple, false);
+    let modele = un_appareil_rendu(AttestationRendue::Apple, false);
     let bon = encoder_appareil(&modele);
     let texte = core::str::from_utf8(&bon).unwrap().to_owned();
 
@@ -1905,7 +1906,7 @@ fn un_appareil_rendu_refuse_chaque_forme_cassee() {
 
 #[test]
 fn chaque_champ_d_appareil_rendu_refuse_le_double_et_se_nomme_absent() {
-    let modele = un_appareil_rendu(PlateformeAttestation::Apple, false);
+    let modele = un_appareil_rendu(AttestationRendue::Apple, false);
     let bon = encoder_appareil(&modele);
     let texte = core::str::from_utf8(&bon).unwrap().to_owned();
 
@@ -1943,7 +1944,7 @@ fn chaque_champ_d_appareil_rendu_refuse_le_double_et_se_nomme_absent() {
 fn un_tampon_trop_petit_se_dit_pour_un_appareil_rendu() {
     let mut sortie = [0_u8; 8];
     assert_eq!(
-        un_appareil_rendu(PlateformeAttestation::Apple, false).encoder(&mut sortie),
+        un_appareil_rendu(AttestationRendue::Apple, false).encoder(&mut sortie),
         Err(Erreur::TamponTropPetit)
     );
 }
@@ -1951,7 +1952,7 @@ fn un_tampon_trop_petit_se_dit_pour_un_appareil_rendu() {
 #[test]
 fn un_appareil_decrit_rend_sa_plateforme_et_son_modele() {
     // **ABSENTS TANT QU'ILS N'ONT PAS ÉTÉ POSÉS**, présents ensemble après.
-    let muet = encoder_appareil(&un_appareil_rendu(PlateformeAttestation::Apple, false));
+    let muet = encoder_appareil(&un_appareil_rendu(AttestationRendue::Apple, false));
     let texte = core::str::from_utf8(&muet).unwrap();
     assert!(
         !texte.contains("plateforme") && !texte.contains("modele"),
@@ -2373,4 +2374,179 @@ fn un_tampon_trop_petit_se_dit_pour_un_service_rendu() {
     };
     let mut minuscule = [0_u8; 8];
     assert_eq!(rendu.encoder(&mut minuscule), Err(Erreur::TamponTropPetit));
+}
+
+// ── Attester un appareil qui rejoint ────────────────────────────────────────
+
+mod attestation {
+    use asl_api::corps::{
+        ATTESTATION_CORPS_MAX, ATTESTATION_MAX, ATTESTATION_PREFIXE_OCTETS, AttestationDAppareil,
+        PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
+    };
+    use asl_id::{Genre, Identifiant};
+    use asl_proto::Erreur;
+
+    /// Un corps : genre, entropie, preuve, plate-forme, puis la chaîne.
+    fn corps(genre: u8, plateforme: u8, attestation: &[u8]) -> Vec<u8> {
+        let mut octets = vec![genre];
+        octets.extend_from_slice(&[0x5A; 16]);
+        octets.extend_from_slice(&[0x52; PREUVE_APPAREIL_OCTETS]);
+        octets.push(plateforme);
+        octets.extend_from_slice(attestation);
+        octets
+    }
+
+    #[test]
+    fn un_corps_avec_chaine_se_lit_et_isole_ses_tranches() {
+        let octets = corps(b'a', 2, &[0x30, 0x82, 0x01]);
+        let lu = AttestationDAppareil::decoder(&octets).expect("il se lit");
+        assert_eq!(lu.appareil.genre(), Genre::Appareil);
+        assert_eq!(lu.appareil.octets(), &[0x5A; 16]);
+        assert_eq!(lu.preuve, &[0x52; PREUVE_APPAREIL_OCTETS]);
+        assert_eq!(lu.plateforme, PlateformeAttestation::Android);
+        assert_eq!(lu.attestation, &[0x30, 0x82, 0x01]);
+    }
+
+    #[test]
+    fn le_codec_fait_l_aller_retour() {
+        for (plateforme, attestation) in [
+            (PlateformeAttestation::Aucune, &[][..]),
+            (PlateformeAttestation::Apple, &[0xA5, 1, 2, 3][..]),
+            (PlateformeAttestation::Android, &[0xFF; 500][..]),
+            (PlateformeAttestation::Invitation, &[0x41; 10][..]),
+        ] {
+            let objet = AttestationDAppareil {
+                appareil: Identifiant::depuis_entropie(Genre::Appareil, [0x11; 16]),
+                preuve: &[0x08; PREUVE_APPAREIL_OCTETS],
+                plateforme,
+                attestation,
+            };
+            let mut tampon = [0_u8; ATTESTATION_CORPS_MAX];
+            let n = objet.encoder(&mut tampon).expect("il s'écrit");
+            assert_eq!(AttestationDAppareil::decoder(&tampon[..n]), Ok(objet));
+        }
+    }
+
+    #[test]
+    fn le_genre_est_exige_et_c_est_a() {
+        // Une machine, une racine, une majuscule : aucun n'est un appareil.
+        for genre in [b'm', b'n', b'A', 0, 0xFF] {
+            assert_eq!(
+                AttestationDAppareil::decoder(&corps(genre, 0, &[])),
+                Err(Erreur::IdentifiantInvalide { position: 0 }),
+                "{genre:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn l_encodeur_refuse_un_identifiant_qui_n_est_pas_un_appareil() {
+        let objet = AttestationDAppareil {
+            appareil: Identifiant::depuis_entropie(Genre::Machine, [0x11; 16]),
+            preuve: &[0x08; PREUVE_APPAREIL_OCTETS],
+            plateforme: PlateformeAttestation::Aucune,
+            attestation: &[],
+        };
+        let mut tampon = [0_u8; ATTESTATION_CORPS_MAX];
+        assert_eq!(
+            objet.encoder(&mut tampon),
+            Err(Erreur::IdentifiantInvalide { position: 0 })
+        );
+    }
+
+    #[test]
+    fn un_corps_plus_court_que_le_prefixe_est_refuse() {
+        let court = corps(b'a', 0, &[]);
+        assert_eq!(court.len(), ATTESTATION_PREFIXE_OCTETS);
+        assert_eq!(
+            AttestationDAppareil::decoder(&court[..ATTESTATION_PREFIXE_OCTETS - 1]),
+            Err(Erreur::CorpsTropCourt {
+                obtenue: ATTESTATION_PREFIXE_OCTETS - 1,
+                attendue: ATTESTATION_PREFIXE_OCTETS
+            })
+        );
+    }
+
+    #[test]
+    fn un_corps_trop_long_est_refuse_sans_etre_lu() {
+        let trop = corps(b'a', 2, &vec![0xEE; ATTESTATION_MAX + 1]);
+        assert_eq!(
+            AttestationDAppareil::decoder(&trop),
+            Err(Erreur::CorpsTropLong {
+                obtenue: ATTESTATION_CORPS_MAX + 1,
+                maximum: ATTESTATION_CORPS_MAX
+            })
+        );
+        let borne = corps(b'a', 2, &vec![0xEE; ATTESTATION_MAX]);
+        assert!(AttestationDAppareil::decoder(&borne).is_ok());
+    }
+
+    #[test]
+    fn la_plateforme_et_la_chaine_vont_ensemble() {
+        assert_eq!(
+            AttestationDAppareil::decoder(&corps(b'a', 9, &[1])),
+            Err(Erreur::PlateformeInconnue { octet: 9 })
+        );
+        assert_eq!(
+            AttestationDAppareil::decoder(&corps(b'a', 0, &[1])),
+            Err(Erreur::AttestationInattendue { obtenue: 1 })
+        );
+        for plateforme in [1, 2, 3] {
+            assert_eq!(
+                AttestationDAppareil::decoder(&corps(b'a', plateforme, &[])),
+                Err(Erreur::AttestationManquante)
+            );
+        }
+    }
+
+    #[test]
+    fn l_encodeur_refuse_ce_que_le_decodeur_refuserait() {
+        let appareil = Identifiant::depuis_entropie(Genre::Appareil, [0x11; 16]);
+        let mut tampon = [0_u8; ATTESTATION_CORPS_MAX];
+        let courte = AttestationDAppareil {
+            appareil,
+            preuve: &[0; PREUVE_APPAREIL_OCTETS - 1],
+            plateforme: PlateformeAttestation::Aucune,
+            attestation: &[],
+        };
+        assert!(matches!(
+            courte.encoder(&mut tampon),
+            Err(Erreur::CorpsTropCourt { .. })
+        ));
+        let incoherent = AttestationDAppareil {
+            appareil,
+            preuve: &[0; PREUVE_APPAREIL_OCTETS],
+            plateforme: PlateformeAttestation::Aucune,
+            attestation: &[1],
+        };
+        assert_eq!(
+            incoherent.encoder(&mut tampon),
+            Err(Erreur::AttestationInattendue { obtenue: 1 })
+        );
+        let vide = AttestationDAppareil {
+            appareil,
+            preuve: &[0; PREUVE_APPAREIL_OCTETS],
+            plateforme: PlateformeAttestation::Android,
+            attestation: &[],
+        };
+        assert_eq!(vide.encoder(&mut tampon), Err(Erreur::AttestationManquante));
+        let demesuree = AttestationDAppareil {
+            appareil,
+            preuve: &[0; PREUVE_APPAREIL_OCTETS],
+            plateforme: PlateformeAttestation::Android,
+            attestation: &[0xEE; ATTESTATION_MAX + 1],
+        };
+        assert!(matches!(
+            demesuree.encoder(&mut tampon),
+            Err(Erreur::CorpsTropLong { .. })
+        ));
+        let juste = AttestationDAppareil {
+            appareil,
+            preuve: &[0; PREUVE_APPAREIL_OCTETS],
+            plateforme: PlateformeAttestation::Android,
+            attestation: &[0xEE; 8],
+        };
+        let mut petit = [0_u8; 10];
+        assert_eq!(juste.encoder(&mut petit), Err(Erreur::TamponTropPetit));
+    }
 }

@@ -462,16 +462,32 @@ impl Tireur {
                     // **UN EFFACEMENT DE COMPTE SE DIT, « APPLIQUÉ » ET NON
                     // « EFFACÉ »** (`replication.md` §3.3, §8) : l'identifiant,
                     // la cause portée par l'opération, et rien d'autre. Qui a
-                    // effacé est dit par l'estampille. C'est la seule opération
-                    // qui ait sa ligne — jamais une ligne par opération.
-                    if let Cadre::Operation {
-                        operation: Operation::CompteEfface { compte, cause, .. },
-                        ..
-                    } = cadre
-                    {
-                        (self.journal)(format!(
-                            "compte {compte} appliqué : effacé chez {pair}, cause {cause}"
-                        ));
+                    // effacé est dit par l'estampille. **Une attestation
+                    // aussi** (2026-09-21) : c'est ce qu'un appareil a prouvé
+                    // chez l'autre racine, et l'exploitant qui lit « attesté »
+                    // ici doit savoir que ce n'est pas ici qu'on l'a jugé. Ce
+                    // sont les deux seules opérations qui aient leur ligne —
+                    // jamais une ligne par opération.
+                    if let Cadre::Operation { operation, .. } = cadre {
+                        match operation {
+                            Operation::CompteEfface { compte, cause, .. } => {
+                                (self.journal)(format!(
+                                    "compte {compte} appliqué : effacé chez {pair}, cause {cause}"
+                                ));
+                            }
+                            Operation::AppareilAtteste { appareil, atteste } => {
+                                (self.journal)(format!(
+                                    "appareil {appareil} appliqué : attesté {} chez {pair}",
+                                    match atteste {
+                                        asl_registre::Attestation::Apple => "apple",
+                                        asl_registre::Attestation::Android => "android",
+                                        asl_registre::Attestation::Aucune
+                                        | asl_registre::Attestation::Attendue => "sans preuve",
+                                    }
+                                ));
+                            }
+                            _ => {}
+                        }
                     }
                     for quoi in effets.a_fermer {
                         // Le récepteur est fermé quand le serveur s'éteint :

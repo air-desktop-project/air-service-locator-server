@@ -1815,6 +1815,68 @@ impl Entrepot {
         Ok(Some(avant))
     }
 
+    /// Pose l'attestation d'un appareil qui a rejoint, et rend ce qu'il était.
+    ///
+    /// **UNE VALEUR PROUVÉE, SUR UN APPAREIL QUI NE L'EST PAS ENCORE**
+    /// (`docs/replication.md` §5.2, `appareil-atteste`, 2026-09-21) : `aucune`
+    /// ou `attendue` deviennent `apple` ou `android` ; un appareil déjà prouvé
+    /// garde sa valeur, et rien n'est écrit ni journalisé — une clé ne
+    /// s'atteste qu'une fois. C'est l'appelant qui a vérifié la chaîne, et
+    /// qui a refusé un appareil révoqué ou un compte effacé : ici, on range.
+    ///
+    /// Rend `None` si aucun appareil ne répond à cet identifiant.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`] — celle-ci aussi quand la
+    /// valeur n'est pas une preuve : l'opération ne se relirait pas, et ce
+    /// que le fil refuserait ne s'écrit pas non plus.
+    pub fn attester_appareil(
+        &self,
+        quel: Identifiant,
+        atteste: Attestation,
+    ) -> Result<Option<Appareil>, Faute> {
+        if !atteste.prouvee() {
+            return Err(Faute::Enregistrement(asl_registre::Faute::Etiquette {
+                lue: atteste.etiquette(),
+            }));
+        }
+        let clef_appareil = clef(quel);
+        let ecriture = self.base.begin_write()?;
+        let journalisee;
+        let avant;
+        {
+            let mut table = ecriture.open_table(APPAREILS)?;
+            avant = match table.get(clef_appareil.as_slice())? {
+                Some(brut) => Appareil::lire(brut.value())?,
+                None => return Ok(None),
+            };
+            if avant.atteste.prouvee() {
+                return Ok(Some(avant));
+            }
+            let estampille = estampiller(&ecriture, self.racine)?;
+            let mut octets = [0_u8; APPAREIL_OCTETS];
+            Appareil {
+                estampille,
+                atteste,
+                ..avant
+            }
+            .ecrire(&mut octets);
+            table.insert(clef_appareil.as_slice(), &octets)?;
+            journalisee = journaliser_l_operation(
+                &ecriture,
+                estampille,
+                avant.provenance,
+                &Operation::AppareilAtteste {
+                    appareil: quel,
+                    atteste,
+                },
+            )?;
+        }
+        self.commettre_une_operation(ecriture, journalisee)?;
+        Ok(Some(avant))
+    }
+
     // ── Les jetons de poussée ───────────────────────────────────────────────
 
     /// Dépose ou renouvelle le jeton de cet appareil.
@@ -2656,6 +2718,20 @@ impl Entrepot {
                     },
                 );
             }
+            // **L'ATTESTATION VOYAGE À PART, COMME LA RÉVOCATION** : l'autre
+            // racine tient peut-être déjà cet appareil `attendue` — apporté
+            // chez elle, prouvé ici —, et `appareil` n'insère que si absent.
+            // Un appareil entré prouvé à sa création la reçoit aussi ; elle
+            // n'y change rien.
+            if appareil.atteste.prouvee() {
+                suite.ajouter(
+                    appareil.estampille,
+                    &Operation::AppareilAtteste {
+                        appareil: quel,
+                        atteste: appareil.atteste,
+                    },
+                );
+            }
         }
 
         let descriptions = lecture.open_table(DESCRIPTIONS)?;
@@ -3391,6 +3467,7 @@ fn provenance_de(operation: &Operation) -> Option<Provenance> {
         Operation::Autorisation { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Alias { .. }
         | Operation::AppareilRevoque { .. }
+        | Operation::AppareilAtteste { .. }
         | Operation::MachineModifiee { .. }
         | Operation::CleMachine { .. }
         | Operation::CleMachineRevoquee { .. }
@@ -3429,6 +3506,9 @@ fn appliquer_dans(
             appareil,
             revoque_le,
         } => appliquer_appareil_revoque(ecriture, *appareil, *revoque_le, estampille, effets),
+        Operation::AppareilAtteste { appareil, atteste } => {
+            appliquer_appareil_atteste(ecriture, *appareil, *atteste, estampille)
+        }
         Operation::Description {
             appareil,
             enregistrement,
@@ -3679,6 +3759,48 @@ fn appliquer_appareil_revoque(
         .open_table(POUSSEES)?
         .remove(clef_appareil.as_slice())?;
     effets.a_fermer.push(quel);
+    Ok(())
+}
+
+/// `appareil-atteste` — poser la valeur si l'appareil est `aucune` ou
+/// `attendue`, rien s'il porte déjà une valeur prouvée, TOUJOURS — révoqué ou
+/// non (`docs/replication.md` §3.2, §5.2, décision 25).
+///
+/// **Sur un appareil révoqué aussi**, et c'est ce qui converge : l'attestation
+/// est un fait sur la clé, la révocation un fait sur l'appareil, et ne pas
+/// poser l'une à cause de l'autre ferait diverger la valeur selon l'ordre
+/// d'arrivée. Un `attendue` qui devient prouvé est vivant ici aussi : sa
+/// prochaine preuve est servie. Sur un appareil qu'on n'a pas — son opération
+/// `appareil` n'est pas encore là, ou son compte est effacé —, rien : celui
+/// qui a écrit l'attestation tenait l'appareil, et l'instantané la redira.
+fn appliquer_appareil_atteste(
+    ecriture: &WriteTransaction,
+    quel: Identifiant,
+    atteste: Attestation,
+    estampille: Estampille,
+) -> Result<(), Faute> {
+    let clef_appareil = clef(quel);
+    let mut table = ecriture.open_table(APPAREILS)?;
+    let avant = match table.get(clef_appareil.as_slice())? {
+        Some(brut) => Appareil::lire(brut.value())?,
+        None => return Ok(()),
+    };
+    // **L'ESTAMPILLE SE HISSE MÊME QUAND LA VALEUR NE BOUGE PAS**, comme pour
+    // une révocation : deux attestations du même appareil, dans les deux
+    // ordres, doivent laisser le même enregistrement — et « la dernière
+    // écriture » est une fonction de l'ensemble, pas de l'arrivée.
+    let mut octets = [0_u8; APPAREIL_OCTETS];
+    Appareil {
+        estampille: avant.estampille.max(estampille),
+        atteste: if avant.atteste.prouvee() {
+            avant.atteste
+        } else {
+            atteste
+        },
+        ..avant
+    }
+    .ecrire(&mut octets);
+    table.insert(clef_appareil.as_slice(), &octets)?;
     Ok(())
 }
 
@@ -4541,6 +4663,7 @@ impl Reestampillable for Operation {
             }
             Self::Alias { .. }
             | Self::AppareilRevoque { .. }
+            | Self::AppareilAtteste { .. }
             | Self::MachineModifiee { .. }
             | Self::CleMachineRevoquee { .. }
             | Self::AutorisationRevoquee { .. }

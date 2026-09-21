@@ -79,8 +79,9 @@ extern crate alloc;
 use ams_h3::Reponse;
 use ams_proto_http::{Method, RequestHead, StatusCode};
 use asl_api::corps::{
-    Capacites, CreationDeCompte, DeclarationMachine, DemandeAlias, DemandeAutorisation, DepotJeton,
-    DescriptionAppareil, ModificationMachine, Plateforme, PlateformeAttestation, Portee, Systeme,
+    AttestationDAppareil, Capacites, CreationDeCompte, DeclarationMachine, DemandeAlias,
+    DemandeAutorisation, DepotJeton, DescriptionAppareil, ModificationMachine, Plateforme,
+    PlateformeAttestation, Portee, Systeme,
 };
 use asl_api::{Exigence, Ressource};
 use asl_cle::{CleAppareil, ClePublique, Defi, LiaisonDeCanal, Signature, SignatureAppareil};
@@ -357,6 +358,35 @@ pub enum Besoin<'a> {
     CreerAppareil {
         /// La clé du nouvel appareil. P-256, non encore prouvée.
         cle: CleAppareil,
+    },
+    /// Un appareil qui a rejoint prouve sa clé ET présente sa chaîne, d'un
+    /// même défi (`protocole.md` §2.2, « Attester un appareil qui rejoint »).
+    ///
+    /// # LA PREUVE NE SE VÉRIFIE PAS ICI, ET C'EST L'AUTRE MOITIÉ DE LA RÈGLE
+    ///
+    /// À la création d'un compte, la clé est dans le corps : la session
+    /// vérifie la possession avant que l'étage 3 n'écrive. Ici, la clé est
+    /// RANGÉE sous `appareil`, et seul l'étage 3 peut la lire. Il la lit, puis
+    /// rappelle [`Session::preuve_d_appareil_et_defis`] — la même
+    /// vérification, sur le même défi, qui lui rend ce que la chaîne a dû
+    /// couvrir —, vérifie la chaîne, écrit. Rien n'est écrit sans que la
+    /// preuve tienne, et le défi est dépensé par [`repondre`], comme
+    /// toujours.
+    ///
+    /// **`204`, la connexion est celle de l'appareil ; `401` pour quatre
+    /// causes qu'on ne distingue pas** — signature fausse, pas de défi,
+    /// révoqué, compte effacé — ; `403` quand la preuve tient mais la chaîne
+    /// ne prouve rien sous une posture qui l'exige ; `400` sur le corps.
+    AttesterAppareil {
+        /// L'appareil qui prouve — dont la clé rangée doit vérifier `preuve`.
+        appareil: Identifiant,
+        /// Sa signature du genre `a` sur le défi de cette connexion.
+        preuve: SignatureAppareil,
+        /// Sous quelle plate-forme il s'atteste — `Aucune` vaut une preuve
+        /// nue, comme `POST /v1/defi`.
+        plateforme: PlateformeAttestation,
+        /// La chaîne, telle quelle ; vide quand la plate-forme est `Aucune`.
+        attestation: &'a [u8],
     },
     /// Déclarer une machine, et émettre son premier code d'enrôlement.
     CreerMachine {
@@ -751,6 +781,13 @@ pub enum Trouvaille {
     },
     /// Un appareil de plus a été enrôlé.
     AppareilCree(Identifiant),
+    /// La preuve d'un appareil qui rejoint tient, et sa chaîne a été jugée :
+    /// l'appareil est entré sous cette valeur — ou reste `aucune`, si la
+    /// posture est facultative et que la chaîne ne prouvait rien.
+    ///
+    /// **La connexion devient celle de l'appareil** dans [`repondre`], comme
+    /// après `POST /v1/defi` ; c'est la même preuve.
+    AppareilAtteste,
     /// Une machine a été déclarée, et voici son code.
     MachineCreee {
         /// La machine.
@@ -1026,6 +1063,42 @@ impl Session {
         ))
     }
 
+    /// Vérifie la preuve d'un appareil qui rejoint contre sa clé RANGÉE, et
+    /// rend ce que sa chaîne a dû couvrir.
+    ///
+    /// # POURQUOI ELLE EST PUBLIQUE, ET POURQUOI ELLE NE CONSOMME PAS
+    ///
+    /// C'est [`Self::possession_et_defi_d_attestation`] pour un appareil dont
+    /// la clé n'est pas dans le corps mais dans l'entrepôt : l'étage 3 la lit,
+    /// puis rappelle ici — la mathématique reste à cet étage, le défi et la
+    /// liaison ne sortent pas de la session. Elle ne consomme pas le défi :
+    /// [`repondre`] le fait, que la chaîne tienne ou non, comme pour toute
+    /// preuve. `None` refuse — pas de défi, ou signature fausse —, et les
+    /// deux rendent le même `401`.
+    ///
+    /// La signature est celle du genre `a` sur `genre ‖ identifiant ‖ défi ‖
+    /// liaison` (`asl_cle::message_a_signer`) : exactement ce que
+    /// `POST /v1/defi` vérifie.
+    #[must_use]
+    pub fn preuve_d_appareil_et_defis(
+        &self,
+        appareil: Identifiant,
+        cle: &CleAppareil,
+        preuve: &SignatureAppareil,
+    ) -> Option<(
+        [u8; asl_cle::MESSAGE_ATTESTATION_OCTETS],
+        [u8; asl_cle::MESSAGE_ATTESTATION_DE_CLE_OCTETS],
+    )> {
+        let defi = self.defi?;
+        if !cle.verifie(appareil, &defi, &self.liaison, preuve) {
+            return None;
+        }
+        Some((
+            asl_cle::message_d_attestation(cle, &defi, &self.liaison),
+            asl_cle::message_d_attestation_de_cle(&defi, &self.liaison),
+        ))
+    }
+
     /// Dépense le défi en cours, s'il y en a un.
     fn consommer_le_defi(&mut self) {
         self.defi = None;
@@ -1124,6 +1197,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         },
         Ressource::ServicesMachine { machine } => Besoin::ServicesDeMachine { machine },
         Ressource::Comptes => lire_creation_de_compte(session, corps),
+        Ressource::Attestation => lire_une_attestation(session, corps),
         // **DEUX VERBES, DEUX BESOINS** — voir `Ressource::Autorisations` plus
         // bas. Un `GET` liste ; un `POST` crée. Le routage sert les deux depuis
         // que `protocole.md` §2.2 a nommé les écrans qui lisent.
@@ -1251,6 +1325,36 @@ fn lire_creation_d_appareil<'a>(corps: &[u8]) -> Besoin<'a> {
     match lire_une_cle_d_appareil(corps) {
         Some(cle) => Besoin::CreerAppareil { cle },
         None => Besoin::Deja(StatusCode::BAD_REQUEST),
+    }
+}
+
+/// Lit `POST /v1/attestation` : l'identifiant, la preuve, la plate-forme, la
+/// chaîne — et exige qu'un défi soit en cours.
+///
+/// **Sans défi, c'est [`Besoin::PreuveRefusee`], pas `400`** : le corps est
+/// bien formé, c'est la connexion qui n'a rien à signer, et la réponse est
+/// celle d'une preuve qui ne tient pas — la même `401`, pour qu'on ne
+/// distingue pas.
+fn lire_une_attestation<'a>(session: &Session, corps: &'a [u8]) -> Besoin<'a> {
+    let Ok(lue) = AttestationDAppareil::decoder(corps) else {
+        return Besoin::Deja(StatusCode::BAD_REQUEST);
+    };
+    if session.defi.is_none() {
+        return Besoin::PreuveRefusee;
+    }
+    // **LA TRANCHE FAIT EXACTEMENT SOIXANTE-QUATRE OCTETS** : `asl-api` l'a
+    // découpée dans un préfixe de longueur fixe. Recopier par `zip`, comme
+    // `lire_une_preuve`, n'ouvre aucune branche qu'un essai ne pourrait
+    // prendre.
+    let mut brute = [0_u8; asl_cle::SIGNATURE_APPAREIL_OCTETS];
+    for (place, octet) in brute.iter_mut().zip(lue.preuve.iter()) {
+        *place = *octet;
+    }
+    Besoin::AttesterAppareil {
+        appareil: lue.appareil,
+        preuve: SignatureAppareil::depuis_octets(brute),
+        plateforme: lue.plateforme,
+        attestation: lue.attestation,
     }
 }
 
@@ -1734,6 +1838,33 @@ pub fn repondre<'o>(
             }
             autre => rendre_l_echec(autre, sortie),
         },
+        // **LE DÉFI EST DÉPENSÉ, QUE LA CHAÎNE TIENNE OU NON** — et même si
+        // l'étage 3 n'a rien trouvé : une preuve fausse coûte un défi. Trois
+        // réponses : `204` et la connexion est celle de l'appareil ; `403`,
+        // la preuve tient mais la chaîne ne prouve rien sous une posture qui
+        // l'exige — le défi est mort, cette clé ne s'attestera plus ; `401`
+        // pour tout le reste, sans dire lequel.
+        Besoin::AttesterAppareil { appareil, .. } => {
+            session.consommer_le_defi();
+            match trouvaille {
+                Trouvaille::AppareilAtteste => {
+                    session.pair = Some(*appareil);
+                    composer(StatusCode::NO_CONTENT, OCTETS_MEDIA, &[], sortie)
+                }
+                Trouvaille::Refus => composer(
+                    StatusCode::FORBIDDEN,
+                    PROBLEME_MEDIA,
+                    probleme(StatusCode::FORBIDDEN),
+                    sortie,
+                ),
+                _ => composer(
+                    StatusCode::UNAUTHORIZED,
+                    PROBLEME_MEDIA,
+                    probleme(StatusCode::UNAUTHORIZED),
+                    sortie,
+                ),
+            }
+        }
         Besoin::CreerMachine { .. } => match trouvaille {
             Trouvaille::MachineCreee {
                 machine,
@@ -6299,6 +6430,329 @@ mod voie_entre_racines {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "{quoi:?} : un inconnu ne l'atteint pas, un `500` dit la vérité"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod attestation_d_un_appareil_qui_rejoint {
+    //! `POST /v1/attestation` : la preuve d'un appareil qui a rejoint, avec sa
+    //! chaîne, d'un même défi (`protocole.md` §2.2, 2026-09-21).
+    //!
+    //! # CE MODULE ÉPROUVE LA MOITIÉ QUE L'ÉTAGE 2 TIENT
+    //!
+    //! La lecture du corps, le besoin, la vérification de la preuve contre une
+    //! clé que l'étage 3 a lue, et les trois réponses — `204` qui authentifie,
+    //! `403`, `401` — avec le défi dépensé dans tous les cas. La chaîne, elle,
+    //! se juge à l'étage 3, et n'est pas regardée ici.
+
+    extern crate alloc;
+
+    use alloc::vec::Vec;
+    use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
+    use asl_api::corps::{AttestationDAppareil, PlateformeAttestation};
+    use asl_cle::{CleSecreteAppareil, Defi, LiaisonDeCanal, SignatureAppareil};
+    use asl_id::{Genre, Identifiant};
+
+    use super::{Besoin, Session, Trouvaille, besoin, repondre};
+
+    fn liaison() -> LiaisonDeCanal {
+        LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
+    }
+
+    fn defi() -> Defi {
+        Defi::depuis_octets([0x5A; asl_cle::DEFI_OCTETS])
+    }
+
+    fn session_avec_defi() -> Session {
+        let mut session = Session::new(liaison());
+        let _ = session.poser_le_defi(defi());
+        session
+    }
+
+    fn tete<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
+        let limites = Limits::default();
+        let mut constructeur = HeadBuilder::new(&limites);
+        constructeur.field(b":method", verbe).expect("le verbe");
+        constructeur.field(b":scheme", b"https").expect("le schéma");
+        constructeur
+            .field(b":authority", b"annuaire.example")
+            .expect("l'autorité");
+        constructeur.field(b":path", cible).expect("la cible");
+        constructeur.finish().expect("une tête close")
+    }
+
+    fn appareil() -> Identifiant {
+        Identifiant::depuis_entropie(Genre::Appareil, [0x2B; 16])
+    }
+
+    fn secrete(graine: u8) -> CleSecreteAppareil {
+        CleSecreteAppareil::depuis_entropie([graine; 32]).expect("un scalaire valide")
+    }
+
+    /// Le corps de `POST /v1/attestation` : la preuve de cette clé sur le
+    /// défi de la session, puis la plate-forme et la chaîne.
+    fn corps(
+        cle: &CleSecreteAppareil,
+        plateforme: PlateformeAttestation,
+        attestation: &[u8],
+    ) -> Vec<u8> {
+        let preuve = cle
+            .signer(appareil(), &defi(), &liaison())
+            .expect("l'appareil signe");
+        corps_avec(&preuve, plateforme, attestation)
+    }
+
+    fn corps_avec(
+        preuve: &SignatureAppareil,
+        plateforme: PlateformeAttestation,
+        attestation: &[u8],
+    ) -> Vec<u8> {
+        let objet = AttestationDAppareil {
+            appareil: appareil(),
+            preuve: preuve.octets(),
+            plateforme,
+            attestation,
+        };
+        let mut tampon = [0_u8; 512];
+        let n = objet.encoder(&mut tampon).expect("un corps bien formé");
+        tampon[..n].to_vec()
+    }
+
+    fn rendre(
+        session: &mut Session,
+        quoi: &Besoin<'_>,
+        trouvaille: &Trouvaille,
+    ) -> (StatusCode, Vec<u8>) {
+        let mut sortie = [0_u8; 512];
+        let reponse = repondre(session, quoi, trouvaille, None, &mut sortie);
+        (reponse.status(), reponse.body().to_vec())
+    }
+
+    // ── La lecture du corps ─────────────────────────────────────────────────
+
+    #[test]
+    fn un_corps_bien_forme_devient_le_besoin_sans_que_la_preuve_soit_verifiee_ici() {
+        // **LA CLÉ EST RANGÉE, PAS DANS LE CORPS** : la session ne peut pas
+        // vérifier la preuve dans `besoin`. Elle lit, et passe tout à l'étage
+        // 3 — qui lira la clé, et rappellera `preuve_d_appareil_et_defis`.
+        let cle = secrete(0x11);
+        let chaine = &[0x30, 0x82, 0x01][..];
+        let octets = corps(&cle, PlateformeAttestation::Android, chaine);
+        let preuve = cle
+            .signer(appareil(), &defi(), &liaison())
+            .expect("l'appareil signe");
+        assert_eq!(
+            besoin(
+                &session_avec_defi(),
+                &tete(b"POST", b"/v1/attestation"),
+                &octets
+            ),
+            Besoin::AttesterAppareil {
+                appareil: appareil(),
+                preuve,
+                plateforme: PlateformeAttestation::Android,
+                attestation: chaine,
+            }
+        );
+    }
+
+    #[test]
+    fn un_corps_mal_forme_est_un_400() {
+        let cle = secrete(0x11);
+        let bon = corps(&cle, PlateformeAttestation::Android, &[1, 2, 3]);
+        // Trop court, genre `m`, plate-forme inconnue, chaîne derrière `0`.
+        let mut genre_faux = bon.clone();
+        genre_faux[0] = Genre::Machine.prefixe();
+        let mut plateforme_inconnue = bon.clone();
+        plateforme_inconnue[1 + 16 + 64] = 9;
+        let mut nue_avec_chaine = bon.clone();
+        nue_avec_chaine[1 + 16 + 64] = 0;
+        for mauvais in [
+            &bon[..bon.len() - 4],
+            &genre_faux,
+            &plateforme_inconnue,
+            &nue_avec_chaine,
+        ] {
+            assert_eq!(
+                besoin(
+                    &session_avec_defi(),
+                    &tete(b"POST", b"/v1/attestation"),
+                    mauvais
+                ),
+                Besoin::Deja(StatusCode::BAD_REQUEST)
+            );
+        }
+    }
+
+    #[test]
+    fn sans_defi_tire_c_est_une_preuve_refusee_et_non_un_400() {
+        // Le corps est bien formé ; c'est la connexion qui n'a rien à signer.
+        // La réponse est celle d'une preuve qui ne tient pas — `401`, sans
+        // dire laquelle des causes.
+        let cle = secrete(0x11);
+        let octets = corps(&cle, PlateformeAttestation::Android, &[1]);
+        assert_eq!(
+            besoin(
+                &Session::new(liaison()),
+                &tete(b"POST", b"/v1/attestation"),
+                &octets
+            ),
+            Besoin::PreuveRefusee
+        );
+    }
+
+    #[test]
+    fn la_ressource_ne_sert_que_post_et_n_exige_rien() {
+        let cle = secrete(0x11);
+        let octets = corps(&cle, PlateformeAttestation::Aucune, &[]);
+        for verbe in [&b"GET"[..], b"PUT", b"DELETE", b"PATCH"] {
+            assert_eq!(
+                besoin(
+                    &session_avec_defi(),
+                    &tete(verbe, b"/v1/attestation"),
+                    &octets
+                ),
+                Besoin::Deja(StatusCode::METHOD_NOT_ALLOWED),
+                "{verbe:?}"
+            );
+        }
+        // Sans appareil authentifié, le besoin passe quand même : c'est lui,
+        // la preuve — nue, ici, comme sur `/v1/defi`.
+        let preuve = cle
+            .signer(appareil(), &defi(), &liaison())
+            .expect("l'appareil signe");
+        assert_eq!(
+            besoin(
+                &session_avec_defi(),
+                &tete(b"POST", b"/v1/attestation"),
+                &octets
+            ),
+            Besoin::AttesterAppareil {
+                appareil: appareil(),
+                preuve,
+                plateforme: PlateformeAttestation::Aucune,
+                attestation: &[],
+            }
+        );
+    }
+
+    // ── La preuve contre la clé rangée ──────────────────────────────────────
+
+    #[test]
+    fn la_preuve_se_verifie_contre_la_cle_rangee_et_rend_les_deux_defis() {
+        let cle = secrete(0x11);
+        let preuve = cle
+            .signer(appareil(), &defi(), &liaison())
+            .expect("l'appareil signe");
+        let session = session_avec_defi();
+        assert_eq!(
+            session.preuve_d_appareil_et_defis(appareil(), &cle.publique(), &preuve),
+            Some((
+                asl_cle::message_d_attestation(&cle.publique(), &defi(), &liaison()),
+                asl_cle::message_d_attestation_de_cle(&defi(), &liaison()),
+            ))
+        );
+        // Elle ne consomme pas le défi : c'est `repondre` qui le fait.
+        assert!(session.defi.is_some());
+    }
+
+    #[test]
+    fn une_preuve_d_une_autre_cle_d_un_autre_defi_ou_sans_defi_ne_vaut_pas() {
+        let cle = secrete(0x11);
+        let autre = secrete(0x22);
+        let session = session_avec_defi();
+        // Signée par une autre clé.
+        let fausse = autre
+            .signer(appareil(), &defi(), &liaison())
+            .expect("signe");
+        assert!(
+            session
+                .preuve_d_appareil_et_defis(appareil(), &cle.publique(), &fausse)
+                .is_none()
+        );
+        // Signée pour un autre défi.
+        let autre_defi = Defi::depuis_octets([0x77; asl_cle::DEFI_OCTETS]);
+        let perimee = cle
+            .signer(appareil(), &autre_defi, &liaison())
+            .expect("signe");
+        assert!(
+            session
+                .preuve_d_appareil_et_defis(appareil(), &cle.publique(), &perimee)
+                .is_none()
+        );
+        // Signée pour un autre identifiant.
+        let autre_appareil = Identifiant::depuis_entropie(Genre::Appareil, [0x3C; 16]);
+        let deplacee = cle
+            .signer(autre_appareil, &defi(), &liaison())
+            .expect("signe");
+        assert!(
+            session
+                .preuve_d_appareil_et_defis(appareil(), &cle.publique(), &deplacee)
+                .is_none()
+        );
+        // Sans défi.
+        let juste = cle.signer(appareil(), &defi(), &liaison()).expect("signe");
+        assert!(
+            Session::new(liaison())
+                .preuve_d_appareil_et_defis(appareil(), &cle.publique(), &juste)
+                .is_none()
+        );
+    }
+
+    // ── Les trois réponses ──────────────────────────────────────────────────
+
+    #[test]
+    fn une_attestation_acceptee_rend_204_et_authentifie_la_connexion() {
+        let cle = secrete(0x11);
+        let octets = corps(&cle, PlateformeAttestation::Android, &[1]);
+        let mut session = session_avec_defi();
+        let quoi = besoin(&session, &tete(b"POST", b"/v1/attestation"), &octets);
+        let (statut, rendu) = rendre(&mut session, &quoi, &Trouvaille::AppareilAtteste);
+        assert_eq!(statut, StatusCode::NO_CONTENT);
+        assert!(rendu.is_empty());
+        // **LA CONNEXION EST CELLE DE L'APPAREIL**, comme après `/v1/defi`,
+        // et le défi est dépensé.
+        assert_eq!(session.appareil(), Some(appareil()));
+        assert_eq!(session.machine(), None);
+        assert!(session.defi.is_none());
+    }
+
+    #[test]
+    fn une_chaine_refusee_sous_une_posture_exigee_rend_403_sans_authentifier() {
+        let cle = secrete(0x11);
+        let octets = corps(&cle, PlateformeAttestation::Android, &[1]);
+        let mut session = session_avec_defi();
+        let quoi = besoin(&session, &tete(b"POST", b"/v1/attestation"), &octets);
+        let (statut, rendu) = rendre(&mut session, &quoi, &Trouvaille::Refus);
+        assert_eq!(statut, StatusCode::FORBIDDEN);
+        assert!(rendu.windows(3).any(|f| f == b"403"));
+        assert_eq!(session.appareil(), None);
+        assert!(
+            session.defi.is_none(),
+            "le défi est dépensé : cette clé ne s'attestera plus"
+        );
+    }
+
+    #[test]
+    fn tout_le_reste_est_un_401_qui_depense_le_defi() {
+        // Inconnu, révoqué, compte effacé, signature fausse, panne : `Rien`,
+        // et le même `401`. Et une trouvaille qui ne correspond pas non plus —
+        // rien de ce qui n'est pas « attesté » n'authentifie.
+        let cle = secrete(0x11);
+        let octets = corps(&cle, PlateformeAttestation::Aucune, &[]);
+        for trouvaille in [
+            Trouvaille::Rien,
+            Trouvaille::Fait,
+            Trouvaille::AppareilCree(appareil()),
+        ] {
+            let mut session = session_avec_defi();
+            let quoi = besoin(&session, &tete(b"POST", b"/v1/attestation"), &octets);
+            let (statut, rendu) = rendre(&mut session, &quoi, &trouvaille);
+            assert_eq!(statut, StatusCode::UNAUTHORIZED, "{trouvaille:?}");
+            assert!(rendu.windows(3).any(|f| f == b"401"));
+            assert_eq!(session.appareil(), None);
+            assert!(session.defi.is_none());
         }
     }
 }

@@ -30,9 +30,10 @@
 use libfuzzer_sys::fuzz_target;
 
 use asl_api::corps::{
-    AppareilRendu, AutorisationRendue, CLE_APPAREIL_OCTETS, COMPTE_CORPS_MAX, CORPS_MAX,
-    CreationDeCompte, DeclarationMachine, DemandeAlias, DemandeAutorisation, DescriptionAppareil,
-    MachineRendue, MachineVue, NOM_MACHINE_MAX, PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
+    ATTESTATION_CORPS_MAX, AppareilRendu, AttestationDAppareil, AutorisationRendue,
+    CLE_APPAREIL_OCTETS, COMPTE_CORPS_MAX, CORPS_MAX, CreationDeCompte, DeclarationMachine,
+    DemandeAlias, DemandeAutorisation, DescriptionAppareil, MachineRendue, MachineVue,
+    NOM_MACHINE_MAX, PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
 };
 
 /// Ce caractère change-t-il l'affichage de ce qui l'entoure ?
@@ -304,5 +305,37 @@ fuzz_target!(|octets: &[u8]| {
         );
         let relu = CreationDeCompte::decoder(ecrit).expect("ce qu'on écrit se relit");
         assert_eq!(relu, compte, "l'aller-retour a changé le corps");
+    }
+
+    if let Ok(preuve) = AttestationDAppareil::decoder(octets) {
+        // **LE GENRE EST `a`, ET LA CHAÎNE SUIT LA PLATE-FORME** — les mêmes
+        // règles que la création d'un compte, sur la preuve d'un appareil qui
+        // rejoint.
+        assert_eq!(preuve.appareil.genre(), asl_id::Genre::Appareil);
+        assert_eq!(preuve.preuve.len(), PREUVE_APPAREIL_OCTETS);
+        match preuve.plateforme {
+            PlateformeAttestation::Aucune => assert!(
+                preuve.attestation.is_empty(),
+                "une plate-forme Aucune ne doit rien traîner : {} octets",
+                preuve.attestation.len()
+            ),
+            PlateformeAttestation::Apple
+            | PlateformeAttestation::Android
+            | PlateformeAttestation::Invitation => assert!(
+                !preuve.attestation.is_empty(),
+                "une plate-forme déclarée sans attestation a été acceptée"
+            ),
+        }
+        let mut sortie = [0_u8; ATTESTATION_CORPS_MAX];
+        let combien = preuve
+            .encoder(&mut sortie)
+            .expect("ce qui a été compris se réécrit");
+        let ecrit = &sortie[..combien];
+        assert_eq!(
+            ecrit, octets,
+            "le corps n'est pas canonique : deux écritures"
+        );
+        let relu = AttestationDAppareil::decoder(ecrit).expect("ce qu'on écrit se relit");
+        assert_eq!(relu, preuve, "l'aller-retour a changé le corps");
     }
 });

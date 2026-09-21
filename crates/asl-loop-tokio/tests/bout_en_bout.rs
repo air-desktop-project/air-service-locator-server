@@ -3412,3 +3412,405 @@ async fn un_compte_orphelin_est_efface_au_passage_et_pas_un_compte_vivant() {
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
+
+// ── Attester un appareil qui rejoint ────────────────────────────────────────
+
+/// Les réglages Android du Fairphone 5 : la racine de Google, notre paquet,
+/// l'empreinte de la build de débogage — de quoi que l'annuaire ESSAIE de
+/// vérifier une chaîne, et la refuse quand elle ne remonte pas.
+fn reglages_android_du_fp5() -> (Vec<u8>, Attestations<'static>) {
+    let (case_reelle, google) = capture_android();
+    let racines: &'static [Vec<u8>] = Box::leak(vec![google].into_boxed_slice());
+    let mut signataire = [0_u8; 32];
+    for (place, paire) in signataire.iter_mut().zip(
+        "5ea316f1b50f2ce54b8225aba85ff5cc8238a710b8fae44b4f3a195aadeb5f68"
+            .as_bytes()
+            .chunks(2),
+    ) {
+        *place = u8::from_str_radix(std::str::from_utf8(paire).expect("ascii"), 16)
+            .expect("hexadécimal");
+    }
+    let android = Some(ConfigAndroid {
+        racines,
+        paquet: "org.airdesktop.servicelocator",
+        signataire,
+    });
+    (
+        case_reelle,
+        Attestations {
+            apple: None,
+            android,
+        },
+    )
+}
+
+/// Un appareil déjà enrôlé apporte la clé d'un nouvel appareil, et rend
+/// l'identifiant que l'annuaire lui a attribué.
+async fn apporter_une_cle(
+    client: &mut ams_quic_client::Client,
+    flux: u64,
+    nouvelle: &asl_cle::CleSecreteAppareil,
+) -> (Vec<u8>, Option<Identifiant>) {
+    let (statut, rendu) = poster(
+        client,
+        flux,
+        b"/v1/appareils",
+        &nouvelle.publique().octets(),
+        b"application/octet-stream",
+    )
+    .await;
+    let appareil = (statut == b"201")
+        .then(|| Identifiant::analyser(&valeur_json(&rendu, "appareil")).expect("un identifiant"));
+    (statut, appareil)
+}
+
+/// Le nouvel appareil prouve sa clé ET présente sa chaîne, d'un même défi :
+/// `GET /v1/defi` sur `flux`, puis `POST /v1/attestation` sur le suivant.
+async fn attester(
+    client: &mut ams_quic_client::Client,
+    flux: u64,
+    appareil: Identifiant,
+    secrete: &asl_cle::CleSecreteAppareil,
+    plateforme: PlateformeAttestation,
+    chaine: &[u8],
+) -> Vec<u8> {
+    let defi = tirer_le_defi(client, flux).await;
+    let preuve = secrete
+        .signer(appareil, &defi, &liaison_du_client(client))
+        .expect("l'appareil signe");
+    let objet = asl_api::corps::AttestationDAppareil {
+        appareil,
+        preuve: preuve.octets(),
+        plateforme,
+        attestation: chaine,
+    };
+    let mut tampon = vec![0_u8; asl_api::corps::ATTESTATION_CORPS_MAX];
+    let n = objet.encoder(&mut tampon).expect("un corps bien formé");
+    let (statut, _) = poster(
+        client,
+        flux.saturating_add(4),
+        b"/v1/attestation",
+        &tampon[..n],
+        b"application/octet-stream",
+    )
+    .await;
+    statut
+}
+
+/// Ce que `GET /v1/appareils` dit de cet appareil, depuis cette connexion.
+async fn attestation_rendue(
+    client: &mut ams_quic_client::Client,
+    flux: u64,
+    appareil: Identifiant,
+) -> asl_api::corps::AttestationRendue {
+    ams_quic_client::envoyer_une_requete(client, flux, 17, b"/v1/appareils", None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(client, flux).await;
+    assert_eq!(
+        champ(&champs(client.recu(flux)), b":status"),
+        Some(&b"200"[..])
+    );
+    let texte = String::from_utf8_lossy(&rendu).into_owned();
+    let objets = texte
+        .strip_prefix('[')
+        .and_then(|reste| reste.strip_suffix(']'))
+        .unwrap_or_else(|| panic!("une liste : {texte}"));
+    // Les objets sont séparés par `},{` ; chacun se relit avec le décodeur
+    // des liaisons.
+    objets
+        .split("},{")
+        .map(|morceau| {
+            let mut entier = String::new();
+            if !morceau.starts_with('{') {
+                entier.push('{');
+            }
+            entier.push_str(morceau);
+            if !morceau.ends_with('}') {
+                entier.push('}');
+            }
+            let lu = asl_api::corps::AppareilRendu::decoder(entier.as_bytes())
+                .unwrap_or_else(|faute| panic!("{entier} : {faute}"));
+            (lu.appareil, lu.attestation)
+        })
+        .find(|(quel, _)| *quel == appareil)
+        .unwrap_or_else(|| panic!("{appareil} absent de {texte}"))
+        .1
+}
+
+#[tokio::test]
+async fn un_appareil_qui_rejoint_prouve_sa_cle_et_presente_sa_chaine_sous_une_posture_facultative()
+{
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // `protocole.md` §2.2, « Attester un appareil qui rejoint » : l'ancien
+    // appareil apporte la clé (`POST /v1/appareils`, `201`, `aucune`) ; le
+    // nouveau, sur SA connexion, tire un défi puis `POST /v1/attestation`
+    // avec sa preuve et sa chaîne. Sous une posture facultative, une chaîne
+    // que l'annuaire ne peut pas prouver — celle du Fairphone 5, amputée de
+    // ce que le harnais ne sait pas porter — rend `204` quand même :
+    // l'appareil reste `aucune`, la connexion est authentifiée, le journal
+    // dit le refus. Une preuve nue passe aussi. Une signature fausse, un
+    // appareil révoqué : `401`, le même.
+    let (autorite, racine, chaine, cle) = materiel("rejoindre-facultative");
+    let (base, fichier) = entrepot("rejoindre-facultative");
+    let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
+    let (case_reelle, attestations) = reglages_android_du_fp5();
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        bail,
+        asl_auth::Politique::AttestationFacultative,
+        attestations,
+        None,
+    )
+    .await;
+
+    // L'ancien appareil : un compte, sa connexion authentifiée.
+    let mut ancien = connecter(&racine, adresse).await;
+    let (_compte, _appareil_ancien, _secrete_ancien) = creer_un_compte(&mut ancien, 0, 0xA1).await;
+
+    // Le nouveau : sa connexion, son défi AVANT sa clé — l'ordre du Keystore.
+    let mut nouveau = connecter(&racine, adresse).await;
+    let _defi = tirer_le_defi(&mut nouveau, 0).await;
+    let secrete_nouveau =
+        asl_cle::CleSecreteAppareil::depuis_entropie([0xB1; 32]).expect("un scalaire valide");
+
+    // L'ancien apporte la clé : `201`, et l'appareil entre `aucune`.
+    let (statut, appareil) = apporter_une_cle(&mut ancien, 8, &secrete_nouveau).await;
+    assert_eq!(statut, b"201");
+    let appareil = appareil.expect("un identifiant");
+    assert_eq!(
+        attestation_rendue(&mut ancien, 12, appareil).await,
+        asl_api::corps::AttestationRendue::Aucune
+    );
+
+    // Le nouveau prouve et présente sa chaîne, sur la connexion tenue depuis
+    // le défi — le défi fixe du banc rend le second tirage égal au premier.
+    assert_eq!(
+        attester(
+            &mut nouveau,
+            4,
+            appareil,
+            &secrete_nouveau,
+            PlateformeAttestation::Android,
+            &case_reelle
+        )
+        .await,
+        b"204",
+        "posture facultative : la chaîne refusée ne ferme pas la porte"
+    );
+    // La connexion est celle de l'appareil : il lit son compte, et se voit
+    // `aucune` — la chaîne n'a rien prouvé.
+    assert_eq!(
+        attestation_rendue(&mut nouveau, 12, appareil).await,
+        asl_api::corps::AttestationRendue::Aucune
+    );
+    {
+        let journal = JOURNAL.lock().expect("le journal n'est pas empoisonné");
+        assert!(
+            journal
+                .iter()
+                .any(|ligne| ligne.starts_with("attestation refusée : Android, ")),
+            "le journal dit pourquoi la chaîne n'a pas été acceptée"
+        );
+        assert!(
+            journal.iter().any(|ligne| ligne
+                == &format!(
+                    "appareil {appareil} : chaîne refusée, posture facultative : reste sans preuve"
+                )),
+            "et ce qu'il en est advenu"
+        );
+    }
+
+    // Une preuve nue sur ce verbe vaut `POST /v1/defi` : `204`.
+    let mut encore = connecter(&racine, adresse).await;
+    assert_eq!(
+        attester(
+            &mut encore,
+            0,
+            appareil,
+            &secrete_nouveau,
+            PlateformeAttestation::Aucune,
+            &[]
+        )
+        .await,
+        b"204"
+    );
+
+    // Une signature d'une autre clé : `401`, et le défi est dépensé — la
+    // même preuve refaite sans défi rend encore `401`.
+    let mut intrus = connecter(&racine, adresse).await;
+    let autre = asl_cle::CleSecreteAppareil::depuis_entropie([0xC1; 32]).expect("un scalaire");
+    assert_eq!(
+        attester(
+            &mut intrus,
+            0,
+            appareil,
+            &autre,
+            PlateformeAttestation::Android,
+            &case_reelle
+        )
+        .await,
+        b"401"
+    );
+
+    // Révoqué par l'ancien : sa preuve, nue ou avec chaîne, rend `401`.
+    let cible = format!("/v1/appareils/{}", appareil.texte());
+    ams_quic_client::envoyer_une_requete(&mut ancien, 16, 16, cible.as_bytes(), None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut ancien, 16).await;
+    assert_eq!(
+        champ(&champs(ancien.recu(16)), b":status"),
+        Some(&b"204"[..]),
+        "révoqué"
+    );
+    let mut revoque = connecter(&racine, adresse).await;
+    assert_eq!(
+        attester(
+            &mut revoque,
+            0,
+            appareil,
+            &secrete_nouveau,
+            PlateformeAttestation::Android,
+            &case_reelle
+        )
+        .await,
+        b"401",
+        "un appareil révoqué ne s'atteste plus"
+    );
+    assert_eq!(
+        prouver_l_appareil(&mut revoque, appareil, &secrete_nouveau, 8).await,
+        b"401",
+        "et sa preuve nue non plus"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn sous_une_posture_exigee_un_appareil_apporte_est_attendu_jusqu_a_sa_chaine() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // La table des postures de `protocole.md` §2.2 : sous `required`,
+    // `POST /v1/appareils` écrit `attendue` là où il refusait ; la preuve nue
+    // du nouvel appareil rend `401`, comme une clé révoquée ; sa chaîne
+    // refusée rend `403`, et il reste `attendue` — visible dans Appareils,
+    // révocable. Un appareil `aucune` d'hier, sur cette racine, reste servi :
+    // la posture qualifie l'entrée, jamais ce qui est déjà entré.
+    let (autorite, racine, chaine, cle) = materiel("rejoindre-exigee");
+    let (base, fichier) = entrepot("rejoindre-exigee");
+    // L'ancien appareil est entré `aucune` sous une posture d'hier : on le
+    // range à la main, puisque `POST /v1/comptes` ne l'admettrait plus.
+    let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xA2; 16]);
+    let appareil_ancien = Identifiant::depuis_entropie(Genre::Appareil, [0xA3; 16]);
+    let secrete_ancien =
+        asl_cle::CleSecreteAppareil::depuis_entropie([0xA4; 32]).expect("un scalaire valide");
+    base.creer_compte(compte, asl_registre::Provenance::Ici, None)
+        .expect("le compte");
+    base.creer_appareil(
+        appareil_ancien,
+        asl_registre::Provenance::Ici,
+        compte,
+        secrete_ancien.publique().octets(),
+        asl_registre::Attestation::Aucune,
+    )
+    .expect("l'appareil d'hier");
+    let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
+    let (case_reelle, attestations) = reglages_android_du_fp5();
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        bail,
+        asl_auth::Politique::AttestationExigee,
+        attestations,
+        None,
+    )
+    .await;
+
+    let mut ancien = connecter(&racine, adresse).await;
+    assert_eq!(
+        prouver_l_appareil(&mut ancien, appareil_ancien, &secrete_ancien, 0).await,
+        b"204",
+        "un appareil `aucune` d'hier reste servi"
+    );
+
+    let mut nouveau = connecter(&racine, adresse).await;
+    let _defi = tirer_le_defi(&mut nouveau, 0).await;
+    let secrete_nouveau =
+        asl_cle::CleSecreteAppareil::depuis_entropie([0xB2; 32]).expect("un scalaire valide");
+
+    // Apporté : `201`, et `attendue` — pas refusé.
+    let (statut, appareil) = apporter_une_cle(&mut ancien, 8, &secrete_nouveau).await;
+    assert_eq!(
+        statut, b"201",
+        "sous `required`, la clé est apportée quand même"
+    );
+    let appareil = appareil.expect("un identifiant");
+    assert_eq!(
+        attestation_rendue(&mut ancien, 12, appareil).await,
+        asl_api::corps::AttestationRendue::Attendue
+    );
+
+    // Sa preuve nue : `401`, il n'est pas entré — par `/v1/defi` comme par
+    // `/v1/attestation` sans chaîne.
+    let mut nu = connecter(&racine, adresse).await;
+    assert_eq!(
+        prouver_l_appareil(&mut nu, appareil, &secrete_nouveau, 0).await,
+        b"401"
+    );
+    assert_eq!(
+        attester(
+            &mut nu,
+            8,
+            appareil,
+            &secrete_nouveau,
+            PlateformeAttestation::Aucune,
+            &[]
+        )
+        .await,
+        b"401"
+    );
+
+    // Sa chaîne, que l'annuaire ne peut pas prouver : `403`, il reste
+    // `attendue`, et la connexion n'est pas authentifiée.
+    assert_eq!(
+        attester(
+            &mut nouveau,
+            4,
+            appareil,
+            &secrete_nouveau,
+            PlateformeAttestation::Android,
+            &case_reelle
+        )
+        .await,
+        b"403"
+    );
+    ams_quic_client::envoyer_une_requete(&mut nouveau, 12, 17, b"/v1/appareils", None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut nouveau, 12).await;
+    assert_eq!(
+        champ(&champs(nouveau.recu(12)), b":status"),
+        Some(&b"401"[..]),
+        "la connexion du nouveau n'est pas authentifiée"
+    );
+    assert_eq!(
+        attestation_rendue(&mut ancien, 16, appareil).await,
+        asl_api::corps::AttestationRendue::Attendue,
+        "il reste attendu — visible, et révocable"
+    );
+    {
+        let journal = JOURNAL.lock().expect("le journal n'est pas empoisonné");
+        assert!(
+            journal.iter().any(|ligne| ligne
+                == &format!("appareil {appareil} : chaîne refusée, posture exigée : refusé")),
+            "le journal dit le refus"
+        );
+    }
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
