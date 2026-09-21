@@ -460,12 +460,23 @@ impl Service<'_> {
                 // **UN APPAREIL SIGNE EN P-256**, et sa clé rangée fait 33
                 // octets. La lire comme un Ed25519 échouerait, et une panne de
                 // courbe se lirait comme une clé fausse.
+                //
+                // **ET IL DOIT ÊTRE VIVANT** : un appareil révoqué, ou
+                // `attendue` — apporté sous une posture exigée, pas encore
+                // attesté (`protocole.md` §2.2, 2026-09-21) —, n'est pas
+                // entré, et sa preuve nue rend le même `401` qu'une clé
+                // inconnue. Sa chaîne passe par `POST /v1/attestation`.
                 asl_id::Genre::Appareil => match self.entrepot.appareil(*qui).ok().flatten() {
-                    Some(appareil) => match CleAppareil::depuis_octets(appareil.cle) {
-                        Ok(cle) => Trouvaille::Cle(CleTrouvee::Appareil(cle)),
-                        Err(_) => Trouvaille::Rien,
-                    },
-                    None => Trouvaille::Rien,
+                    Some(appareil)
+                        if !appareil.revoque()
+                            && appareil.atteste != asl_registre::Attestation::Attendue =>
+                    {
+                        match CleAppareil::depuis_octets(appareil.cle) {
+                            Ok(cle) => Trouvaille::Cle(CleTrouvee::Appareil(cle)),
+                            Err(_) => Trouvaille::Rien,
+                        }
+                    }
+                    _ => Trouvaille::Rien,
                 },
                 // **UNE MACHINE SANS CLÉ NE PROUVE RIEN.** Elle est déclarée et
                 // pas encore enrôlée ; c'est `None`, et non trente-deux zéros
@@ -543,6 +554,12 @@ impl Service<'_> {
                 defi_attestation_de_cle,
             ),
             Besoin::CreerAppareil { cle } => self.creer_un_appareil(cle),
+            Besoin::AttesterAppareil {
+                appareil,
+                preuve,
+                plateforme,
+                attestation,
+            } => self.attester_un_appareil(*appareil, preuve, *plateforme, attestation),
             Besoin::CreerMachine { nom, capacites } => self.creer_une_machine(nom, *capacites),
             Besoin::ModifierMachine {
                 machine,
@@ -810,10 +827,19 @@ impl Service<'_> {
     }
 
     /// Enrôle un appareil de plus sur le compte de cette connexion.
+    ///
+    /// **SOUS QUOI IL ENTRE DÉPEND DE LA POSTURE** (`protocole.md` §2.2,
+    /// « Attester un appareil qui rejoint », 2026-09-21) : `aucune` sous une
+    /// posture facultative — une entrée entière, comme avant — ; `attendue`
+    /// sous une posture exigée, là où l'on refusait : la clé est apportée,
+    /// et l'appareil n'entrera que quand il l'aura prouvée avec sa chaîne,
+    /// sur sa propre connexion. Un `201` dans les deux cas — ce que le
+    /// nouvel appareil en fait ensuite est à lui.
     fn creer_un_appareil(&self, cle: &CleAppareil) -> Trouvaille {
-        if asl_auth::decider_attestation(false, self.politique) == asl_auth::Decision::Refuser {
-            return Trouvaille::Refus;
-        }
+        let atteste = match asl_auth::decider_attestation(false, self.politique) {
+            asl_auth::Decision::Servir => asl_registre::Attestation::Aucune,
+            asl_auth::Decision::Refuser => asl_registre::Attestation::Attendue,
+        };
         let (Some(compte), Some(appareil)) = (
             self.compte_de_la_connexion(),
             self.un_identifiant(asl_id::Genre::Appareil),
@@ -825,10 +851,126 @@ impl Service<'_> {
             asl_registre::Provenance::Ici,
             compte,
             cle.octets(),
-            asl_registre::Attestation::Aucune,
+            atteste,
         ) {
             Ok(()) => Trouvaille::AppareilCree(appareil),
             Err(_) => Trouvaille::Rien,
+        }
+    }
+
+    /// Un appareil qui a rejoint prouve sa clé et présente sa chaîne
+    /// (`protocole.md` §2.2, « Attester un appareil qui rejoint »).
+    ///
+    /// # DEUX VÉRIFICATIONS, UNE ÉCRITURE, ET LA TABLE DES POSTURES
+    ///
+    /// La preuve d'abord — contre la clé RANGÉE, par la session, sur le défi
+    /// de cette connexion —, et rien n'est jugé ni écrit si elle ne tient pas.
+    /// Puis la chaîne, par `verifier_l_attestation`, exactement comme à la
+    /// création d'un compte : même racines, même défi
+    /// (`SHA-256(message_d_attestation_de_cle)`), même clé attendue à la
+    /// feuille. Puis ce que la posture en fait :
+    ///
+    /// - facultative : chaîne acceptée, l'appareil passe à `apple`/`android` ;
+    ///   refusée, il reste `aucune` et la connexion est authentifiée quand
+    ///   même — c'est ce que la posture promet ; le journal dit le refus.
+    /// - exigée : acceptée, `attendue` devient prouvé et l'appareil est
+    ///   vivant ; refusée, `403`, il reste `attendue`, et cette clé ne
+    ///   s'attestera plus — son défi est dépensé.
+    ///
+    /// Une plate-forme `Aucune` est une preuve nue : servie sous une posture
+    /// facultative, `401` sous une posture exigée tant que l'appareil est
+    /// `attendue` — la même règle que `POST /v1/defi`.
+    ///
+    /// **`Rien` est `401`**, pour quatre causes qu'on ne distingue pas —
+    /// inconnu, révoqué, compte effacé, signature fausse — et pour une panne
+    /// de l'entrepôt, que le journal dit et que la réponse tait.
+    fn attester_un_appareil(
+        &self,
+        appareil: Identifiant,
+        preuve: &asl_cle::SignatureAppareil,
+        plateforme: PlateformeAttestation,
+        attestation: &[u8],
+    ) -> Trouvaille {
+        let dire = |quoi: &str| {
+            (self.voie.journal)(&format!("appareil {appareil} : {quoi}"));
+        };
+        let Ok(Some(rangee)) = self.entrepot.appareil(appareil) else {
+            dire("attestation refusée, appareil inconnu");
+            return Trouvaille::Rien;
+        };
+        if rangee.revoque() {
+            dire("attestation refusée, appareil révoqué");
+            return Trouvaille::Rien;
+        }
+        if !matches!(
+            self.entrepot.compte_vivant(rangee.proprietaire),
+            Ok(Some(_))
+        ) {
+            dire("attestation refusée, compte effacé");
+            return Trouvaille::Rien;
+        }
+        let Ok(cle) = CleAppareil::depuis_octets(rangee.cle) else {
+            dire("attestation refusée, clé rangée illisible");
+            return Trouvaille::Rien;
+        };
+        let Some((defi_attestation, defi_attestation_de_cle)) = self
+            .session
+            .preuve_d_appareil_et_defis(appareil, &cle, preuve)
+        else {
+            dire("attestation refusée, preuve fausse ou sans défi");
+            return Trouvaille::Rien;
+        };
+
+        // **UNE PREUVE NUE SUR CE VERBE VAUT `POST /v1/defi`** : rien à juger,
+        // rien à écrire — et un `attendue` n'est pas entré.
+        if plateforme == PlateformeAttestation::Aucune {
+            return if rangee.atteste == asl_registre::Attestation::Attendue {
+                dire("preuve nue, appareil attendu : pas entré");
+                Trouvaille::Rien
+            } else {
+                Trouvaille::AppareilAtteste
+            };
+        }
+
+        let jugee = self.verifier_l_attestation(
+            plateforme,
+            attestation,
+            &defi_attestation,
+            &defi_attestation_de_cle,
+            &cle,
+        );
+        let exigee = self.politique == asl_auth::Politique::AttestationExigee;
+        let Some(atteste) = jugee else {
+            // `verifier_l_attestation` a déjà dit la cause au journal.
+            if exigee {
+                dire("chaîne refusée, posture exigée : refusé");
+                return Trouvaille::Refus;
+            }
+            dire("chaîne refusée, posture facultative : reste sans preuve");
+            return Trouvaille::AppareilAtteste;
+        };
+        match self.entrepot.attester_appareil(appareil, atteste) {
+            Ok(Some(avant)) => {
+                if avant.atteste.prouvee() {
+                    dire(&format!(
+                        "chaîne acceptée, déjà attesté {}",
+                        mot_d_attestation(avant.atteste)
+                    ));
+                } else {
+                    dire(&format!("attesté {}", mot_d_attestation(atteste)));
+                }
+                Trouvaille::AppareilAtteste
+            }
+            Ok(None) => {
+                dire("attestation refusée, appareil parti entre deux lectures");
+                Trouvaille::Rien
+            }
+            Err(faute) => {
+                dire(&format!(
+                    "attestation non rangée, l'entrepôt a refusé : {faute}"
+                ));
+                Trouvaille::Rien
+            }
         }
     }
 
@@ -1893,13 +2035,16 @@ impl Service<'_> {
                     appareil: quel,
                     attestation: match enregistre.atteste {
                         asl_registre::Attestation::Aucune => {
-                            asl_api::corps::PlateformeAttestation::Aucune
+                            asl_api::corps::AttestationRendue::Aucune
                         }
                         asl_registre::Attestation::Apple => {
-                            asl_api::corps::PlateformeAttestation::Apple
+                            asl_api::corps::AttestationRendue::Apple
                         }
                         asl_registre::Attestation::Android => {
-                            asl_api::corps::PlateformeAttestation::Android
+                            asl_api::corps::AttestationRendue::Android
+                        }
+                        asl_registre::Attestation::Attendue => {
+                            asl_api::corps::AttestationRendue::Attendue
                         }
                     },
                     revoque: enregistre.revoque(),
@@ -2102,6 +2247,16 @@ impl Service<'_> {
 /// tire de la même source que le reste de la boucle, en divisant les
 /// microsecondes : un bail se compte en dizaines de secondes, et la
 /// milliseconde y est déjà une précision de trop.
+/// Le mot du journal pour une attestation rangée.
+const fn mot_d_attestation(atteste: asl_registre::Attestation) -> &'static str {
+    match atteste {
+        asl_registre::Attestation::Aucune => "aucune",
+        asl_registre::Attestation::Apple => "apple",
+        asl_registre::Attestation::Android => "android",
+        asl_registre::Attestation::Attendue => "attendue",
+    }
+}
+
 fn instant() -> asl_annuaire::Instant {
     asl_annuaire::Instant::depuis_millisecondes(maintenant().saturating_div(1_000))
 }

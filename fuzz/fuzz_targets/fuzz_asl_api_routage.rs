@@ -70,6 +70,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Version => "/v1/version".to_owned(),
         Ressource::Comptes => "/v1/comptes".to_owned(),
         Ressource::Compte => "/v1/compte".to_owned(),
+        Ressource::Attestation => "/v1/attestation".to_owned(),
         Ressource::Enrolement => "/v1/enrolement".to_owned(),
         Ressource::Utilisateur { compte } => format!("/v1/utilisateurs/{compte}"),
         Ressource::MachinesUtilisateur { compte } => format!("/v1/utilisateurs/{compte}/machines"),
@@ -178,9 +179,9 @@ fuzz_target!(|entree: Entree| {
 
     // ── LA LISTE CLOSE DE CE QUI N'EXIGE RIEN ───────────────────────────────
     //
-    // Sept ressources, et chacune a sa raison écrite sur `Ressource::exigence`.
-    // **CETTE ASSERTION A DÉJÀ SERVI** : elle a arrêté `/v1/enrolement` le jour
-    // de son ajout. Le verbe était légitime et sa liberté délibérée — mais
+    // Huit ressources, et chacune a sa raison écrite sur `Ressource::exigence`.
+    // **CETTE ASSERTION A DÉJÀ SERVI DEUX FOIS** : elle a arrêté
+    // `/v1/enrolement` le jour de son ajout, puis `/v1/attestation` le sien. Le verbe était légitime et sa liberté délibérée — mais
     // c'est précisément le point : une ressource ne devient publique que si
     // quelqu'un l'écrit ICI, jamais parce qu'un `_ =>` l'a laissée passer.
     if resolu.exigence == Exigence::Aucune {
@@ -192,6 +193,7 @@ fuzz_target!(|entree: Entree| {
                     | Ressource::Version
                     | Ressource::Comptes
                     | Ressource::Enrolement
+                    | Ressource::Attestation
                     | Ressource::AliasResolu { .. }
                     | Ressource::Utilisateur { .. }
             ),

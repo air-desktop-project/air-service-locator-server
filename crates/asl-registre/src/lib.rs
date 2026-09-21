@@ -1422,12 +1422,26 @@ impl Appareil {
 
 /// Ce qui a cautionné un appareil au moment de son enrôlement.
 ///
-/// # TROIS ÉTATS, ET `Aucune` EN EST UN À PART ENTIÈRE
+/// # QUATRE ÉTATS, ET `Aucune` EN EST UN À PART ENTIÈRE
 ///
 /// Ce n'est pas « attesté ou non » : c'est PAR QUOI. Un annuaire en posture
 /// `facultative` laisse entrer des appareils sans preuve, et il faut pouvoir
 /// dire qu'ils sont entrés ainsi — non pas qu'on a oublié de le noter. `Aucune`
 /// est donc une valeur, pas une absence.
+///
+/// # ET `Attendue` DIT QU'IL N'EST PAS ENTRÉ
+///
+/// Depuis le 2026-09-21 (`protocole.md` §2.2, « Attester un appareil qui
+/// rejoint ») : une clé apportée par un autre appareil du compte
+/// (`POST /v1/appareils`) sous une posture EXIGÉE, que son porteur n'a pas
+/// encore prouvée ni attestée sur sa propre connexion (`POST /v1/attestation`).
+/// Sa preuve nue rend `401`, comme une clé révoquée ; sa chaîne acceptée le
+/// fait passer à `Apple` ou `Android`, et il est vivant. **Elle ne s'expire
+/// pas** : un enregistrement qui partirait de lui-même serait une exception de
+/// plus à « marqué, jamais effacé », pour un cas que l'écran Appareils montre
+/// et qu'un geste — révoquer — règle. Une quatrième étiquette, sans que
+/// l'enregistrement change de taille : les bases d'avant se relisent telles
+/// quelles, et seul un binaire d'avant ne saurait pas la lire.
 ///
 /// # POURQUOI LES ÉTIQUETTES RANGÉES NE SONT PAS CELLES DU FIL
 ///
@@ -1457,6 +1471,9 @@ pub enum Attestation {
     /// Cautionné par l'attestation de clé d'Android (Keystore), contre une
     /// racine que l'exploitant épingle.
     Android,
+    /// Apporté par un autre appareil du compte sous une posture exigée, et
+    /// pas encore prouvé ni attesté par son porteur : il n'est pas entré.
+    Attendue,
 }
 
 impl Attestation {
@@ -1466,13 +1483,20 @@ impl Attestation {
     const APPLE: u8 = 2;
     /// L'étiquette d'Android — celle qui disait Google.
     const ANDROID: u8 = 3;
+    /// L'étiquette d'« attendue ».
+    const ATTENDUE: u8 = 4;
 
     /// Son étiquette rangée. **Aucune ne vaut zéro** — voir l'en-tête du type.
-    const fn etiquette(self) -> u8 {
+    ///
+    /// Publique pour que l'entrepôt puisse DIRE quelle valeur il refuse dans
+    /// `appareil-atteste` ; rien d'autre ne la lit hors d'ici.
+    #[must_use]
+    pub const fn etiquette(self) -> u8 {
         match self {
             Self::Aucune => Self::AUCUNE,
             Self::Apple => Self::APPLE,
             Self::Android => Self::ANDROID,
+            Self::Attendue => Self::ATTENDUE,
         }
     }
 
@@ -1482,8 +1506,19 @@ impl Attestation {
             Self::AUCUNE => Ok(Self::Aucune),
             Self::APPLE => Ok(Self::Apple),
             Self::ANDROID => Ok(Self::Android),
+            Self::ATTENDUE => Ok(Self::Attendue),
             lue => Err(Faute::Etiquette { lue }),
         }
+    }
+
+    /// Cette valeur est-elle une PREUVE — une chaîne que l'annuaire a jugée ?
+    ///
+    /// `Aucune` et `Attendue` ne le sont pas, et c'est ce qui les rend
+    /// remplaçables par `appareil-atteste` : une attestation ne va que vers
+    /// une valeur prouvée, jamais en arrière (`docs/replication.md` §5.2).
+    #[must_use]
+    pub const fn prouvee(self) -> bool {
+        matches!(self, Self::Apple | Self::Android)
     }
 }
 
@@ -2386,13 +2421,15 @@ pub const OPERATION_OCTETS_MAX: usize = OPERATION_ENTETE_OCTETS + CHARGE_OCTETS_
 /// de la charge, donc **aucune longueur ne vient du réseau**, et il n'y a pas de
 /// second décodeur : ce qui se lit sur le fil est ce qui se lit sur le disque.
 ///
-/// # LES QUINZE GENRES SONT CEUX DE `replication.md` §5.2
+/// # LES SEIZE GENRES SONT CEUX DE `replication.md` §5.2
 ///
 /// Un par écriture locale possible, et aucun pour ce qui ne se réplique pas —
 /// l'expiration d'un code, le retrait d'un jeton par son appareil n'ont pas
 /// d'opération. Il n'y a pas d'effacement d'une machine ou d'un service :
 /// l'API n'en a pas. **Il y en a un pour un compte**, depuis le 2026-09-18
 /// ([`Operation::CompteEfface`]), et c'est le seul qui efface physiquement.
+/// Le seizième, `appareil-atteste` (2026-09-21), porte l'attestation d'un
+/// appareil qui a rejoint — un octet, jamais la chaîne.
 ///
 /// **L'estampille n'est pas dans la variante** : elle est celle de l'opération,
 /// et [`Operation::ecrire`] la prend à part. Une opération est un fait daté par
@@ -2431,6 +2468,19 @@ pub enum Operation {
         appareil: Identifiant,
         /// Quand, en millisecondes d'époque.
         revoque_le: u64,
+    },
+    /// Un appareil qui a rejoint a présenté sa chaîne, et elle tient. Poser
+    /// la valeur si l'appareil est `aucune` ou `attendue` ; s'il porte déjà
+    /// une valeur prouvée, rien. **Toujours**, révoqué ou non
+    /// (`docs/replication.md` §3.2, §5.2, décision 25, 2026-09-21) : une
+    /// attestation est un fait sur la clé, une révocation un fait sur
+    /// l'appareil, et les deux racines doivent finir avec les deux.
+    AppareilAtteste {
+        /// Lequel.
+        appareil: Identifiant,
+        /// Sous quoi il est entré — une valeur prouvée, jamais `Aucune` ni
+        /// `Attendue` : le lecteur les refuse.
+        atteste: Attestation,
     },
     /// Ce qu'un appareil dit de lui-même. Le plus récent.
     Description {
@@ -2535,7 +2585,8 @@ pub enum Operation {
 ///
 /// **Et aucun ne vaut quinze** : c'est [`ETIQUETTE_DE_FIN`], posée quand il
 /// n'y avait que quatorze genres. Le quinzième, `compte-efface`, a pris seize
-/// plutôt que de déplacer un cadre que les deux racines savaient déjà lire.
+/// plutôt que de déplacer un cadre que les deux racines savaient déjà lire ;
+/// le seizième, `appareil-atteste`, dix-sept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenreOperation {
     /// `compte`.
@@ -2568,12 +2619,14 @@ pub enum GenreOperation {
     AutorisationRevoquee,
     /// `compte-efface`.
     CompteEfface,
+    /// `appareil-atteste`.
+    AppareilAtteste,
 }
 
 impl GenreOperation {
-    /// Les quinze, dans l'ordre de `replication.md` §5.2 — et l'ordre de
-    /// leurs étiquettes, de 1 à 14, puis 16 (voir l'en-tête du type).
-    pub const TOUS: [Self; 15] = [
+    /// Les seize, dans l'ordre de `replication.md` §5.2 — et l'ordre de
+    /// leurs étiquettes, de 1 à 14, puis 16 et 17 (voir l'en-tête du type).
+    pub const TOUS: [Self; 16] = [
         Self::Compte,
         Self::Alias,
         Self::Appareil,
@@ -2589,6 +2642,7 @@ impl GenreOperation {
         Self::Autorisation,
         Self::AutorisationRevoquee,
         Self::CompteEfface,
+        Self::AppareilAtteste,
     ];
 
     /// Son étiquette, en tête du cadre.
@@ -2610,6 +2664,7 @@ impl GenreOperation {
             Self::Autorisation => 13,
             Self::AutorisationRevoquee => 14,
             Self::CompteEfface => 16,
+            Self::AppareilAtteste => 17,
         }
     }
 
@@ -2636,6 +2691,7 @@ impl GenreOperation {
             13 => Self::Autorisation,
             14 => Self::AutorisationRevoquee,
             16 => Self::CompteEfface,
+            17 => Self::AppareilAtteste,
             lue => return Err(Faute::Etiquette { lue }),
         })
     }
@@ -2650,6 +2706,7 @@ impl GenreOperation {
             Self::Alias => IDENTIFIANT_OCTETS + 1 + 1 + ALIAS_OCTETS_MAX,
             Self::Appareil => IDENTIFIANT_OCTETS + APPAREIL_OCTETS,
             Self::AppareilRevoque => IDENTIFIANT_OCTETS + 8,
+            Self::AppareilAtteste => IDENTIFIANT_OCTETS + 1,
             Self::AutorisationRevoquee => IDENTIFIANT_OCTETS,
             Self::CompteEfface => IDENTIFIANT_OCTETS + EFFACEMENT_OCTETS,
             Self::Description => IDENTIFIANT_OCTETS + DESCRIPTION_OCTETS,
@@ -2687,6 +2744,7 @@ impl Operation {
             Self::Alias { .. } => GenreOperation::Alias,
             Self::Appareil { .. } => GenreOperation::Appareil,
             Self::AppareilRevoque { .. } => GenreOperation::AppareilRevoque,
+            Self::AppareilAtteste { .. } => GenreOperation::AppareilAtteste,
             Self::Description { .. } => GenreOperation::Description,
             Self::Poussee { .. } => GenreOperation::Poussee,
             Self::Machine { .. } => GenreOperation::Machine,
@@ -2758,6 +2816,13 @@ impl Operation {
                 poser(
                     charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
                     &revoque_le.to_be_bytes(),
+                );
+            }
+            Self::AppareilAtteste { appareil, atteste } => {
+                ecrire_identifiant(*appareil, charge);
+                poser_un(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    atteste.etiquette(),
                 );
             }
             Self::Description {
@@ -2958,6 +3023,19 @@ impl Operation {
                     appareil: lire_identifiant(charge, Genre::Appareil)?,
                     revoque_le: u64::from_be_bytes(quand),
                 }
+            }
+            GenreOperation::AppareilAtteste => {
+                let appareil = lire_identifiant(charge, Genre::Appareil)?;
+                let atteste = Attestation::depuis(apres_identifiant.first().copied().unwrap_or(0))?;
+                // **UNE VALEUR PROUVÉE, OU RIEN** : une opération qui poserait
+                // `aucune` ou `attendue` irait en arrière, et la règle de §5.2
+                // ne connaît que l'aller.
+                if !atteste.prouvee() {
+                    return Err(Faute::Etiquette {
+                        lue: atteste.etiquette(),
+                    });
+                }
+                Self::AppareilAtteste { appareil, atteste }
             }
             GenreOperation::Description => Self::Description {
                 appareil: lire_identifiant(charge, Genre::Appareil)?,
@@ -5097,17 +5175,28 @@ mod tests {
     }
 
     #[test]
-    fn les_trois_attestations_font_l_aller_retour() {
+    fn les_quatre_attestations_font_l_aller_retour() {
         for atteste in [
             Attestation::Aucune,
             Attestation::Apple,
             Attestation::Android,
+            Attestation::Attendue,
         ] {
             let appareil = un_appareil(atteste, None);
             let mut octets = [0_u8; APPAREIL_OCTETS];
             appareil.ecrire(&mut octets);
             assert_eq!(Appareil::lire(&octets), Ok(appareil), "pour {atteste:?}");
         }
+    }
+
+    #[test]
+    fn seules_apple_et_android_sont_des_preuves() {
+        // **`Attendue` N'EST PAS ENTRÉ, ET `Aucune` N'A RIEN PROUVÉ** : les
+        // deux se remplacent par `appareil-atteste`, jamais l'inverse.
+        assert!(!Attestation::Aucune.prouvee());
+        assert!(!Attestation::Attendue.prouvee());
+        assert!(Attestation::Apple.prouvee());
+        assert!(Attestation::Android.prouvee());
     }
 
     #[test]
@@ -5123,14 +5212,14 @@ mod tests {
             PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS;
         octets[place] = 0;
         assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 0 }));
-        octets[place] = 4;
-        assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 4 }));
+        octets[place] = 5;
+        assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 5 }));
     }
 
     // ── Les opérations ──────────────────────────────────────────────────────
 
     /// Une opération de chaque genre, dans l'ordre de `replication.md` §5.2.
-    fn une_de_chaque() -> [Operation; 15] {
+    fn une_de_chaque() -> [Operation; 16] {
         [
             Operation::Compte {
                 compte: un(Genre::Utilisateur, 1),
@@ -5198,6 +5287,10 @@ mod tests {
                 efface_le: effacement(Cause::Titulaire).le,
                 cause: Cause::Titulaire,
             },
+            Operation::AppareilAtteste {
+                appareil: un(Genre::Appareil, 2),
+                atteste: Attestation::Android,
+            },
         ]
     }
 
@@ -5206,12 +5299,12 @@ mod tests {
         for (rang, operation) in une_de_chaque().into_iter().enumerate() {
             let genre = operation.genre();
             assert_eq!(genre, GenreOperation::TOUS[rang], "{operation:?}");
-            // Les étiquettes suivent l'ordre de la table — sauf la dernière,
-            // qui saute le cadre de fin (voir `GenreOperation`).
-            let attendue = if genre == GenreOperation::CompteEfface {
-                16
-            } else {
-                rang + 1
+            // Les étiquettes suivent l'ordre de la table — sauf les deux
+            // dernières, qui sautent le cadre de fin (voir `GenreOperation`).
+            let attendue = match genre {
+                GenreOperation::CompteEfface => 16,
+                GenreOperation::AppareilAtteste => 17,
+                _ => rang + 1,
             };
             assert_eq!(
                 usize::from(genre.etiquette()),
@@ -5239,6 +5332,28 @@ mod tests {
                 "{genre:?}"
             );
         }
+    }
+
+    #[test]
+    fn une_attestation_dont_l_identifiant_n_est_pas_un_appareil_est_refusee() {
+        // **LE GENRE SE VÉRIFIE À LA RELECTURE** : une opération
+        // `appareil-atteste` dont la charge porte un identifiant d'un autre
+        // genre est une corruption, et elle se voit ici — pas trois couches
+        // plus haut, quand une clé introuvable ferait douter d'un enrôlement.
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        let operation = Operation::AppareilAtteste {
+            appareil: un(Genre::Appareil, 2),
+            atteste: Attestation::Android,
+        };
+        let combien = operation.ecrire(e(1), &mut sortie);
+        // Le préfixe de l'identifiant est en tête de la charge, après l'en-tête.
+        sortie[OPERATION_ENTETE_OCTETS] = Genre::Utilisateur.prefixe();
+        assert_eq!(
+            Operation::lire(&sortie[..combien]),
+            Err(Faute::Genre {
+                attendu: Genre::Appareil
+            })
+        );
     }
 
     #[test]
@@ -5282,9 +5397,9 @@ mod tests {
 
     #[test]
     fn un_genre_inconnu_est_refuse_zero_compris() {
-        // Quinze est le cadre de fin, dix-sept le premier au-delà du dernier
+        // Quinze est le cadre de fin, dix-huit le premier au-delà du dernier
         // genre : aucun des deux n'est une opération.
-        for lue in [0_u8, 15, 17, 200] {
+        for lue in [0_u8, 15, 18, 200] {
             let mut octets = [0_u8; OPERATION_OCTETS_MAX];
             octets[0] = lue;
             assert_eq!(Operation::lire(&octets), Err(Faute::Etiquette { lue }));
@@ -5334,6 +5449,39 @@ mod tests {
                 Operation::lire(&sortie[..combien]),
                 Ok((e(2), operation, combien)),
                 "{cause:?}"
+            );
+        }
+
+        // **`appareil-atteste` porte UN octet, et une valeur prouvée** :
+        // `aucune` et `attendue` iraient en arrière, zéro ne désigne personne.
+        let combien = une_de_chaque()[15].ecrire(e(1), &mut sortie);
+        assert_eq!(combien, OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS + 1);
+        let place = combien - 1;
+        assert_eq!(sortie[place], Attestation::Android.etiquette());
+        for lue in [
+            0_u8,
+            Attestation::Aucune.etiquette(),
+            Attestation::Attendue.etiquette(),
+            200,
+        ] {
+            let mut corrompue = sortie;
+            corrompue[place] = lue;
+            assert_eq!(
+                Operation::lire(&corrompue),
+                Err(Faute::Etiquette { lue }),
+                "{lue}"
+            );
+        }
+        for atteste in [Attestation::Apple, Attestation::Android] {
+            let operation = Operation::AppareilAtteste {
+                appareil: un(Genre::Appareil, 2),
+                atteste,
+            };
+            let combien = operation.ecrire(e(2), &mut sortie);
+            assert_eq!(
+                Operation::lire(&sortie[..combien]),
+                Ok((e(2), operation, combien)),
+                "{atteste:?}"
             );
         }
     }

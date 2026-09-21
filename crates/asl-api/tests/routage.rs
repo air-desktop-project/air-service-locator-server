@@ -31,9 +31,10 @@ fn chaque_chemin_designe_sa_ressource() {
     let g = ident(Genre::Autorisation);
     let n = ident(Genre::Annuaire);
 
-    let cas: [(String, Ressource<'_>); 7] = [
+    let cas: [(String, Ressource<'_>); 8] = [
         ("/v1/comptes".to_owned(), Ressource::Comptes),
         ("/v1/compte".to_owned(), Ressource::Compte),
+        ("/v1/attestation".to_owned(), Ressource::Attestation),
         ("/v1/appareils".to_owned(), Ressource::Appareils),
         ("/v1/machines".to_owned(), Ressource::Machines),
         ("/v1/autorisations".to_owned(), Ressource::Autorisations),
@@ -241,6 +242,10 @@ fn trois_ressources_seulement_n_exigent_rien() {
         // encore de clé, et un numéro de version de logiciel libre est public.
         "/v1/version".to_owned(),
         format!("/v1/utilisateurs/{u}"),
+        // **`/v1/attestation` EST UNE PREUVE**, comme `/v1/defi` : la
+        // signature d'un appareil qui rejoint, avec sa chaîne. Exiger un
+        // appareil authentifié serait exiger ce qu'elle produit.
+        "/v1/attestation".to_owned(),
     ] {
         assert_eq!(
             resoudre_get(&cible).unwrap().exigence(),
@@ -932,6 +937,31 @@ fn effacer_mon_compte_est_un_delete_sur_v1_compte_et_rien_d_autre() {
     let u = ident(Genre::Utilisateur);
     assert_eq!(
         resoudre_get(&format!("/v1/comptes/{u}")),
+        Err(Erreur::RessourceInconnue)
+    );
+}
+
+// ── Attester un appareil qui rejoint ────────────────────────────────────────
+
+#[test]
+fn attester_est_un_post_sur_v1_attestation_sans_exigence() {
+    // `/v1/attestation`, au singulier : *mon* attestation, celle de la clé
+    // qui signe. Un seul verbe, et aucune exigence — c'est une preuve, comme
+    // `/v1/defi`.
+    let resolu = resoudre(Methode::Post, b"/v1/attestation").expect("il se route");
+    assert_eq!(resolu.ressource, Ressource::Attestation);
+    assert!(resolu.sert, "POST est le verbe");
+    assert_eq!(resolu.exigence, Exigence::Aucune);
+    assert_eq!(Ressource::Attestation.verbes(), &[Methode::Post]);
+    for methode in [Methode::Get, Methode::Delete, Methode::Put, Methode::Patch] {
+        let resolu = resoudre(methode, b"/v1/attestation").expect("il se route quand même");
+        assert!(!resolu.sert, "{methode:?}");
+    }
+    // Et `/v1/appareils/{a}/attestation` n'existe pas : une attestation ne se
+    // remplace pas, et rien dans le chemin ne nomme l'appareil deux fois.
+    let a = ident(Genre::Appareil);
+    assert_eq!(
+        resoudre_get(&format!("/v1/appareils/{a}/attestation")),
         Err(Erreur::RessourceInconnue)
     );
 }

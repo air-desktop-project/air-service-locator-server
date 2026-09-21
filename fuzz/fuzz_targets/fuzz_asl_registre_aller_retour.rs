@@ -395,9 +395,10 @@ fuzz_target!(|entree: Entree| {
     assert_eq!(Machine::lire(&octets), Ok(machine));
 
     // ── L'APPAREIL ET LE CODE D'ENRÔLEMENT ──────────────────────────────────
-    let atteste = match entree.graine % 3 {
+    let atteste = match entree.graine % 4 {
         0 => Attestation::Aucune,
         1 => Attestation::Apple,
+        2 => Attestation::Attendue,
         _ => Attestation::Android,
     };
     let appareil = Appareil {
@@ -506,7 +507,7 @@ fuzz_target!(|entree: Entree| {
     // un enregistrement — ceux-là sont déjà éprouvés ci-dessus, et l'opération
     // n'y ajoute qu'un identifiant.
     let identifiant = |genre| Identifiant::depuis_entropie(genre, [entree.graine; 16]);
-    let operation = match entree.quelle_operation % 6 {
+    let operation = match entree.quelle_operation % 7 {
         0 => Operation::Alias {
             compte: identifiant(Genre::Utilisateur),
             alias: AliasRange::nouveau(&entree.alias).ok(),
@@ -536,6 +537,17 @@ fuzz_target!(|entree: Entree| {
             compte: identifiant(Genre::Utilisateur),
             efface_le: entree.date,
             cause: cause.unwrap_or(Cause::Orphelin),
+        },
+        // **UNE VALEUR PROUVÉE SEULEMENT** : le lecteur refuse `aucune` et
+        // `attendue` dans cette opération, et l'aller-retour ne s'éprouve que
+        // sur ce qui se lit.
+        5 => Operation::AppareilAtteste {
+            appareil: identifiant(Genre::Appareil),
+            atteste: if entree.graine % 2 == 0 {
+                Attestation::Apple
+            } else {
+                Attestation::Android
+            },
         },
         _ => Operation::Machine {
             machine: identifiant(Genre::Machine),
