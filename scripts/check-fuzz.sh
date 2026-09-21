@@ -102,7 +102,6 @@ fuzz_asl_registre_aller_retour registre
 fuzz_asl_store_application application
 fuzz_asl_attest_objet attestation
 fuzz_asl_apple_verifier apple
-fuzz_asl_jwt jwt
 fuzz_asl_keystore keystore
 TABLE
 )

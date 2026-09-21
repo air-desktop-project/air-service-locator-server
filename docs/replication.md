@@ -637,11 +637,29 @@ les autres champs découlent :
   champ nul aurait l'air d'une valeur.
 
 `compteur` est l'horloge de Lamport de cette racine (§4) ; `applique` est le
-curseur qu'elle tient pour le pair (§5.3) — jusqu'où elle a appliqué ce qu'il a
-écrit. Voie ouverte, `applique` rejoint `compteur` du pair en moins d'une
-seconde après une écriture ; coupée, l'écart dit ce qu'il reste à rattraper.
-Les deux nombres et le mot se lisent de l'entrepôt et du tireur au moment de la
-requête — rien n'est recopié, donc rien ne vieillit.
+curseur qu'elle tient pour le pair (§5.3) — l'estampille de la dernière
+opération ÉCRITE PAR LE PAIR qu'elle a appliquée. Les deux nombres et le mot
+se lisent de l'entrepôt et du tireur au moment de la requête — rien n'est
+recopié, donc rien ne vieillit.
+
+**Les deux nombres ne se soustraient pas, et ce document l'a d'abord dit de
+travers** (« `applique` rejoint `compteur` du pair en moins d'une seconde »,
+corrigé le 2026-09-21, sur le banc). L'horloge d'une racine se hisse aussi
+sur ce qu'elle REÇOIT (§4) ; le curseur que l'autre tient pour elle ne suit
+que ce qu'elle ÉCRIT. Après l'amorçage du 19/09, `nitrogen` a écrit douze
+fois et `argon` rien : les deux horloges disent 35, `nitrogen` tient pour
+`argon` un curseur à 23 — et rien n'est en retard. Ce qui se lit à coup sûr :
+`applique` ne dépasse jamais l'horloge du pair ; **s'il l'égale, tout ce que
+le pair a écrit est appliqué** ; s'il est en dessous, on ne sait pas — le pair
+a peut-être écrit, ou seulement reçu. La preuve de l'état, c'est la voie :
+`ouverte` de chaque côté, le flux de §5.3 applique chaque écriture dans la
+seconde ; `coupée`, ce que le pair écrit attend, et le curseur dira combien
+quand la voie rouvrira. **À faire, pour que le client conclue depuis les
+nombres** : rendre aussi la dernière estampille que CETTE racine a écrite
+(`Entrepot::derniere_operation` n'en est qu'un majorant après un
+redémarrage, et le journal ne la porte plus après un amorçage — il faut la
+ranger) ; alors `applique` de l'une égale `ecrit` de l'autre, ou il manque
+quelque chose.
 
 **Sur la voie machine (`Exigence::Machine`), et non sans exigence.** La
 vérification de déploiement — « un compte créé chez l'une est lu chez

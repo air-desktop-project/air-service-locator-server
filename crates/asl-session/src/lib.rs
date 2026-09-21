@@ -568,10 +568,11 @@ pub struct VoieVersLePair {
 ///
 /// **Deux nombres et un mot**, et c'est tout ce que la vérification de
 /// déploiement demande : `compteur` est l'horloge de Lamport de cette racine,
-/// `applique` le curseur qu'elle tient pour le pair. Voie ouverte, le second
-/// rejoint le premier en moins d'une seconde après une écriture chez le pair ;
-/// coupée, l'écart dit ce qu'il reste à rattraper. `None` : cette racine
-/// tourne seule — ce n'est pas un défaut, c'est un banc.
+/// `applique` le curseur qu'elle tient pour le pair — la dernière estampille
+/// que le pair a ÉCRITE et qu'elle a appliquée. **Ils ne se soustraient pas** :
+/// l'horloge se hisse aussi sur ce qu'on reçoit, le curseur ne suit que ce
+/// que le pair écrit (`replication.md` §8). `None` : cette racine tourne
+/// seule — ce n'est pas un défaut, c'est un banc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EtatDeLaReplication {
     /// Notre compteur.

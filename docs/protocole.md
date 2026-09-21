@@ -488,7 +488,10 @@ verdict était l'opinion de Google sur l'appareil ET sur la distribution par le
 Play Store. C'était le mauvais outil : `asl-play` est retiré, la dépendance
 `com.google.android.play:integrity` avec lui, et aucun compte Google ne sera
 ouvert. Le jeton capturé le 2026-09-12 reste dans `docs/attestation/captures/`
-comme trace de ce qu'on a lu, pas comme chemin.
+comme trace de ce qu'on a lu, pas comme chemin. `asl-jwt` — le découpage
+JWS/JWE qu'`asl-play` était seul à tirer — est retiré à son tour le
+2026-09-21 (0.12.0), avec sa cible de fuzz : une grammaire que personne ne
+lit n'est pas une réserve, c'est une surface.
 
 **Ce qui le remplace : l'attestation de clé d'Android (Keystore).** C'est ce
 que ce document appelait plus haut « une case de plus, plus tard », et c'est
