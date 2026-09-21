@@ -307,7 +307,7 @@ jamais l'utilisateur : il n'y a pas de mot de passe dans ce produit.
 |---|---|
 | `identifiant` | `a-` + 26 caractères. |
 | `clé publique` | La partie publique d'une clé qui vit dans le matériel sécurisé du téléphone et ne peut être employée qu'après une confirmation biométrique. **P-256** — la Secure Enclave et StrongBox ne font que cette courbe (`protocole.md` §2.1). |
-| `attestation` | Sous quoi l'appareil est entré : `aucune`, `apple` (App Attest), `android` (l'attestation de clé du Keystore, contre une racine que l'exploitant épingle), ou `invitation` (un code émis par l'exploitant). `google` — Play Integrity — n'a jamais été acceptée et est abandonnée (`protocole.md` §2.1, décision du 2026-09-16, C19). **Une valeur, pas une absence** : un annuaire en posture facultative laisse entrer des appareils sans preuve, et il faut pouvoir dire lesquels — c'est ce qu'on regarde le jour où l'on resserre, pour savoir qui prévenir. |
+| `attestation` | Sous quoi l'appareil est entré : `aucune`, `apple` (App Attest), `android` (l'attestation de clé du Keystore, contre une racine que l'exploitant épingle), `invitation` (un code émis par l'exploitant), ou **`attendue`** — une clé apportée par un autre appareil du compte sous une posture exigée, que son porteur n'a pas encore prouvée ni attestée : il n'est pas entré (2026-09-21, `protocole.md` §2.2). `google` — Play Integrity — n'a jamais été acceptée et est abandonnée (`protocole.md` §2.1, décision du 2026-09-16, C19). **Une valeur, pas une absence** : un annuaire en posture facultative laisse entrer des appareils sans preuve, et il faut pouvoir dire lesquels — c'est ce qu'on regarde le jour où l'on resserre, pour savoir qui prévenir. |
 | `jeton de poussée` | APNs ou FCM, pour les notifications (§2.6). Lié à l'appareil, révoqué avec lui. |
 | `plateforme` | `ios`, `android` ou `macos` — ce que l'appareil fait tourner. **Déclaré par l'appareil lui-même**, absent tant qu'il ne l'a pas fait. |
 | `modele` | « iPhone 17 », « MacBook Pro (2019) » — le nom de son **modèle**, libre, 1 à 64 octets, aux règles du nom de machine (§2.3). Déclaré avec la plate-forme, absent avec elle. |
@@ -381,6 +381,23 @@ alors sa clé sur sa propre connexion. Rien de secret ne passe d'un écran à
 l'autre — une clé publique, deux identifiants —, et cela vaut quelle que soit
 la paire d'appareils : deux téléphones, ou un Mac et un téléphone (le Mac
 affiche un code, il n'en lit pas ; ce qu'il reçoit se colle).
+
+**Et le nouvel appareil entre attesté, comme le premier — depuis le
+2026-09-21.** La chaîne d'attestation de sa clé ne peut venir que de lui : elle
+est liée au défi qu'il a tiré sur sa connexion AVANT de générer la clé
+(`protocole.md` §2.1), et l'ancien appareil n'en sait rien. C'est donc au
+moment où le nouveau prouve sa clé qu'il la présente — `POST /v1/attestation`,
+la preuve et la chaîne en un verbe, sur la connexion tenue depuis le défi.
+Ce que cela change à la cérémonie : le nouveau se connecte et tire son défi
+**avant** de montrer sa clé, et garde sa connexion le temps que l'ancien la
+lise et la présente ; si elle tombe, la clé ne s'attestera plus, et l'on
+recommence avec une nouvelle. Sous une posture exigée, l'apport par l'ancien
+ne fait pas entrer l'appareil : il est **`attendue`** jusqu'à sa preuve
+attestée — visible dans Appareils, révocable, vivant pour la règle des
+orphelins, jamais expiré. Sous une posture facultative, il entre `aucune` à
+l'apport, comme avant, et sa chaîne — si son application la présente — le
+fait passer à `android` ou `apple` (`protocole.md` §2.2, la table des
+postures).
 
 ### 2.3 Machine
 

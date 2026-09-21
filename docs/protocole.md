@@ -599,6 +599,7 @@ champs de longueur fixe :
 | `POST /v1/defi` | genre ‖ identifiant (17) ‖ signature (64) | 81 |
 | `POST /v1/comptes` | plate-forme (1) ‖ clé d'appareil (33) ‖ preuve (64) ‖ attestation (0…8 Kio) | 98 + attestation |
 | `POST /v1/appareils` | clé d'appareil (33) | 33 |
+| `POST /v1/attestation` | genre `a` ‖ identifiant (17) ‖ signature (64) ‖ plate-forme (1) ‖ attestation (0…8 Kio) | 82 + attestation |
 | `POST /v1/enrolement` | code (10) ‖ clé de machine (32) ‖ preuve (64) | 106 |
 
 **Deux tailles de clé, et ce n'est pas une inadvertance.** La clé d'un
@@ -606,16 +607,23 @@ APPAREIL fait 33 octets (P-256 compressé, la courbe de la Secure Enclave) ; la
 clé d'une MACHINE en fait 32 (Ed25519). L'enrôlement porte une clé de machine,
 les deux autres une clé d'appareil.
 
-**`POST /v1/comptes` est le seul corps à champ variable de toute l'API**, et le
-seul où la règle des longueurs fixes plie : une chaîne de certificats n'a pas de
-taille. Le corps est donc un préfixe fixe de 98 octets, puis l'attestation, qui
+**`POST /v1/comptes` et `POST /v1/attestation` sont les deux seuls corps à
+champ variable de toute l'API**, et les seuls où la règle des longueurs fixes
+plie : une chaîne de certificats n'a pas de taille. Le corps est donc un
+préfixe fixe — 98 octets pour l'un, 82 pour l'autre —, puis l'attestation, qui
 est tout le reste — **aucune longueur n'est lue des octets pour autant**, il n'y
-a pas de champ de longueur à déplacer. La plate-forme se note `0` aucune, `1`
-Apple, `2` Android (l'attestation de clé du Keystore, décidé le 2026-09-16 —
-la case disait Google, et n'a jamais été acceptée), `3` invitation ; `0`
-interdit toute attestation derrière, `3` porte le code d'invitation, `1` et `2`
-l'exigent. `asl_api::CreationDeCompte` isole les trois tranches sans les
-interpréter ; `asl-attest` refuse ensuite le moindre octet en trop DANS l'objet.
+a pas de champ de longueur à déplacer. Les deux portent la même case, sous les
+mêmes plates-formes ; le second est la preuve d'un appareil qui rejoint,
+augmentée de sa chaîne (voir « Attester un appareil qui rejoint », §2.2 — il
+n'y avait pas de place pour elle, et c'était le trou).
+
+La plate-forme se note `0` aucune, `1` Apple, `2` Android (l'attestation de
+clé du Keystore, décidé le 2026-09-16 — la case disait Google, et n'a jamais
+été acceptée), `3` invitation ; `0` interdit toute attestation derrière, `3`
+porte le code d'invitation, `1` et `2` l'exigent. `asl_api::CreationDeCompte`
+isole les trois tranches sans les interpréter, et la lecture de
+`POST /v1/attestation` isole les siennes de la même façon ; `asl-attest`
+refuse ensuite le moindre octet en trop DANS l'objet.
 
 C'est l'argument d'`asl_cle::message_a_signer`, appliqué au transport : un
 cadrage JSON demanderait d'encoder ces octets, donc **deux écritures possibles du
@@ -659,7 +667,11 @@ C'est aussi ce qui fixe le sens du geste entre les deux écrans : c'est le
 NOUVEL appareil qui montre sa clé, et l'ANCIEN qui la lit — jamais l'ancien qui
 « exporte » le compte vers le nouveau (`modele.md` §2.2). Le nouveau, une fois
 sa clé rangée, apprend l'identifiant du compte et le sien par le même canal, à
-l'envers, et prouve la clé sur sa propre connexion avec `POST /v1/defi`.
+l'envers, et prouve la clé sur sa propre connexion avec `POST /v1/defi` — ou,
+**depuis le 2026-09-21, avec `POST /v1/attestation`**, qui est la même preuve
+augmentée de la chaîne d'attestation de sa clé : celui qui rejoint ne signe
+pas qu'on l'apporte, mais il signe qu'il détient, et c'est à cette signature-là
+que sa chaîne s'attache (« Attester un appareil qui rejoint », §2.2).
 
 ### 2.1 quater Ce que « effet immédiat » veut dire, et ce qu'il coûte
 
@@ -708,7 +720,8 @@ l'empêcherait de comprendre.
 | Verbe | Ce qu'il fait |
 |---|---|
 | `POST /v1/comptes` | Crée le compte et enrôle le premier appareil. Rend `u-…`. |
-| `POST /v1/appareils` | Enrôle un appareil de plus. **Signé par un appareil déjà enrôlé.** |
+| `POST /v1/appareils` | Enrôle un appareil de plus. **Signé par un appareil déjà enrôlé.** L'appareil entre `aucune` en posture facultative, **`attendue` en posture exigée** — vivant seulement quand il aura présenté sa chaîne (voir ci-dessous). |
+| `POST /v1/attestation` | **La preuve d'un appareil qui rejoint, avec la chaîne d'attestation de sa clé** — le `POST /v1/defi` du genre `a`, augmenté de la plate-forme et de la chaîne, sur la connexion où le défi a été tiré AVANT que la clé soit générée. N'exige rien : c'est elle, la preuve. `204` ; la connexion est désormais celle de cet appareil, et son `attestation` dit sous quoi il est entré. Voir ci-dessous. |
 | `GET /v1/appareils` | Les appareils de MON compte, révoqués compris et marqués : l'écran « Compte ». Chacun rend `appareil`, `attestation`, `revoque`, et — s'il les a posés — `plateforme` et `modele`. |
 | `PUT /v1/appareils/{a}/poussee` | Dépose ou renouvelle le jeton APNs / FCM. **Pour soi seulement** ; voir ci-dessous. |
 | `PUT /v1/appareils/{a}/description` | Dit ce que cet appareil est : `{"plateforme": "macos", "modele": "MacBook Pro (2019)"}`, la plate-forme parmi `ios`, `android`, `macos`. **Pour soi seulement**, même règle que la poussée ; voir ci-dessous. |
@@ -937,6 +950,158 @@ chemin d'entrepôt** — la règle des orphelins (`--orphans`, `modele.md` §2.1
 et `asl-server --forget <u-…>` écrivent la même opération, avec leur cause,
 et produisent les mêmes effets vivants. Il n'y a qu'une façon d'effacer un
 compte ; ce qui change est qui l'a voulu, et c'est dit dans la cause.
+
+### Attester un appareil qui rejoint — la preuve et la chaîne, d'un même défi
+
+```
+POST /v1/attestation
+        (sans aucune authentification préalable — c'est elle, la preuve ;
+         sur la connexion où GET /v1/defi a été tiré AVANT de générer la clé)
+
+        corps = genre `a` ‖ a-… (17) ‖ signature (64) ‖ plate-forme (1)
+                ‖ attestation (0…8 Kio)
+
+        → 204, sans corps ; la connexion est désormais celle de cet appareil
+```
+
+**Décidé le 2026-09-21.** Le premier appareil d'un compte entre attesté
+(`POST /v1/comptes`, §2.1) ; **le second n'avait aucun moyen de l'être**, et
+c'est un trou que l'essai réel du 2026-09-17 a montré : le Fairphone 5 a
+ouvert un compte neuf sous l'attestation `android`, puis a rejoint le compte
+du Mac — et y est entré `aucune`. `POST /v1/appareils` ne porte que la clé
+(33 octets, §2.1 bis) : pas de place pour une chaîne. Et l'y mettre n'aurait
+rien résolu, pour une raison qui tient à ce qu'est une attestation de clé.
+
+**Pourquoi ce n'est pas l'ancien appareil qui apporte la chaîne.** Une chaîne
+du Keystore est liée à un défi **posé à la génération de la clé**
+(`setAttestationChallenge`, §2.1) ; ce défi est tiré sur une connexion et lié
+à elle par la liaison de canal. La connexion qui a tiré le défi est celle du
+NOUVEL appareil — c'est lui qui a généré la clé —, et l'ancien n'en sait rien :
+lui apporter la chaîne, c'est lui faire porter une preuve qui parle d'un canal
+qui n'est pas le sien, et que l'annuaire ne pourrait rapprocher de rien. La
+règle de §2.1 ter tient donc telle quelle, et se complète d'une phrase :
+**celui qui PRÉSENTE une clé signe qu'il la détient ; celui pour qui un tiers
+l'apporte ne signe pas — et c'est quand il signe enfin, sur sa propre
+connexion, que sa chaîne a un sens.** L'attestation s'attache à la preuve du
+nouveau, pas à l'apport de l'ancien.
+
+**L'ordre, côté nouvel appareil, et il ne se négocie pas.** Se connecter nu ;
+tirer le défi (`GET /v1/defi`) ; composer
+`asl_cle::message_d_attestation_de_cle(défi, liaison)` ; **GÉNÉRER la clé**
+avec son condensat pour défi d'attestation — exactement l'ordre de
+`POST /v1/comptes`, et pour la même raison : le défi doit exister avant la
+clé ; **montrer la clé** à l'ancien appareil (`modele.md` §2.2) ; attendre
+qu'il l'ait présentée (`POST /v1/appareils`, sur SA connexion) et lui ait
+rendu `u-…` et `a-…` ; puis, **sur la connexion tenue depuis le début**,
+`POST /v1/attestation` : la signature ordinaire du genre `a` — `genre ‖
+identifiant ‖ défi ‖ liaison`, celle de `POST /v1/defi` —, suivie de la
+plate-forme et de la chaîne. Un seul défi, tiré une fois, dépensé une fois :
+il couvre la preuve ET l'attestation, comme il le fait à la création d'un
+compte. Ce que l'annuaire vérifie est ce qu'il vérifie déjà en §2.1 —
+`asl-keystore`, contre `--android-roots`, le défi égal à
+`SHA-256(message_d_attestation_de_cle)`, la clé de la feuille égale à la clé
+rangée pour `a-…`, notre paquet sous notre empreinte — plus une chose : que
+la clé rangée pour `a-…` soit bien celle qui signe. Deux vérifications, une
+transaction : l'attestation ne se pose que si la preuve tient, et la preuve
+n'est retenue que si l'attestation est jugée — jugée, non acceptée : en
+posture facultative, une chaîne refusée laisse l'appareil `aucune` et la
+connexion authentifiée quand même (voir la table).
+
+**Pourquoi un verbe à part, et non `POST /v1/defi` allongé.** `POST /v1/defi`
+sert trois genres — machine, appareil, racine — et fait 81 octets pour les
+trois ; lui donner une queue variable pour le seul genre `a` ferait d'un corps
+à longueur fixe un corps qui l'est parfois. `POST /v1/comptes` est le
+précédent : la preuve d'une clé et sa chaîne, dans un verbe à elles.
+`/v1/attestation`, au singulier, comme `/v1/compte` et `/v1/alias` : *mon*
+attestation, celle de la clé qui signe, et rien dans le chemin ne nomme
+l'appareil deux fois. Pas `PUT /v1/appareils/{a}/attestation` : une
+attestation ne se remplace pas — une clé est attestée à sa génération, une
+fois, et la chaîne ne vaut que sur la connexion qui a tiré son défi.
+
+**Le défi vit ce que vit la connexion, et c'est la seule durée.** Il n'y a
+pas de délai à part : un défi est tenu par la connexion qui l'a tiré, un seul
+à la fois, remplacé par le suivant, consommé par la preuve — qu'elle tienne
+ou non. La connexion, elle, est tenue par l'application (keepalive à 10 s,
+§1.2), le temps que l'humain passe d'un écran à une caméra et revienne. Ce
+que cela impose à l'application est dit en clair : **si la connexion tombe
+entre le code montré et la preuve, la clé générée ne s'attestera plus
+jamais** — son défi est mort avec le canal. L'application recommence alors du
+début : nouvelle connexion, nouveau défi, **nouvelle clé**, nouveau code à
+montrer ; l'ancien appareil représente la nouvelle clé, et le premier `a-…`
+reste dans le compte — `aucune` ou `attendue`, jamais prouvé — jusqu'à ce que
+son titulaire le révoque depuis l'écran Appareils. C'est le prix de lier la
+chaîne au canal, et il est accepté : un défi qui survivrait à sa connexion
+serait un état à garder, à expirer et à répliquer, pour éviter une révocation
+à la main dans un cas qui ne se produit qu'à la coupure.
+
+**Ce que la posture change, et la valeur `attendue`.** L'attestation qualifie
+l'entrée d'un appareil (C19), et **un appareil qui rejoint entre quand il
+prouve**, pas quand on l'apporte :
+
+| Posture | `POST /v1/appareils` écrit | `POST /v1/defi` (genre `a`, sans chaîne) | `POST /v1/attestation` |
+|---|---|---|---|
+| `optional` | `aucune` — l'annuaire admet des appareils sans preuve, et c'est une entrée légitime, comme aujourd'hui | Sert ; l'appareil reste `aucune` | Chaîne acceptée : `aucune` → `android` \| `apple`, `204`. Chaîne refusée : **`204` quand même**, l'appareil reste `aucune`, le refus est journalisé — c'est ce que la posture promet, et ce que l'application 0.5.0 obtenait déjà à la création en retentant sans chaîne |
+| `required` | **`attendue`** — une clé apportée, que personne n'a encore prouvée ni attestée ; rien d'unattesté n'est vivant sous cette posture | **`401`** tant que l'appareil est `attendue` — la même réponse qu'une clé révoquée : il n'est pas vivant | Chaîne acceptée : `attendue` → `android` \| `apple`, `204`, l'appareil est vivant. Chaîne refusée : **`403`**, l'appareil reste `attendue`, la connexion n'est pas authentifiée ; le journal dit pourquoi |
+| `invitation` | `aucune` — l'invitation vaut pour ouvrir un compte ; un appareil qui rejoint est voulu par un appareil du compte, et c'est la seule caution que cette posture connaît | Sert ; `aucune` | Comme `optional` — une racine sans fabricant dans sa boucle n'a pas de racine à opposer à la chaîne, et ne la juge pas |
+
+`attendue` est une **cinquième valeur d'`attestation`** (`modele.md` §2.2),
+et non un drapeau à part : c'est bien « sous quoi l'appareil est entré » —
+il n'est pas entré. Elle se voit dans `GET /v1/appareils` et
+`GET /v1/moi/appareils` comme les autres, et l'écran la dit (« en attente
+d'attestation ») ; un appareil `attendue` se révoque comme un autre, et compte
+comme vivant pour la règle des orphelins tant qu'il ne l'est pas — un compte
+dont le seul appareil non révoqué est `attendue` n'est pas orphelin, il est
+en train de rejoindre. **Elle ne s'expire pas** : un enregistrement qui
+partirait de lui-même serait la troisième exception à « marqué, jamais
+effacé » (`replication.md` §5.2), pour un cas que l'écran Appareils montre et
+qu'un geste règle. Un appareil `aucune` d'aujourd'hui, sur une racine passée
+en `required`, reste servi : la posture qualifie l'entrée, jamais ce qui est
+déjà entré (C19).
+
+**Ce qu'`attendue` ne fait pas.** Il ne s'agit pas d'exiger une chaîne en
+posture facultative : `aucune` y reste une entrée entière, et une application
+d'aujourd'hui (Android 0.6.0, iOS 0.7.0) rejoint une racine `optional` ou
+`invitation` exactement comme hier — `POST /v1/appareils`, puis
+`POST /v1/defi`. Sur une racine `required`, elle obtient `201` à l'apport et
+`401` à la preuve, là où elle obtenait `403` à l'apport ; l'ancien appareil
+verra un appareil « en attente » et pourra le révoquer. Ce n'est pas mieux
+que le refus franc, et ce n'est pas pire : aucune racine ne tourne en
+`required` aujourd'hui, et aucune ne le fera avant que les applications
+présentent leur chaîne.
+
+**Les réponses.** `204` : la preuve tient, la connexion est celle de `a-…`,
+et l'attestation est ce que la table dit. `401` : la signature ne vérifie pas
+contre la clé rangée pour `a-…`, ou il n'y a pas de défi sur cette connexion,
+ou l'appareil est révoqué, ou son compte effacé — **le même `401` pour les
+quatre**, comme `POST /v1/defi`, et pour la même raison : distinguer dirait à
+qui essaie des identifiants lesquels existent. `403` : la preuve tient, la
+chaîne ne prouve rien, et la posture l'exige — la connexion n'est pas
+authentifiée, le défi est dépensé, et cette clé ne s'attestera plus : c'est
+le cas de la coupure, et la sortie est la même — nouvelle clé, nouveau code,
+l'appareil `attendue` à révoquer. `400` : le corps est mal
+formé — genre autre que `a`, plate-forme inconnue, plate-forme `0` avec une
+chaîne derrière ou `1`/`2` sans. `409` : l'appareil est déjà attesté — il
+n'existe pas : une clé attestée est une clé prouvée sur la connexion de son
+défi, et ce défi est dépensé ; un second `POST /v1/attestation` sur la même
+connexion rend `401` (pas de défi), sur une autre aussi (la chaîne ne
+correspond à aucun défi de celle-ci). Il n'y a donc rien à écrire pour
+l'idempotence, et c'est l'argument de « Effacer mon compte » à nouveau.
+
+**Sur la voie machine, rien**, et sur la réplication, une opération :
+`appareil-atteste` (identifiant ‖ attestation), qui ne va que dans un sens —
+d'`aucune` ou `attendue` vers une valeur prouvée — et s'applique toujours,
+révoqué ou non (`replication.md` §3.2, §5.2, décision 25). Une racine passe
+un appareil d'`attendue` à vivant en appliquant l'opération de l'autre, et
+c'est ce qui rend le geste possible quand les deux téléphones parlent à deux
+racines : l'ancien apporte la clé chez `nitrogen`, le nouveau prouve chez
+`argon` — l'opération `appareil` a traversé en moins d'une seconde, et la
+chaîne remonte dans l'autre sens.
+
+**App Attest y passe aussi**, sous la plate-forme `1`, avec le message qui
+contient la clé (`asl_cle::message_d_attestation`) : l'enclave génère la clé
+quand elle veut, et App Attest atteste une clé à lui sur un défi qui nomme la
+nôtre — l'ordre « défi avant clé » n'est une contrainte que du Keystore. Rien
+n'est éprouvé côté Apple, comme pour la création : le même iPhone manque.
 
 ### Ce qu'un `PATCH` change, et ce qu'il ferme
 
