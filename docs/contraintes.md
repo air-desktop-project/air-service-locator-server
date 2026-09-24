@@ -786,6 +786,15 @@ Google pour un Android certifié, celle de GrapheneOS pour les siens, celle
 d'Apple pour un iPhone. C'est une confiance dans un **fichier**, choisie et
 révocable par l'exploitant — pas dans un service. Une racine qui n'en veut
 aucune tourne en `invitation`, et n'a alors aucun fabricant dans sa boucle.
+**Cette posture est servie depuis le 2026-09-24** (`protocole.md` §2.2) :
+l'exploitant émet un code, et c'est lui la caution — il dit qui entre, à la
+place d'un fabricant. La contrepartie se dit sans détour : la porte du service
+est alors gardée par un secret de cinquante bits, là où les deux autres
+postures s'appuient sur une clé dans du matériel. C'est pourquoi elle est la
+seule à s'accompagner d'une limite de débit écrite, et pourquoi l'usage unique
+d'un code n'y tient qu'à la seconde près entre deux racines (`replication.md`
+§3.2). Une racine qui n'appelle personne paie en vigilance ce qu'elle
+n'emprunte à aucun tiers.
 
 **Ce qu'elle ne couvre pas encore : les notifications.** APNs et FCM
 (`modele.md` §2.6) sont des services tiers, et l'appareil les appelle pour

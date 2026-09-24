@@ -567,9 +567,9 @@ empreinte dans `attestationApplicationId`. Ce qui est rendu sans être jugé :
 politique de correctif reste à écrire. Les balises que le lecteur ne connaît
 pas sont sautées, jamais refusées : le schéma change à chaque Android. Chaque
 refus est dit au journal d'exploitation avec sa cause, sans la chaîne. La
-plate-forme `3` (invitation) est **refusée « pas encore servie »** tant que la
-posture ci-dessous n'est pas écrite. Le dépôt n'expédie que la racine de
-Google (`paquet/racines-android/google.pem`, celle de la capture) : celle de
+plate-forme `3` (invitation) est servie depuis le 2026-09-24, sous la posture
+du même nom — voir « Émettre une invitation » en §2.2. Le dépôt n'expédie que
+la racine de Google (`paquet/racines-android/google.pem`, celle de la capture) : celle de
 GrapheneOS n'a pas pu être obtenue hors ligne de façon sûre, et une racine
 qu'on ne peut pas vérifier ne s'expédie pas.
 
@@ -580,8 +580,9 @@ unique, l'annuaire n'en garde que l'empreinte) —, et `POST /v1/comptes` le
 présente sous la plate-forme `3`, dans la case d'attestation (dix octets). Un
 compte s'ouvre parce que quelqu'un l'a voulu, pas parce qu'un fabricant l'a
 dit ; l'appareil entre avec la valeur `invitation`. **Comment l'exploitant émet
-le code** — un verbe de `asl-server` sur la machine, ou un verbe de `asl` réservé
-à un compte d'exploitation — reste à trancher avec le chantier.
+le code** : `POST /v1/invitations`, sur l'annuaire en marche, sous une clé
+d'exploitation qu'un réglage déclare — tranché le 2026-09-24, et écrit en §2.2,
+« Émettre une invitation ».
 
 **Ce qui reste, honnêtement.** La racine de confiance d'une attestation est
 celle de qui a fabriqué l'enclave — Google pour les Android certifiés, Apple
@@ -604,6 +605,7 @@ champs de longueur fixe :
 | `POST /v1/appareils` | clé d'appareil (33) | 33 |
 | `POST /v1/attestation` | genre `a` ‖ identifiant (17) ‖ signature (64) ‖ plate-forme (1) ‖ attestation (0…8 Kio) | 82 + attestation |
 | `POST /v1/enrolement` | code (10) ‖ clé de machine (32) ‖ preuve (64) | 106 |
+| `POST /v1/invitations` | genre `o` ‖ signature (64) — **sans identifiant** : il n'y a qu'une clé d'exploitation, celle du réglage | 65 |
 
 **Deux tailles de clé, et ce n'est pas une inadvertance.** La clé d'un
 APPAREIL fait 33 octets (P-256 compressé, la courbe de la Secure Enclave) ; la
@@ -730,6 +732,7 @@ l'empêcherait de comprendre.
 | `PUT /v1/appareils/{a}/description` | Dit ce que cet appareil est : `{"plateforme": "macos", "modele": "MacBook Pro (2019)"}`, la plate-forme parmi `ios`, `android`, `macos`. **Pour soi seulement**, même règle que la poussée ; voir ci-dessous. |
 | `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. **Il est marqué, non effacé** : l'écran qu'on regarde après avoir perdu un téléphone doit montrer ce qu'on a retiré. La révocation du **dernier** appareil vivant ouvre le délai des orphelins (`modele.md` §2.1). |
 | `DELETE /v1/compte` | **Efface MON compte** — celui de la clé qui signe. Tout part dans une transaction : appareils, machines et services, autorisations dans les deux sens, alias libéré ; reste l'identifiant marqué effacé. `204`, puis l'annuaire ferme la connexion : la clé qui a demandé est révoquée. Voir ci-dessous. |
+| `POST /v1/invitations` | **Émet un code d'invitation**, sous la clé déclarée par `--operator-key`. Rend le code EN CLAIR, une fois — l'annuaire n'en garde que l'empreinte. N'existe que sous la posture `invitation` ; ailleurs, `404`. Voir ci-dessous. |
 | `POST /v1/machines` | Déclare une machine, avec son **nom** et ses **capacités** (`annonce`, `lecture`). **Rend un code d'enrôlement** — dix symboles, à usage unique, valable dix minutes. La machine n'a **pas encore de clé**. |
 | `GET /v1/machines` | Les machines de MON compte : l'écran « Machines ». Chacune rend `machine`, `nom`, `capacites`, et `cle` (`enrolee` ou `attendue`). |
 | `PATCH /v1/machines/{m}` | Change le nom ou les capacités. **Ce qui est absent ne change pas** ; voir ci-dessous. |
@@ -953,6 +956,178 @@ chemin d'entrepôt** — la règle des orphelins (`--orphans`, `modele.md` §2.1
 et `asl-server --forget <u-…>` écrivent la même opération, avec leur cause,
 et produisent les mêmes effets vivants. Il n'y a qu'une façon d'effacer un
 compte ; ce qui change est qui l'a voulu, et c'est dit dans la cause.
+
+### Émettre une invitation — le seul secret que l'exploitant tient
+
+```
+POST /v1/invitations
+        (sans exigence préalable — c'est le corps qui prouve, comme
+         POST /v1/attestation ; sur la connexion où GET /v1/defi a été tiré)
+
+        corps = genre `o` ‖ signature (64)                          65 octets
+
+        → 200, `{"code":"4K9M2-P7R1T","expire_a":1790000000000}`
+          le code EN CLAIR, une seule fois, et jamais rendu ensuite
+```
+
+**Décidé le 2026-09-24.** La posture `invitation` était écrite depuis le
+2026-09-16 (§2.1) — un code que l'exploitant émet, présenté sous la
+plate-forme `3` — mais le geste d'émission restait en suspens, et sans lui la
+posture n'était pas servable : la plate-forme `3` refusait « pas encore
+servie ». Voici ce geste, et ce qu'il a coûté de trancher.
+
+**Pourquoi un verbe, et pas un outil hors ligne.** `asl-server --forget` est
+le précédent commode : un sous-verbe du binaire, sur la machine, qui ouvre
+l'entrepôt et écrit. Mais l'entrepôt n'admet **qu'un seul écrivain** — c'est
+un fichier redb, tenu par le processus qui sert —, et `--forget` exige pour
+cette raison que le service soit **arrêté** (décision 24). Effacer un compte
+dont la clé est perdue est un geste rare, et l'arrêt s'y paie une fois.
+Émettre une invitation est le geste **ordinaire** d'une racine qui tourne en
+`invitation` : c'est ainsi que ses utilisateurs entrent. Arrêter l'annuaire
+pour laisser entrer quelqu'un ferait tomber toutes les annonces en cours
+(§1.2 : la connexion EST le bail) à chaque nouvel arrivant. Un mécanisme dont
+le coût croît avec le succès n'est pas un mécanisme.
+
+**Pourquoi un code rangé, et pas un code qui se vérifie seul.** L'envie est
+naturelle : un code qui porterait sa propre signature — de la clé d'identité
+de la racine — se vérifierait sans que rien soit écrit à l'émission, donc sans
+annuaire en marche. **La forme l'interdit, et ce n'est pas un détail de
+place.** Le code fait dix symboles de Crockford, cinquante bits, dix octets
+dans la case d'attestation ; une signature Ed25519 en fait soixante-quatre.
+Un code auto-porteur serait un code qu'on ne recopie plus à la main, et l'on
+perdrait ce qui fait qu'une invitation se transmet par un canal ordinaire —
+un message, un appel, un bout de papier. Et l'usage unique y resterait
+impossible : une signature se vérifie autant de fois qu'on veut. **Un secret
+court et à usage unique impose un état ; la seule question est où il s'écrit,
+et la réponse est : là où l'annuaire écrit déjà.**
+
+**Pourquoi une clé d'exploitation, et pas un compte d'exploitation.**
+Réserver le verbe à un compte privilégié aurait introduit dans le modèle une
+chose qu'il n'a pas : un `u-…` qui vaut plus que les autres. Tout le produit
+tient sur l'inverse — un compte est un jeu d'appareils enrôlés, et aucun ne
+commande à l'annuaire. **La caution de l'exploitant n'est pas un compte,
+c'est la machine** : il tient `/etc/asl-server/`, la clé d'identité de la
+racine, l'unité de service. Une clé de plus dans ce même dossier, déclarée
+par un réglage, dit exactement cela sans rien ajouter au modèle — et c'est
+déjà la forme de `--peer-key` (`replication.md` §2.2), qui autorise l'autre
+racine sans lui donner de compte non plus.
+
+| Réglage | Ce qu'il fait |
+|---|---|
+| `--operator-key <fichier>` | La clé publique Ed25519 dont la signature ouvre `POST /v1/invitations`. **Sans elle, la ressource n'existe pas** : `404`, comme toute ressource inconnue — une racine qui n'invite pas n'expose pas de porte close. |
+| `--invitation-ttl <durée>` | Ce que vit un code émis. **Vingt-quatre heures par défaut**, une semaine au plus. |
+
+**`--attestation invitation` sans `--operator-key` refuse de démarrer**, et le
+message le nomme : une racine qui exige une invitation sans pouvoir en émettre
+est une racine où personne n'entre jamais. C'est la même règle que
+`--attestation` sans valeur (README) — un service voué à échouer ne démarre
+pas.
+
+**Le genre `o`, et pourquoi il ne passe pas par `POST /v1/defi`.** La clé
+d'exploitation se prouve comme les autres — une signature sur
+`genre ‖ défi ‖ liaison` (§2.1 bis), le défi tiré par `GET /v1/defi` sur cette
+connexion — mais **sans identifiant** : le corps de `POST /v1/defi` en exige
+un de dix-sept octets, et il n'existe pas de `o-…`. Il n'y en a pas besoin, et
+c'est déjà l'argument de l'exigence `Racine` : **il n'y a qu'une clé qui
+satisfasse celle-ci, celle de `--operator-key`** — la nommer serait se
+répéter, et inventer un identifiant pour une clé unique ferait entrer
+l'exploitant dans le modèle par une porte dérobée. La preuve voyage donc dans
+le corps du verbe lui-même, comme celle de `POST /v1/attestation`, et le défi
+est dépensé qu'elle tienne ou non.
+
+**Ce que cette clé ne donne pas.** Elle n'ouvre **que** cette ressource : elle
+ne lit aucun compte, n'en révoque aucun, n'efface rien. Ce qu'un exploitant
+peut faire de destructif, il le fait déjà hors ligne, service arrêté, et c'est
+très bien ainsi. Une clé qui ouvre une porte ne doit pas ouvrir la maison —
+et celle-ci, si elle fuit, ne coûte que des invitations, qu'on cesse d'honorer
+en changeant le réglage.
+
+**Vingt-quatre heures, et pourquoi pas dix minutes.** Un code d'enrôlement de
+machine vaut dix minutes (`modele.md` §2.3) parce que l'humain qui le tape est
+devant les deux écrans : il le lit sur son téléphone et le saisit sur sa
+machine. Une invitation ne se consomme pas devant son émetteur — elle
+s'envoie, et l'invité l'utilisera ce soir ou demain. Dix minutes en feraient
+un rendez-vous ; une semaine au plus en borne la portée. **Ce que cela coûte
+est écrit plus bas** : cinquante bits qui vivent un jour ne se défendent que
+si l'annuaire limite le débit.
+
+**Ce que l'annuaire garde, et ce qu'il ne garde pas.** L'empreinte du code
+(SHA-256, domaine séparé), sa date d'expiration, l'estampille de son émission.
+**Jamais le code.** C'est déjà la règle des codes d'enrôlement (C14) et elle
+vaut pour la même raison : une base qui fuirait ne livrerait aucune entrée. Le
+code en clair n'existe que dans la réponse au verbe, une fois — l'annuaire ne
+sait pas le redire, et un exploitant qui le perd en émet un autre.
+
+#### Ce que `POST /v1/comptes` fait d'une plate-forme `3`
+
+L'ordre est celui de la plate-forme `2` (§2.1), et pour la même raison — rien
+ne s'écrit avant que tout soit jugé :
+
+1. la preuve de possession de la clé de l'appareil, comme toujours ;
+2. l'empreinte du code présenté est cherchée ; absente, expirée ou déjà
+   consommée, c'est **`403`** — le même refus pour les trois, et l'annuaire ne
+   dit pas lequel, exactement comme `POST /v1/defi` ne dit pas pourquoi une
+   preuve échoue. Distinguer « ce code n'existe pas » de « ce code a servi »
+   dirait à qui essaie des codes lesquels ont existé ;
+3. dans **une transaction** : le compte est créé, l'appareil enrôlé avec
+   l'attestation `invitation`, et **l'empreinte du code supprimée**. Consommer,
+   c'est supprimer — la règle des codes d'enrôlement, et la seule qui tienne
+   l'usage unique sans horloge.
+
+`400` si le corps est mal formé — plate-forme `3` sans les dix octets, ou avec
+autre chose que dix. Sous une posture qui n'est **pas** `invitation`, une
+plate-forme `3` reste refusée : une racine qui n'invite pas n'a pas de code à
+reconnaître.
+
+#### Cinquante bits qui vivent un jour, et la limite de débit
+
+`modele.md` §2.3 le note déjà pour le code d'enrôlement : cinquante bits ne se
+devinent pas, « cela ne dispense pas de limiter le débit, et cette limite-là
+n'est pas encore écrite ». Sous la posture `invitation`, elle **doit** l'être,
+et c'est ici la seule nouveauté de sécurité : c'est la première fois qu'un
+secret court, seul, garde **l'entrée du service** — ailleurs il ne fait que
+lier une clé à une machine déjà déclarée.
+
+**La règle : cinq échecs de `POST /v1/comptes` sous plate-forme `3` par
+minute et par adresse observée** (celle de §2.2, `GET /v1/vu`), puis `429`
+avec `retry-after`. Le seuil est haut pour un humain qui se trompe en
+recopiant, et dérisoire pour qui cherche : à cinq essais la minute, épuiser
+cinquante bits demande plus de temps que l'univers n'en a. Les succès ne
+comptent pas — un code qui marche ne se retente pas. Chaque refus est dit au
+journal d'exploitation avec l'adresse, jamais avec le code ni son empreinte.
+
+#### Deux racines, un seul code — la fenêtre, et ce qu'on n'en fait pas
+
+Les invitations se répliquent, **comme les codes d'enrôlement et pour la même
+raison** (`replication.md` §1) : l'alias donne une racine au hasard, et un code
+qui ne vaudrait que chez celle qui l'a émis serait inconnu une fois sur deux.
+C'est l'empreinte qui circule, jamais le code.
+
+Il en découle la même fenêtre qu'en §3.2 : entre la consommation chez l'une et
+son arrivée chez l'autre — moins d'une seconde en marche normale —, l'autre ne
+peut pas refuser ce qu'elle ne sait pas. **Mais la conséquence diffère, et
+c'est ce qui a demandé à trancher.** Un code d'enrôlement consommé deux fois
+donne deux clés pour une machine, et il faut départager : le dépôt le fait (le
+code le plus récemment émis, puis la première consommation). Une invitation
+consommée deux fois donne **deux comptes** — et deux comptes ne se départagent
+pas : ils ne se gênent pas, ne se disputent rien, et chacun porte l'appareil
+de celui qui l'a ouvert.
+
+**On ne les départage donc pas.** L'annuaire ne choisit pas un compte à
+effacer : un effacement automatique déclenché par une course serait une arme,
+et il n'existe aucune règle honnête pour désigner le perdant — le second
+arrivé a fait exactement ce qu'on lui avait dit de faire. **Les deux vivent, et
+le journal dit que le même code a été consommé deux fois**, avec les deux
+`u-…`. L'exploitant tranche s'il veut trancher ; `asl-server --forget` est là
+pour cela, hors ligne, sur décision d'un humain (décision 24).
+
+Ce que cela coûte est borné et se dit en une phrase : **une invitation garantit
+qu'on entre parce que l'exploitant l'a voulu, pas qu'on entre une fois et une
+seule.** L'usage unique tient par racine et au-delà de la seconde qui sépare
+les deux ; il ne tient pas dans cette seconde-là. Pour qu'il y ait deux
+comptes, il faut que le même code soit présenté deux fois dans cet intervalle
+— une faute, ou un code intercepté ; et dans ce second cas, celui qui l'a
+intercepté aurait de toute façon obtenu un compte en arrivant le premier.
 
 ### Attester un appareil qui rejoint — la preuve et la chaîne, d'un même défi
 
