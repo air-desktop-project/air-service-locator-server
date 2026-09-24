@@ -725,7 +725,12 @@ pub enum Trouvaille {
     VuDepuis(asl_proto::VuDepuis),
     /// La version de l'annuaire qui répond — celle du binaire, que seul
     /// l'étage 3 connaît. Du texte semver, `0.2.0`, sans rien à échapper.
-    Version(&'static str),
+    ///
+    /// **Et sa posture d'attestation** (2026-09-24) : elle vient du réglage,
+    /// donc du même étage, et elle sort par la même ressource parce qu'elle
+    /// répond à la même question — « que sert cet annuaire, et puis-je y
+    /// ouvrir un compte ? ».
+    Version(&'static str, asl_auth::Politique),
     /// De quoi décider d'une résolution.
     Resolution(Resolution),
     /// De quoi décider d'une LISTE de résolutions.
@@ -2061,7 +2066,7 @@ pub fn repondre<'o>(
         // cette ressource n'exige aucune preuve, donc `Rien` rend `404` et non
         // `500` — un `500` qu'un inconnu peut fabriquer n'en est plus un.
         Besoin::Version => match trouvaille {
-            Trouvaille::Version(version) => rendre_la_version(version, sortie),
+            Trouvaille::Version(version, posture) => rendre_la_version(version, *posture, sortie),
             Trouvaille::Rien => composer(
                 StatusCode::NOT_FOUND,
                 PROBLEME_MEDIA,
@@ -2220,17 +2225,43 @@ fn rendre_ou_l_on_est_vu(vu: asl_proto::VuDepuis, sortie: &mut [u8]) -> Reponse<
     composer(StatusCode::OK, JSON_MEDIA, corps.rendu(), sortie)
 }
 
-/// Rend `{"version":"0.2.0"}`.
+/// Rend `{"version":"0.2.0","posture":"optional"}`.
 ///
 /// **SANS ÉCHAPPEMENT, ET C'EST SÛR** : la version vient de `CARGO_PKG_VERSION`
 /// du binaire — des chiffres, des points, au plus un tiret et des lettres —,
 /// jamais du réseau. Elle est bornée par [`VU_CORPS_MAX`], qui a de la marge :
 /// une version qui ne tiendrait pas dans quatre-vingts octets serait une faute de
-/// manifeste, et `Corps` la tronquerait plutôt que de déborder.
-fn rendre_la_version<'a>(version: &str, sortie: &'a mut [u8]) -> Reponse<'a> {
+/// manifeste, et `Corps` la tronquerait plutôt que de déborder. La posture, elle,
+/// est l'un de trois mots choisis ici, pas une chaîne qui vient d'ailleurs.
+///
+/// # POURQUOI `posture` ET NON `attestation`
+///
+/// Parce que `attestation` est déjà pris, et pour autre chose : c'est le champ
+/// qu'un APPAREIL porte dans `GET /v1/appareils` — `aucune`, `apple`,
+/// `android`, `invitation`, `attendue` —, et il y dit sous quoi cet appareil
+/// est entré. Ici la question est l'inverse : ce que l'annuaire EXIGE de qui
+/// se présente. Le mot `invitation` vit dans les deux vocabulaires avec deux
+/// sens — « entré grâce à un code » là-bas, « il faut un code » ici —, et
+/// deux sens sous un même nom dans deux réponses voisines, c'est le genre
+/// d'ambiguïté qui se paie en bogue d'application. `posture` est le mot dont
+/// la documentation se sert déjà partout pour ce concept.
+fn rendre_la_version<'a>(
+    version: &str,
+    posture: asl_auth::Politique,
+    sortie: &'a mut [u8],
+) -> Reponse<'a> {
     let mut corps = Corps::<VU_CORPS_MAX>::neuf();
     corps.pousser(br#"{"version":""#);
     corps.pousser(version.as_bytes());
+    corps.pousser(br#"","posture":""#);
+    // **LES MOTS DU RÉGLAGE, ET NON CEUX DU CODE** : ce qui sort ici est ce
+    // que l'exploitant a tapé derrière `--attestation`, pour qu'une réponse
+    // se rapproche d'une configuration sans traduction mentale.
+    corps.pousser(match posture {
+        asl_auth::Politique::AttestationExigee => b"required".as_slice(),
+        asl_auth::Politique::AttestationFacultative => b"optional".as_slice(),
+        asl_auth::Politique::Invitation => b"invitation".as_slice(),
+    });
     corps.pousser(br#""}"#);
     composer(StatusCode::OK, JSON_MEDIA, corps.rendu(), sortie)
 }
@@ -4916,10 +4947,13 @@ mod creations {
         let (statut, rendu) = rendre(
             &mut session,
             &Besoin::Version,
-            &Trouvaille::Version("0.2.0-essai"),
+            &Trouvaille::Version("0.2.0-essai", asl_auth::Politique::AttestationFacultative),
         );
         assert_eq!(statut, StatusCode::OK);
-        assert_eq!(&rendu[..], br#"{"version":"0.2.0-essai"}"#);
+        assert_eq!(
+            &rendu[..],
+            br#"{"version":"0.2.0-essai","posture":"optional"}"#
+        );
 
         // **`Rien` REND `404`, ET NON `500`** : la ressource est publique, et
         // un `500` qu'un inconnu peut fabriquer n'en est plus un.
@@ -4932,6 +4966,39 @@ mod creations {
             rendre(&mut session, &Besoin::Version, &Trouvaille::Fait).0,
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    #[test]
+    fn la_posture_sort_avec_les_mots_du_reglage() {
+        // **LES TROIS, ET LES TROIS SEULEMENT** : ce que l'exploitant tape
+        // derrière `--attestation` est ce qu'une application lit ici, sans
+        // traduction. Si un quatrième mot apparaît un jour dans
+        // `asl_auth::Politique`, ce `match` ne compilera plus — et c'est le
+        // but : une posture qu'on ajoute sans la dire est une posture qu'une
+        // application ne saura pas afficher.
+        for (politique, attendu) in [
+            (
+                asl_auth::Politique::AttestationExigee,
+                &br#"{"version":"1.0.0","posture":"required"}"#[..],
+            ),
+            (
+                asl_auth::Politique::AttestationFacultative,
+                &br#"{"version":"1.0.0","posture":"optional"}"#[..],
+            ),
+            (
+                asl_auth::Politique::Invitation,
+                &br#"{"version":"1.0.0","posture":"invitation"}"#[..],
+            ),
+        ] {
+            let mut session = Session::new(liaison());
+            let (statut, rendu) = rendre(
+                &mut session,
+                &Besoin::Version,
+                &Trouvaille::Version("1.0.0", politique),
+            );
+            assert_eq!(statut, StatusCode::OK);
+            assert_eq!(&rendu[..], attendu, "posture {politique:?}");
+        }
     }
 
     // ── D'où l'on est vu ────────────────────────────────────────────────────

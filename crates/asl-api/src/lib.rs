@@ -203,7 +203,8 @@ pub enum Ressource<'a> {
     /// en train d'installer, qui veut savoir si elle atteint l'annuaire et
     /// comment il la voit, avant même d'avoir un code d'enrôlement.
     Vu,
-    /// `/v1/version` — la version de l'annuaire, `{"version": "0.2.0"}`.
+    /// `/v1/version` — la version de l'annuaire et sa posture d'attestation,
+    /// `{"version": "0.2.0", "posture": "optional"}`.
     ///
     /// # ELLE N'EXIGE RIEN, ET C'EST LA SIXIÈME
     ///
@@ -528,7 +529,9 @@ impl Ressource<'_> {
     /// - **`/v1/vu`** : elle ne parle que de la connexion qui demande, et ne
     ///   rend rien qu'un serveur STUN public ne rendrait. Voir [`Ressource::Vu`].
     /// - **`/v1/version`** : un nombre public d'un logiciel libre, dont ont
-    ///   besoin ceux qui n'ont pas encore de clé. Voir [`Ressource::Version`].
+    ///   besoin ceux qui n'ont pas encore de clé — et depuis le 2026-09-24 la
+    ///   posture, qu'un refus révélerait de toute façon. Voir
+    ///   [`Ressource::Version`].
     #[must_use]
     pub const fn exigence(&self) -> Exigence {
         match self {

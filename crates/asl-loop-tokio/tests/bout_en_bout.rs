@@ -2213,9 +2213,16 @@ async fn la_version_se_lit_sans_rien_prouver() {
         "{}",
         String::from_utf8_lossy(&rendu)
     );
+    // **ET LA POSTURE**, celle de ce banc — `lever` monte l'annuaire en
+    // `AttestationFacultative`. C'est ce qu'une application lira pour savoir
+    // s'il lui faut demander un code d'invitation avant d'ouvrir un compte.
     assert_eq!(
         rendu,
-        format!(r#"{{"version":"{}"}}"#, env!("CARGO_PKG_VERSION")).into_bytes()
+        format!(
+            r#"{{"version":"{}","posture":"optional"}}"#,
+            env!("CARGO_PKG_VERSION")
+        )
+        .into_bytes()
     );
 
     let _ = dire_stop.send(());

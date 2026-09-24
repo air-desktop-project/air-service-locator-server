@@ -512,7 +512,10 @@ impl Service<'_> {
             // **LA VERSION DU WORKSPACE, EN LOCKSTEP** : toutes les crates la
             // partagent (`Cargo.toml`), donc celle-ci est celle du binaire, et
             // `scripts/check-version.sh` tient l'égalité.
-            Besoin::Version => Trouvaille::Version(env!("CARGO_PKG_VERSION")),
+            // **ET LA POSTURE AVEC ELLE** (2026-09-24) : elle vient du
+            // réglage, que seul cet étage tient, et une application doit
+            // pouvoir demander un code d'invitation AVANT d'essuyer un refus.
+            Besoin::Version => Trouvaille::Version(env!("CARGO_PKG_VERSION"), self.politique),
 
             Besoin::Annoncer => self
                 .annoncer()

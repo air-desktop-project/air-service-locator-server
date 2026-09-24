@@ -123,7 +123,9 @@ scripts/check-version.sh  # après avoir committé : la version a changé, et to
 **Chaque PR change la version** (`CLAUDE.md`), et `check-version` la tient : une
 PR dont `[workspace.package] version` est celle de `main` ne se merge pas.
 `asl-server --version` dit la version et le commit du binaire ;
-`GET /v1/version` la rend à qui interroge l'annuaire.
+`GET /v1/version` la rend à qui interroge l'annuaire, avec sa **posture**
+d'attestation (`required`, `optional` ou `invitation`) — de quoi savoir, avant
+d'ouvrir un compte, s'il faut un code d'invitation.
 
 L'ordre n'est pas arbitraire, et le formatage est en dernier : une faute de forme
 ne doit pas cacher une faute de fond.
@@ -290,7 +292,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.15.0_amd64.deb
+sudo dpkg -i asl-server_0.16.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :

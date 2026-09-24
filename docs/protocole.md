@@ -743,7 +743,7 @@ l'empêcherait de comprendre.
 | `GET /v1/alias/{alias}` | Rend l'identifiant, **et rien d'autre**. Public — c'est l'emploi de l'alias, et son coût (`modele.md` §2.1). |
 | `GET /v1/machines/{m}/services` | Les services, leurs candidats, leur état et la date de la dernière sonde. |
 | `GET /v1/vu` | **D'où l'annuaire voit cette connexion**, sans rien annoncer ni prouver. Voir ci-dessous. |
-| `GET /v1/version` | **La version de l'annuaire qui répond**, `{"version": "0.2.0"}`, sans rien prouver. Voir ci-dessous. |
+| `GET /v1/version` | **La version de l'annuaire qui répond, et sa posture d'attestation**, `{"version": "0.2.0", "posture": "optional"}`, sans rien prouver. Voir ci-dessous. |
 | `GET /v1/utilisateurs/{u}` | **Confirme qu'un identifiant existe**, et rien d'autre : ni nom, ni machines, ni services. Sert à ce qu'une faute de frappe ne produise pas une autorisation muette. |
 | `GET /v1/moi/appareils` | **Les appareils du compte de la machine qui demande**, révoqués compris — lecture seule, voie machine. Voir §3. |
 | `GET /v1/utilisateurs/{u}/machines` | **Les machines de `u` que le demandeur a le droit de voir** — les siennes si `u` est lui, sinon celles que les autorisations de `u` envers lui couvrent (`modele.md` §2.5). Voir ci-dessous. Servi aussi sur la voie machine (§3). |
@@ -784,10 +784,10 @@ quelqu'un rencontre `::ffff:203.0.113.7`.
 adresse à celles qu'un daemon ANNONCE, et un appelant qui n'a rien annoncé n'a
 rien à comparer. Répondre ici serait affirmer ce qui n'a pas été mesuré.
 
-### `GET /v1/version` — quelle version de l'annuaire répond
+### `GET /v1/version` — quelle version répond, et ce qu'elle exige
 
 ```jsonc
-{"version": "0.2.0"}
+{"version": "0.2.0", "posture": "optional"}   // required | optional | invitation
 ```
 
 **Elle n'exige rien, et c'est la sixième ressource dans ce cas.** Ceux qui ont
@@ -798,14 +798,39 @@ qu'un banc sert bien ce qu'il croit. Et elle ne révèle rien qui ne soit déjà
 public : ce logiciel est libre, et **chaque PR change sa version**
 (`CLAUDE.md`), donc ce nombre nomme exactement un état du dépôt.
 
-**La version, et rien d'autre.** Ni commit, ni posture d'attestation, ni
-réglage : ce qu'un annuaire sait de lui-même au-delà de ce nombre est l'affaire
-de son exploitant, qui le lit sur la machine avec `asl-server --version`.
+**La version et la posture, et rien d'autre.** Ni commit, ni réglage : ce
+qu'un annuaire sait de lui-même au-delà de ces deux mots est l'affaire de son
+exploitant, qui le lit sur la machine avec `asl-server --version`.
+
+**La posture s'est ajoutée le 2026-09-24, et ce paragraphe disait le
+contraire.** Il tenait que la posture était « l'affaire de son exploitant »,
+au même titre que le reste du réglage. L'argument ne tient pas à l'examen :
+**une posture n'est pas un secret, elle est déjà observable**. Une racine en
+`invitation` refuse toute création de compte qui ne porte pas de code ; une
+racine en `required` refuse celles qui n'attestent pas. Qui veut la connaître
+l'apprend en une requête, et la taire ne l'a jamais cachée — cela obligeait
+seulement les applications à deviner, ou à essuyer un refus pour comprendre
+ensuite. La posture `invitation` (§2.2) a rendu ce coût visible : une
+application doit savoir s'il lui faut demander un code **avant** d'ouvrir un
+compte, faute de quoi elle montre à tous un champ qui ne sert qu'à quelques-uns,
+ou ne le montre à personne.
+
+**Où passe la ligne, alors.** Elle passe entre ce qui est déductible du dehors
+et ce qui ne l'est pas. La posture est déductible : elle se lit dans les refus.
+Le reste du réglage ne l'est pas, et **reste tu** — les racines de fabricant
+épinglées, le paquet et le signataire Android attendus, l'existence d'une
+`--operator-key`, les durées et les seuils. Rien de tout cela ne se devine en
+essayant, et rien de tout cela n'aide une application honnête : ce sont des
+renseignements pour qui cherche une prise.
 
 **Ce qu'elle promet aux applications : un point de comparaison, pas une
 négociation.** Une application qui lit `0.1.0` là où elle attend le verbe de
 description (`0.2.0`) peut le dire à son utilisateur plutôt que de journaliser
-un `404` ; elle ne demande pas à l'annuaire de parler autrement.
+un `404` ; elle ne demande pas à l'annuaire de parler autrement. La posture
+s'y lit de la même façon : une application qui voit `invitation` demande un
+code avant d'ouvrir un compte, et ne le demande pas ailleurs — elle ne
+négocie pas davantage, et un annuaire qui répondrait un mot qu'elle ne
+connaît pas se traite comme une version trop récente, non comme une panne.
 
 ### Ce qu'un jeton de poussée exige, et ce qu'il ne promet pas
 
