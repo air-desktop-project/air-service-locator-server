@@ -481,6 +481,7 @@ impl Tireur {
                                     match atteste {
                                         asl_registre::Attestation::Apple => "apple",
                                         asl_registre::Attestation::Android => "android",
+                                        asl_registre::Attestation::Invitation => "invitation",
                                         asl_registre::Attestation::Aucune
                                         | asl_registre::Attestation::Attendue => "sans preuve",
                                     }

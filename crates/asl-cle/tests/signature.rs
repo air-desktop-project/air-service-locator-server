@@ -397,3 +397,100 @@ fn le_texte_groupe_s_affiche() {
     let code = CodeEnrolement::analyser("4K9M2P7R1T").unwrap();
     assert_eq!(code.texte_groupe().to_string(), "4K9M2-P7R1T");
 }
+
+// ── Le code d'invitation, et la preuve de l'exploitant ──────────────────────
+
+#[test]
+fn un_code_d_invitation_a_la_forme_d_un_code_et_une_autre_empreinte() {
+    use asl_cle::{CodeEnrolement, CodeInvitation};
+
+    let graine = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
+    let invitation = CodeInvitation::depuis_entropie(graine);
+
+    // **LA MÊME FORME** : dix symboles, le tiret d'affichage au milieu, les
+    // deux écritures relues — un humain le recopie dans les mêmes conditions.
+    assert_eq!(invitation.texte().len(), asl_cle::CODE_SYMBOLES);
+    let groupe = invitation.texte_groupe();
+    assert_eq!(groupe.as_str().len(), asl_cle::CODE_TEXTE_OCTETS);
+    assert_eq!(
+        CodeInvitation::analyser(groupe.as_str())
+            .expect("la forme groupée se relit")
+            .texte(),
+        invitation.texte(),
+        "le tiret d'affichage n'ajoute rien à taper"
+    );
+    assert_eq!(
+        CodeInvitation::analyser(invitation.texte())
+            .expect("la forme canonique se relit")
+            .empreinte(),
+        invitation.empreinte()
+    );
+
+    // **ET PAS LA MÊME EMPREINTE** : les deux codes n'ouvrent pas la même
+    // porte, et leurs domaines les séparent (`protocole.md` §2.2).
+    let enrolement = CodeEnrolement::depuis_entropie(graine);
+    assert_eq!(
+        enrolement.texte(),
+        invitation.texte(),
+        "mêmes octets d'entropie, mêmes symboles"
+    );
+    assert_ne!(
+        enrolement.empreinte(),
+        invitation.empreinte(),
+        "un code d'enrôlement ne doit jamais valoir une invitation"
+    );
+
+    // Un code mal formé se refuse, comme l'autre.
+    assert!(CodeInvitation::analyser("trop-court").is_err());
+}
+
+#[test]
+fn la_preuve_d_un_exploitant_lie_le_defi_et_le_canal() {
+    use asl_cle::{CleSecrete, Defi, LiaisonDeCanal};
+
+    let exploitant = CleSecrete::depuis_entropie([0x0E; 32]);
+    let defi = Defi::depuis_octets([0x5A; 32]);
+    let liaison = LiaisonDeCanal::depuis_octets([0xC0; 32]);
+    let signature = exploitant.signer_l_exploitant(&defi, &liaison);
+
+    assert!(
+        exploitant
+            .publique()
+            .prouve_l_exploitant(&defi, &liaison, &signature),
+        "sa propre signature vérifie"
+    );
+
+    // **UN AUTRE DÉFI, UN AUTRE CANAL, UNE AUTRE CLÉ : rien ne passe.** Sans
+    // la liaison, une signature obtenue ailleurs vaudrait ici.
+    let autre_defi = Defi::depuis_octets([0x5B; 32]);
+    assert!(
+        !exploitant
+            .publique()
+            .prouve_l_exploitant(&autre_defi, &liaison, &signature)
+    );
+    let autre_canal = LiaisonDeCanal::depuis_octets([0xC1; 32]);
+    assert!(
+        !exploitant
+            .publique()
+            .prouve_l_exploitant(&defi, &autre_canal, &signature)
+    );
+    let quelqu_un = CleSecrete::depuis_entropie([0x11; 32]);
+    assert!(
+        !quelqu_un
+            .publique()
+            .prouve_l_exploitant(&defi, &liaison, &signature),
+        "il n'y a qu'une clé d'exploitant, celle du réglage"
+    );
+
+    // **LE MESSAGE PORTE SON DOMAINE ET LE GENRE `o`, ET PAS D'IDENTIFIANT.**
+    let message = asl_cle::message_d_exploitant(&defi, &liaison);
+    assert_eq!(message.len(), asl_cle::MESSAGE_EXPLOITANT_OCTETS);
+    assert!(message.starts_with(asl_cle::DOMAINE_EXPLOITANT));
+    assert_eq!(
+        message[asl_cle::DOMAINE_EXPLOITANT.len()],
+        asl_cle::GENRE_EXPLOITANT
+    );
+    // Il est plus court que celui d'une machine : les seize octets
+    // d'identifiant n'y sont pas.
+    assert!(message.len() < asl_cle::MESSAGE_OCTETS);
+}

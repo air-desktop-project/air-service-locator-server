@@ -3378,3 +3378,67 @@ fn attester_un_appareil_pose_une_preuve_une_fois_et_jamais_en_arriere() {
     );
     let _ = std::fs::remove_file(&chemin);
 }
+
+/// L'empreinte d'un code d'invitation, pour les essais.
+fn empreinte_d_invitation(graine: u8) -> [u8; asl_registre::EMPREINTE_OCTETS] {
+    [graine; asl_registre::EMPREINTE_OCTETS]
+}
+
+#[test]
+fn une_invitation_s_emet_se_consomme_une_fois_et_ouvre_le_compte_en_une_transaction() {
+    let (base, chemin) = entrepot("invitation-aller-retour");
+    let code = empreinte_d_invitation(0x1E);
+    let compte = un(Genre::Utilisateur, 1);
+    let appareil = un(Genre::Appareil, 1);
+
+    // **UN CODE INCONNU N'ÉCRIT RIEN**, et c'est le même fait qu'un code
+    // consommé : l'appelant en fera un `403` sans dire lequel.
+    assert!(
+        !base
+            .creer_compte_sur_invitation(compte, appareil, [7; 33], &code, 1_000)
+            .expect("lisible"),
+        "un code inconnu ne crée rien"
+    );
+    assert!(base.compte(compte).expect("lisible").is_none());
+
+    base.emettre_invitation(&code, Provenance::Ici, 10_000)
+        .expect("émise");
+
+    // **EXPIRÉE, C'EST LE MÊME REFUS** — et le code reste, le balayage
+    // l'enlèvera.
+    assert!(
+        !base
+            .creer_compte_sur_invitation(compte, appareil, [7; 33], &code, 10_001)
+            .expect("lisible"),
+        "une invitation expirée ne crée rien"
+    );
+    assert!(base.compte(compte).expect("lisible").is_none());
+
+    // Vivante : le compte naît, l'appareil est enrôlé SOUS `invitation`, et le
+    // code disparaît — les trois dans la même transaction.
+    assert!(
+        base.creer_compte_sur_invitation(compte, appareil, [7; 33], &code, 9_999)
+            .expect("lisible"),
+        "une invitation vivante ouvre le compte"
+    );
+    assert!(base.compte(compte).expect("lisible").is_some());
+    assert_eq!(
+        base.appareil(appareil)
+            .expect("lisible")
+            .expect("là")
+            .atteste,
+        Attestation::Invitation,
+        "il entre sous invitation, et cela se garde"
+    );
+
+    // **UNE SEULE FOIS** : le même code ne rouvre rien.
+    let second = un(Genre::Utilisateur, 2);
+    assert!(
+        !base
+            .creer_compte_sur_invitation(second, un(Genre::Appareil, 2), [8; 33], &code, 9_999)
+            .expect("lisible"),
+        "consommer, c'est supprimer"
+    );
+    assert!(base.compte(second).expect("lisible").is_none());
+    let _ = std::fs::remove_file(&chemin);
+}

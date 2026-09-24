@@ -1248,3 +1248,144 @@ fn une_emission_apres_sa_consommation_reparait_le_temps_du_flux() {
     );
     let _ = std::fs::remove_file(&chemin);
 }
+
+// ── Les invitations (décision 26) ───────────────────────────────────────────
+
+/// L'empreinte d'un code d'invitation, reproductible.
+fn code(graine: u8) -> [u8; asl_registre::EMPREINTE_OCTETS] {
+    [graine; asl_registre::EMPREINTE_OCTETS]
+}
+
+/// Une invitation telle qu'elle voyage : **de provenance locale**, C11 ne
+/// laissant passer que cela entre racines (§7). C'est l'entrepôt qui la
+/// marquera comme reçue.
+fn invitation(estampille: Estampille, expire_a: u64) -> asl_registre::Invitation {
+    asl_registre::Invitation {
+        provenance: Provenance::Ici,
+        estampille,
+        expire_a,
+    }
+}
+
+#[test]
+fn une_invitation_consommee_avant_d_etre_connue_ne_ressuscite_pas() {
+    // **L'ORDRE D'ARRIVÉE NE DOIT RIEN CHANGER** (`replication.md` §5.4) :
+    // `invitation-consommee` peut précéder `invitation` — deux tables, un
+    // amorçage, aucun ordre garanti entre elles. Dans les DEUX ordres, le code
+    // doit finir absent : un code dépensé ne revit pas.
+    let (base, chemin) = entrepot("invitation-hors-ordre");
+    let quel = code(0x2E);
+
+    // Ordre « à l'envers » : la consommation d'abord.
+    appliquer(
+        &base,
+        est(pair(), 4),
+        Operation::InvitationConsommee { empreinte: quel },
+    );
+    appliquer(
+        &base,
+        est(pair(), 3),
+        Operation::Invitation {
+            empreinte: quel,
+            enregistrement: invitation(est(pair(), 3), 10_000),
+        },
+    );
+
+    // Le code ne doit ouvrir aucun compte : il a été dépensé chez le pair.
+    assert!(
+        !base
+            .creer_compte_sur_invitation(
+                un(Genre::Utilisateur, 1),
+                un(Genre::Appareil, 1),
+                [7; 33],
+                &quel,
+                1_000,
+            )
+            .expect("lisible"),
+        "une émission arrivée en retard ne ressuscite pas un code consommé"
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn une_invitation_s_applique_une_fois_et_ne_se_prolonge_pas() {
+    // **INSÉRER SI ABSENTE** (§5.2) : une émission rejouée — un amorçage qui
+    // repasse — ne doit pas réécrire l'expiration. Sans quoi un instantané
+    // prolongerait des codes en vol.
+    let (base, chemin) = entrepot("invitation-rejouee");
+    let quel = code(0x4E);
+
+    appliquer(
+        &base,
+        est(pair(), 3),
+        Operation::Invitation {
+            empreinte: quel,
+            enregistrement: invitation(est(pair(), 3), 5_000),
+        },
+    );
+    // La même, rejouée avec une expiration PLUS LOINTAINE : elle ne prend pas.
+    appliquer(
+        &base,
+        est(pair(), 3),
+        Operation::Invitation {
+            empreinte: quel,
+            enregistrement: invitation(est(pair(), 3), 90_000),
+        },
+    );
+
+    // À 6 000, la première expiration est passée : si le rejeu l'avait
+    // prolongée, le compte s'ouvrirait.
+    assert!(
+        !base
+            .creer_compte_sur_invitation(
+                un(Genre::Utilisateur, 1),
+                un(Genre::Appareil, 1),
+                [7; 33],
+                &quel,
+                6_000,
+            )
+            .expect("lisible"),
+        "un rejeu ne prolonge pas un code en vol"
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn deux_comptes_sur_un_code_vivent_tous_les_deux() {
+    // **DÉCISION 26** : un même code consommé des deux côtés de la fenêtre
+    // donne deux comptes, et on ne les départage PAS. Quand la consommation de
+    // l'autre racine arrive, le compte ouvert ici reste entier — un effacement
+    // automatique déclenché par une course serait une arme.
+    let (base, chemin) = entrepot("invitation-deux-comptes");
+    let quel = code(0x3E);
+    let ici = un(Genre::Utilisateur, 1);
+    let appareil = un(Genre::Appareil, 1);
+
+    base.emettre_invitation(&quel, Provenance::Ici, 10_000)
+        .expect("émise");
+    assert!(
+        base.creer_compte_sur_invitation(ici, appareil, [7; 33], &quel, 1_000)
+            .expect("lisible"),
+        "notre compte s'ouvre"
+    );
+
+    appliquer(
+        &base,
+        est(pair(), 9),
+        Operation::InvitationConsommee { empreinte: quel },
+    );
+
+    assert!(
+        base.compte(ici).expect("lisible").is_some(),
+        "aucune règle de conflit n'efface un compte"
+    );
+    assert_eq!(
+        base.appareil(appareil)
+            .expect("lisible")
+            .expect("là")
+            .atteste,
+        Attestation::Invitation,
+        "et il reste entré sous invitation"
+    );
+    let _ = std::fs::remove_file(&chemin);
+}

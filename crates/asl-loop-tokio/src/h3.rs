@@ -223,6 +223,14 @@ pub struct Voie<'a> {
     pub identite: Option<&'a CleSecrete>,
     /// La clé d'identité de l'autre racine (`--peer-key`), si elle est réglée.
     pub pair: Option<ClePublique>,
+    /// La clé publique de l'exploitant (`--operator-key`), si elle est réglée :
+    /// ce contre quoi la signature de `POST /v1/invitations` se vérifie
+    /// (`protocole.md` §2.2).
+    ///
+    /// **Elle vit ici, avec les autres clés que l'exploitant pose dans
+    /// `/etc/asl-server/`**, et non dans `Attestations` : elle n'atteste rien,
+    /// elle autorise un geste.
+    pub exploitant: Option<ClePublique>,
     /// Où dire l'ouverture et la fermeture de chaque sens, un rattrapage avec
     /// son nombre d'opérations, un amorçage avec sa taille — le journal
     /// d'exploitation de `replication.md` §8. **Jamais une opération par
@@ -238,6 +246,7 @@ impl Voie<'static> {
     pub const AUCUNE: Self = Self {
         identite: None,
         pair: None,
+        exploitant: None,
         journal: &taire,
         etat: None,
     };
@@ -245,6 +254,72 @@ impl Voie<'static> {
 
 /// Ne dit rien.
 fn taire(_: &str) {}
+
+/// Ce que vit une invitation par défaut, en millisecondes : vingt-quatre
+/// heures. Le binaire le règle (`--invitation-ttl`) ; c'est la valeur d'une
+/// application montée sans rien dire.
+const INVITATION_TTL_DEFAUT_MS: u64 = 24 * 60 * 60 * 1_000;
+
+/// Combien d'échecs d'invitation une adresse peut faire par fenêtre.
+const ECHECS_PAR_FENETRE: usize = 5;
+
+/// La fenêtre de la limite de débit, en millisecondes : une minute.
+const FENETRE_D_ECHECS_MS: u64 = 60 * 1_000;
+
+/// Les échecs récents de `POST /v1/comptes` sous plate-forme `3`, par adresse.
+///
+/// # CE QU'ELLE PROTÈGE, ET CE QU'ELLE NE PROTÈGE PAS
+///
+/// Un code d'invitation fait cinquante bits et vit un jour (`protocole.md`
+/// §2.2). Cinquante bits ne se devinent pas — mais c'est la première fois
+/// qu'un secret court, SEUL, garde l'entrée du service, et une porte qu'on
+/// peut frapper sans fin finit par s'ouvrir. **Cinq échecs par minute et par
+/// adresse** : haut pour un humain qui recopie de travers, dérisoire pour qui
+/// cherche.
+///
+/// **Elle ne remplace pas l'entropie du code**, et ne prétend pas le faire :
+/// une adresse qui change à chaque essai la contourne, et c'est assumé —
+/// cinquante bits tiennent tout seuls contre cela. Elle ferme le cas simple,
+/// celui d'une adresse qui martèle.
+///
+/// **Les succès ne comptent pas** : un code qui marche ne se retente pas.
+///
+/// Fenêtre glissante, en mémoire. Rien n'est rangé, rien n'est répliqué : voir
+/// le champ qui la porte.
+struct EchecsParAdresse {
+    /// Par adresse, les instants des échecs encore dans la fenêtre.
+    vus: std::collections::HashMap<core::net::IpAddr, Vec<u64>>,
+}
+
+impl EchecsParAdresse {
+    /// Aucun échec connu.
+    fn neufs() -> Self {
+        Self {
+            vus: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Cette adresse a-t-elle épuisé sa fenêtre ?
+    ///
+    /// **Elle oublie en même temps qu'elle juge** : ce qui est sorti de la
+    /// fenêtre est retiré ici, et une table qui grandirait sans fin n'existe
+    /// donc pas.
+    fn trop(&mut self, adresse: core::net::IpAddr, maintenant: u64) -> bool {
+        let depuis = maintenant.saturating_sub(FENETRE_D_ECHECS_MS);
+        let echecs = self.vus.entry(adresse).or_default();
+        echecs.retain(|quand| *quand >= depuis);
+        if echecs.is_empty() {
+            self.vus.remove(&adresse);
+            return false;
+        }
+        echecs.len() >= ECHECS_PAR_FENETRE
+    }
+
+    /// Un échec de plus pour cette adresse.
+    fn echec(&mut self, adresse: core::net::IpAddr, maintenant: u64) {
+        self.vus.entry(adresse).or_default().push(maintenant);
+    }
+}
 
 /// Une trame `DATA` qui porte ces cadres à la suite, sans enveloppe.
 ///
@@ -352,6 +427,11 @@ struct Service<'a> {
     /// sait pas quelles connexions ce pair tient — c'est `Annuaire` qui les
     /// connaît, et qui traduira. Voir `Annuaire::au_tour`.
     a_fermer: &'a mut Vec<Identifiant>,
+    /// Ce que vit une invitation, en millisecondes (`--invitation-ttl`).
+    invitation_ttl_ms: u64,
+    /// Les échecs récents de `POST /v1/comptes` sous plate-forme `3`, par
+    /// adresse (`protocole.md` §2.2).
+    echecs_d_invitation: &'a mut EchecsParAdresse,
     /// Ce qui se souvient.
     entrepot: &'a Entrepot,
     /// Ce qui vit.
@@ -567,6 +647,9 @@ impl Service<'_> {
                 capacites,
             } => self.modifier_une_machine(*machine, *nom, *capacites),
             Besoin::NouveauCode { machine } => self.emettre_un_code(*machine),
+            Besoin::EmettreInvitation { defi, signature } => {
+                self.emettre_une_invitation(defi, signature)
+            }
             Besoin::Enroler { empreinte, cle } => self.enroler(empreinte, cle),
             Besoin::Autoriser {
                 a,
@@ -671,13 +754,22 @@ impl Service<'_> {
 
     /// Crée un compte et enrôle l'appareil qui vient de prouver sa clé.
     fn creer_un_compte(
-        &self,
+        &mut self,
         cle: &CleAppareil,
         plateforme: PlateformeAttestation,
         attestation: &[u8],
         defi_attestation: &[u8],
         defi_attestation_de_cle: &[u8],
     ) -> Trouvaille {
+        // **LA POSTURE `invitation` A SON PROPRE CHEMIN**, parce que la
+        // consommation du code et la création du compte sont UNE transaction
+        // (`protocole.md` §2.2) : deux appels laisseraient un compte sans
+        // porte, ou deux comptes sur un code.
+        if plateforme == PlateformeAttestation::Invitation
+            || self.politique == asl_auth::Politique::Invitation
+        {
+            return self.creer_un_compte_sur_invitation(cle, plateforme, attestation);
+        }
         // **L'ATTESTATION, D'ABORD.** Elle est ce qui garde ce chemin : il
         // n'exige aucune signature de compte, puisqu'il n'y a pas encore de
         // compte. Un refus ici est `Refus` (403), pas `Rien` (500) : la règle a
@@ -727,6 +819,93 @@ impl Service<'_> {
             return Trouvaille::Rien;
         }
         Trouvaille::CompteCree { compte, appareil }
+    }
+
+    /// Ouvre un compte sur une invitation (`protocole.md` §2.2).
+    ///
+    /// # L'ORDRE, ET IL NE SE NÉGOCIE PAS
+    ///
+    /// La possession de la clé est déjà prouvée — l'étage 2 l'a faite. Ici :
+    /// la limite de débit, puis le code, puis **une transaction** qui crée le
+    /// compte, enrôle l'appareil sous `invitation` et supprime l'empreinte.
+    ///
+    /// **`403` pour un code absent, expiré ou déjà consommé — le même refus
+    /// pour les trois.** Distinguer « ce code n'existe pas » de « ce code a
+    /// servi » dirait à qui essaie des codes lesquels ont existé.
+    ///
+    /// Sous une posture qui n'est pas `invitation`, une plate-forme `3` est
+    /// refusée : une racine qui n'invite pas n'a pas de code à reconnaître.
+    /// Et sous la posture `invitation`, une plate-forme qui n'est pas `3` est
+    /// refusée aussi — il n'y a pas d'autre entrée.
+    fn creer_un_compte_sur_invitation(
+        &mut self,
+        cle: &CleAppareil,
+        plateforme: PlateformeAttestation,
+        code: &[u8],
+    ) -> Trouvaille {
+        let dire = |cause: &str| {
+            (self.voie.journal)(&format!("invitation refusée : {cause}"));
+        };
+        if self.politique != asl_auth::Politique::Invitation {
+            dire("la posture de cette racine n'est pas `invitation`");
+            return Trouvaille::Refus;
+        }
+        if plateforme != PlateformeAttestation::Invitation {
+            dire("sous cette posture, seule la plate-forme 3 entre");
+            return Trouvaille::Refus;
+        }
+        // **LA LIMITE DE DÉBIT, AVANT DE REGARDER LE CODE** : elle garde la
+        // porte, et regarder d'abord donnerait un oracle à qui martèle.
+        let adresse = self.vu_depuis.adresse;
+        let maintenant_ms = maintenant().saturating_div(1_000);
+        if self.echecs_d_invitation.trop(adresse, maintenant_ms) {
+            (self.voie.journal)(&format!(
+                "invitation refusée : trop d'essais depuis {adresse}"
+            ));
+            return Trouvaille::TropDEssais;
+        }
+        let Ok(texte) = core::str::from_utf8(code) else {
+            self.echecs_d_invitation.echec(adresse, maintenant_ms);
+            dire(&format!("le code n'est pas lisible, depuis {adresse}"));
+            return Trouvaille::Refus;
+        };
+        let Ok(invitation) = asl_cle::CodeInvitation::analyser(texte) else {
+            self.echecs_d_invitation.echec(adresse, maintenant_ms);
+            dire(&format!(
+                "le code n'a pas la forme attendue, depuis {adresse}"
+            ));
+            return Trouvaille::Refus;
+        };
+        let (Some(compte), Some(appareil)) = (
+            self.un_identifiant(asl_id::Genre::Utilisateur),
+            self.un_identifiant(asl_id::Genre::Appareil),
+        ) else {
+            return Trouvaille::Rien;
+        };
+        match self.entrepot.creer_compte_sur_invitation(
+            compte,
+            appareil,
+            cle.octets(),
+            &invitation.empreinte(),
+            maintenant_ms,
+        ) {
+            // **LE CODE N'EST JAMAIS DIT AU JOURNAL**, ni son empreinte :
+            // l'adresse suffit à l'exploitant (`protocole.md` §2.2).
+            Ok(false) => {
+                self.echecs_d_invitation.echec(adresse, maintenant_ms);
+                dire(&format!(
+                    "code inconnu, expiré ou déjà servi, depuis {adresse}"
+                ));
+                Trouvaille::Refus
+            }
+            Ok(true) => {
+                (self.voie.journal)(&format!(
+                    "invitation consommée : compte {compte} ouvert, appareil {appareil}"
+                ));
+                Trouvaille::CompteCree { compte, appareil }
+            }
+            Err(_) => Trouvaille::Rien,
+        }
     }
 
     /// Vérifie l'attestation, et rend SOUS QUOI l'appareil est entré.
@@ -814,13 +993,16 @@ impl Service<'_> {
                     }
                 }
             }
-            // **L'INVITATION N'EST PAS ENCORE SERVIE.** La posture
-            // `--attestation invitation` et l'émission du code par l'exploitant
-            // sont un chantier à part (`protocole.md` §2.1) ; en attendant, la
-            // plate-forme `3` est refusée franchement, et le journal dit
-            // pourquoi.
+            // **UNE INVITATION N'ATTESTE PAS UNE CLÉ, ELLE OUVRE UNE PORTE.**
+            // Servie depuis 0.14.0, mais seulement à la création d'un compte
+            // (`POST /v1/comptes`, qui a son propre chemin) : ici, on juge la
+            // chaîne d'un appareil qui REJOINT, et un code d'invitation n'en
+            // est pas une. La table des postures le dit — sous `invitation`,
+            // un appareil qui rejoint entre `aucune`, parce qu'il est voulu
+            // par un appareil du compte, et c'est la seule caution que cette
+            // posture connaisse (`protocole.md` §2.2).
             PlateformeAttestation::Invitation => {
-                dire("invitation, pas encore servie");
+                dire("un code d'invitation n'atteste pas un appareil qui rejoint");
                 None
             }
         }
@@ -1115,6 +1297,64 @@ impl Service<'_> {
                 machine,
                 expire_a,
             )
+            .ok()?;
+        Some((code.texte_groupe(), expire_a))
+    }
+
+    /// Émet une invitation, si la signature de l'exploitant tient
+    /// (`protocole.md` §2.2).
+    ///
+    /// # TROIS RÉPONSES, ET LA PREMIÈRE N'EST PAS UN REFUS
+    ///
+    /// `Rien` — que l'étage 2 rend en `404` — quand la posture n'est pas
+    /// `invitation` : la ressource n'existe pas alors, et une racine qui
+    /// n'invite pas n'expose pas de porte close. `Rien` aussi sans
+    /// `--operator-key`, mais ce cas ne survient pas : `asl-server` refuse de
+    /// démarrer sous cette posture sans la clé.
+    ///
+    /// `Rien` encore si la signature ne tient pas — l'étage 2 en fait `401`.
+    /// **Le défi est dépensé de toute façon**, et c'est lui qui borne les
+    /// essais : une signature fausse coûte un aller-retour complet.
+    fn emettre_une_invitation(&self, defi: &Defi, signature: &asl_cle::Signature) -> Trouvaille {
+        if self.politique != asl_auth::Politique::Invitation {
+            return Trouvaille::Rien;
+        }
+        let Some(cle) = self.voie.exploitant else {
+            return Trouvaille::Rien;
+        };
+        // **`Refus` ICI, ET NON `Rien`** : la ressource EXISTE — la posture est
+        // `invitation` et la clé est réglée —, c'est la signature qui ne tient
+        // pas. L'étage 2 en fait `401` ; `Rien` aurait dit `404`, c'est-à-dire
+        // « cette porte n'existe pas », ce qui serait faux.
+        if !cle.prouve_l_exploitant(defi, self.session.liaison(), signature) {
+            (self.voie.journal)("invitation refusée : la signature de l'exploitant ne tient pas");
+            return Trouvaille::Refus;
+        }
+        match self.tirer_une_invitation() {
+            Some((code, expire_a)) => {
+                (self.voie.journal)(&format!("invitation émise, valable jusqu'à {expire_a}"));
+                Trouvaille::CodeEmis { code, expire_a }
+            }
+            None => Trouvaille::Rien,
+        }
+    }
+
+    /// Tire un code d'invitation et le range sous son empreinte.
+    fn tirer_une_invitation(&self) -> Option<(asl_cle::TexteCode, u64)> {
+        // La graine d'`emettre_un_code`, et la même raison : dix symboles ne
+        // portent que cinquante bits, et l'entropie vient du même noyau.
+        let graine = (self.tirer_un_identifiant)()?;
+        let mut huit = [0_u8; 8];
+        for (place, octet) in huit.iter_mut().zip(graine.iter()) {
+            *place = *octet;
+        }
+        let code = asl_cle::CodeInvitation::depuis_entropie(huit);
+        let expire_a = maintenant()
+            .saturating_div(1_000)
+            .saturating_add(self.invitation_ttl_ms);
+
+        self.entrepot
+            .emettre_invitation(&code.empreinte(), asl_registre::Provenance::Ici, expire_a)
             .ok()?;
         Some((code.texte_groupe(), expire_a))
     }
@@ -2043,6 +2283,9 @@ impl Service<'_> {
                         asl_registre::Attestation::Android => {
                             asl_api::corps::AttestationRendue::Android
                         }
+                        asl_registre::Attestation::Invitation => {
+                            asl_api::corps::AttestationRendue::Invitation
+                        }
                         asl_registre::Attestation::Attendue => {
                             asl_api::corps::AttestationRendue::Attendue
                         }
@@ -2254,6 +2497,7 @@ const fn mot_d_attestation(atteste: asl_registre::Attestation) -> &'static str {
         asl_registre::Attestation::Apple => "apple",
         asl_registre::Attestation::Android => "android",
         asl_registre::Attestation::Attendue => "attendue",
+        asl_registre::Attestation::Invitation => "invitation",
     }
 }
 
@@ -2349,6 +2593,17 @@ pub struct Annuaire<'a> {
     /// Quand la règle des orphelins est passée pour la dernière fois — zéro
     /// au démarrage, pour qu'elle passe au premier tour.
     dernier_passage_des_orphelins: u64,
+    /// Ce que vit une invitation, en millisecondes (`--invitation-ttl`).
+    invitation_ttl_ms: u64,
+    /// Les échecs récents d'une invitation, par adresse — la limite de débit.
+    ///
+    /// **EN MÉMOIRE, ET JAMAIS RÉPLIQUÉE.** Une limite de débit qui se
+    /// réplique serait un amplificateur : chaque racine porterait les échecs
+    /// de l'autre, et un client honnête se ferait refuser pour les tentatives
+    /// d'un tiers qu'il ne connaît pas. Elle ne survit pas non plus à un
+    /// redémarrage, et c'est voulu — ce n'est pas un état du produit, c'est
+    /// une garde du moment.
+    echecs_d_invitation: EchecsParAdresse,
     /// Les pairs révoqués dont il reste des connexions à fermer.
     revoques: Vec<Identifiant>,
     /// Ce que le tireur demande de fermer ici : une clé de machine révoquée,
@@ -2416,12 +2671,23 @@ impl<'a> Annuaire<'a> {
             dernier_balayage: 0,
             orphelins: None,
             dernier_passage_des_orphelins: 0,
+            invitation_ttl_ms: INVITATION_TTL_DEFAUT_MS,
+            echecs_d_invitation: EchecsParAdresse::neufs(),
             revoques: Vec::new(),
             voie,
             pair_attendu,
             suite: None,
             fermetures: None,
         }
+    }
+
+    /// Règle ce que vit une invitation, en millisecondes
+    /// (`--invitation-ttl`, `protocole.md` §2.2).
+    ///
+    /// **APPELÉ UNE FOIS, AU MONTAGE**, comme les deux réglages voisins. Sans
+    /// cet appel, vingt-quatre heures.
+    pub const fn invitations_vivent(&mut self, combien_ms: u64) {
+        self.invitation_ttl_ms = combien_ms;
     }
 
     /// Règle le délai de la règle des orphelins, en millisecondes
@@ -2627,6 +2893,10 @@ impl<'a> Annuaire<'a> {
         // Une base qui refuse ne doit pas arrêter la boucle : le balayage
         // reviendra, et rien ne dépend de lui.
         let _ = self.entrepot.expirer_les_enrolements(maintenant_ms);
+        // **ET LES INVITATIONS, AU MÊME BALAYAGE** : une invitation expirée
+        // est refusée de toute façon, ceci empêche seulement une table de
+        // secrets morts de grandir (`protocole.md` §2.2).
+        let _ = self.entrepot.expirer_les_invitations(maintenant_ms);
     }
 
     /// Efface les comptes orphelins, au démarrage puis de loin en loin
@@ -2839,6 +3109,8 @@ impl Application for Annuaire<'_> {
             session,
             politique: self.politique,
             attestations: self.attestations,
+            invitation_ttl_ms: self.invitation_ttl_ms,
+            echecs_d_invitation: &mut self.echecs_d_invitation,
             a_fermer: &mut self.revoques,
             entrepot: self.entrepot,
             vivier: &mut self.vivier,

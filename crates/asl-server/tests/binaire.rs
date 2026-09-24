@@ -69,6 +69,42 @@ fn lancer(autorite: &Path, base: &Path) -> (Child, SocketAddr) {
     lancer_avec(autorite, base, &[])
 }
 
+/// Éteint ce serveur PROPREMENT, et attend qu'il soit sorti.
+///
+/// # POURQUOI PAS `kill()`
+///
+/// `Child::kill` envoie `SIGKILL` : le processus meurt sur-le-champ, sans
+/// exécuter la moindre ligne de sortie. Le binaire, lui, sait s'éteindre en
+/// deux temps sur `SIGTERM` (`main::arret`, `replication.md` §5.2) — c'est ce
+/// que systemd lui envoie, et c'est donc ce chemin-là qu'un essai doit
+/// éprouver, pas la mort brutale.
+///
+/// **Et c'est ce qui rend sa couverture mesurable** : un processus tué de
+/// force n'écrit pas son profil, et tout ce qu'il a exercé est perdu pour la
+/// mesure — y compris du code des étages 1 et 2, que C2 veut à 100 %.
+fn eteindre(serveur: &mut Child) {
+    // SAFETY : `kill(2)` sur le PID d'un enfant qu'on tient, avec un signal
+    // valide ; la valeur de retour est ignorée à dessein — si le processus
+    // est déjà sorti, il n'y a rien à faire.
+    let pid = i32::try_from(serveur.id()).unwrap_or(-1);
+    if pid > 0 {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
+    // Il s'éteint en deux temps ; s'il s'attarde, on ne bloque pas l'essai.
+    for _ in 0..50 {
+        match serveur.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(_) => break,
+        }
+    }
+    // Il ne s'est pas éteint : on ne laisse pas un processus derrière soi.
+    let _ = serveur.kill();
+    let _ = serveur.wait();
+}
+
 /// La même chose, avec des arguments de plus — ceux de la voie entre racines.
 fn lancer_avec(autorite: &Path, base: &Path, en_plus: &[&str]) -> (Child, SocketAddr) {
     let mut enfant = Command::new(env!("CARGO_BIN_EXE_asl-server"))
@@ -167,8 +203,7 @@ async fn le_binaire_sert_un_compte_de_son_entrepot() {
         "le binaire n'a pas rendu l'alias : {rendu}"
     );
 
-    let _ = serveur.kill();
-    let _ = serveur.wait();
+    eteindre(&mut serveur);
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&base);
 }
@@ -838,10 +873,8 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
     assert_eq!(cadres.len(), 1, "{cadres:?}");
     assert!(matches!(cadres[0], Cadre::Fin { coupe } if coupe.compteur == 0));
 
-    let _ = nitrogen.kill();
-    let _ = nitrogen.wait();
-    let _ = argon.kill();
-    let _ = argon.wait();
+    eteindre(&mut nitrogen);
+    eteindre(&mut argon);
     let _ = std::fs::remove_dir_all(&autorite);
     for fichier in [
         &base_nitrogen,
@@ -1235,10 +1268,8 @@ async fn la_replication_de_bout_en_bout() {
         !tenue.ecouter().await
     });
 
-    let _ = nitrogen.kill();
-    let _ = nitrogen.wait();
-    let _ = argon.kill();
-    let _ = argon.wait();
+    eteindre(&mut nitrogen);
+    eteindre(&mut argon);
     let _ = std::fs::remove_dir_all(&autorite);
     for fichier in [
         &base_nitrogen,
@@ -1401,10 +1432,8 @@ async fn un_entrepot_de_plusieurs_milliers_d_enregistrements_s_amorce() {
             && champ_json(&corps, "compteur") == Some(compteur.to_string())
     });
 
-    let _ = nitrogen.kill();
-    let _ = nitrogen.wait();
-    let _ = argon.kill();
-    let _ = argon.wait();
+    eteindre(&mut nitrogen);
+    eteindre(&mut argon);
     let _ = std::fs::remove_dir_all(&autorite);
     for fichier in [
         &base_nitrogen,
@@ -1528,8 +1557,7 @@ async fn forget_efface_un_compte_hors_ligne_et_refuse_si_le_daemon_tient_l_entre
         "200",
         "rien n'a été écrit"
     );
-    let _ = serveur.kill();
-    let _ = serveur.wait();
+    eteindre(&mut serveur);
 
     // ── ENTREPÔT ARRÊTÉ : LE COMPTE EST EFFACÉ, ET C'EST DIT ────────────────
     let (ok, dit) = oublier(&texte, &base, &["--identity-key", &identite_arg]);
@@ -1614,8 +1642,7 @@ async fn forget_efface_un_compte_hors_ligne_et_refuse_si_le_daemon_tient_l_entre
         prouver(&mut client, machine, &secrete_machine, 0).await,
         "401"
     );
-    let _ = serveur.kill();
-    let _ = serveur.wait();
+    eteindre(&mut serveur);
     let _ = std::fs::remove_dir_all(&autorite);
     for fichier in [&base, &cle_identite, &pub_identite] {
         let _ = std::fs::remove_file(fichier);
@@ -1828,10 +1855,8 @@ async fn l_effacement_d_un_compte_se_replique_de_bout_en_bout() {
         assert_eq!(statut(&client, 4), "401", "chez {vers}");
     }
 
-    let _ = nitrogen.kill();
-    let _ = nitrogen.wait();
-    let _ = argon.kill();
-    let _ = argon.wait();
+    eteindre(&mut nitrogen);
+    eteindre(&mut argon);
     let _ = std::fs::remove_dir_all(&autorite);
     for fichier in [
         &base_nitrogen,

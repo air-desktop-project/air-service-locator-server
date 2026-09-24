@@ -536,6 +536,24 @@ pub enum Besoin<'a> {
     /// compte déjà effacé. La ressource est le compte de la connexion, et une
     /// connexion authentifiée a toujours un compte.
     EffacerMonCompte,
+    /// **L'exploitant émet une invitation** (`protocole.md` §2.2, 2026-09-24).
+    ///
+    /// La preuve est dans le corps — `genre `o` ‖ signature` —, et le message
+    /// signé est `asl_cle::message_d_exploitant(défi, liaison)` : celui de
+    /// cette connexion, celui que `GET /v1/defi` y a rendu. **L'étage 2 ne
+    /// vérifie pas cette signature** : la clé de `--operator-key` vit à
+    /// l'étage 3, comme celle de `--peer-key`. Il porte le défi et la
+    /// signature, et l'étage 3 tranche.
+    ///
+    /// **Sans défi, c'est [`Besoin::PreuveRefusee`], pas `400`** : le corps
+    /// est bien formé, c'est la connexion qui n'a rien à signer — la même
+    /// règle que [`Ressource::Attestation`].
+    EmettreInvitation {
+        /// Le défi de cette connexion, celui que la signature couvre.
+        defi: Defi,
+        /// Ce que l'exploitant a signé.
+        signature: Signature,
+    },
     /// L'autre racine pose un défi, et cette racine-ci doit le signer.
     ///
     /// # LE SECOND TEMPS DE `replication.md` §2.2
@@ -679,6 +697,12 @@ pub enum CleTrouvee {
 /// par référence —, donc cela ne coûte rien.
 #[derive(Debug, Clone, Default)]
 pub enum Trouvaille {
+    /// **Trop d'essais depuis cette adresse** : la limite de débit de la
+    /// posture `invitation` (`protocole.md` §2.2). `429`.
+    ///
+    /// C'est la seule limite de débit du produit, et elle ne garde qu'une
+    /// porte : celle qu'un secret de cinquante bits tient seul.
+    TropDEssais,
     /// Rien ne correspond.
     #[default]
     Rien,
@@ -1198,6 +1222,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         Ressource::ServicesMachine { machine } => Besoin::ServicesDeMachine { machine },
         Ressource::Comptes => lire_creation_de_compte(session, corps),
         Ressource::Attestation => lire_une_attestation(session, corps),
+        Ressource::Invitations => lire_une_demande_d_invitation(session, corps),
         // **DEUX VERBES, DEUX BESOINS** — voir `Ressource::Autorisations` plus
         // bas. Un `GET` liste ; un `POST` crée. Le routage sert les deux depuis
         // que `protocole.md` §2.2 a nommé les écrans qui lisent.
@@ -1355,6 +1380,32 @@ fn lire_une_attestation<'a>(session: &Session, corps: &'a [u8]) -> Besoin<'a> {
         preuve: SignatureAppareil::depuis_octets(brute),
         plateforme: lue.plateforme,
         attestation: lue.attestation,
+    }
+}
+
+/// Lit `POST /v1/invitations` : le genre `o`, puis la signature de
+/// l'exploitant (`protocole.md` §2.2).
+///
+/// **Le genre est vérifié ici**, et il vaut `o` : un corps qui en porterait un
+/// autre est mal formé, et ce n'est pas un refus d'autorisation mais un `400`.
+/// La signature, elle, n'est pas jugée — l'étage 3 tient la clé.
+fn lire_une_demande_d_invitation<'a>(session: &Session, corps: &[u8]) -> Besoin<'a> {
+    if corps.len() != asl_api::corps::INVITATION_CORPS_OCTETS {
+        return Besoin::Deja(StatusCode::BAD_REQUEST);
+    }
+    if corps.first() != Some(&asl_api::corps::GENRE_EXPLOITANT) {
+        return Besoin::Deja(StatusCode::BAD_REQUEST);
+    }
+    let Some(defi) = session.defi else {
+        return Besoin::PreuveRefusee;
+    };
+    let mut brute = [0_u8; asl_cle::SIGNATURE_OCTETS];
+    for (place, octet) in brute.iter_mut().zip(corps.iter().skip(1)) {
+        *place = *octet;
+    }
+    Besoin::EmettreInvitation {
+        defi,
+        signature: Signature::depuis_octets(brute),
     }
 }
 
@@ -1857,6 +1908,42 @@ pub fn repondre<'o>(
                     probleme(StatusCode::FORBIDDEN),
                     sortie,
                 ),
+                _ => composer(
+                    StatusCode::UNAUTHORIZED,
+                    PROBLEME_MEDIA,
+                    probleme(StatusCode::UNAUTHORIZED),
+                    sortie,
+                ),
+            }
+        }
+        // **LE DÉFI EST DÉPENSÉ, QUE LA SIGNATURE TIENNE OU NON** — la règle
+        // d'`AttesterAppareil`, et pour la même raison : une preuve fausse
+        // coûte un défi, sans quoi on en essaierait mille.
+        //
+        // **`404` QUAND LA POSTURE N'EST PAS `invitation`** (`Rien`), et non
+        // `403` : une racine qui n'invite pas n'expose pas de porte close
+        // (`protocole.md` §2.2). `401` quand la signature ne tient pas.
+        Besoin::EmettreInvitation { .. } => {
+            session.consommer_le_defi();
+            match trouvaille {
+                Trouvaille::CodeEmis { code, expire_a } => {
+                    let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
+                    corps.pousser(br#"{"code":""#);
+                    corps.pousser(code.as_str().as_bytes());
+                    corps.pousser(br#"","expire_a":"#);
+                    corps.pousser_un_nombre(*expire_a);
+                    corps.pousser(b"}");
+                    composer(StatusCode::OK, JSON_MEDIA, corps.rendu(), sortie)
+                }
+                // `Rien` : la posture n'est pas `invitation`, ou aucune clé
+                // n'est réglée — la ressource n'existe pas.
+                Trouvaille::Rien => composer(
+                    StatusCode::NOT_FOUND,
+                    PROBLEME_MEDIA,
+                    probleme(StatusCode::NOT_FOUND),
+                    sortie,
+                ),
+                // `Refus` : la ressource existe, la signature ne tient pas.
                 _ => composer(
                     StatusCode::UNAUTHORIZED,
                     PROBLEME_MEDIA,
@@ -2396,6 +2483,7 @@ impl<const N: usize> Corps<N> {
 fn rendre_l_echec<'o>(trouvaille: &Trouvaille, sortie: &'o mut [u8]) -> Reponse<'o> {
     let statut = match trouvaille {
         Trouvaille::Refus => StatusCode::FORBIDDEN,
+        Trouvaille::TropDEssais => StatusCode::TOO_MANY_REQUESTS,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     composer(statut, PROBLEME_MEDIA, probleme(statut), sortie)
@@ -6334,7 +6422,7 @@ mod voie_entre_racines {
         assert_eq!(reponse.status(), StatusCode::OK);
         assert_eq!(champ(&reponse, b"content-type"), Some(OCTETS_MEDIA));
         let corps = reponse.body();
-        assert_eq!(corps.len(), PREUVE_OCTETS);
+        assert_eq!(corps.len(), super::PREUVE_OCTETS);
         assert_eq!(corps[0], b'n');
         assert_eq!(&corps[1..17], racine.octets());
         let mut brute = [0_u8; asl_cle::SIGNATURE_OCTETS];
@@ -6754,5 +6842,265 @@ mod attestation_d_un_appareil_qui_rejoint {
             assert_eq!(session.appareil(), None);
             assert!(session.defi.is_none());
         }
+    }
+
+    // ── `POST /v1/invitations` : ce que l'étage 2 en lit ─────────────────────
+
+    /// Le corps d'une émission : le genre `o`, puis soixante-quatre octets.
+    fn corps_d_invitation(genre: u8, combien: usize) -> alloc::vec::Vec<u8> {
+        let mut octets = alloc::vec::Vec::new();
+        octets.push(genre);
+        octets.extend(core::iter::repeat_n(0xE7_u8, combien));
+        octets
+    }
+
+    #[test]
+    fn un_corps_d_invitation_mal_forme_est_un_400() {
+        // **CE N'EST PAS UN REFUS D'AUTORISATION** : le corps ne fait pas la
+        // taille annoncée, ou ne porte pas le genre `o`. L'étage 3 n'a rien à
+        // juger — il n'y a pas de preuve à lui donner.
+        for corps in [
+            corps_d_invitation(b'o', 63),
+            corps_d_invitation(b'o', 65),
+            alloc::vec::Vec::new(),
+        ] {
+            assert_eq!(
+                besoin(
+                    &session_avec_defi(),
+                    &tete(b"POST", b"/v1/invitations"),
+                    &corps
+                ),
+                Besoin::Deja(StatusCode::BAD_REQUEST),
+            );
+        }
+        // Le bon compte d'octets, mais pas le bon genre : `a` est celui d'un
+        // appareil, et il ne prouve pas un exploitant.
+        assert_eq!(
+            besoin(
+                &session_avec_defi(),
+                &tete(b"POST", b"/v1/invitations"),
+                &corps_d_invitation(b'a', 64)
+            ),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn une_emission_sans_defi_est_une_preuve_refusee_et_non_un_400() {
+        // **LE CORPS EST BIEN FORMÉ, C'EST LA CONNEXION QUI N'A RIEN À
+        // SIGNER** — la règle de `POST /v1/attestation`, et la même `401` :
+        // une connexion sans défi et une signature fausse ne se distinguent
+        // pas pour qui essaie.
+        assert_eq!(
+            besoin(
+                &Session::new(liaison()),
+                &tete(b"POST", b"/v1/invitations"),
+                &corps_d_invitation(b'o', 64)
+            ),
+            Besoin::PreuveRefusee
+        );
+    }
+
+    #[test]
+    fn une_emission_bien_formee_porte_le_defi_et_la_signature() {
+        let corps = corps_d_invitation(b'o', 64);
+        let attendue = asl_cle::Signature::depuis_octets([0xE7; asl_cle::SIGNATURE_OCTETS]);
+        assert_eq!(
+            besoin(
+                &session_avec_defi(),
+                &tete(b"POST", b"/v1/invitations"),
+                &corps
+            ),
+            Besoin::EmettreInvitation {
+                defi: defi(),
+                signature: attendue,
+            },
+            "l'étage 2 ne juge pas la signature : la clé vit à l'étage 3"
+        );
+    }
+
+    #[test]
+    fn les_variantes_de_l_invitation_se_disent() {
+        // **UN TYPE QUI DÉRIVE `Debug` DOIT POUVOIR LE DIRE** : c'est ce qu'un
+        // essai qui échoue imprime, et un bras jamais formaté est un bras que
+        // personne n'a lu. Les autres variantes le sont par les messages
+        // d'assertion du reste de ce module.
+        let besoin = Besoin::EmettreInvitation {
+            defi: defi(),
+            signature: asl_cle::Signature::depuis_octets([0xE7; asl_cle::SIGNATURE_OCTETS]),
+        };
+        let dit = alloc::format!("{besoin:?}");
+        assert!(dit.starts_with("EmettreInvitation"), "{dit}");
+        // La copie et l'égalité, que la dérivation donne aussi.
+        assert_eq!(besoin, besoin);
+
+        let trouvaille = Trouvaille::TropDEssais;
+        let dit = alloc::format!("{trouvaille:?}");
+        assert_eq!(dit, "TropDEssais");
+    }
+
+    // ── La voie entre racines, lue et rendue ici ────────────────────────────
+    //
+    // **CES DEUX-LÀ NE DOIVENT PAS DÉPENDRE D'UN SOUS-PROCESSUS.** Le défi que
+    // l'autre racine pose et la preuve qu'on lui rend sont du code de l'étage
+    // 2 ; ils n'étaient couverts que par l'essai qui lance le BINAIRE
+    // (`asl-server/tests/binaire.rs`), dont la couverture remonte par un
+    // profil de sous-processus — un chemin qui dépend de l'ordonnancement.
+    // Éprouvés ici, ils le sont par construction.
+
+    #[test]
+    fn le_defi_pose_par_l_autre_racine_se_lit_et_se_refuse() {
+        // Trente-deux octets, et rien d'autre : c'est un défi.
+        let octets = [0x7A_u8; asl_cle::DEFI_OCTETS];
+        assert_eq!(
+            super::lire_un_defi(&octets),
+            Besoin::ProuverLaRacine {
+                defi: Defi::depuis_octets(octets),
+            }
+        );
+        // Trop court, trop long, vide : le corps est mal formé.
+        for corps in [&octets[..31], &[][..]] {
+            assert_eq!(
+                super::lire_un_defi(corps),
+                Besoin::Deja(StatusCode::BAD_REQUEST)
+            );
+        }
+    }
+
+    #[test]
+    fn la_preuve_de_racine_se_rend_en_dix_sept_octets_et_une_signature() {
+        // `n-… (17) ‖ signature (64)` — la forme du corps d'une preuve
+        // (`protocole.md` §2.1 bis), dans l'autre sens.
+        let racine = Identifiant::depuis_entropie(Genre::Annuaire, [0x9C; 16]);
+        let signature = asl_cle::Signature::depuis_octets([0x3D; asl_cle::SIGNATURE_OCTETS]);
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 512];
+        let rendue = repondre(
+            &mut session,
+            &Besoin::ProuverLaRacine { defi: defi() },
+            &Trouvaille::PreuveDeRacine { racine, signature },
+            None,
+            &mut sortie,
+        );
+        assert_eq!(rendue.status(), StatusCode::OK);
+        let corps = rendue.body();
+        assert_eq!(corps.len(), super::PREUVE_OCTETS);
+        assert_eq!(corps[0], Genre::Annuaire.prefixe());
+        assert_eq!(&corps[1..17], racine.octets());
+        assert_eq!(&corps[17..], signature.octets());
+
+        // **SANS CLÉ D'IDENTITÉ, L'ÉTAGE 3 NE TROUVE RIEN**, et un `500` dit
+        // la vérité : la panne est de notre côté, un inconnu ne l'atteint pas.
+        let rendue = repondre(
+            &mut session,
+            &Besoin::ProuverLaRacine { defi: defi() },
+            &Trouvaille::Rien,
+            None,
+            &mut sortie,
+        );
+        assert_eq!(rendue.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn une_invitation_emise_se_rend_en_clair_une_fois() {
+        // **LE CODE EST RENDU EN CLAIR, UNE FOIS** — l'annuaire n'en garde que
+        // l'empreinte (C14), et il ne sait pas le redire.
+        let mut session = session_avec_defi();
+        let mut sortie = [0_u8; 512];
+        let code = asl_cle::CodeInvitation::depuis_entropie([0x12; 8]);
+        let rendue = repondre(
+            &mut session,
+            &Besoin::EmettreInvitation {
+                defi: defi(),
+                signature: asl_cle::Signature::depuis_octets([0xE7; asl_cle::SIGNATURE_OCTETS]),
+            },
+            &Trouvaille::CodeEmis {
+                code: code.texte_groupe(),
+                expire_a: 1_790_000_000_000,
+            },
+            None,
+            &mut sortie,
+        );
+        assert_eq!(rendue.status(), StatusCode::OK);
+        let corps = core::str::from_utf8(rendue.body()).expect("du JSON");
+        assert!(corps.contains(code.texte_groupe().as_str()), "{corps}");
+        assert!(corps.contains("\"expire_a\":1790000000000"), "{corps}");
+        // Le défi est dépensé, comme pour toute preuve.
+        assert!(session.defi.is_none());
+    }
+
+    #[test]
+    fn une_signature_d_exploitant_qui_ne_tient_pas_rend_401() {
+        // **`Refus` ICI VAUT `401`, ET NON `403`** : la ressource existe — la
+        // posture est `invitation` et la clé est réglée —, c'est la signature
+        // qui ne tient pas. On ne distingue pas une signature fausse d'une
+        // connexion sans défi.
+        let mut session = session_avec_defi();
+        let mut sortie = [0_u8; 512];
+        let rendue = repondre(
+            &mut session,
+            &Besoin::EmettreInvitation {
+                defi: defi(),
+                signature: asl_cle::Signature::depuis_octets([0xE7; asl_cle::SIGNATURE_OCTETS]),
+            },
+            &Trouvaille::Refus,
+            None,
+            &mut sortie,
+        );
+        assert_eq!(rendue.status(), StatusCode::UNAUTHORIZED);
+        assert!(session.defi.is_none());
+    }
+
+    #[test]
+    fn trop_d_essais_d_invitation_rend_429() {
+        // **LA SEULE LIMITE DE DÉBIT DU PRODUIT** (`protocole.md` §2.2) : elle
+        // ne garde qu'une porte, celle qu'un secret de cinquante bits tient
+        // seul. L'étage 3 compte les échecs ; l'étage 2 ne fait que rendre le
+        // statut, et c'est celui-là — `429`, et non `403`, qui dirait à qui
+        // martèle que son code était simplement faux.
+        let mut session = session_avec_defi();
+        let mut sortie = [0_u8; 512];
+        let rendue = repondre(
+            &mut session,
+            &Besoin::CreerCompte {
+                cle: secrete(0x11).publique(),
+                plateforme: PlateformeAttestation::Invitation,
+                attestation: b"4K9M2P7R1T",
+                defi_attestation: asl_cle::message_d_attestation(
+                    &secrete(0x11).publique(),
+                    &defi(),
+                    &liaison(),
+                ),
+                defi_attestation_de_cle: asl_cle::message_d_attestation_de_cle(&defi(), &liaison()),
+            },
+            &Trouvaille::TropDEssais,
+            None,
+            &mut sortie,
+        );
+        assert_eq!(rendue.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn une_ressource_d_invitation_absente_rend_404_et_non_403() {
+        // **UNE RACINE QUI N'INVITE PAS N'EXPOSE PAS DE PORTE CLOSE**
+        // (`protocole.md` §2.2) : `Trouvaille::Rien` — la posture n'est pas
+        // `invitation`, ou aucune clé n'est réglée — devient `404`, jamais
+        // `403`, qui dirait « cette porte existe, mais pas pour vous ».
+        let mut session = session_avec_defi();
+        let mut sortie = [0_u8; 512];
+        let rendue = repondre(
+            &mut session,
+            &Besoin::EmettreInvitation {
+                defi: defi(),
+                signature: asl_cle::Signature::depuis_octets([0xE7; asl_cle::SIGNATURE_OCTETS]),
+            },
+            &Trouvaille::Rien,
+            None,
+            &mut sortie,
+        );
+        assert_eq!(rendue.status(), StatusCode::NOT_FOUND);
+        // **ET LE DÉFI EST DÉPENSÉ QUAND MÊME** : une tentative coûte un
+        // aller-retour complet, qu'elle aboutisse ou non.
+        assert!(session.defi.is_none());
     }
 }

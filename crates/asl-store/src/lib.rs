@@ -57,9 +57,9 @@ use asl_registre::{
     CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS, COMPTE_OCTETS, Cadre, Capacites, Cause,
     CleLiee, Compte, DESCRIPTION_OCTETS, Description, EMPREINTE_OCTETS, ENROLEMENT_OCTETS,
     ENTREE_OCTETS, ESTAMPILLE_OCTETS, Effacement, Enrolement, EntreeJournal, Estampille,
-    IDENTIFIANT_OCTETS, JetonPoussee, JetonRange, MACHINE_OCTETS, Machine, NomRange,
-    OPERATION_OCTETS_MAX, Operation, POUSSEE_OCTETS, Plateforme, Portee, Provenance,
-    SERVICE_OCTETS, Service, Systeme,
+    IDENTIFIANT_OCTETS, INVITATION_OCTETS, Invitation, JetonPoussee, JetonRange, MACHINE_OCTETS,
+    Machine, NomRange, OPERATION_OCTETS_MAX, Operation, POUSSEE_OCTETS, Plateforme, Portee,
+    Provenance, SERVICE_OCTETS, Service, Systeme,
 };
 use redb::{
     Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableHandle,
@@ -143,6 +143,19 @@ const ENROLEMENTS: TableDefinition<'_, &[u8], &[u8; ENROLEMENT_OCTETS]> =
 /// l'effacer — sans lui, il faudrait balayer toute la table.
 const ENROLEMENTS_PAR_MACHINE: TableDefinition<'_, &[u8], &[u8]> =
     TableDefinition::new("enrolements-par-machine");
+
+/// Les invitations en attente, **par empreinte du code**
+/// (`protocole.md` §2.2).
+///
+/// # PAS D'INDEX, ET C'EST LA DIFFÉRENCE AVEC LES ENRÔLEMENTS
+///
+/// [`ENROLEMENTS_PAR_MACHINE`] existe parce qu'une machine n'a qu'un code
+/// vivant à la fois, et qu'il faut retrouver le précédent pour l'effacer. Une
+/// invitation n'appartient à personne : deux codes émis coexistent, aucun ne
+/// remplace l'autre, et il n'y a donc rien à retrouver. La seule recherche est
+/// par empreinte, celle que `POST /v1/comptes` présente.
+const INVITATIONS: TableDefinition<'_, &[u8], &[u8; INVITATION_OCTETS]> =
+    TableDefinition::new("invitations");
 
 /// Les services, par identifiant.
 const SERVICES: TableDefinition<'_, &[u8], &[u8; SERVICE_OCTETS]> =
@@ -889,6 +902,12 @@ impl Entrepot {
             ecriture.open_table(APPAREILS)?;
             ecriture.open_table(ENROLEMENTS)?;
             ecriture.open_table(ENROLEMENTS_PAR_MACHINE)?;
+            // **UNE TABLE QUI S'AJOUTE NE CHANGE AUCUN FORMAT.** Elle naît
+            // vide sur une base d'hier — `open_table` la crée —, et aucun
+            // enregistrement existant ne change de taille ni de sens. Le
+            // format reste 3 : la reprise 2→3 avait dû relire et réécrire
+            // deux tables, ce n'est pas le cas ici.
+            ecriture.open_table(INVITATIONS)?;
             ecriture.open_table(ALIAS)?;
             ecriture.open_table(SERVICES)?;
             ecriture.open_table(SERVICES_PAR_NOM)?;
@@ -2126,6 +2145,218 @@ impl Entrepot {
         Ok(combien)
     }
 
+    // ── Les invitations ─────────────────────────────────────────────────────
+
+    /// Émet une invitation sous cette empreinte (`protocole.md` §2.2).
+    ///
+    /// **Rien ne s'efface**, contrairement à [`Entrepot::emettre_enrolement`] :
+    /// une invitation n'appartient à personne, et deux codes émis coexistent.
+    /// L'exploitant qui en émet un second n'annule pas le premier — il invite
+    /// deux personnes.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] si la base refuse.
+    pub fn emettre_invitation(
+        &self,
+        empreinte: &[u8; EMPREINTE_OCTETS],
+        provenance: Provenance,
+        expire_a: u64,
+    ) -> Result<(), Faute> {
+        let ecriture = self.base.begin_write()?;
+        let journalisee;
+        {
+            let mut invitations = ecriture.open_table(INVITATIONS)?;
+            let estampille = estampiller(&ecriture, self.racine)?;
+            let invitation = Invitation {
+                provenance,
+                estampille,
+                expire_a,
+            };
+            let mut octets = [0_u8; INVITATION_OCTETS];
+            invitation.ecrire(&mut octets);
+            invitations.insert(empreinte.as_slice(), &octets)?;
+            journalisee = journaliser_l_operation(
+                &ecriture,
+                estampille,
+                provenance,
+                &Operation::Invitation {
+                    empreinte: *empreinte,
+                    enregistrement: invitation,
+                },
+            )?;
+        }
+        self.commettre_une_operation(ecriture, journalisee)?;
+        Ok(())
+    }
+
+    /// Ouvre un compte sur une invitation : **la consommer, créer le compte et
+    /// enrôler l'appareil, en UNE transaction** (`protocole.md` §2.2).
+    ///
+    /// # POURQUOI CE N'EST PAS TROIS APPELS
+    ///
+    /// « À usage unique » ne se tient pas en trois temps. Deux créations
+    /// simultanées avec le même code liraient toutes deux une invitation
+    /// vivante, et deux comptes naîtraient sur une seule invitation — la
+    /// course que §3.2 accepte ENTRE DEUX RACINES, et qu'il n'y a aucune
+    /// raison d'ouvrir à l'intérieur d'une seule. Et un compte créé dont
+    /// l'appareil ne s'enrôlerait pas serait un compte sans porte.
+    ///
+    /// Rend `false` — et n'écrit rien — si l'empreinte est **inconnue ou
+    /// expirée** : les deux sont le même fait pour l'appelant, qui répondra
+    /// `403` sans dire lequel (§2.2, « le même refus pour les trois »).
+    ///
+    /// Trois opérations sont journalisées : `invitation-consommee`, `compte`
+    /// et `appareil`. La première voyage seule ; les deux autres portent le
+    /// compte chez l'autre racine, comme tout compte.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Existe`] si le compte ou l'appareil existent déjà,
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn creer_compte_sur_invitation(
+        &self,
+        compte: Identifiant,
+        appareil: Identifiant,
+        cle: [u8; CLE_APPAREIL_OCTETS],
+        empreinte: &[u8; EMPREINTE_OCTETS],
+        maintenant: u64,
+    ) -> Result<bool, Faute> {
+        let clef_compte = clef(compte);
+        let clef_appareil = clef(appareil);
+        let ecriture = self.base.begin_write()?;
+        let journalisee;
+        {
+            // ── L'invitation, d'abord : sans elle, rien ne s'écrit ──────────
+            let mut invitations = ecriture.open_table(INVITATIONS)?;
+            let Some(brut) = invitations.get(empreinte.as_slice())? else {
+                drop(invitations);
+                drop(ecriture);
+                return Ok(false);
+            };
+            let invitation = Invitation::lire(brut.value())?;
+            drop(brut);
+            if invitation.expire_a < maintenant {
+                drop(invitations);
+                drop(ecriture);
+                return Ok(false);
+            }
+            // **CONSOMMER, C'EST MARQUER EXPIRÉ**, ici comme à l'application
+            // d'une consommation venue du pair ([`appliquer_invitation_consommee`]) :
+            // un `remove` laisserait l'empreinte inconnue, et l'émission que
+            // le pair pourrait nous renvoyer — par instantané, tant qu'il
+            // n'a pas appliqué notre consommation — la ressusciterait.
+            let morte = Invitation {
+                provenance: Provenance::Ici,
+                estampille: Estampille {
+                    compteur: 0,
+                    racine: RACINE_SANS_IDENTITE,
+                },
+                expire_a: 0,
+            };
+            let mut morte_octets = [0_u8; INVITATION_OCTETS];
+            morte.ecrire(&mut morte_octets);
+            invitations.insert(empreinte.as_slice(), &morte_octets)?;
+            drop(invitations);
+
+            let mut comptes = ecriture.open_table(COMPTES)?;
+            let mut appareils = ecriture.open_table(APPAREILS)?;
+            if comptes.get(clef_compte.as_slice())?.is_some()
+                || appareils.get(clef_appareil.as_slice())?.is_some()
+            {
+                return Err(Faute::Existe);
+            }
+
+            let consommation = estampiller(&ecriture, self.racine)?;
+            journaliser_l_operation(
+                &ecriture,
+                consommation,
+                Provenance::Ici,
+                &Operation::InvitationConsommee {
+                    empreinte: *empreinte,
+                },
+            )?;
+
+            let estampille_compte = estampiller(&ecriture, self.racine)?;
+            let enregistrement = Compte {
+                provenance: Provenance::Ici,
+                estampille: estampille_compte,
+                alias: None,
+                reclamation: estampille_compte,
+                efface: None,
+            };
+            let mut octets = [0_u8; COMPTE_OCTETS];
+            enregistrement.ecrire(&mut octets);
+            comptes.insert(clef_compte.as_slice(), &octets)?;
+            journaliser_l_operation(
+                &ecriture,
+                estampille_compte,
+                Provenance::Ici,
+                &Operation::Compte {
+                    compte,
+                    enregistrement,
+                },
+            )?;
+
+            let estampille_appareil = estampiller(&ecriture, self.racine)?;
+            let enregistrement = Appareil {
+                provenance: Provenance::Ici,
+                estampille: estampille_appareil,
+                proprietaire: compte,
+                cle,
+                atteste: Attestation::Invitation,
+                revoque_le: None,
+            };
+            let mut octets = [0_u8; APPAREIL_OCTETS];
+            enregistrement.ecrire(&mut octets);
+            appareils.insert(clef_appareil.as_slice(), &octets)?;
+            let mut par_compte = ecriture.open_table(APPAREILS_PAR_COMPTE)?;
+            par_compte.insert(paire(compte, appareil).as_slice(), clef_appareil.as_slice())?;
+            journalisee = journaliser_l_operation(
+                &ecriture,
+                estampille_appareil,
+                Provenance::Ici,
+                &Operation::Appareil {
+                    appareil,
+                    enregistrement,
+                },
+            )?;
+        }
+        self.commettre_une_operation(ecriture, journalisee)?;
+        Ok(true)
+    }
+
+    /// Efface les invitations dont la date est passée, et rend combien.
+    ///
+    /// La raison d'[`Entrepot::expirer_les_enrolements`], mot pour mot : une
+    /// invitation expirée est refusée de toute façon, et ce balayage empêche
+    /// seulement une table de secrets morts de grandir. Sans opération —
+    /// chaque racine expire à sa propre horloge.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn expirer_les_invitations(&self, avant: u64) -> Result<usize, Faute> {
+        let ecriture = self.base.begin_write()?;
+        let combien;
+        {
+            let mut invitations = ecriture.open_table(INVITATIONS)?;
+            let mut condamnees = Vec::new();
+            for entree in invitations.iter()? {
+                let (empreinte, valeur) = entree?;
+                if Invitation::lire(valeur.value())?.expire_a < avant {
+                    condamnees.push(empreinte.value().to_vec());
+                }
+            }
+            for empreinte in &condamnees {
+                invitations.remove(empreinte.as_slice())?;
+            }
+            combien = condamnees.len();
+        }
+        ecriture.commit()?;
+        Ok(combien)
+    }
+
     // ── Les services ────────────────────────────────────────────────────────
 
     /// Déclare ce service sur cette machine, sous ce nom.
@@ -2782,6 +3013,29 @@ impl Entrepot {
                 &Operation::Enrolement {
                     empreinte: octets,
                     enregistrement: enrolement,
+                },
+            );
+        }
+
+        // **LES INVITATIONS AUSSI** : une racine qui s'amorce doit connaître
+        // les codes en vol, sinon un code émis ici serait inconnu chez elle —
+        // et l'alias donne une racine au hasard (`replication.md` §1).
+        let invitations = lecture.open_table(INVITATIONS)?;
+        for entree in invitations.iter()? {
+            let (empreinte, valeur) = entree?;
+            let invitation = Invitation::lire(valeur.value())?;
+            if invitation.provenance != Provenance::Ici {
+                continue;
+            }
+            let mut octets = [0_u8; EMPREINTE_OCTETS];
+            for (place, octet) in octets.iter_mut().zip(empreinte.value().iter()) {
+                *place = *octet;
+            }
+            suite.ajouter(
+                invitation.estampille,
+                &Operation::Invitation {
+                    empreinte: octets,
+                    enregistrement: invitation,
                 },
             );
         }
@@ -3463,6 +3717,7 @@ fn provenance_de(operation: &Operation) -> Option<Provenance> {
         Operation::Poussee { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Machine { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Enrolement { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::Invitation { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Service { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Autorisation { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Alias { .. }
@@ -3472,6 +3727,7 @@ fn provenance_de(operation: &Operation) -> Option<Provenance> {
         | Operation::CleMachine { .. }
         | Operation::CleMachineRevoquee { .. }
         | Operation::AutorisationRevoquee { .. }
+        | Operation::InvitationConsommee { .. }
         | Operation::CompteEfface { .. } => None,
     }
 }
@@ -3530,6 +3786,13 @@ fn appliquer_dans(
             empreinte,
             enregistrement,
         } => appliquer_enrolement(ecriture, empreinte, enregistrement),
+        Operation::Invitation {
+            empreinte,
+            enregistrement,
+        } => appliquer_invitation(ecriture, empreinte, enregistrement),
+        Operation::InvitationConsommee { empreinte } => {
+            appliquer_invitation_consommee(ecriture, empreinte)
+        }
         Operation::CleMachine {
             machine,
             cle,
@@ -3946,6 +4209,83 @@ fn appliquer_machine_modifiee(
     if perd_l_annonce {
         effets.a_fermer.push(quelle);
     }
+    Ok(())
+}
+
+/// `invitation` — **insérer si absente** (`docs/replication.md` §5.2,
+/// décision 26).
+///
+/// # PAS DE « PLUS RÉCENTE », ET C'EST CE QUI LA SÉPARE D'UN ENRÔLEMENT
+///
+/// [`appliquer_enrolement`] départage : une machine n'a qu'un code vivant, et
+/// le plus récemment émis remplace l'autre. Une invitation n'appartient à
+/// personne — deux codes émis coexistent, chacun le sien, et aucun ne chasse
+/// l'autre. Il n'y a donc rien à comparer : ou l'empreinte est là, ou on
+/// l'écrit.
+///
+/// **Et on n'écrase pas ce qu'on tient déjà** : si l'empreinte est présente,
+/// on la laisse. Réécrire changerait son expiration pour celle du cadre reçu,
+/// alors que les deux racines portent la même — et une émission rejouée à
+/// l'amorçage ne doit pas prolonger un code.
+fn appliquer_invitation(
+    ecriture: &WriteTransaction,
+    empreinte: &[u8; EMPREINTE_OCTETS],
+    enregistrement: &Invitation,
+) -> Result<(), Faute> {
+    let mut invitations = ecriture.open_table(INVITATIONS)?;
+    if invitations.get(empreinte.as_slice())?.is_some() {
+        return Ok(());
+    }
+    let invitation = Invitation {
+        provenance: Provenance::Ici,
+        ..*enregistrement
+    };
+    let mut octets = [0_u8; INVITATION_OCTETS];
+    invitation.ecrire(&mut octets);
+    invitations.insert(empreinte.as_slice(), &octets)?;
+    Ok(())
+}
+
+/// `invitation-consommee` — **toujours** (`docs/replication.md` §5.2).
+///
+/// # ELLE MARQUE PLUTÔT QU'ELLE N'EFFACE, ET C'EST CE QUI REND L'ORDRE VAIN
+///
+/// Supprimer l'empreinte suffirait si les deux cadres arrivaient toujours dans
+/// l'ordre. Ils le font sur le journal — il est trié par estampille —, mais
+/// §5.4 demande que **l'ordre d'arrivée soit sans effet**, et un `remove` sur
+/// une empreinte absente ne laisse rien : l'émission qui suivrait
+/// ressusciterait un code déjà dépensé.
+///
+/// On écrit donc une invitation **déjà expirée** (`expire_a` à zéro), et
+/// [`appliquer_invitation`] n'écrase jamais ce qui est là. Dans les deux
+/// ordres, l'empreinte finit expirée, donc refusée par
+/// [`Entrepot::creer_compte_sur_invitation`] — les deux racines convergent.
+///
+/// **Et la table reste bornée** : une invitation expirée est ce que
+/// [`Entrepot::expirer_les_invitations`] balaie, marque comprise. Ce n'est pas
+/// une pierre tombale éternelle, c'est un code mort de plus.
+///
+/// **Rien d'autre n'est écrit ici.** Le compte ouvert en face voyage par ses
+/// propres opérations (`compte`, `appareil`) ; celle-ci ne porte que la
+/// disparition du code. Et **aucun compte n'est effacé** quand le même code a
+/// servi des deux côtés : deux comptes ne se départagent pas (décision 26),
+/// l'exploitant tranche hors ligne s'il le veut.
+fn appliquer_invitation_consommee(
+    ecriture: &WriteTransaction,
+    empreinte: &[u8; EMPREINTE_OCTETS],
+) -> Result<(), Faute> {
+    let mut invitations = ecriture.open_table(INVITATIONS)?;
+    let morte = Invitation {
+        provenance: Provenance::Ici,
+        estampille: Estampille {
+            compteur: 0,
+            racine: RACINE_SANS_IDENTITE,
+        },
+        expire_a: 0,
+    };
+    let mut octets = [0_u8; INVITATION_OCTETS];
+    morte.ecrire(&mut octets);
+    invitations.insert(empreinte.as_slice(), &octets)?;
     Ok(())
 }
 
@@ -4632,6 +4972,12 @@ impl Reestampillable for Enrolement {
     }
 }
 
+impl Reestampillable for Invitation {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
 impl Reestampillable for Service {
     fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
         reestampiller_les_champs!(self, de, vers, estampille)
@@ -4653,6 +4999,7 @@ impl Reestampillable for Operation {
             Self::Poussee { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Machine { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Enrolement { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::Invitation { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Service { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Autorisation { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::CleMachine { code, .. } => {
@@ -4667,6 +5014,7 @@ impl Reestampillable for Operation {
             | Self::MachineModifiee { .. }
             | Self::CleMachineRevoquee { .. }
             | Self::AutorisationRevoquee { .. }
+            | Self::InvitationConsommee { .. }
             | Self::CompteEfface { .. } => false,
         }
     }
