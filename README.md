@@ -182,7 +182,22 @@ dit au démarrage. Chacune ouvre une connexion sortante vers l'autre et y **tire
 sans fin** ce que l'autre a écrit ; une écriture faite chez l'une est chez
 l'autre en moins d'une seconde, voie ouverte. `GET /v1/replication`, **sur la
 voie machine**, rend l'état : `{"pair":"n-…","voie":"ouverte","compteur":…,
-"applique":…}`, ou `{"voie":"seule","compteur":…}` sans pair.
+"ecrit":…,"applique":…}`, ou `{"voie":"seule","compteur":…,"ecrit":…}` sans
+pair.
+
+**Les trois nombres, et celui qui conclut.** `compteur` est l'horloge de cette
+racine — elle se hisse aussi sur ce qu'elle REÇOIT, donc elle ne dit pas ce
+qu'on a écrit ; `ecrit` est la dernière estampille qu'elle a écrite
+ELLE-MÊME ; `applique` est jusqu'où elle a appliqué le pair. **Ce qui se
+conclut : `applique` de l'une égale `ecrit` de l'autre ⇒ tout ce que l'autre a
+écrit est ici** ; en dessous, il manque exactement la différence. Comparer
+`applique` au `compteur` du pair ne dit rien : c'est l'erreur que ce dépôt a
+faite une fois, sur le banc, le 2026-09-21. **Rien à reprendre au déploiement
+de 0.17.0** — `ecrit` est une clé de plus dans une table qui existe déjà, le
+format de l'entrepôt reste le troisième, et une base d'avant retrouve sa
+valeur à l'ouverture, depuis son journal. La voie ne se coupe pas ; un banc
+d'avant lit sans peine ce que le nouveau écrit, et un client qui ne lit pas
+`ecrit` ne remarque rien.
 
 ### Mettre deux bancs en réplication
 
@@ -292,7 +307,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.16.1_amd64.deb
+sudo dpkg -i asl-server_0.17.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :

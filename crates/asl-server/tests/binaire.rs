@@ -1190,6 +1190,35 @@ async fn la_replication_de_bout_en_bout() {
         );
         assert_eq!(champ_json(&corps, "compteur").as_deref(), Some("5"));
         assert_eq!(champ_json(&corps, "applique").as_deref(), Some("0"));
+        // **CE QUE `ecrit` REND CONCLUANT** (`replication.md` §8) : nitrogen a
+        // tout écrit lui-même — cinq opérations, aucune reçue —, et le curseur
+        // qu'argon tient pour lui vaut exactement cela. C'est la comparaison
+        // qui manquait : sans `ecrit`, un lecteur voyait `applique: 5` chez
+        // argon et `compteur: 5` chez nitrogen, et ne pouvait pas savoir si les
+        // cinq étaient des écritures de nitrogen ou des réceptions.
+        assert_eq!(champ_json(&corps, "ecrit").as_deref(), Some("5"), "{corps}");
+    }
+
+    // ── 2 ter. LA CONCLUSION : `applique` DE L'UN ÉGALE `ecrit` DE L'AUTRE ───
+    //
+    // Et l'inverse distingue `ecrit` de l'horloge : argon n'a RIEN écrit de
+    // lui-même, son compteur ne dit que ce qu'il a reçu. C'est le cas qui a
+    // démenti §8 sur le banc le 2026-09-19, et qui se lit maintenant.
+    {
+        let chez_argon = replication_chez(vers_argon, &racine_tls, grenier, &secrete_grenier).await;
+        let chez_nitrogen =
+            replication_chez(vers_nitrogen, &racine_tls, grenier, &secrete_grenier).await;
+        assert_eq!(
+            champ_json(&chez_argon, "applique"),
+            champ_json(&chez_nitrogen, "ecrit"),
+            "tout ce que nitrogen a écrit est chez argon\nargon : {chez_argon}\nnitrogen : {chez_nitrogen}"
+        );
+        assert_eq!(
+            champ_json(&chez_argon, "ecrit").as_deref(),
+            Some("0"),
+            "argon n'a fait que recevoir, si haut que soit son compteur : {chez_argon}"
+        );
+        assert_eq!(champ_json(&chez_argon, "compteur").as_deref(), Some("5"));
     }
 
     // ── 3. UN FLUX VIVANT : UN ALIAS POSÉ CHEZ NITROGEN ARRIVE CHEZ ARGON ────

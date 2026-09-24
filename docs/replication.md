@@ -624,7 +624,7 @@ répétée sur `stderr` doublerait ce que C18 veut voir jeté.
 
 ```
 GET /v1/replication
-{"pair": "n-…", "voie": "ouverte", "compteur": 4812, "applique": 4790}
+{"pair": "n-…", "voie": "ouverte", "compteur": 4812, "ecrit": 4801, "applique": 4790}
 ```
 
 **La forme exacte, décidée par la PR de code (4/4).** Le corps est du JSON, et
@@ -636,34 +636,50 @@ les autres champs découlent :
 - `"coupée"` — il y a un pair réglé, mais la connexion n'est pas établie (le
   pair est parti, ou la voie est rompue et la reprise rappelle) ;
 - `"seule"` — **aucun pair n'est réglé** : la racine tourne seule, et le corps
-  est alors `{"voie": "seule", "compteur": 4812}`, **sans `pair` ni
-  `applique`** — il n'y a personne dont on applique quoi que ce soit, et un
-  champ nul aurait l'air d'une valeur.
+  est alors `{"voie": "seule", "compteur": 4812, "ecrit": 4801}`, **sans `pair`
+  ni `applique`** — il n'y a personne dont on applique quoi que ce soit, et un
+  champ nul aurait l'air d'une valeur. **`ecrit`, lui, est rendu dans les deux
+  formes** : une racine seule écrit comme une autre, et ce qu'elle a écrit est
+  précisément ce qu'un futur pair devra rattraper.
 
-`compteur` est l'horloge de Lamport de cette racine (§4) ; `applique` est le
-curseur qu'elle tient pour le pair (§5.3) — l'estampille de la dernière
-opération ÉCRITE PAR LE PAIR qu'elle a appliquée. Les deux nombres et le mot
-se lisent de l'entrepôt et du tireur au moment de la requête — rien n'est
-recopié, donc rien ne vieillit.
+`compteur` est l'horloge de Lamport de cette racine (§4) ; `ecrit` est la
+dernière estampille qu'elle a écrite ELLE-MÊME ; `applique` est le curseur
+qu'elle tient pour le pair (§5.3) — l'estampille de la dernière opération
+ÉCRITE PAR LE PAIR qu'elle a appliquée. Les trois nombres et le mot se lisent
+de l'entrepôt et du tireur au moment de la requête — rien n'est recopié, donc
+rien ne vieillit.
 
-**Les deux nombres ne se soustraient pas, et ce document l'a d'abord dit de
-travers** (« `applique` rejoint `compteur` du pair en moins d'une seconde »,
-corrigé le 2026-09-21, sur le banc). L'horloge d'une racine se hisse aussi
-sur ce qu'elle REÇOIT (§4) ; le curseur que l'autre tient pour elle ne suit
-que ce qu'elle ÉCRIT. Après l'amorçage du 19/09, `nitrogen` a écrit douze
-fois et `argon` rien : les deux horloges disent 35, `nitrogen` tient pour
-`argon` un curseur à 23 — et rien n'est en retard. Ce qui se lit à coup sûr :
-`applique` ne dépasse jamais l'horloge du pair ; **s'il l'égale, tout ce que
-le pair a écrit est appliqué** ; s'il est en dessous, on ne sait pas — le pair
-a peut-être écrit, ou seulement reçu. La preuve de l'état, c'est la voie :
-`ouverte` de chaque côté, le flux de §5.3 applique chaque écriture dans la
-seconde ; `coupée`, ce que le pair écrit attend, et le curseur dira combien
-quand la voie rouvrira. **À faire, pour que le client conclue depuis les
-nombres** : rendre aussi la dernière estampille que CETTE racine a écrite
-(`Entrepot::derniere_operation` n'en est qu'un majorant après un
-redémarrage, et le journal ne la porte plus après un amorçage — il faut la
-ranger) ; alors `applique` de l'une égale `ecrit` de l'autre, ou il manque
-quelque chose.
+**`compteur` et `applique` ne se soustraient pas, et ce document l'a d'abord
+dit de travers** (« `applique` rejoint `compteur` du pair en moins d'une
+seconde », corrigé le 2026-09-21, sur le banc). L'horloge d'une racine se
+hisse aussi sur ce qu'elle REÇOIT (§4) ; le curseur que l'autre tient pour
+elle ne suit que ce qu'elle ÉCRIT. Après l'amorçage du 19/09, `nitrogen` a
+écrit douze fois et `argon` rien : les deux horloges disaient 35, `nitrogen`
+tenait pour `argon` un curseur à 23 — et rien n'était en retard. **C'est
+précisément l'écart que `ecrit` comble** : `argon` disait `compteur: 35` et
+n'avait rien écrit ; il dit désormais `ecrit: 23`, et le curseur de `nitrogen`
+l'égale. La même journée se lit maintenant sans qu'il faille connaître
+l'histoire des deux bancs.
+
+**Ce qui se conclut, des deux côtés** : `applique` de l'une égale `ecrit` de
+l'autre ⇒ **tout ce que l'autre a écrit est appliqué ici** ; en dessous, il
+manque exactement la différence, et on peut enfin la nommer. `applique` ne
+dépasse jamais `ecrit` du pair — le dépasser voudrait dire qu'on a appliqué ce
+qui n'a pas été écrit. La voie reste ce qui dit l'ALLURE : `ouverte` des deux
+côtés, le flux de §5.3 applique chaque écriture dans la seconde, et un écart
+se referme tout seul ; `coupée`, ce que le pair écrit attend, et l'écart dit
+combien attend.
+
+`ecrit` est **rangé, et non déduit** — c'est ce qui le rend juste quand on en
+a le plus besoin. Le compteur de la dernière opération journalisée
+(`Entrepot::derniere_operation`) repart de l'horloge à chaque ouverture et
+n'en est qu'un majorant ; le journal, lui, s'expire à trente jours (§5.4) et
+ne porte plus rien après un amorçage par instantané. La valeur est donc écrite
+dans la transaction même qui écrit ce qu'elle compte, et un instantané qui
+nous rend NOS PROPRES estampilles la hisse aussi — sans quoi une racine
+amorcée dirait n'avoir jamais rien écrit, et son pair chercherait une panne
+qui n'existe pas. Une base d'avant la retrouve à l'ouverture, depuis son
+journal et sa borne d'expiration ; ce n'est pas une reprise de format.
 
 **Sur la voie machine (`Exigence::Machine`), et non sans exigence.** La
 vérification de déploiement — « un compte créé chez l'une est lu chez
@@ -718,7 +734,7 @@ d'exploitation dit la même chose, à qui sait lire la machine.
 | 17 | La provenance d'un enregistrement répliqué entre racines reste `locale`. | **Décidé** (2026-09-15) |
 | 18 | Rompre la réplication n'efface rien. | **Décidé** |
 | 19 | `--identity-key`, `--peer`, `--peer-key` ; `--new-identity-key` pour générer. **`--peer-ca` ajouté par la PR de code (0.7.0)** : valider le certificat TLS du pair demande son autorité, que sa chaîne ne porte pas. | **Décidé** (2026-09-15) — `--identity-key`, parce que c'est une clé privée ; `--peer-ca` amendé (2026-09-16) |
-| 20 | `GET /v1/replication`, **sur la voie machine** — pas sans exigence : l'état de la voie dit à un inconnu quand une unicité se gagne. **La réponse : `voie` vaut `ouverte`, `coupée` ou `seule` ; `seule` n'a ni `pair` ni `applique`** (PR de code, 4/4). | **Décidé** (2026-09-15), amendé |
+| 20 | `GET /v1/replication`, **sur la voie machine** — pas sans exigence : l'état de la voie dit à un inconnu quand une unicité se gagne. **La réponse : `voie` vaut `ouverte`, `coupée` ou `seule` ; `seule` n'a ni `pair` ni `applique`** (PR de code, 4/4). **Et `ecrit`, la dernière estampille que cette racine a écrite elle-même, rendu dans les deux formes** (2026-09-24) : sans lui, `applique` ne se conclut pas — le compteur d'une racine se hisse aussi sur ce qu'elle reçoit, et rien ne disait ce qu'elle avait écrit. `applique` de l'une égale `ecrit` de l'autre ⇒ tout est appliqué. | **Décidé** (2026-09-15), amendé deux fois |
 | 21 | **La reprise d'un entrepôt sans identité : ré-estampillage sous l'identité réelle au premier démarrage avec une clé, une fois, dans une transaction** (§11.4). | **Décidé** (2026-09-16) |
 | 22 | **L'effacement d'un compte se réplique, comme une révocation** : l'opération `compte-efface` (identifiant, date, cause) gagne sur toute écriture concurrente du même compte, se rejoue comme effet vivant chez l'autre, sans notification ; une écriture arrivée après est refusée, le curseur avance. C'est la seule opération qui efface physiquement ; la marque du compte reste, et c'est elle qui figure dans l'instantané. `appareil-revoque` porte désormais `révoqué le`. | **Décidé** (2026-09-18, Thierry) |
 | 23 | **La règle des orphelins** : un compte sans aucun appareil vivant — tous révoqués, jamais « silencieux » (C6) — est effacé par la racine **trente jours** après la révocation du dernier, cause `orphelin`, journalisé ; `--orphans <days>`, `0` = jamais, même valeur sur les deux racines ; chacune peut écrire, la première fait appliquer l'autre. | **Décidé** (2026-09-18, Thierry) — la règle plutôt qu'un verbe d'exploitant |
