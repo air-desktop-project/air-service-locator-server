@@ -307,7 +307,7 @@ jamais l'utilisateur : il n'y a pas de mot de passe dans ce produit.
 |---|---|
 | `identifiant` | `a-` + 26 caractères. |
 | `clé publique` | La partie publique d'une clé qui vit dans le matériel sécurisé du téléphone et ne peut être employée qu'après une confirmation biométrique. **P-256** — la Secure Enclave et StrongBox ne font que cette courbe (`protocole.md` §2.1). |
-| `attestation` | Sous quoi l'appareil est entré : `aucune`, `apple` (App Attest), `android` (l'attestation de clé du Keystore, contre une racine que l'exploitant épingle), `invitation` (un code émis par l'exploitant), ou **`attendue`** — une clé apportée par un autre appareil du compte sous une posture exigée, que son porteur n'a pas encore prouvée ni attestée : il n'est pas entré (2026-09-21, `protocole.md` §2.2). `google` — Play Integrity — n'a jamais été acceptée et est abandonnée (`protocole.md` §2.1, décision du 2026-09-16, C19). **Une valeur, pas une absence** : un annuaire en posture facultative laisse entrer des appareils sans preuve, et il faut pouvoir dire lesquels — c'est ce qu'on regarde le jour où l'on resserre, pour savoir qui prévenir. |
+| `attestation` | Sous quoi l'appareil est entré : `aucune`, `apple` (App Attest), `android` (l'attestation de clé du Keystore, contre une racine que l'exploitant épingle), `invitation` (un code émis par l'exploitant, servi depuis le 2026-09-24 — `protocole.md` §2.2), ou **`attendue`** — une clé apportée par un autre appareil du compte sous une posture exigée, que son porteur n'a pas encore prouvée ni attestée : il n'est pas entré (2026-09-21, `protocole.md` §2.2). `google` — Play Integrity — n'a jamais été acceptée et est abandonnée (`protocole.md` §2.1, décision du 2026-09-16, C19). **Une valeur, pas une absence** : un annuaire en posture facultative laisse entrer des appareils sans preuve, et il faut pouvoir dire lesquels — c'est ce qu'on regarde le jour où l'on resserre, pour savoir qui prévenir. |
 | `jeton de poussée` | APNs ou FCM, pour les notifications (§2.6). Lié à l'appareil, révoqué avec lui. |
 | `plateforme` | `ios`, `android` ou `macos` — ce que l'appareil fait tourner. **Déclaré par l'appareil lui-même**, absent tant qu'il ne l'a pas fait. |
 | `modele` | « iPhone 17 », « MacBook Pro (2019) » — le nom de son **modèle**, libre, 1 à 64 octets, aux règles du nom de machine (§2.3). Déclaré avec la plate-forme, absent avec elle. |
@@ -507,6 +507,17 @@ n'importe qui peut appeler. Au-dessus, il ne se tape plus — c'est un humain qu
 le recopie d'un téléphone vers un terminal, et chaque symbole de trop est une
 occasion de se tromper. **Cela ne dispense pas de limiter le débit**, et cette
 limite-là n'est pas encore écrite.
+
+**Un second code partage cette forme, et rien d'autre** : celui de la posture
+`invitation` (`protocole.md` §2.2), que l'exploitant émet pour qu'un compte
+s'ouvre. Mêmes dix symboles, même usage unique, même empreinte seule sur le
+disque — parce qu'un humain le recopie dans les mêmes conditions. Mais il ne
+lie pas une clé à une machine déjà déclarée : **il ouvre l'entrée du
+service**, il vit vingt-quatre heures et non dix minutes puisqu'il s'envoie à
+quelqu'un qui n'est pas devant, et c'est pour cela que lui seul s'accompagne
+d'une limite de débit écrite. Ne pas confondre les deux : l'un est montré par
+l'application au titulaire d'un compte, l'autre est donné par l'exploitant à
+qui n'en a pas encore.
 
 **L'annuaire n'en garde que l'empreinte** (SHA-256, domaine séparé) : une base
 qui fuirait ne livrerait aucune machine en cours d'enrôlement. C'est aussi ce qui

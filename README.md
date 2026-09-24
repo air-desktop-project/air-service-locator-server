@@ -290,7 +290,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.13.0_amd64.deb
+sudo dpkg -i asl-server_0.13.1_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
@@ -356,6 +356,31 @@ systemctl edit asl-server
 L'affectation est **citée en entier**, comme celle de la réplication, et pour
 la même raison. Vide, `$ASL_ANDROID` laisse la racine refuser les attestations
 Android en le disant au journal.
+
+**La posture `invitation`** (`docs/protocole.md` §2.2, spécifiée pour 0.13.1).
+Pour une racine qui ne veut aucun fabricant dans sa boucle : personne n'ouvre
+de compte sans un code que l'exploitant a émis.
+
+```sh
+systemctl edit asl-server
+# [Service]
+# Environment="ASL_ATTESTATION=--attestation invitation --operator-key /etc/asl-server/exploitant.pub"
+```
+
+- **`--operator-key <fichier>`**, la clé publique Ed25519 dont la signature
+  ouvre `POST /v1/invitations`. **Obligatoire sous cette posture** : sans elle
+  le service refuse de démarrer, parce qu'une racine qui exige une invitation
+  sans pouvoir en émettre est une racine où personne n'entre. Sous les autres
+  postures, la ressource n'existe pas et répond `404`.
+- **`--invitation-ttl <durée>`**, vingt-quatre heures par défaut, une semaine
+  au plus. Un code d'invitation s'envoie à quelqu'un qui n'est pas devant
+  vous ; les dix minutes d'un code d'enrôlement de machine en feraient un
+  rendez-vous.
+- La partie privée de la clé d'exploitation **ne se pose pas sur le banc** :
+  elle vit là où l'exploitant émet ses invitations. Le banc n'en connaît que
+  le `.pub`, comme pour `--peer-key`.
+- **À poser sur les DEUX bancs**, la même : un code émis chez l'un se présente
+  chez l'autre (l'alias tire au hasard), et les invitations se répliquent.
 
 **Les comptes qui s'effacent** (`docs/modele.md` §2.1, depuis 0.11.0). Un
 compte se ferme depuis un appareil, de la même main qui l'a ouvert
