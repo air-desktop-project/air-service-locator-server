@@ -1953,7 +1953,12 @@ fn cle_d_exploitant(quoi: &str) -> (PathBuf, PathBuf) {
 fn inviter(annuaire: SocketAddr, autorite: &Path, secrete: &Path) -> (bool, String, String) {
     let sortie = Command::new(env!("CARGO_BIN_EXE_asl-server"))
         .arg("--invite")
-        .args(["--directory", &format!("localhost:{}", annuaire.port())])
+        // **`127.0.0.1` ET NON `localhost`** : l'outil résout et prend l'IPv6
+        // d'abord (comme tout ce produit), et une machine d'intégration n'a
+        // pas toujours de `::1`. Les autres essais de ce fichier visent la
+        // boucle locale v4 pour la même raison ; le certificat du banc la
+        // porte dans ses SAN (`scripts/ca.sh`).
+        .args(["--directory", &format!("127.0.0.1:{}", annuaire.port())])
         .arg("--ca")
         .arg(autorite.join("racine.crt"))
         .arg("--operator-secret")
