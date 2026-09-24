@@ -43,7 +43,7 @@ use asl_loop_tokio::{
 };
 use asl_store::{Entrepot, RACINE_SANS_IDENTITE};
 
-use crate::reglages::{Oubli, Reglages, USAGE};
+use crate::reglages::{Invite, Oubli, Reglages, USAGE};
 
 /// Combien de temps entre deux passages d'expiration du journal.
 ///
@@ -105,6 +105,31 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
             return Err("--new-identity-key attend un chemin".into());
         };
         return nouvelle_identite(std::path::Path::new(chemin));
+    }
+    // **FRAPPER LA CLÉ DE L'EXPLOITANT EST LE MÊME GESTE**, et volontairement
+    // le même code : une paire Ed25519, la privée en 0600, la publique à
+    // côté. Ce qui change est ce qu'on en dit — un exploitant n'a pas de
+    // `n-…`, et ce qu'il doit faire du fichier n'est pas ce qu'on fait d'une
+    // clé de racine (`protocole.md` §2.2).
+    if let Some(rang) = arguments
+        .iter()
+        .position(|quoi| quoi == "--new-operator-key")
+    {
+        let Some(chemin) = arguments.get(rang.saturating_add(1)) else {
+            eprint!("{USAGE}");
+            return Err("--new-operator-key attend un chemin".into());
+        };
+        return nouvelle_cle_d_exploitant(std::path::Path::new(chemin));
+    }
+    // **ÉMETTRE UNE INVITATION EST UN GESTE EN LIGNE**, et c'est ce qui le
+    // distingue de tous les autres : il parle à un annuaire QUI TOURNE
+    // (`protocole.md` §2.2). Il ne veut ni entrepôt, ni certificat de
+    // serveur, ni posture — et il n'a aucune raison de s'exécuter sur un
+    // banc.
+    if let Some(invite) =
+        Reglages::geste_d_invitation(&arguments).inspect_err(|_| eprint!("{USAGE}"))?
+    {
+        return inviter(&invite);
     }
     // **EFFACER UN COMPTE HORS LIGNE EST UN GESTE AUSSI** (`modele.md` §2.1,
     // `replication.md` §8) : l'entrepôt, l'identité si on l'a, et rien
@@ -433,6 +458,77 @@ fn nouvelle_identite(chemin: &std::path::Path) -> Result<(), Box<dyn std::error:
         identite::chemin_public(chemin).display(),
         identite::en_hexadecimal(&publique.octets()),
         asl_cle::identifiant_de_racine(&publique),
+    );
+    Ok(())
+}
+
+/// Frappe la clé de l'exploitant, dit où poser chaque moitié, et s'arrête.
+///
+/// # LA MÊME PAIRE QU'UNE IDENTITÉ, ET UN USAGE QUI N'A RIEN À VOIR
+///
+/// Les octets sont les mêmes — Ed25519, trente-deux bruts, la privée en 0600
+/// et la publique à côté —, et c'est pourquoi le geste réemploie `identite`.
+/// Ce qui diffère est le mode d'emploi : une clé de racine se copie vers
+/// l'autre racine comme `--peer-key`, celle-ci se copie vers **les deux**
+/// comme `--operator-key`, et sa moitié privée ne va sur aucune des deux.
+fn nouvelle_cle_d_exploitant(chemin: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let publique = identite::generer(chemin)?;
+    let public = identite::chemin_public(chemin);
+    println!(
+        "clé privée   : {} (0600) — elle reste ICI, sur aucun banc",
+        chemin.display()
+    );
+    println!(
+        "clé publique : {} — {}",
+        public.display(),
+        identite::en_hexadecimal(&publique.octets()),
+    );
+    println!();
+    println!("Posez la clé PUBLIQUE sur les DEUX racines, la même, et réglez-les :");
+    println!(
+        "  --attestation invitation --operator-key {}",
+        public.display()
+    );
+    println!("Puis émettez depuis cette machine :");
+    println!(
+        "  asl-server --invite --directory <hôte:port> --ca <racine.crt> --operator-secret {}",
+        chemin.display(),
+    );
+    Ok(())
+}
+
+/// Émet une invitation sur un annuaire en marche, imprime le code, et s'arrête.
+///
+/// # LE CODE S'IMPRIME, ET NE SE RANGE NULLE PART
+///
+/// C'est le seul secret que l'exploitant tient (`protocole.md` §2.2), et
+/// l'annuaire n'en garde que l'empreinte : il n'est rendu qu'une fois. On
+/// l'écrit donc sur la sortie standard — que l'exploitant lit, copie et
+/// oublie — et jamais dans un fichier, jamais dans un message d'erreur.
+/// L'échéance va sur la sortie d'erreur, pour qu'un `asl-server --invite …
+/// | pbcopy` ne copie que le code.
+fn inviter(invite: &Invite) -> Result<(), Box<dyn std::error::Error>> {
+    let racines =
+        std::fs::read(&invite.ca).map_err(|quoi| format!("{} : {quoi}", invite.ca.display()))?;
+    let secrete = identite::lire_secrete(&invite.secrete)?;
+
+    // Un geste ne dure qu'un aller-retour : un fil suffit, là où l'annuaire
+    // qui sert en veut autant que la machine en a.
+    let execution = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let invitation = execution
+        .block_on(asl_loop_tokio::exploitant::emettre(
+            &invite.annuaire,
+            &racines,
+            &secrete,
+        ))
+        .map_err(|quoi| format!("{} : {quoi}", invite.annuaire))?;
+
+    println!("{}", invitation.code);
+    eprintln!(
+        "asl-server : code émis, valable jusqu'à {} — il ne sera pas réaffiché.",
+        invitation.expire_a
     );
     Ok(())
 }

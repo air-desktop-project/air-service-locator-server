@@ -36,6 +36,10 @@ ams-quic-client.workspace = true
 # QPACK, il ne voyage pas en clair — et découper les trames `DATA` d'un flux
 # tenu, celui de la voie entre racines.
 ams-proto-h3.workspace = true
+# Pour COMPOSER le corps de `POST /v1/comptes` : l'essai de la posture
+# `invitation` ouvre un compte avec le code que `--invite` vient d'émettre, et
+# la grammaire de ce corps vit là.
+asl-api.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]

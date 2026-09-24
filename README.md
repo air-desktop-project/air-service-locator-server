@@ -290,7 +290,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.14.0_amd64.deb
+sudo dpkg -i asl-server_0.15.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
@@ -389,6 +389,44 @@ systemctl edit asl-server
   deux ne servent pas 0.14.0** : un banc d'avant ne saurait pas lire les
   opérations `invitation` (18) et `invitation-consommee` (19), et fermerait
   la voie en le disant — il ne saute rien.
+### Frapper la clé d'exploitation, et émettre (depuis 0.15.0)
+
+Les deux gestes sont dans le même binaire, et **aucun ne tourne sur un banc** :
+`asl-server` est un exécutable autonome, qu'on copie sur la machine de
+l'exploitant. C'est là que vit la moitié privée de sa clé, et nulle part
+ailleurs.
+
+```sh
+# Une fois, chez l'exploitant — jamais sur une racine.
+asl-server --new-operator-key ~/.config/asl/exploitant.key
+# → la privée en 0600, la publique à côté ; portez le `.pub` sur les DEUX bancs.
+
+# À chaque arrivant, contre un annuaire QUI TOURNE.
+asl-server --invite \
+  --directory asl-root.air-desktop.org:6630 \
+  --ca racine.crt \
+  --operator-secret ~/.config/asl/exploitant.key
+# → 4K9M2-P7R1T
+```
+
+- **`--invite` n'arrête rien et n'ouvre aucun entrepôt** — c'est ce qui le
+  sépare de `--forget`. Il ouvre une connexion, tire un défi, signe
+  `genre ‖ défi ‖ liaison`, et poste soixante-cinq octets. Émettre pendant que
+  l'annuaire sert est le geste ordinaire de cette posture.
+- **Le code sort SEUL sur la sortie standard**, son échéance sur la sortie
+  d'erreur : `asl-server --invite … | pbcopy` ne copie que le code. Il vaut
+  **un** compte, vit ce que dit `--invitation-ttl`, et **ne sera pas
+  réaffiché** — l'annuaire n'en garde que l'empreinte (C14). Il ne s'écrit
+  dans aucun fichier et n'apparaît dans aucun journal.
+- Les trois refus se distinguent, parce qu'ils appellent trois gestes
+  différents : « cette racine n'émet pas d'invitations » (`404` — mauvaise
+  posture, ou pas de `--operator-key`), « la racine a refusé la signature »
+  (`401` — ce n'est pas la bonne clé privée), « trop d'échecs depuis cette
+  adresse » (`429` — attendez une minute).
+- `--ca` est l'autorité qui valide le certificat TLS de la racine : le
+  `racine.crt` de la cérémonie (`scripts/ca.sh`), celui-là même qu'un client
+  épingle.
+
 - **L'usage unique tient par racine, et à la seconde près entre les deux.**
   Un même code présenté des deux côtés de la fenêtre de réplication ouvre
   DEUX comptes, et l'annuaire ne les départage pas : il les laisse vivre et

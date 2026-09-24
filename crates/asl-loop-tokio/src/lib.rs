@@ -47,6 +47,7 @@
 //! L'entrepôt. `asl-session` route et refuse correctement ; tout ce qui se route
 //! rend `501`, parce qu'aucune ressource de cette API ne se sert sans état.
 
+pub mod exploitant;
 pub mod h3;
 pub mod pont;
 pub mod privileges;
