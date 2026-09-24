@@ -292,7 +292,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.16.0_amd64.deb
+sudo dpkg -i asl-server_0.16.1_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
@@ -366,8 +366,17 @@ personne n'ouvre de compte sans un code que l'exploitant a émis.
 ```sh
 systemctl edit asl-server
 # [Service]
-# Environment="ASL_ATTESTATION=--attestation invitation --operator-key /etc/asl-server/exploitant.pub"
+# Environment="ASL_ATTESTATION=invitation --operator-key /etc/asl-server/exploitant.pub"
 ```
+
+**`--attestation` ne se répète pas ici**, et c'est le piège de ce drop-in :
+l'unité écrit déjà `--attestation $ASL_ATTESTATION` (`paquet/asl-server.service`),
+donc la variable porte **la valeur, puis les réglages qui la suivent** — pas le
+drapeau. L'écrire deux fois donnerait `--attestation --attestation invitation`,
+et le service refuserait de démarrer en le disant. L'affectation est **citée en
+entier**, comme les autres ; `$ASL_ATTESTATION` n'a pas d'accolades à dessein,
+si bien que systemd découpe sa valeur en mots et que `--operator-key` et son
+chemin arrivent comme deux arguments.
 
 - **`--operator-key <fichier>`**, la clé publique Ed25519 dont la signature
   ouvre `POST /v1/invitations`. **Obligatoire sous cette posture** : sans elle
