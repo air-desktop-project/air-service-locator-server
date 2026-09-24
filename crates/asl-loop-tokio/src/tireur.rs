@@ -255,28 +255,12 @@ impl Tireur {
 
     /// Le nom du certificat qu'on exige du pair : la part `hôte` de l'adresse.
     fn nom_tls(&self) -> String {
-        let sans_port = self
-            .adresse
-            .rsplit_once(':')
-            .map_or(self.adresse.as_str(), |(hote, _)| hote);
-        // Une adresse IPv6 se donne entre crochets ; le certificat, lui, porte
-        // l'adresse nue.
-        sans_port
-            .strip_prefix('[')
-            .and_then(|reste| reste.strip_suffix(']'))
-            .unwrap_or(sans_port)
-            .to_owned()
+        nom_tls(&self.adresse)
     }
 
     /// Résout l'adresse du pair — à chaque session, car le DNS peut bouger.
     async fn resoudre(&self) -> Result<SocketAddr, Faute> {
-        tokio::net::lookup_host(&self.adresse)
-            .await
-            .map_err(Faute::Socket)?
-            // IPv6 d'abord, comme partout dans ce produit — mais on prend la
-            // première qui vienne si c'est tout ce qu'il y a.
-            .max_by_key(|adresse| u8::from(adresse.is_ipv6()))
-            .ok_or(Faute::SansAdresse)
+        resoudre(&self.adresse).await
     }
 
     /// Le rattrapage, puis le flux vivant, part après part — et l'amorçage
@@ -671,20 +655,55 @@ impl Reprise {
     }
 }
 
+/// Le nom du certificat qu'on exige d'en face : la part `hôte` de l'adresse.
+///
+/// Une adresse IPv6 se donne entre crochets (`[::1]:6630`) ; le certificat,
+/// lui, porte l'adresse nue.
+pub(crate) fn nom_tls(adresse: &str) -> String {
+    let sans_port = adresse.rsplit_once(':').map_or(adresse, |(hote, _)| hote);
+    sans_port
+        .strip_prefix('[')
+        .and_then(|reste| reste.strip_suffix(']'))
+        .unwrap_or(sans_port)
+        .to_owned()
+}
+
+/// Résout `hôte:port` — **à chaque fois**, car le DNS peut bouger sous nous.
+///
+/// IPv6 d'abord, comme partout dans ce produit ; mais on prend ce qu'il y a
+/// quand il n'y a que de l'IPv4.
+///
+/// # Errors
+///
+/// [`Faute::Socket`] si le résolveur refuse, [`Faute::SansAdresse`] s'il ne
+/// rend rien.
+pub(crate) async fn resoudre(adresse: &str) -> Result<SocketAddr, Faute> {
+    tokio::net::lookup_host(adresse)
+        .await
+        .map_err(Faute::Socket)?
+        .max_by_key(|adresse| u8::from(adresse.is_ipv6()))
+        .ok_or(Faute::SansAdresse)
+}
+
 // ── La connexion QUIC sortante ──────────────────────────────────────────────
 
 /// Une connexion cliente vers l'autre racine.
-struct Connexion {
+///
+/// **Visible dans la crate**, et non plus seulement ici : l'exploitant qui
+/// émet une invitation ([`crate::exploitant`]) ouvre exactement la même
+/// connexion — QUIC, HTTP/3, une racine épinglée, une liaison de canal. Deux
+/// bootstraps QUIC dans un même binaire auraient divergé au premier réglage.
+pub(crate) struct Connexion {
     socket: UdpSocket,
     quic: Box<Connection>,
     h3: Http3Client,
-    liaison: LiaisonDeCanal,
+    pub(crate) liaison: LiaisonDeCanal,
     autorite: String,
 }
 
 impl Connexion {
     /// Ouvre une connexion et mène la poignée de main au bout.
-    async fn ouvrir(
+    pub(crate) async fn ouvrir(
         cible: SocketAddr,
         nom: &str,
         racines: &[u8],
@@ -729,7 +748,7 @@ impl Connexion {
     }
 
     /// La cadence de maintien : c'est elle qui tient le mapping ouvert (§2.3).
-    fn maintenir(&mut self, keepalive_us: u64) {
+    pub(crate) fn maintenir(&mut self, keepalive_us: u64) {
         self.quic.set_keepalive(keepalive_us, maintenant());
     }
 
@@ -816,7 +835,7 @@ impl Connexion {
     }
 
     /// Envoie une requête courte et attend sa réponse entière.
-    async fn requete(
+    pub(crate) async fn requete(
         &mut self,
         methode: &[u8],
         chemin: &[u8],
@@ -923,7 +942,7 @@ impl Connexion {
     }
 
     /// Tire un défi du pair.
-    async fn defi(&mut self) -> Result<Defi, Faute> {
+    pub(crate) async fn defi(&mut self) -> Result<Defi, Faute> {
         let reponse = self.requete(b"GET", b"/v1/defi", &[], b"").await?;
         if reponse.statut.value() != 200 || reponse.corps.len() != asl_cle::DEFI_OCTETS {
             return Err(Faute::Illisible);

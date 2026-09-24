@@ -164,6 +164,27 @@ pub struct Oubli {
     pub identite: Option<PathBuf>,
 }
 
+/// Le geste `--invite` : émettre une invitation, et s'arrêter.
+///
+/// `docs/protocole.md` §2.2 : l'exploitant ouvre une connexion vers un
+/// annuaire **EN MARCHE**, signe `genre ‖ défi ‖ liaison` de sa clé, et reçoit
+/// un code en clair — une fois. **Rien de commun avec `--forget`**, qui veut
+/// l'entrepôt arrêté : ici on ne touche à aucun fichier de la racine, et l'on
+/// peut émettre depuis une autre machine que le banc. C'est même ce qu'il faut
+/// faire : la partie privée de la clé d'exploitation ne se pose pas sur un
+/// banc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invite {
+    /// Où joindre l'annuaire : `hôte:port`, une adresse IPv6 entre crochets.
+    pub annuaire: String,
+    /// L'autorité qui valide le certificat TLS de l'annuaire, en PEM — celle
+    /// que le client épingle, le `racine.crt` de la cérémonie.
+    pub ca: PathBuf,
+    /// La clé PRIVÉE de l'exploitant, trente-deux octets bruts : celle dont
+    /// l'annuaire épingle la publique par `--operator-key`.
+    pub secrete: PathBuf,
+}
+
 /// L'autre racine, telle qu'on la joint et telle qu'on la reconnaît.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReglagePair {
@@ -381,6 +402,11 @@ asl-server — an air-service-locator service directory.
                             revoked for that many days; 0 = never (default: 30)
   --new-identity-key <path> write a new identity key there (0600), print the
                             public key and the `n-…` it gives, then exit
+  --new-operator-key <path> write a new OPERATOR key there (0600) and its
+                            `<path>.pub`, print what to put where, then exit
+  --invite --directory <host:port> --ca <path> --operator-secret <path>
+                            ask that RUNNING directory for an invitation code,
+                            print it on stdout — once —, then exit
   --forget <u-…> --store <path> [--identity-key <path>]
                             erase THAT account offline — the store must not be
                             held by a running directory —, log what was
@@ -400,6 +426,14 @@ loop at all: nobody opens an account without a code the operator issued through
 `POST /v1/invitations`, signed by the key of `--operator-key`. The operator's
 PRIVATE key never goes on the bench. Both roots must carry the SAME public key:
 invitations replicate, and the alias hands out a root at random.
+
+`--new-operator-key` mints that pair, and `--invite` spends it. Unlike
+`--forget`, `--invite` talks to a directory that IS RUNNING — it stops nothing,
+opens no store, and belongs on the operator's own machine, where the private key
+lives. The code it prints is worth ONE account, lives `--invitation-ttl`
+(a day by default, a week at most), and is NEVER shown again: the directory
+keeps only its fingerprint. It goes on stdout, alone, so that piping it copies
+nothing else; how long it lives goes on stderr.
 
 The socket is DUAL-STACK: IPv6 first, IPv4 accepted on the same socket.
 The directory REFUSES to start as root — it needs no privilege at all.
@@ -664,6 +698,45 @@ impl Reglages {
         }))
     }
 
+    /// Le geste `--invite`, s'il est demandé dans ces arguments.
+    ///
+    /// **Lu à part des réglages**, comme `--forget` et `--new-identity-key` :
+    /// c'est un geste, pas un service. Il ne demande ni entrepôt, ni
+    /// certificat, ni posture — seulement où joindre l'annuaire, de quoi
+    /// valider son certificat, et la clé qui signe. Rend `None` sans
+    /// `--invite`.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::SansValeur`] si un drapeau n'a pas sa valeur,
+    /// [`Faute::Manque`] si `--directory`, `--ca` ou `--operator-secret`
+    /// manque.
+    pub fn geste_d_invitation<S: AsRef<str>>(arguments: &[S]) -> Result<Option<Invite>, Faute> {
+        if !arguments.iter().any(|quoi| quoi.as_ref() == "--invite") {
+            return Ok(None);
+        }
+        let valeur_de = |drapeau: &str| {
+            arguments
+                .iter()
+                .position(|quoi| quoi.as_ref() == drapeau)
+                .map(|rang| {
+                    arguments
+                        .get(rang.saturating_add(1))
+                        .map(|quoi| quoi.as_ref().to_owned())
+                        .ok_or_else(|| Faute::SansValeur(drapeau.to_owned()))
+                })
+                .transpose()
+        };
+        let annuaire = valeur_de("--directory")?.ok_or(Faute::Manque("--directory"))?;
+        let ca = valeur_de("--ca")?.ok_or(Faute::Manque("--ca"))?;
+        let secrete = valeur_de("--operator-secret")?.ok_or(Faute::Manque("--operator-secret"))?;
+        Ok(Some(Invite {
+            annuaire,
+            ca: PathBuf::from(ca),
+            secrete: PathBuf::from(secrete),
+        }))
+    }
+
     /// L'inactivité en microsecondes, comme la boucle la veut.
     #[must_use]
     pub const fn inactivite_us(&self) -> u64 {
@@ -767,7 +840,7 @@ fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute
 
 #[cfg(test)]
 mod tests {
-    use super::{Faute, Oubli, ReglageAndroid, ReglageApple, ReglagePair, Reglages};
+    use super::{Faute, Invite, Oubli, ReglageAndroid, ReglageApple, ReglagePair, Reglages};
 
     /// Les quatre réglages obligatoires, et rien d'autre.
     fn minimum() -> Vec<String> {
@@ -1313,6 +1386,60 @@ mod tests {
         assert_eq!(
             Reglages::depuis(avec(&["--orphans"])).map(|_| ()),
             Err(Faute::SansValeur("--orphans".to_owned()))
+        );
+    }
+
+    #[test]
+    fn le_geste_d_invitation_se_lit_a_part_et_exige_ses_trois_chemins() {
+        // Sans `--invite`, rien : ce sont des réglages ordinaires.
+        assert_eq!(Reglages::geste_d_invitation(&minimum()), Ok(None));
+
+        // Avec, les trois : où joindre, de quoi valider, et la clé qui signe.
+        assert_eq!(
+            Reglages::geste_d_invitation(&[
+                "--invite",
+                "--directory",
+                "banc:6630",
+                "--ca",
+                "/c",
+                "--operator-secret",
+                "/k",
+            ]),
+            Ok(Some(Invite {
+                annuaire: "banc:6630".to_owned(),
+                ca: std::path::PathBuf::from("/c"),
+                secrete: std::path::PathBuf::from("/k"),
+            }))
+        );
+
+        // **AUCUN DES TROIS N'A DE DÉFAUT**, et l'absent est nommé : deviner
+        // une racine, une autorité ou une clé serait deviner à qui l'on parle.
+        for (arguments, manque) in [
+            (
+                vec!["--invite", "--ca", "/c", "--operator-secret", "/k"],
+                "--directory",
+            ),
+            (
+                vec!["--invite", "--directory", "b:1", "--operator-secret", "/k"],
+                "--ca",
+            ),
+            (
+                vec!["--invite", "--directory", "b:1", "--ca", "/c"],
+                "--operator-secret",
+            ),
+        ] {
+            assert_eq!(
+                Reglages::geste_d_invitation(&arguments),
+                Err(Faute::Manque(manque)),
+                "{arguments:?}"
+            );
+        }
+
+        // Un drapeau posé sans sa valeur se dit, plutôt que de prendre le
+        // drapeau suivant pour une valeur.
+        assert_eq!(
+            Reglages::geste_d_invitation(&["--invite", "--directory"]),
+            Err(Faute::SansValeur("--directory".to_owned()))
         );
     }
 

@@ -1869,3 +1869,229 @@ async fn l_effacement_d_un_compte_se_replique_de_bout_en_bout() {
         let _ = std::fs::remove_file(fichier);
     }
 }
+
+/// Lance le binaire sous la posture `invitation`, avec cette clé d'exploitant.
+///
+/// **Un lanceur à part plutôt qu'un paramètre de plus** : `lancer_avec` pose
+/// `--attestation optional` pour tous les autres essais, et cette posture-ci
+/// n'admet personne sans code — les deux ne se mélangent pas.
+fn lancer_en_invitation(autorite: &Path, base: &Path, cle_publique: &Path) -> (Child, SocketAddr) {
+    let mut enfant = Command::new(env!("CARGO_BIN_EXE_asl-server"))
+        .arg("--store")
+        .arg(base)
+        .arg("--certificate")
+        .arg(autorite.join("banc/chaine.pem"))
+        .arg("--key")
+        .arg(autorite.join("banc/serveur.key"))
+        .args(["--port", "0"])
+        .args(["--attestation", "invitation"])
+        .arg("--operator-key")
+        .arg(cle_publique)
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("le binaire se lance");
+
+    let erreurs = enfant.stderr.take().expect("sa sortie d'erreur");
+    let mut lignes = BufReader::new(erreurs).lines();
+    let annonce = lignes
+        .find_map(|ligne| {
+            let ligne = ligne.ok()?;
+            let apres = ligne.split("écoute sur ").nth(1)?;
+            apres.split(' ').next()?.parse::<SocketAddr>().ok()
+        })
+        .expect("le serveur annonce son adresse avant de servir");
+    let montrer = std::env::var_os("ASL_ESSAI_JOURNAL").is_some();
+    std::thread::spawn(move || {
+        for ligne in lignes.map_while(Result::ok) {
+            if montrer {
+                eprintln!("[{}] {ligne}", annonce.port());
+            }
+        }
+    });
+    (enfant, annonce)
+}
+
+/// Frappe une clé d'exploitant par `--new-operator-key`, et rend les deux
+/// chemins.
+fn cle_d_exploitant(quoi: &str) -> (PathBuf, PathBuf) {
+    let privee = std::env::temp_dir().join(format!("asl-bin-{}-{quoi}.op", std::process::id()));
+    let publique = privee.with_extension("op.pub");
+    let _ = std::fs::remove_file(&privee);
+    let _ = std::fs::remove_file(&publique);
+    let sortie = Command::new(env!("CARGO_BIN_EXE_asl-server"))
+        .arg("--new-operator-key")
+        .arg(&privee)
+        .output()
+        .expect("le binaire se lance");
+    assert!(
+        sortie.status.success(),
+        "la frappe a échoué : {}",
+        String::from_utf8_lossy(&sortie.stderr)
+    );
+    // **CE QU'IL IMPRIME EST UN MODE D'EMPLOI**, et il nomme les deux racines :
+    // une clé d'exploitant qui n'irait que sur l'une laisserait la moitié des
+    // invitations inconnues (`protocole.md` §2.2).
+    let dit = String::from_utf8_lossy(&sortie.stdout);
+    assert!(dit.contains("--operator-key"), "{dit}");
+    assert!(dit.contains("DEUX racines"), "{dit}");
+    // **PAS DE LIGNE `identifiant`**, que `--new-identity-key` imprime : un
+    // exploitant n'est pas une racine, et n'a pas de `n-…` à comparer à l'œil.
+    assert!(
+        !dit.contains("identifiant"),
+        "un exploitant n'a pas d'identifiant de racine : {dit}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let droits = std::fs::metadata(&privee).expect("là").permissions().mode() & 0o777;
+        assert_eq!(droits, 0o600, "la clé privée de l'exploitant est en 0600");
+    }
+    (privee, publique)
+}
+
+/// Lance `--invite` contre cet annuaire, et rend `(succès, stdout, stderr)`.
+fn inviter(annuaire: SocketAddr, autorite: &Path, secrete: &Path) -> (bool, String, String) {
+    let sortie = Command::new(env!("CARGO_BIN_EXE_asl-server"))
+        .arg("--invite")
+        .args(["--directory", &format!("localhost:{}", annuaire.port())])
+        .arg("--ca")
+        .arg(autorite.join("racine.crt"))
+        .arg("--operator-secret")
+        .arg(secrete)
+        .output()
+        .expect("le binaire se lance");
+    (
+        sortie.status.success(),
+        String::from_utf8_lossy(&sortie.stdout).trim().to_owned(),
+        String::from_utf8_lossy(&sortie.stderr).into_owned(),
+    )
+}
+
+#[tokio::test]
+async fn l_exploitant_emet_une_invitation_et_un_compte_s_ouvre_dessus() {
+    // **`protocole.md` §2.2, le geste d'émission de bout en bout.** La clé se
+    // frappe ici, sa publique va sur le banc, et `--invite` parle à un
+    // annuaire QUI TOURNE — rien n'est arrêté, aucun entrepôt n'est ouvert par
+    // l'outil. Le code rendu ouvre un compte, une fois, et une seule.
+    let (autorite, racine) = materiel("invite");
+    let base = std::env::temp_dir().join(format!("asl-bin-{}-invite.redb", std::process::id()));
+    let _ = std::fs::remove_file(&base);
+    let (secrete, publique) = cle_d_exploitant("invite");
+    let (mut serveur, adresse) = lancer_en_invitation(&autorite, &base, &publique);
+
+    // ── 1. L'exploitant émet ────────────────────────────────────────────────
+    let (succes, code, dit) = inviter(adresse, &autorite, &secrete);
+    assert!(succes, "l'émission doit aboutir : {dit}");
+    assert_eq!(code.len(), 11, "dix symboles et un tiret : {code}");
+    // **LE CODE EST SEUL SUR LA SORTIE STANDARD** — un `| pbcopy` ne doit rien
+    // copier d'autre —, et son échéance va sur la sortie d'erreur.
+    assert!(
+        !code.contains('\n'),
+        "le code est seul sur stdout : {code:?}"
+    );
+    assert!(dit.contains("valable jusqu'à"), "{dit}");
+    assert!(
+        dit.contains("ne sera pas réaffiché"),
+        "l'outil dit que le code ne revient pas : {dit}"
+    );
+    assert!(
+        !dit.contains(&code),
+        "le code ne se répète pas ailleurs : {dit}"
+    );
+
+    // ── 2. Ce code ouvre un compte, sous la plate-forme 3 ───────────────────
+    // L'annonce porte l'adresse d'écoute — la joker `[::]` —, et l'on ne se
+    // connecte pas à une joker : on vise la boucle locale sur ce port-là,
+    // comme les autres essais de ce fichier.
+    let vers = SocketAddr::from(([127, 0, 0, 1], adresse.port()));
+    let ouvrir = |code: String, graine: u8| {
+        let racine = racine.clone();
+        async move {
+            let mut client = client_vers(vers, &racine).await;
+            let defi = un_defi(&mut client, 0).await;
+            let liaison = liaison_du_client(&client);
+            let cle = asl_cle::CleSecreteAppareil::depuis_entropie([graine; 32])
+                .expect("un scalaire valide");
+            let preuve = cle.prouver_la_possession(&defi, &liaison);
+            let sans_tiret = code.replace('-', "");
+            let objet = asl_api::corps::CreationDeCompte {
+                plateforme: asl_api::corps::PlateformeAttestation::Invitation,
+                cle: &cle.publique().octets(),
+                preuve: preuve.octets(),
+                attestation: sans_tiret.as_bytes(),
+            };
+            let mut tampon = [0_u8; asl_api::corps::COMPTE_CORPS_MAX];
+            let n = objet.encoder(&mut tampon).expect("un corps bien formé");
+            ams_quic_client::envoyer_avec_media(
+                &mut client,
+                4,
+                20,
+                b"/v1/comptes",
+                None,
+                &tampon[..n],
+                b"application/octet-stream",
+            )
+            .await;
+            let corps = ams_quic_client::attendre_la_reponse(&mut client, 4).await;
+            (
+                statut(&client, 4),
+                String::from_utf8_lossy(&corps).into_owned(),
+            )
+        }
+    };
+
+    let (etat, corps) = ouvrir(code.clone(), 0x5C).await;
+    assert_eq!(etat, "201", "le compte s'ouvre sur l'invitation : {corps}");
+    assert!(corps.contains("\"compte\":\"u-"), "{corps}");
+
+    // ── 3. Le même code ne sert pas deux fois ───────────────────────────────
+    let (etat, _) = ouvrir(code, 0x6D).await;
+    assert_eq!(etat, "403", "un code consommé ne rouvre pas de compte");
+
+    eteindre(&mut serveur);
+    let _ = std::fs::remove_file(&base);
+    let _ = std::fs::remove_dir_all(&autorite);
+}
+
+#[tokio::test]
+async fn une_autre_cle_n_emet_rien_et_une_racine_sans_posture_non_plus() {
+    // Les deux refus que l'exploitant doit pouvoir distinguer sans rien lire
+    // d'autre : « ce n'est pas ma clé » et « cette racine n'invite pas ».
+    let (autorite, _racine) = materiel("invite-refus");
+    let base =
+        std::env::temp_dir().join(format!("asl-bin-{}-invite-refus.redb", std::process::id()));
+    let _ = std::fs::remove_file(&base);
+    let (_secrete, publique) = cle_d_exploitant("invite-refus");
+    let (imposteur, _) = cle_d_exploitant("invite-imposteur");
+
+    // ── Une clé qui n'est pas celle du réglage : `401` ──────────────────────
+    let (mut serveur, adresse) = lancer_en_invitation(&autorite, &base, &publique);
+    let (succes, code, dit) = inviter(adresse, &autorite, &imposteur);
+    assert!(!succes, "une autre clé n'émet pas");
+    assert!(code.is_empty(), "aucun code ne sort : {code:?}");
+    assert!(
+        dit.contains("la racine a refusé la signature"),
+        "le refus dit quoi faire : {dit}"
+    );
+    eteindre(&mut serveur);
+
+    // ── La même clé, mais une racine en `optional` : `404` ──────────────────
+    let base2 = std::env::temp_dir().join(format!(
+        "asl-bin-{}-invite-optional.redb",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&base2);
+    let (mut serveur, adresse) = lancer(&autorite, &base2);
+    let (succes, code, dit) = inviter(adresse, &autorite, &_secrete);
+    assert!(!succes, "une racine en `optional` n'émet pas d'invitations");
+    assert!(code.is_empty(), "aucun code ne sort : {code:?}");
+    assert!(
+        dit.contains("n'émet pas d'invitations"),
+        "le refus nomme la posture : {dit}"
+    );
+    eteindre(&mut serveur);
+
+    let _ = std::fs::remove_file(&base);
+    let _ = std::fs::remove_file(&base2);
+    let _ = std::fs::remove_dir_all(&autorite);
+}

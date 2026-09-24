@@ -1035,6 +1035,20 @@ l'exploitant dans le modèle par une porte dérobée. La preuve voyage donc dans
 le corps du verbe lui-même, comme celle de `POST /v1/attestation`, et le défi
 est dépensé qu'elle tienne ou non.
 
+**Qui parle ce verbe.** `asl-server --invite --directory <hôte:port> --ca
+<racine.crt> --operator-secret <fichier>`, et `asl-server --new-operator-key`
+frappe la paire (2026-09-24). **Le même binaire, et non `asl`** : `asl` est
+l'utilitaire d'une MACHINE — il s'enrôle, annonce, résout —, et émettre une
+invitation n'est aucun de ces gestes ; lui donner ce verbe aurait fait entrer
+l'exploitant dans la grammaire d'un daemon. Un binaire séparé, lui, aurait
+redemandé la même pile QUIC, la même racine épinglée et le même conducteur
+HTTP/3 que la voie entre racines porte déjà (`replication.md` §2.1) — deux
+clients à maintenir, dont le second aurait vieilli. `asl-server` avait déjà
+deux gestes qui ne servent pas (`--new-identity-key`, `--forget`) ; celui-ci
+est le troisième, et le seul qui parle à un annuaire EN MARCHE. **Il n'a rien
+à faire sur un banc** : c'est un exécutable autonome, qu'on copie là où vit la
+moitié privée de la clé.
+
 **Ce que cette clé ne donne pas.** Elle n'ouvre **que** cette ressource : elle
 ne lit aucun compte, n'en révoque aucun, n'efface rien. Ce qu'un exploitant
 peut faire de destructif, il le fait déjà hors ligne, service arrêté, et c'est
