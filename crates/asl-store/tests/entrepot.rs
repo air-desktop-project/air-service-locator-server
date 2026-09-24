@@ -3442,3 +3442,65 @@ fn une_invitation_s_emet_se_consomme_une_fois_et_ouvre_le_compte_en_une_transact
     assert!(base.compte(second).expect("lisible").is_none());
     let _ = std::fs::remove_file(&chemin);
 }
+
+#[test]
+fn l_ecrit_ne_compte_que_nos_ecritures_et_survit_au_redemarrage() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // `replication.md` §8 : `ecrit` est la dernière estampille que CETTE racine
+    // a écrite elle-même. Trois choses le distinguent de ses voisins, et l'une
+    // d'elles a déjà été dite de travers une fois dans le document :
+    //
+    // 1. **Ce n'est pas le compteur.** L'horloge de Lamport se hisse aussi sur
+    //    ce qu'on REÇOIT (§4) ; `ecrit` ne bouge que sur ce qu'on écrit. Une
+    //    racine qui ne fait que recevoir garde le sien immobile — c'est le cas
+    //    qu'`argon` a présenté le 2026-09-19, et qui a démenti §8.
+    // 2. **Ce n'est pas `derniere_operation`**, qui repart du compteur à chaque
+    //    ouverture et n'en est qu'un majorant.
+    // 3. **Il est rangé**, donc il vaut après un redémarrage ce qu'il valait
+    //    avant.
+    let (base, chemin) = entrepot("ecrit-et-redemarrage");
+    assert_eq!(base.ecrit().expect("lisible"), 0, "rien n'est encore écrit");
+
+    base.creer_compte(un(Genre::Utilisateur, 1), Provenance::Ici, None)
+        .expect("une écriture à nous");
+    base.creer_compte(un(Genre::Utilisateur, 2), Provenance::Ici, None)
+        .expect("une seconde");
+    assert_eq!(base.ecrit().expect("lisible"), 2);
+    assert_eq!(base.compteur().expect("lisible"), 2);
+
+    // Recevoir hisse l'horloge et laisse `ecrit` où il est.
+    base.hisser_le_compteur(100).expect("hissé");
+    assert_eq!(base.compteur().expect("lisible"), 100);
+    assert_eq!(
+        base.ecrit().expect("lisible"),
+        2,
+        "recevoir n'est pas écrire"
+    );
+
+    // Une écriture qui ne journalise rien ne le fait pas bouger non plus.
+    base.poser_curseur(un(Genre::Annuaire, 2), 50)
+        .expect("posé");
+    assert_eq!(base.ecrit().expect("lisible"), 2);
+
+    // Écrire de nouveau le hisse, au-dessus de l'horloge reçue.
+    base.creer_compte(un(Genre::Utilisateur, 3), Provenance::Ici, None)
+        .expect("une troisième");
+    assert_eq!(base.ecrit().expect("lisible"), 101);
+
+    // ── LE REDÉMARRAGE ──────────────────────────────────────────────────────
+    drop(base);
+    let rouverte = Entrepot::ouvrir(&chemin, racine()).expect("rouvrir");
+    assert_eq!(
+        rouverte.ecrit().expect("lisible"),
+        101,
+        "il est rangé, donc il survit"
+    );
+    assert_eq!(
+        rouverte.derniere_operation(),
+        rouverte.compteur().expect("lisible"),
+        "le majorant, lui, repart du compteur — c'est pourquoi `ecrit` existe"
+    );
+    drop(rouverte);
+    let _ = std::fs::remove_file(&chemin);
+}

@@ -625,6 +625,11 @@ pub struct VoieVersLePair {
 pub struct EtatDeLaReplication {
     /// Notre compteur.
     pub compteur: u64,
+    /// La dernière estampille que CETTE racine a écrite elle-même.
+    ///
+    /// **C'est ce que le pair compare à son curseur**, et c'est pour cela
+    /// qu'il est rendu : sans lui, `applique` ne se conclut pas (§8).
+    pub ecrit: u64,
     /// La voie, s'il y a un pair.
     pub voie: Option<VoieVersLePair>,
 }
@@ -2268,21 +2273,27 @@ fn rendre_la_version<'a>(
 
 /// Ce qu'un corps de `/v1/replication` peut faire, en octets.
 ///
-/// Un identifiant de racine tient sur vingt-huit caractères, deux compteurs sur
-/// vingt chacun, et le reste est du balisage : cent soixante suffisent avec de
+/// Un identifiant de racine tient sur vingt-huit caractères, TROIS compteurs sur
+/// vingt chacun, et le reste est du balisage : deux cents suffisent avec de
 /// la marge.
-const REPLICATION_CORPS_MAX: usize = 160;
+const REPLICATION_CORPS_MAX: usize = 200;
 
 /// Rend l'état de la voie entre racines (`replication.md` §8).
 ///
 /// # DEUX FORMES, ET LE MOT `voie` DIT LAQUELLE
 ///
-/// Avec un pair : `{"pair":"n-…","voie":"ouverte","compteur":4812,"applique":4790}`
+/// Avec un pair :
+/// `{"pair":"n-…","voie":"ouverte","compteur":4812,"ecrit":4801,"applique":4790}`
 /// — `voie` vaut `ouverte` ou `coupée`. Sans pair :
-/// `{"voie":"seule","compteur":4812}`, et **ni `pair` ni `applique`** : il n'y
-/// a personne dont on applique quoi que ce soit, et un champ nul aurait l'air
-/// d'une valeur. Un lecteur regarde `voie` d'abord ; les autres champs suivent
-/// de ce qu'il y lit.
+/// `{"voie":"seule","compteur":4812,"ecrit":4801}`, et **ni `pair` ni
+/// `applique`** : il n'y a personne dont on applique quoi que ce soit, et un
+/// champ nul aurait l'air d'une valeur. Un lecteur regarde `voie` d'abord ;
+/// les autres champs suivent de ce qu'il y lit.
+///
+/// **`ecrit` est rendu dans les DEUX formes**, lui, parce qu'une racine seule
+/// écrit comme une autre : c'est ce que son futur pair devra rattraper, et
+/// c'est déjà lisible avant qu'il existe. Il s'ajoute après `compteur` ; un
+/// client qui ne le lit pas ne remarque rien.
 ///
 /// **Sans échappement, et c'est sûr** : un identifiant est du base32, un
 /// compteur un nombre, et les trois mots sont à nous.
@@ -2300,6 +2311,8 @@ fn rendre_la_replication(etat: EtatDeLaReplication, sortie: &mut [u8]) -> Repons
             });
             corps.pousser(br#"","compteur":"#);
             corps.pousser_un_nombre(etat.compteur);
+            corps.pousser(br#","ecrit":"#);
+            corps.pousser_un_nombre(etat.ecrit);
             corps.pousser(br#","applique":"#);
             corps.pousser_un_nombre(voie.applique);
             corps.pousser(b"}");
@@ -2307,6 +2320,8 @@ fn rendre_la_replication(etat: EtatDeLaReplication, sortie: &mut [u8]) -> Repons
         None => {
             corps.pousser(br#"{"voie":"seule","compteur":"#);
             corps.pousser_un_nombre(etat.compteur);
+            corps.pousser(br#","ecrit":"#);
+            corps.pousser_un_nombre(etat.ecrit);
             corps.pousser(b"}");
         }
     }
@@ -5445,6 +5460,7 @@ mod creations {
             &Besoin::EtatDeLaReplication,
             &Trouvaille::Replication(EtatDeLaReplication {
                 compteur: 4812,
+                ecrit: 4801,
                 voie: Some(VoieVersLePair {
                     pair,
                     ouverte: true,
@@ -5456,7 +5472,7 @@ mod creations {
         assert_eq!(
             rendu,
             alloc::format!(
-                r#"{{"pair":"{}","voie":"ouverte","compteur":4812,"applique":4790}}"#,
+                r#"{{"pair":"{}","voie":"ouverte","compteur":4812,"ecrit":4801,"applique":4790}}"#,
                 pair.texte().as_str()
             )
             .into_bytes()
@@ -5467,6 +5483,7 @@ mod creations {
             &Besoin::EtatDeLaReplication,
             &Trouvaille::Replication(EtatDeLaReplication {
                 compteur: 4812,
+                ecrit: 0,
                 voie: Some(VoieVersLePair {
                     pair,
                     ouverte: false,
@@ -5477,7 +5494,7 @@ mod creations {
         assert_eq!(
             rendu,
             alloc::format!(
-                r#"{{"pair":"{}","voie":"coupée","compteur":4812,"applique":0}}"#,
+                r#"{{"pair":"{}","voie":"coupée","compteur":4812,"ecrit":0,"applique":0}}"#,
                 pair.texte().as_str()
             )
             .into_bytes()
@@ -5488,17 +5505,21 @@ mod creations {
             &Besoin::EtatDeLaReplication,
             &Trouvaille::Replication(EtatDeLaReplication {
                 compteur: 7,
+                // Une racine seule écrit comme une autre : `ecrit` est rendu,
+                // là où `applique` ne l'est pas.
+                ecrit: 5,
                 voie: None,
             }),
         );
         assert_eq!(statut, StatusCode::OK);
-        assert_eq!(rendu, br#"{"voie":"seule","compteur":7}"#);
+        assert_eq!(rendu, br#"{"voie":"seule","compteur":7,"ecrit":5}"#);
         // Et les plus grands compteurs tiennent dans la borne.
         let (_, rendu) = rendre(
             &mut session,
             &Besoin::EtatDeLaReplication,
             &Trouvaille::Replication(EtatDeLaReplication {
                 compteur: u64::MAX,
+                ecrit: u64::MAX,
                 voie: Some(VoieVersLePair {
                     pair,
                     ouverte: true,

@@ -2257,6 +2257,10 @@ async fn une_racine_seule_dit_qu_elle_est_seule_a_une_machine_et_a_personne_d_au
         },
     );
     let compteur = base.compteur().expect("lisible");
+    // **`ecrit` est rendu même seule**, et il vaut ce que cette racine a écrit
+    // elle-même — ici tout, puisqu'elle n'a rien reçu de personne.
+    let ecrit = base.ecrit().expect("lisible");
+    assert_eq!(ecrit, compteur, "seule, elle n'a reçu de personne");
     let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
 
     // Un inconnu : `401`.
@@ -2281,7 +2285,7 @@ async fn une_racine_seule_dit_qu_elle_est_seule_a_une_machine_et_a_personne_d_au
     );
     assert_eq!(
         rendu,
-        format!(r#"{{"voie":"seule","compteur":{compteur}}}"#).into_bytes()
+        format!(r#"{{"voie":"seule","compteur":{compteur},"ecrit":{ecrit}}}"#).into_bytes()
     );
 
     let _ = dire_stop.send(());

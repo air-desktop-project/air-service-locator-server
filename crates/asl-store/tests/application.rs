@@ -1389,3 +1389,68 @@ fn deux_comptes_sur_un_code_vivent_tous_les_deux() {
     );
     let _ = std::fs::remove_file(&chemin);
 }
+
+#[test]
+fn un_instantane_rend_nos_propres_estampilles_et_l_ecrit_les_compte() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // `replication.md` §5.4 : un instantané rend les estampilles d'origine, **y
+    // compris les nôtres** — c'est le seul chemin par lequel nos écritures nous
+    // reviennent quand notre journal ne les porte plus. Elles comptent donc pour
+    // `ecrit` (§8).
+    //
+    // Sans cela, une racine amorcée dirait n'avoir jamais rien écrit ; son pair,
+    // qui compare son curseur à ce nombre, conclurait qu'il lui manque quelque
+    // chose alors qu'il a tout — et l'exploitant chercherait une panne qui
+    // n'existe pas.
+    let (base, chemin) = entrepot("instantane-ecrit");
+    assert_eq!(base.ecrit().expect("lisible"), 0);
+
+    // Ce qui vient du pair ne compte pas pour nous, si haut soit-il.
+    let leur = est(pair(), 90);
+    appliquer(
+        &base,
+        leur,
+        Operation::Compte {
+            compte: un(Genre::Utilisateur, 90),
+            enregistrement: compte(leur, None),
+        },
+    );
+    assert_eq!(
+        base.ecrit().expect("lisible"),
+        0,
+        "l'écriture d'un autre n'est pas la nôtre"
+    );
+
+    // Une estampille À NOUS, revenue par l'instantané : elle compte.
+    let notre = est(locale(), 42);
+    appliquer(
+        &base,
+        notre,
+        Operation::Compte {
+            compte: un(Genre::Utilisateur, 42),
+            enregistrement: compte(notre, None),
+        },
+    );
+    assert_eq!(
+        base.ecrit().expect("lisible"),
+        42,
+        "nos écritures nous reviennent, et restent les nôtres"
+    );
+
+    // Une plus ancienne ne le fait pas reculer : c'est un `max`, et un
+    // instantané ne promet pas l'ordre.
+    let ancienne = est(locale(), 7);
+    appliquer(
+        &base,
+        ancienne,
+        Operation::Compte {
+            compte: un(Genre::Utilisateur, 7),
+            enregistrement: compte(ancienne, None),
+        },
+    );
+    assert_eq!(base.ecrit().expect("lisible"), 42, "il ne recule jamais");
+
+    drop(base);
+    let _ = std::fs::remove_file(&chemin);
+}

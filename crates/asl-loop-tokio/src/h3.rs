@@ -701,6 +701,10 @@ impl Service<'_> {
             Besoin::EtatDeLaReplication => match self.entrepot.compteur() {
                 Ok(compteur) => Trouvaille::Replication(EtatDeLaReplication {
                     compteur,
+                    // Rangé, donc juste après un redémarrage comme après un
+                    // amorçage — là où `derniere_operation` ne serait qu'un
+                    // majorant.
+                    ecrit: self.entrepot.ecrit().unwrap_or(0),
                     voie: self.pair_attendu.map(|pair| VoieVersLePair {
                         pair,
                         ouverte: self.voie.etat.is_some_and(EtatDeLaVoie::ouverte),

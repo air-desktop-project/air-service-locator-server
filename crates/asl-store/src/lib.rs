@@ -247,6 +247,25 @@ const CLEF_DU_COMPTEUR: &str = "compteur";
 /// La clé du dernier compteur dont l'opération a été retirée du journal.
 const CLEF_DES_RETIREES: &str = "operations-retirees-jusqu-a";
 
+/// La clé de la dernière estampille que CETTE racine a écrite elle-même.
+///
+/// # POURQUOI ELLE EST RANGÉE, ALORS QUE LE JOURNAL LA PORTE
+///
+/// Parce qu'il ne la porte pas toujours. Le journal s'expire à trente jours
+/// (§5.4), et un amorçage par instantané le laisse vide alors que nos
+/// écritures, elles, ont eu lieu — elles nous reviennent du pair sous nos
+/// propres estampilles. Un lecteur qui prendrait le maximum du journal
+/// sous-estimerait donc, et [`Entrepot::derniere_operation`] — qui part du
+/// compteur à l'ouverture — sur-estime. Entre les deux, il n'y avait pas de
+/// valeur juste ; celle-ci en est une, et elle survit au redémarrage parce
+/// qu'elle est écrite dans la même transaction que ce qu'elle compte.
+///
+/// **Ce n'est pas le compteur** ([`CLEF_DU_COMPTEUR`]) : l'horloge de Lamport
+/// se hisse aussi sur ce qu'on REÇOIT (§4), celle-ci ne bouge que sur ce qu'on
+/// ÉCRIT. C'est exactement la confusion que §8 a faite une première fois, et
+/// que le banc a démentie le 2026-09-21.
+const CLEF_DE_L_ECRIT: &str = "derniere-ecriture";
+
 /// Le format de cet entrepôt : le troisième, celui des dates.
 ///
 /// Le premier n'était pas numéroté — il n'y avait rien d'autre —, et c'est son
@@ -586,6 +605,20 @@ fn estampiller(ecriture: &WriteTransaction, racine: Identifiant) -> Result<Estam
     Ok(Estampille { compteur, racine })
 }
 
+/// Hisse la dernière estampille écrite par cette racine, dans CETTE écriture.
+///
+/// **Elle ne recule jamais** : un `max`, pas une affectation. Les écritures
+/// sont sérialisées par `redb`, mais un instantané rejoue nos anciennes
+/// estampilles dans un ordre quelconque, et la plus grande est la bonne.
+fn hisser_l_ecrit(ecriture: &WriteTransaction, compteur: u64) -> Result<(), Faute> {
+    let mut table = ecriture.open_table(RACINE)?;
+    let courant = table.get(CLEF_DE_L_ECRIT)?.map_or(0, |quoi| quoi.value());
+    if compteur > courant {
+        table.insert(CLEF_DE_L_ECRIT, compteur)?;
+    }
+    Ok(())
+}
+
 /// Ajoute cette opération au journal d'opérations, sous cette estampille.
 ///
 /// # SEULEMENT CE QUI EST DE PROVENANCE LOCALE
@@ -611,6 +644,11 @@ fn journaliser_l_operation(
     valeur.extend_from_slice(cadre.get(..combien).unwrap_or_default());
     let mut table = ecriture.open_table(OPERATIONS)?;
     table.insert(estampille.compteur, valeur.as_slice())?;
+    drop(table);
+    // **Dans la même transaction que l'opération**, et pas après le commit :
+    // une valeur posée ensuite se perdrait à la coupure de courant qui suit
+    // l'écriture, et dirait moins que ce que l'entrepôt porte.
+    hisser_l_ecrit(ecriture, estampille.compteur)?;
     Ok(Some(estampille))
 }
 
@@ -930,6 +968,33 @@ impl Entrepot {
             } else {
                 reestampiller(&ecriture, RACINE_SANS_IDENTITE, racine)?
             };
+            // **La dernière écriture, pour une base qui ne la portait pas.**
+            // Ce n'est pas une reprise de FORMAT — la clé s'ajoute à une table
+            // qui existe déjà, et son absence se lit « pas encore connue ».
+            // Elle se retrouve dans le journal, qui ne contient que nos
+            // écritures ; et jamais en dessous de ce qu'on en a retiré, une
+            // opération expirée ayant bien été écrite. Une base amorcée par
+            // instantané a un journal vide et rend zéro : c'est juste, tant
+            // qu'elle n'a rien écrit depuis, et l'instantané suivant la
+            // corrigera s'il rend nos anciennes estampilles.
+            {
+                let connu = {
+                    let table = ecriture.open_table(RACINE)?;
+                    table.get(CLEF_DE_L_ECRIT)?.map(|quoi| quoi.value())
+                };
+                if connu.is_none() {
+                    let retirees = {
+                        let table = ecriture.open_table(RACINE)?;
+                        table.get(CLEF_DES_RETIREES)?.map_or(0, |quoi| quoi.value())
+                    };
+                    let dernier = {
+                        let table = ecriture.open_table(OPERATIONS)?;
+                        table.last()?.map_or(0, |(clef, _)| clef.value())
+                    };
+                    let mut table = ecriture.open_table(RACINE)?;
+                    table.insert(CLEF_DE_L_ECRIT, dernier.max(retirees))?;
+                }
+            }
             ecriture.commit()?;
         }
         // Le compteur de la racine majore ce que le journal porte : un lecteur
@@ -966,6 +1031,26 @@ impl Entrepot {
     #[must_use]
     pub const fn dates_de_reprise(&self) -> usize {
         self.dates_de_reprise
+    }
+
+    /// La dernière estampille que CETTE racine a écrite elle-même.
+    ///
+    /// **C'est le nombre que l'autre racine compare à son curseur** (§8) : son
+    /// `applique` pour nous égale ce `ecrit`, et tout ce que nous avons écrit
+    /// est chez elle ; en dessous, il manque exactement la différence.
+    ///
+    /// Ni [`Entrepot::compteur`] — l'horloge, qui se hisse aussi sur ce qu'on
+    /// reçoit —, ni [`Entrepot::derniere_operation`] — un majorant en mémoire,
+    /// remis au compteur à chaque ouverture. Celui-ci est rangé, dans la
+    /// transaction qui écrit ce qu'il compte.
+    ///
+    /// # Errors
+    ///
+    /// Rend `Err` si l'entrepôt ne se lit pas.
+    pub fn ecrit(&self) -> Result<u64, Faute> {
+        let lecture = self.base.begin_read()?;
+        let table = lecture.open_table(RACINE)?;
+        Ok(table.get(CLEF_DE_L_ECRIT)?.map_or(0, |quoi| quoi.value()))
     }
 
     /// Le compteur de la dernière opération journalisée, sans transaction.
@@ -3318,6 +3403,18 @@ impl Entrepot {
                 // 5. Le compteur se hisse au-dessus de l'estampille appliquée
                 //    (§4).
                 hisser_dans(&ecriture, estampille.compteur)?;
+                // 5 bis. **Un instantané nous rend NOS PROPRES écritures**, sous
+                //    nos estampilles — c'est ce que dit le point 2 ci-dessus, et
+                //    c'est le seul chemin par lequel elles reviennent quand notre
+                //    journal ne les porte plus. Elles comptent donc pour
+                //    `derniere-ecriture` : sans cela, une racine amorcée dirait
+                //    n'avoir jamais rien écrit, et le pair qui compare son
+                //    curseur à ce nombre conclurait qu'il lui manque quelque
+                //    chose alors qu'il a tout. Hors instantané, le point 2 a
+                //    déjà refusé nos estampilles comme rejeu.
+                if estampille.racine == self.racine {
+                    hisser_l_ecrit(&ecriture, estampille.compteur)?;
+                }
                 // 6. Le curseur avance — mais pas pendant un instantané, où
                 //    c'est le cadre de fin qui le pose (à la coupe).
                 if !instantane {
@@ -5175,4 +5272,115 @@ fn reestampiller(
         journal.insert(*compteur, valeur.as_slice())?;
     }
     Ok(combien.saturating_add(bouges.len()))
+}
+
+#[cfg(test)]
+mod essais {
+    //! Ce qui ne s'éprouve pas du dehors : la reprise d'une base qui ne
+    //! portait pas encore la dernière écriture.
+    //!
+    //! Les essais de cette crate sont d'intégration, sur de vrais fichiers
+    //! (`tests/entrepot.rs`) — c'est la règle, et elle est bonne. Celui-ci
+    //! fait exception parce qu'il doit **retirer une clé** pour simuler une
+    //! base d'avant, et que cette clé est privée. L'exposer pour l'éprouver
+    //! serait élargir la surface publique au bénéfice d'un seul essai.
+
+    use redb::Database;
+
+    use super::{CLEF_DE_L_ECRIT, CLEF_DES_RETIREES, Entrepot, Identifiant, Provenance, RACINE};
+    use asl_id::Genre;
+
+    /// La racine de ces essais.
+    fn racine() -> Identifiant {
+        Identifiant::depuis_entropie(Genre::Annuaire, [0xEE; 16])
+    }
+
+    /// Un chemin à nous, effacé s'il traîne.
+    fn chemin(quoi: &str) -> std::path::PathBuf {
+        let ou = std::env::temp_dir().join(format!(
+            "asl-store-interne-{}-{quoi}.redb",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&ou);
+        ou
+    }
+
+    /// Retire la clé, comme une base écrite par une version qui l'ignorait.
+    fn oublier_l_ecrit(ou: &std::path::Path) {
+        let base = Database::open(ou).expect("ouvrable");
+        let ecriture = base.begin_write().expect("écrivable");
+        {
+            let mut table = ecriture.open_table(RACINE).expect("la table racine");
+            table.remove(CLEF_DE_L_ECRIT).expect("retirée");
+        }
+        ecriture.commit().expect("commis");
+    }
+
+    #[test]
+    fn une_base_sans_la_cle_la_retrouve_depuis_son_journal() {
+        let ou = chemin("ecrit-retrouve");
+        {
+            let base = Entrepot::ouvrir(&ou, racine()).expect("neuve");
+            for graine in 1..=3_u8 {
+                base.creer_compte(
+                    Identifiant::depuis_entropie(Genre::Utilisateur, [graine; 16]),
+                    Provenance::Ici,
+                    None,
+                )
+                .expect("écrite");
+            }
+            assert_eq!(base.ecrit().expect("lisible"), 3);
+        }
+        oublier_l_ecrit(&ou);
+
+        let reprise = Entrepot::ouvrir(&ou, racine()).expect("rouvrable");
+        assert_eq!(
+            reprise.ecrit().expect("lisible"),
+            3,
+            "le journal ne porte que nos écritures : son dernier compteur EST la valeur"
+        );
+        drop(reprise);
+        let _ = std::fs::remove_file(&ou);
+    }
+
+    #[test]
+    fn une_base_dont_le_journal_a_ete_expire_ne_sous_estime_pas() {
+        // **Une opération retirée avait bien été écrite.** Si l'on ne regardait
+        // que le journal, une racine dont la rétention a tout emporté dirait
+        // n'avoir jamais rien écrit, et son pair croirait qu'il lui manque
+        // quelque chose alors qu'il a tout.
+        let ou = chemin("ecrit-expire");
+        {
+            let base = Entrepot::ouvrir(&ou, racine()).expect("neuve");
+            base.creer_compte(
+                Identifiant::depuis_entropie(Genre::Utilisateur, [1; 16]),
+                Provenance::Ici,
+                None,
+            )
+            .expect("écrite");
+        }
+        // Le journal vidé, et la borne des retirées posée : l'état d'après une
+        // expiration (§5.4).
+        {
+            let base = Database::open(&ou).expect("ouvrable");
+            let ecriture = base.begin_write().expect("écrivable");
+            {
+                let mut table = ecriture.open_table(super::OPERATIONS).expect("journal");
+                table.retain(|_, _| false).expect("vidé");
+                let mut racines = ecriture.open_table(RACINE).expect("racine");
+                racines.insert(CLEF_DES_RETIREES, 1_u64).expect("borne");
+                racines.remove(CLEF_DE_L_ECRIT).expect("clé retirée");
+            }
+            ecriture.commit().expect("commis");
+        }
+
+        let reprise = Entrepot::ouvrir(&ou, racine()).expect("rouvrable");
+        assert_eq!(
+            reprise.ecrit().expect("lisible"),
+            1,
+            "ce qu'on a retiré du journal avait été écrit"
+        );
+        drop(reprise);
+        let _ = std::fs::remove_file(&ou);
+    }
 }
