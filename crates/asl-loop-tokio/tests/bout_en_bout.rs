@@ -166,6 +166,7 @@ async fn lever_avec_bail(
         asl_auth::Politique::AttestationFacultative,
         Attestations::AUCUNE,
         None,
+        ClesDeLExploitant::default(),
     )
     .await
 }
@@ -183,6 +184,26 @@ fn journaliser(ligne: &str) {
 
 /// La plus générale : on choisit la posture, les configurations
 /// d'attestation, et le délai de la règle des orphelins (`None` : jamais).
+/// Les clés que l'exploitant pose, pour un harnais qui en a besoin.
+///
+/// **Un seul paramètre plutôt que trois** : elles vont ensemble, et la plupart
+/// des essais n'en veulent aucune.
+#[derive(Default)]
+struct ClesDeLExploitant {
+    /// `--operator-key`, pour la posture `invitation`.
+    exploitant: Option<asl_cle::ClePublique>,
+    /// `--peer-key`, celle de l'autre racine.
+    pair: Option<asl_cle::ClePublique>,
+    /// `--identity-key`, la nôtre.
+    identite: Option<&'static asl_cle::CleSecrete>,
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "un harnais d'essai : chaque réglage est distinct, et les grouper \
+              dans une structure ajouterait une indirection sans rien rendre \
+              plus sûr"
+)]
 async fn lever_complet(
     chaine: &[u8],
     cle: &[u8],
@@ -191,6 +212,9 @@ async fn lever_complet(
     politique: asl_auth::Politique,
     attestations: Attestations<'static>,
     orphelins: Option<u64>,
+    // Ce que l'exploitant pose dans `/etc/asl-server/` : la clé d'invitation,
+    // celle du pair, la nôtre. `Default` pour un annuaire seul.
+    cles: ClesDeLExploitant,
 ) -> (
     SocketAddr,
     tokio::sync::oneshot::Sender<()>,
@@ -223,6 +247,9 @@ async fn lever_complet(
             bail,
             Voie {
                 journal: &journaliser,
+                exploitant: cles.exploitant,
+                pair: cles.pair,
+                identite: cles.identite,
                 ..Voie::AUCUNE
             },
         );
@@ -1431,6 +1458,7 @@ async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
         asl_auth::Politique::AttestationFacultative,
         Attestations { apple, android },
         None,
+        ClesDeLExploitant::default(),
     )
     .await;
     let mut client = connecter(&racine, adresse).await;
@@ -1448,10 +1476,13 @@ async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
             &case_reelle,
             "attestation refusée : Android, chaîne refusée",
         ),
+        // **SERVIE DEPUIS 0.14.0, MAIS PAS SOUS CETTE POSTURE-CI** : une
+        // racine en `optional` n'a pas de code à reconnaître
+        // (`protocole.md` §2.2).
         (
             PlateformeAttestation::Invitation,
             b"4K9M2P7R1T",
-            "attestation refusée : invitation, pas encore servie",
+            "invitation refusée : la posture de cette racine n'est pas",
         ),
     ];
     for (rang, (plateforme, attestation, cause)) in cas.into_iter().enumerate() {
@@ -1485,7 +1516,9 @@ async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
         let ligne = journal
             .iter()
             .rev()
-            .find(|ligne| ligne.starts_with("attestation refusée"))
+            .find(|ligne| {
+                ligne.starts_with("attestation refusée") || ligne.starts_with("invitation refusée")
+            })
             .cloned()
             .unwrap_or_default();
         assert!(ligne.starts_with(cause), "{plateforme:?} : « {ligne} »");
@@ -3316,6 +3349,7 @@ async fn un_compte_orphelin_est_efface_au_passage_et_pas_un_compte_vivant() {
         asl_auth::Politique::AttestationFacultative,
         Attestations::AUCUNE,
         Some(30 * jour),
+        ClesDeLExploitant::default(),
     )
     .await;
     assert_eq!(
@@ -3562,6 +3596,7 @@ async fn un_appareil_qui_rejoint_prouve_sa_cle_et_presente_sa_chaine_sous_une_po
         asl_auth::Politique::AttestationFacultative,
         attestations,
         None,
+        ClesDeLExploitant::default(),
     )
     .await;
 
@@ -3727,6 +3762,7 @@ async fn sous_une_posture_exigee_un_appareil_apporte_est_attendu_jusqu_a_sa_chai
         asl_auth::Politique::AttestationExigee,
         attestations,
         None,
+        ClesDeLExploitant::default(),
     )
     .await;
 
@@ -3808,6 +3844,251 @@ async fn sous_une_posture_exigee_un_appareil_apporte_est_attendu_jusqu_a_sa_chai
             "le journal dit le refus"
         );
     }
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn la_posture_invitation_de_bout_en_bout() {
+    // **`protocole.md` §2.2, la posture `invitation`.** L'exploitant émet un
+    // code sur l'annuaire EN MARCHE (`POST /v1/invitations`, signé de la clé
+    // de `--operator-key`) ; un appareil l'présente sous la plate-forme `3` et
+    // son compte s'ouvre, l'appareil entré sous `invitation`. Le même code ne
+    // sert pas deux fois, un code inconnu est refusé sans dire lequel des
+    // trois, et la limite de débit ferme la porte à qui martèle.
+    let (autorite, racine, chaine, cle) = materiel("posture-invitation");
+    let (base, fichier) = entrepot("posture-invitation");
+    let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
+
+    // La clé de l'exploitant : sa partie PRIVÉE ne vit que dans cet essai,
+    // comme elle ne vivrait que chez l'exploitant.
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
+    let publique = secrete.publique();
+
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        bail,
+        asl_auth::Politique::Invitation,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            exploitant: Some(publique),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+    let mut client = connecter(&racine, adresse).await;
+
+    // ── 1. L'exploitant émet, et lui seul ───────────────────────────────────
+    let defi = tirer_le_defi(&mut client, 0).await;
+    let liaison = liaison_du_client(&client);
+
+    // **UNE SIGNATURE QUI N'EST PAS LA SIENNE NE VAUT RIEN** : `401`, et le
+    // défi est dépensé — il faut en retirer un pour le vrai essai.
+    let imposteur = asl_cle::CleSecrete::depuis_entropie([0x11; 32]);
+    let mut corps = vec![b'o'];
+    corps.extend_from_slice(imposteur.signer_l_exploitant(&defi, &liaison).octets());
+    let (statut, _) = poster(
+        &mut client,
+        4,
+        b"/v1/invitations",
+        &corps,
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"401", "une autre clé n'émet pas d'invitation");
+
+    let defi = tirer_le_defi(&mut client, 8).await;
+    let mut corps = vec![b'o'];
+    corps.extend_from_slice(secrete.signer_l_exploitant(&defi, &liaison).octets());
+    let (statut, rendu) = poster(
+        &mut client,
+        12,
+        b"/v1/invitations",
+        &corps,
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"200", "l'exploitant émet");
+    let texte = String::from_utf8(rendu).expect("du JSON");
+    let code = texte
+        .split("\"code\":\"")
+        .nth(1)
+        .and_then(|reste| reste.split('"').next())
+        .expect("le code est rendu EN CLAIR, une fois")
+        .to_owned();
+    assert_eq!(code.len(), 11, "dix symboles et un tiret : {code}");
+
+    // ── 2. Un compte s'ouvre sur ce code ────────────────────────────────────
+    let ouvrir = |code: String, graine: u8, flux: u64| {
+        let racine = racine.clone();
+        async move {
+            let mut client = connecter(&racine, adresse).await;
+            let defi = tirer_le_defi(&mut client, flux).await;
+            let liaison = liaison_du_client(&client);
+            let secrete = asl_cle::CleSecreteAppareil::depuis_entropie([graine; 32])
+                .expect("un scalaire valide");
+            let preuve = secrete.prouver_la_possession(&defi, &liaison);
+            // Le code voyage SANS son tiret d'affichage : les deux formes se
+            // lisent (`asl_cle::CodeInvitation::analyser`).
+            let sans_tiret = code.replace('-', "");
+            let objet = CreationDeCompte {
+                plateforme: PlateformeAttestation::Invitation,
+                cle: &secrete.publique().octets(),
+                preuve: preuve.octets(),
+                attestation: sans_tiret.as_bytes(),
+            };
+            let mut tampon = [0_u8; asl_api::corps::COMPTE_CORPS_MAX];
+            let n = objet.encoder(&mut tampon).expect("un corps bien formé");
+            let (statut, rendu) = poster(
+                &mut client,
+                flux.saturating_add(4),
+                b"/v1/comptes",
+                &tampon[..n],
+                b"application/octet-stream",
+            )
+            .await;
+            (statut, rendu)
+        }
+    };
+
+    let (statut, rendu) = ouvrir(code.clone(), 0x5C, 0).await;
+    assert_eq!(statut, b"201", "le compte s'ouvre sur l'invitation");
+    let corps = String::from_utf8(rendu).expect("du JSON");
+    assert!(corps.contains("\"compte\":\"u-"), "{corps}");
+
+    // ── 3. Le même code ne sert pas deux fois ───────────────────────────────
+    let (statut, _) = ouvrir(code.clone(), 0x6C, 0).await;
+    assert_eq!(statut, b"403", "consommer, c'est supprimer");
+
+    // ── 4. Un code inconnu : le MÊME refus, et rien qui le distingue ────────
+    let (statut, _) = ouvrir("4K9M2-P7R1T".to_owned(), 0x7C, 0).await;
+    assert_eq!(
+        statut, b"403",
+        "un code inconnu et un code servi sont le même fait"
+    );
+
+    // ── 5. La limite de débit ferme la porte ────────────────────────────────
+    // Cinq échecs par minute et par adresse : les deux ci-dessus comptent,
+    // trois de plus épuisent la fenêtre, et le sixième rend `429`.
+    for essai in 0..3_u8 {
+        let (statut, _) = ouvrir("4K9M2-P7R1T".to_owned(), 0x80 + essai, 0).await;
+        assert_eq!(statut, b"403", "essai {essai} : encore dans la fenêtre");
+    }
+    let (statut, _) = ouvrir("4K9M2-P7R1T".to_owned(), 0x90, 0).await;
+    assert_eq!(
+        statut, b"429",
+        "cinq échecs par minute, puis la porte se ferme"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn la_racine_tiree_prouve_son_identite_sur_le_defi_du_tireur() {
+    // **`replication.md` §2.2, LE SECOND TEMPS, SERVI EN PROCESSUS.** Le
+    // tireur a prouvé sa clé (genre `n` sur `/v1/defi`) ; il pose maintenant
+    // un défi sur `/v1/pair/preuve`, et c'est la racine TIRÉE qui signe — sans
+    // quoi elle ne serait authentifiée que par son certificat, c'est-à-dire
+    // par l'autorité, qui n'est pas l'ancre.
+    //
+    // Ce chemin n'était éprouvé que par les essais qui lancent le BINAIRE
+    // (`asl-server/tests/binaire.rs`) : ce qu'un sous-processus exerce ne
+    // remonte pas dans la mesure de couverture, et le code de l'étage 2 qui
+    // lit ce défi et compose cette preuve n'était donc mesuré nulle part.
+    let (autorite, racine_tls, chaine, cle) = materiel("preuve-de-racine");
+    let (base, fichier) = entrepot("preuve-de-racine");
+    let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
+
+    // La nôtre — celle qui signera —, et celle du tireur, qu'on autorise.
+    let notre: &'static asl_cle::CleSecrete =
+        Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie([0xB1; 32])));
+    let tireur = asl_cle::CleSecrete::depuis_entropie([0xA2; 32]);
+
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        bail,
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            pair: Some(tireur.publique()),
+            identite: Some(notre),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+    let mut client = connecter(&racine_tls, adresse).await;
+
+    // ── 1. Le tireur prouve SA clé, genre `n` ───────────────────────────────
+    let defi = tirer_le_defi(&mut client, 0).await;
+    let liaison = liaison_du_client(&client);
+    let moi = asl_cle::identifiant_de_racine(&tireur.publique());
+    let signature = tireur
+        .signer(moi, &defi, &liaison)
+        .expect("la racine signe");
+    let mut corps = Vec::new();
+    corps.push(moi.genre().prefixe());
+    corps.extend_from_slice(moi.octets());
+    corps.extend_from_slice(signature.octets());
+    let (statut, _) = poster(
+        &mut client,
+        4,
+        b"/v1/defi",
+        &corps,
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"204", "le tireur prouve sa clé");
+
+    // ── 2. Il pose un défi, et la racine tirée signe ────────────────────────
+    let son_defi = [0x7A_u8; asl_cle::DEFI_OCTETS];
+    let (statut, rendu) = poster(
+        &mut client,
+        8,
+        b"/v1/pair/preuve",
+        &son_defi,
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"200", "la racine tirée prouve son identité");
+
+    // `n-… (17) ‖ signature (64)` — et la signature vérifie contre NOTRE clé,
+    // sur le défi que le tireur a posé et la liaison de CETTE connexion.
+    assert_eq!(rendu.len(), 17 + asl_cle::SIGNATURE_OCTETS);
+    assert_eq!(rendu[0], asl_id::Genre::Annuaire.prefixe());
+    let mut octets = [0_u8; asl_cle::SIGNATURE_OCTETS];
+    octets.copy_from_slice(&rendu[17..]);
+    assert!(
+        notre.publique().prouve_la_racine(
+            asl_cle::identifiant_de_racine(&notre.publique()),
+            &asl_cle::Defi::depuis_octets(son_defi),
+            &liaison,
+            &asl_cle::Signature::depuis_octets(octets),
+        ),
+        "la preuve rendue vérifie contre la clé d'identité de la racine tirée"
+    );
+
+    // ── 3. Un défi mal formé est un corps mal formé, pas un refus ───────────
+    let (statut, _) = poster(
+        &mut client,
+        12,
+        b"/v1/pair/preuve",
+        &son_defi[..31],
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"400", "trente-deux octets, et rien d'autre");
 
     let _ = dire_stop.send(());
     let _ = tache.await;

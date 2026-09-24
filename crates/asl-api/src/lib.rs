@@ -255,6 +255,26 @@ pub enum Ressource<'a> {
     /// et une queue variable pour le seul genre `a` ferait d'un corps fixe un
     /// corps qui l'est parfois.
     Attestation,
+    /// `/v1/invitations` — **l'exploitant émet un code d'invitation**
+    /// (`protocole.md` §2.2, 2026-09-24).
+    ///
+    /// # ELLE N'EXIGE RIEN, ET C'EST LE CORPS QUI PROUVE
+    ///
+    /// Comme [`Ressource::Attestation`] : la preuve voyage dans le corps —
+    /// `genre `o` ‖ signature`, soixante-cinq octets — et se vérifie contre la
+    /// clé de `--operator-key`. Elle ne passe pas par `POST /v1/defi`, dont le
+    /// corps exige un identifiant de dix-sept octets : **il n'existe pas de
+    /// `o-…`**, et il n'y a qu'une clé qui tienne ce rôle, celle du réglage.
+    /// Lui inventer un identifiant ferait entrer l'exploitant dans le modèle
+    /// par une porte dérobée.
+    ///
+    /// # ET SANS LE RÉGLAGE, ELLE N'EXISTE PAS
+    ///
+    /// L'étage 3 rend `404` sous toute autre posture que `invitation` — pas
+    /// `403` : une racine qui n'invite pas n'expose pas de porte close. C'est
+    /// la seule ressource dont l'existence dépend d'un réglage, et le routage
+    /// ne peut pas le savoir : il ne connaît que des chemins.
+    Invitations,
     /// `/v1/compte` — **effacer MON compte**, celui de la clé qui signe
     /// (`protocole.md` §2.2, « Effacer mon compte », 2026-09-18).
     ///
@@ -447,7 +467,9 @@ impl Ressource<'_> {
         match self {
             Self::Annonce => &[Methode::Post],
             Self::Defi => &[Methode::Get, Methode::Post],
-            Self::Comptes | Self::Attestation | Self::Enrolement => &[Methode::Post],
+            Self::Comptes | Self::Attestation | Self::Enrolement | Self::Invitations => {
+                &[Methode::Post]
+            }
             Self::Utilisateur { .. }
             | Self::MachinesUtilisateur { .. }
             | Self::Moi
@@ -513,6 +535,7 @@ impl Ressource<'_> {
             Self::Defi
             | Self::Comptes
             | Self::Attestation
+            | Self::Invitations
             | Self::Enrolement
             | Self::AliasResolu { .. }
             | Self::Vu
@@ -804,6 +827,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "defi"] => Ok(Ressource::Defi),
         ["v1", "comptes"] => Ok(Ressource::Comptes),
         ["v1", "attestation"] => Ok(Ressource::Attestation),
+        ["v1", "invitations"] => Ok(Ressource::Invitations),
         ["v1", "compte"] => Ok(Ressource::Compte),
         ["v1", "enrolement"] => Ok(Ressource::Enrolement),
         ["v1", "utilisateurs", compte] => Ok(Ressource::Utilisateur {

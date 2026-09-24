@@ -675,6 +675,14 @@ pub enum Politique {
     /// L'attestation n'est pas exigée. **N'importe qui crée un compte**, et le
     /// journal d'exploitation doit le dire au démarrage.
     AttestationFacultative,
+    /// L'entrée se fait sur **invitation** : un code que l'exploitant émet
+    /// (`protocole.md` §2.2, 2026-09-24). Pour une racine qui ne veut aucun
+    /// fabricant dans sa boucle — la caution est un humain, pas une enclave.
+    ///
+    /// **Un appareil qui n'a pas d'invitation n'entre pas**, quelle que soit
+    /// la chaîne qu'il présenterait : sous cette posture l'annuaire n'oppose
+    /// aucune racine de fabricant à une attestation, et ne la juge donc pas.
+    Invitation,
 }
 
 /// Cet appareil peut-il s'enrôler ?
@@ -688,7 +696,11 @@ pub enum Politique {
 pub const fn decider_attestation(atteste: bool, politique: Politique) -> Decision {
     match politique {
         Politique::AttestationFacultative => Decision::Servir,
-        Politique::AttestationExigee => {
+        // **`atteste` VAUT ICI « l'invitation a été consommée »**, et rien
+        // d'autre : sous cette posture, c'est l'étage 3 qui a cherché
+        // l'empreinte du code et l'a trouvée vivante. Une chaîne de fabricant
+        // n'y change rien — il n'y a aucune racine à lui opposer.
+        Politique::AttestationExigee | Politique::Invitation => {
             if atteste {
                 Decision::Servir
             } else {

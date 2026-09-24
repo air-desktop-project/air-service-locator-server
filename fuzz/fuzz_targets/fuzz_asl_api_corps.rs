@@ -285,11 +285,17 @@ fuzz_target!(|octets: &[u8]| {
                 "une plate-forme Aucune ne doit rien traîner : {} octets",
                 compte.attestation.len()
             ),
-            PlateformeAttestation::Apple
-            | PlateformeAttestation::Android
-            | PlateformeAttestation::Invitation => assert!(
+            PlateformeAttestation::Apple | PlateformeAttestation::Android => assert!(
                 !compte.attestation.is_empty(),
                 "une plate-forme déclarée sans attestation a été acceptée"
+            ),
+            // **L'INVITATION EST BORNÉE DES DEUX CÔTÉS** : c'est un code, et
+            // un code fait dix octets (`protocole.md` §2.2). Les deux autres
+            // portent une chaîne, dont la longueur n'est pas connue.
+            PlateformeAttestation::Invitation => assert_eq!(
+                compte.attestation.len(),
+                asl_api::corps::CODE_INVITATION_OCTETS,
+                "une invitation qui ne fait pas dix octets a été acceptée"
             ),
         }
 

@@ -1474,6 +1474,12 @@ pub enum Attestation {
     /// Apporté par un autre appareil du compte sous une posture exigée, et
     /// pas encore prouvé ni attesté par son porteur : il n'est pas entré.
     Attendue,
+    /// Entré sur un code que l'exploitant a émis, sous la posture du même nom
+    /// (`protocole.md` §2.2, 2026-09-24). **La caution est un humain, pas un
+    /// fabricant** : c'est ce qui la distingue d'`Apple` et d'`Android`, et
+    /// c'est pourquoi elle n'est pas « prouvée » au sens de
+    /// [`Attestation::prouvee`] — aucune chaîne n'a été jugée.
+    Invitation,
 }
 
 impl Attestation {
@@ -1485,6 +1491,8 @@ impl Attestation {
     const ANDROID: u8 = 3;
     /// L'étiquette d'« attendue ».
     const ATTENDUE: u8 = 4;
+    /// L'étiquette d'« invitation ».
+    const INVITATION: u8 = 5;
 
     /// Son étiquette rangée. **Aucune ne vaut zéro** — voir l'en-tête du type.
     ///
@@ -1497,6 +1505,7 @@ impl Attestation {
             Self::Apple => Self::APPLE,
             Self::Android => Self::ANDROID,
             Self::Attendue => Self::ATTENDUE,
+            Self::Invitation => Self::INVITATION,
         }
     }
 
@@ -1507,6 +1516,7 @@ impl Attestation {
             Self::APPLE => Ok(Self::Apple),
             Self::ANDROID => Ok(Self::Android),
             Self::ATTENDUE => Ok(Self::Attendue),
+            Self::INVITATION => Ok(Self::Invitation),
             lue => Err(Faute::Etiquette { lue }),
         }
     }
@@ -1516,9 +1526,16 @@ impl Attestation {
     /// `Aucune` et `Attendue` ne le sont pas, et c'est ce qui les rend
     /// remplaçables par `appareil-atteste` : une attestation ne va que vers
     /// une valeur prouvée, jamais en arrière (`docs/replication.md` §5.2).
+    ///
+    /// **`Invitation` n'est pas une chaîne jugée, et compte pourtant ici** :
+    /// l'appareil est ENTRÉ, sur la caution d'un humain que l'annuaire a
+    /// vérifiée à l'émission du code. La laisser hors de cette liste
+    /// permettrait à un `appareil-atteste` venu de l'autre racine d'écraser
+    /// « invitation » par « aucune » ou « android » — de réécrire sous quoi
+    /// un appareil est entré, ce que §5.2 interdit précisément.
     #[must_use]
     pub const fn prouvee(self) -> bool {
-        matches!(self, Self::Apple | Self::Android)
+        matches!(self, Self::Apple | Self::Android | Self::Invitation)
     }
 }
 
@@ -1971,6 +1988,75 @@ impl Enrolement {
             provenance,
             estampille,
             machine,
+            expire_a: u64::from_be_bytes(quand),
+        })
+    }
+}
+
+// ── L'invitation ────────────────────────────────────────────────────────────
+
+/// Ce qu'une invitation occupe.
+///
+/// **Pas d'identifiant, contrairement à [`ENROLEMENT_OCTETS`]** : un code
+/// d'enrôlement appartient à une machine, une invitation n'appartient à
+/// personne — elle ouvre l'entrée, et qui la franchira n'existe pas encore.
+pub const INVITATION_OCTETS: usize = PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + 8;
+
+/// Un code d'invitation émis et pas encore consommé (`protocole.md` §2.2).
+///
+/// # LE CODE N'EST PAS ICI, ET C'EST TOUT L'INTÉRÊT
+///
+/// Comme pour [`Enrolement`], cet enregistrement est rangé SOUS l'empreinte du
+/// code (`asl_cle::CodeInvitation::empreinte`) et ne la porte pas. Le code
+/// lui-même n'est écrit nulle part : il n'existe qu'une fois, dans la réponse
+/// au verbe qui l'a émis. Un exploitant qui le perd en émet un autre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Invitation {
+    /// D'où vient cet enregistrement.
+    pub provenance: Provenance,
+    /// L'émission du code.
+    pub estampille: Estampille,
+    /// Quand il cesse de valoir, en millisecondes d'époque.
+    ///
+    /// **Rangée, et non calculée à la lecture** — la raison d'[`Enrolement`],
+    /// mot pour mot : un code dont la validité dépendrait de la durée en
+    /// vigueur au moment où on le relit changerait de durée quand on change
+    /// le réglage, y compris pour les codes déjà en vol.
+    pub expire_a: u64,
+}
+
+impl Invitation {
+    /// Écrit cette invitation.
+    pub fn ecrire(&self, sortie: &mut [u8; INVITATION_OCTETS]) {
+        self.provenance
+            .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
+        let apres_estampille = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        self.estampille.ecrire(
+            sortie
+                .get_mut(PROVENANCE_OCTETS..apres_estampille)
+                .unwrap_or_default(),
+        );
+        poser(
+            sortie.get_mut(apres_estampille..).unwrap_or_default(),
+            &self.expire_a.to_be_bytes(),
+        );
+    }
+
+    /// Relit une invitation.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas une invitation.
+    pub fn lire(octets: &[u8; INVITATION_OCTETS]) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        let apres = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        let estampille =
+            Estampille::lire(octets.get(PROVENANCE_OCTETS..apres).unwrap_or_default())?;
+        let mut quand = [0_u8; 8];
+        poser(&mut quand, octets.get(apres..).unwrap_or_default());
+        Ok(Self {
+            provenance,
+            estampille,
             expire_a: u64::from_be_bytes(quand),
         })
     }
@@ -2576,6 +2662,26 @@ pub enum Operation {
         /// Qui l'a voulu.
         cause: Cause,
     },
+    /// Une invitation émise (`protocole.md` §2.2, décision 26). **Insérer si
+    /// absente.** Une invitation n'a pas de « plus récente » à départager :
+    /// chaque code est le sien, et deux codes émis coexistent — contrairement
+    /// au code d'enrôlement, qui appartient à UNE machine et remplace le
+    /// précédent.
+    Invitation {
+        /// L'empreinte du code.
+        empreinte: [u8; EMPREINTE_OCTETS],
+        /// L'enregistrement.
+        enregistrement: Invitation,
+    },
+    /// Une invitation consommée. **Toujours** : supprimer l'empreinte,
+    /// présente ou non — inconnue, la supprimer d'avance ferme la porte à une
+    /// opération d'émission qui arriverait en retard. Le compte créé en face
+    /// voyage par ses propres opérations (`compte`, `appareil`) : celle-ci ne
+    /// porte que la disparition du code.
+    InvitationConsommee {
+        /// L'empreinte du code consommé.
+        empreinte: [u8; EMPREINTE_OCTETS],
+    },
 }
 
 /// Le genre d'une opération, tel qu'il s'écrit en tête du cadre.
@@ -2586,7 +2692,8 @@ pub enum Operation {
 /// **Et aucun ne vaut quinze** : c'est [`ETIQUETTE_DE_FIN`], posée quand il
 /// n'y avait que quatorze genres. Le quinzième, `compte-efface`, a pris seize
 /// plutôt que de déplacer un cadre que les deux racines savaient déjà lire ;
-/// le seizième, `appareil-atteste`, dix-sept.
+/// le seizième, `appareil-atteste`, dix-sept ; puis `invitation` dix-huit et
+/// `invitation-consommee` dix-neuf (2026-09-24).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenreOperation {
     /// `compte`.
@@ -2621,12 +2728,16 @@ pub enum GenreOperation {
     CompteEfface,
     /// `appareil-atteste`.
     AppareilAtteste,
+    /// `invitation`.
+    Invitation,
+    /// `invitation-consommee`.
+    InvitationConsommee,
 }
 
 impl GenreOperation {
-    /// Les seize, dans l'ordre de `replication.md` §5.2 — et l'ordre de
-    /// leurs étiquettes, de 1 à 14, puis 16 et 17 (voir l'en-tête du type).
-    pub const TOUS: [Self; 16] = [
+    /// Les dix-huit, dans l'ordre de `replication.md` §5.2 — et l'ordre de
+    /// leurs étiquettes, de 1 à 14, puis 16 à 19 (voir l'en-tête du type).
+    pub const TOUS: [Self; 18] = [
         Self::Compte,
         Self::Alias,
         Self::Appareil,
@@ -2643,6 +2754,8 @@ impl GenreOperation {
         Self::AutorisationRevoquee,
         Self::CompteEfface,
         Self::AppareilAtteste,
+        Self::Invitation,
+        Self::InvitationConsommee,
     ];
 
     /// Son étiquette, en tête du cadre.
@@ -2665,6 +2778,8 @@ impl GenreOperation {
             Self::AutorisationRevoquee => 14,
             Self::CompteEfface => 16,
             Self::AppareilAtteste => 17,
+            Self::Invitation => 18,
+            Self::InvitationConsommee => 19,
         }
     }
 
@@ -2692,6 +2807,8 @@ impl GenreOperation {
             14 => Self::AutorisationRevoquee,
             16 => Self::CompteEfface,
             17 => Self::AppareilAtteste,
+            18 => Self::Invitation,
+            19 => Self::InvitationConsommee,
             lue => return Err(Faute::Etiquette { lue }),
         })
     }
@@ -2720,6 +2837,8 @@ impl GenreOperation {
             Self::CleMachineRevoquee => IDENTIFIANT_OCTETS + CLE_OCTETS,
             Self::Service => IDENTIFIANT_OCTETS + SERVICE_OCTETS,
             Self::Autorisation => IDENTIFIANT_OCTETS + AUTORISATION_OCTETS,
+            Self::Invitation => EMPREINTE_OCTETS + INVITATION_OCTETS,
+            Self::InvitationConsommee => EMPREINTE_OCTETS,
         }
     }
 
@@ -2756,6 +2875,8 @@ impl Operation {
             Self::Autorisation { .. } => GenreOperation::Autorisation,
             Self::AutorisationRevoquee { .. } => GenreOperation::AutorisationRevoquee,
             Self::CompteEfface { .. } => GenreOperation::CompteEfface,
+            Self::Invitation { .. } => GenreOperation::Invitation,
+            Self::InvitationConsommee { .. } => GenreOperation::InvitationConsommee,
         }
     }
 
@@ -2893,6 +3014,21 @@ impl Operation {
                     charge.get_mut(EMPREINTE_OCTETS..).unwrap_or_default(),
                     &octets,
                 );
+            }
+            Self::Invitation {
+                empreinte,
+                enregistrement,
+            } => {
+                poser(charge, empreinte);
+                let mut octets = [0_u8; INVITATION_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(EMPREINTE_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::InvitationConsommee { empreinte } => {
+                poser(charge, empreinte);
             }
             Self::CleMachine {
                 machine,
@@ -3098,6 +3234,21 @@ impl Operation {
                         charge.get(EMPREINTE_OCTETS..).unwrap_or_default(),
                     ))?,
                 }
+            }
+            GenreOperation::Invitation => {
+                let mut empreinte = [0_u8; EMPREINTE_OCTETS];
+                poser(&mut empreinte, charge);
+                Self::Invitation {
+                    empreinte,
+                    enregistrement: Invitation::lire(&copie(
+                        charge.get(EMPREINTE_OCTETS..).unwrap_or_default(),
+                    ))?,
+                }
+            }
+            GenreOperation::InvitationConsommee => {
+                let mut empreinte = [0_u8; EMPREINTE_OCTETS];
+                poser(&mut empreinte, charge);
+                Self::InvitationConsommee { empreinte }
             }
             GenreOperation::CleMachine => {
                 let mut cle = [0_u8; CLE_OCTETS];
@@ -5197,6 +5348,74 @@ mod tests {
         assert!(!Attestation::Attendue.prouvee());
         assert!(Attestation::Apple.prouvee());
         assert!(Attestation::Android.prouvee());
+        // **`Invitation` COMPTE ICI**, non qu'une chaîne ait été jugée, mais
+        // parce que l'appareil est ENTRÉ : un `appareil-atteste` venu de
+        // l'autre racine ne doit pas réécrire sous quoi il l'a fait.
+        assert!(Attestation::Invitation.prouvee());
+    }
+
+    #[test]
+    fn une_invitation_illisible_se_refuse_plutot_que_de_se_deviner() {
+        // **CHAQUE CHAMP PEUT REFUSER, ET LE REFUS REMONTE.** Une provenance
+        // qui ne désigne rien, une estampille dont la racine n'est pas un
+        // `n-…` : l'enregistrement ne se relit pas, et il ne se devine pas.
+        let bonne = super::Invitation {
+            provenance: Provenance::Ici,
+            estampille: e(3),
+            expire_a: 1_790_000_000_000,
+        };
+        let mut octets = [0_u8; super::INVITATION_OCTETS];
+        bonne.ecrire(&mut octets);
+        assert_eq!(super::Invitation::lire(&octets), Ok(bonne));
+
+        // La provenance est le premier octet : deux ne désigne rien — zéro est
+        // « ici », un est « ailleurs », et il n'y a pas de troisième.
+        let mut cassee = octets;
+        cassee[0] = 2;
+        assert_eq!(
+            super::Invitation::lire(&cassee),
+            Err(Faute::Etiquette { lue: 2 })
+        );
+
+        // L'estampille porte une racine : un genre qui n'est pas `n` refuse.
+        let mut cassee = octets;
+        cassee[PROVENANCE_OCTETS.saturating_add(8)] = Genre::Appareil.prefixe();
+        assert_eq!(
+            super::Invitation::lire(&cassee),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+
+        // Et le refus remonte à travers l'opération qui la porte.
+        let mut cadre = [0_u8; OPERATION_OCTETS_MAX];
+        let combien = Operation::Invitation {
+            empreinte: [0x1E; EMPREINTE_OCTETS],
+            enregistrement: bonne,
+        }
+        .ecrire(e(1), &mut cadre);
+        cadre[OPERATION_ENTETE_OCTETS.saturating_add(EMPREINTE_OCTETS)] = 2;
+        assert_eq!(
+            Operation::lire(&cadre[..combien]),
+            Err(Faute::Etiquette { lue: 2 })
+        );
+    }
+
+    #[test]
+    fn l_invitation_fait_l_aller_retour_de_son_etiquette() {
+        // La cinquième valeur (2026-09-24), un octet dans un champ qui
+        // existait : les bases d'avant se relisent telles quelles, et seul un
+        // binaire d'avant ne saurait pas la lire.
+        let appareil = un_appareil(Attestation::Invitation, None);
+        let mut octets = [0_u8; APPAREIL_OCTETS];
+        appareil.ecrire(&mut octets);
+        assert_eq!(
+            Appareil::lire(&octets).expect("il se relit").atteste,
+            Attestation::Invitation
+        );
+        let place =
+            PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS;
+        assert_eq!(octets[place], 5, "l'étiquette rangée de l'invitation");
     }
 
     #[test]
@@ -5212,14 +5431,15 @@ mod tests {
             PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + IDENTIFIANT_OCTETS + CLE_APPAREIL_OCTETS;
         octets[place] = 0;
         assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 0 }));
-        octets[place] = 5;
-        assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 5 }));
+        // Cinq est `invitation` depuis 0.14.0 ; six ne désigne toujours rien.
+        octets[place] = 6;
+        assert_eq!(Appareil::lire(&octets), Err(Faute::Etiquette { lue: 6 }));
     }
 
     // ── Les opérations ──────────────────────────────────────────────────────
 
     /// Une opération de chaque genre, dans l'ordre de `replication.md` §5.2.
-    fn une_de_chaque() -> [Operation; 16] {
+    fn une_de_chaque() -> [Operation; 18] {
         [
             Operation::Compte {
                 compte: un(Genre::Utilisateur, 1),
@@ -5291,6 +5511,17 @@ mod tests {
                 appareil: un(Genre::Appareil, 2),
                 atteste: Attestation::Android,
             },
+            Operation::Invitation {
+                empreinte: [0x1E; EMPREINTE_OCTETS],
+                enregistrement: super::Invitation {
+                    provenance: Provenance::Ici,
+                    estampille: e(7),
+                    expire_a: 1_790_000_000_000,
+                },
+            },
+            Operation::InvitationConsommee {
+                empreinte: [0x1F; EMPREINTE_OCTETS],
+            },
         ]
     }
 
@@ -5304,6 +5535,8 @@ mod tests {
             let attendue = match genre {
                 GenreOperation::CompteEfface => 16,
                 GenreOperation::AppareilAtteste => 17,
+                GenreOperation::Invitation => 18,
+                GenreOperation::InvitationConsommee => 19,
                 _ => rang + 1,
             };
             assert_eq!(
@@ -5397,9 +5630,10 @@ mod tests {
 
     #[test]
     fn un_genre_inconnu_est_refuse_zero_compris() {
-        // Quinze est le cadre de fin, dix-huit le premier au-delà du dernier
-        // genre : aucun des deux n'est une opération.
-        for lue in [0_u8, 15, 18, 200] {
+        // Quinze est le cadre de fin, vingt le premier au-delà du dernier
+        // genre (`invitation-consommee` tient dix-neuf) : aucun des deux
+        // n'est une opération.
+        for lue in [0_u8, 15, 20, 200] {
             let mut octets = [0_u8; OPERATION_OCTETS_MAX];
             octets[0] = lue;
             assert_eq!(Operation::lire(&octets), Err(Faute::Etiquette { lue }));

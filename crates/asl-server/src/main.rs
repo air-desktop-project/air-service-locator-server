@@ -138,6 +138,14 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map(|pair| identite::lire_publique(&pair.cle))
         .transpose()?;
+    // **LA CLÉ DE L'EXPLOITANT SE LIT ICI, COMME CELLE DU PAIR** : un fichier
+    // absent ou mal formé doit se dire avant d'avoir verrouillé une base. Sa
+    // partie PRIVÉE ne vient jamais sur le banc (`protocole.md` §2.2).
+    let cle_de_l_exploitant = reglages
+        .exploitant
+        .as_ref()
+        .map(|chemin| identite::lire_publique(chemin))
+        .transpose()?;
     // **SANS CLÉ, SEIZE ZÉROS — ET C'EST DIT AU DÉMARRAGE.** Une clé générée
     // en silence aurait été pire (§8) : une clé que personne n'a copiée nulle
     // part. `asl_store::RACINE_SANS_IDENTITE` dit le reste, et l'entrepôt
@@ -260,6 +268,13 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                 "asl-server : ATTENTION — l'attestation de plate-forme n'est pas exigée. \
                  N'IMPORTE QUI peut créer un compte sur cet annuaire."
             );
+        } else if reglages.politique == asl_auth::Politique::Invitation {
+            eprintln!(
+                "asl-server : posture `invitation` — personne n'ouvre de compte sans un code \
+                 que vous avez émis (POST /v1/invitations), et une invitation vit {} heure(s). \
+                 Aucun fabricant n'est dans la boucle.",
+                reglages.invitation_ttl_s.saturating_div(3_600),
+            );
         } else if reglages.apple.is_none() && reglages.android.is_none() {
             eprintln!(
                 "asl-server : l'attestation est exigée, mais aucune plate-forme n'est \
@@ -305,6 +320,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         let voie = Voie {
             identite: identite.as_ref(),
             pair: cle_du_pair,
+            exploitant: cle_de_l_exploitant,
             journal: &dire,
             etat: reglages.pair.as_ref().map(|_| etat_de_la_voie.as_ref()),
         };
@@ -322,6 +338,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(delai) = reglages.orphelins_ms() {
             application.effacer_les_orphelins_apres(delai);
         }
+        application.invitations_vivent(reglages.invitation_ttl_s.saturating_mul(1_000));
 
         // **LE TIREUR : LA CONNEXION SORTANTE** (`docs/replication.md` §2.1).
         // Quand `--peer` est réglé, une tâche ouvre une connexion vers le pair,

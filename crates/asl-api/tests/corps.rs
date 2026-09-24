@@ -2105,12 +2105,38 @@ mod compte {
                 .plateforme,
             PlateformeAttestation::Android
         );
+        // **DIX OCTETS POUR L'INVITATION** : c'est un code, et un code a une
+        // forme (`protocole.md` §2.2). Les deux autres portent une chaîne de
+        // certificats, dont la longueur n'est pas connue.
         assert_eq!(
-            CreationDeCompte::decoder(&corps(3, &[9]))
+            CreationDeCompte::decoder(&corps(3, b"4K9M2P7R1T"))
                 .unwrap()
                 .plateforme,
             PlateformeAttestation::Invitation
         );
+    }
+
+    #[test]
+    fn une_invitation_fait_exactement_dix_octets() {
+        // Trop court, trop long, absent : le corps est mal formé, et c'est un
+        // `400` — pas un refus d'autorisation. L'étage 3 ne doit jamais
+        // recevoir dix-neuf octets et en lire dix.
+        assert!(matches!(
+            CreationDeCompte::decoder(&corps(3, b"4K9M2")),
+            Err(Erreur::AttestationInattendue { obtenue: 5 })
+        ));
+        assert!(matches!(
+            CreationDeCompte::decoder(&corps(3, b"4K9M2P7R1TZ")),
+            Err(Erreur::AttestationInattendue { obtenue: 11 })
+        ));
+        assert!(matches!(
+            CreationDeCompte::decoder(&corps(3, &[])),
+            Err(Erreur::AttestationManquante)
+        ));
+        // Et les autres plates-formes ne sont pas bornées par cette règle :
+        // une chaîne d'un octet reste lisible, c'est l'étage 3 qui la juge.
+        assert!(CreationDeCompte::decoder(&corps(1, &[9])).is_ok());
+        assert!(CreationDeCompte::decoder(&corps(2, &[9])).is_ok());
     }
 
     #[test]

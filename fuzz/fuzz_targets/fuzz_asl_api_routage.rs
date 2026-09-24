@@ -71,6 +71,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Comptes => "/v1/comptes".to_owned(),
         Ressource::Compte => "/v1/compte".to_owned(),
         Ressource::Attestation => "/v1/attestation".to_owned(),
+        Ressource::Invitations => "/v1/invitations".to_owned(),
         Ressource::Enrolement => "/v1/enrolement".to_owned(),
         Ressource::Utilisateur { compte } => format!("/v1/utilisateurs/{compte}"),
         Ressource::MachinesUtilisateur { compte } => format!("/v1/utilisateurs/{compte}/machines"),
@@ -179,11 +180,13 @@ fuzz_target!(|entree: Entree| {
 
     // ── LA LISTE CLOSE DE CE QUI N'EXIGE RIEN ───────────────────────────────
     //
-    // Huit ressources, et chacune a sa raison écrite sur `Ressource::exigence`.
-    // **CETTE ASSERTION A DÉJÀ SERVI DEUX FOIS** : elle a arrêté
-    // `/v1/enrolement` le jour de son ajout, puis `/v1/attestation` le sien. Le verbe était légitime et sa liberté délibérée — mais
-    // c'est précisément le point : une ressource ne devient publique que si
-    // quelqu'un l'écrit ICI, jamais parce qu'un `_ =>` l'a laissée passer.
+    // Neuf ressources, et chacune a sa raison écrite sur `Ressource::exigence`.
+    // **CETTE ASSERTION A DÉJÀ SERVI TROIS FOIS** : elle a arrêté
+    // `/v1/enrolement` le jour de son ajout, puis `/v1/attestation` le sien,
+    // puis `/v1/invitations`. Le verbe était légitime et sa liberté délibérée
+    // — mais c'est précisément le point : une ressource ne devient publique
+    // que si quelqu'un l'écrit ICI, jamais parce qu'un `_ =>` l'a laissée
+    // passer.
     if resolu.exigence == Exigence::Aucune {
         assert!(
             matches!(
@@ -194,6 +197,7 @@ fuzz_target!(|entree: Entree| {
                     | Ressource::Comptes
                     | Ressource::Enrolement
                     | Ressource::Attestation
+                    | Ressource::Invitations
                     | Ressource::AliasResolu { .. }
                     | Ressource::Utilisateur { .. }
             ),

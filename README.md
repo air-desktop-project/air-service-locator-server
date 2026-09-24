@@ -290,7 +290,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.13.1_amd64.deb
+sudo dpkg -i asl-server_0.14.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
@@ -357,9 +357,9 @@ L'affectation est **citée en entier**, comme celle de la réplication, et pour
 la même raison. Vide, `$ASL_ANDROID` laisse la racine refuser les attestations
 Android en le disant au journal.
 
-**La posture `invitation`** (`docs/protocole.md` §2.2, spécifiée pour 0.13.1).
-Pour une racine qui ne veut aucun fabricant dans sa boucle : personne n'ouvre
-de compte sans un code que l'exploitant a émis.
+**La posture `invitation`** (`docs/protocole.md` §2.2, **servie depuis
+0.14.0**). Pour une racine qui ne veut aucun fabricant dans sa boucle :
+personne n'ouvre de compte sans un code que l'exploitant a émis.
 
 ```sh
 systemctl edit asl-server
@@ -381,6 +381,25 @@ systemctl edit asl-server
   le `.pub`, comme pour `--peer-key`.
 - **À poser sur les DEUX bancs**, la même : un code émis chez l'un se présente
   chez l'autre (l'alias tire au hasard), et les invitations se répliquent.
+- **Rien à reprendre au déploiement de 0.14.0.** La table des invitations
+  s'ajoute vide à l'ouverture, aucun enregistrement existant ne change de
+  taille ni de sens, et le format de l'entrepôt reste le troisième : la voie
+  ne se coupe pas, le journal d'opérations n'est pas vidé. Déployer les deux
+  bancs à la suite suffit. **N'en passez aucun en `invitation` tant que les
+  deux ne servent pas 0.14.0** : un banc d'avant ne saurait pas lire les
+  opérations `invitation` (18) et `invitation-consommee` (19), et fermerait
+  la voie en le disant — il ne saute rien.
+- **L'usage unique tient par racine, et à la seconde près entre les deux.**
+  Un même code présenté des deux côtés de la fenêtre de réplication ouvre
+  DEUX comptes, et l'annuaire ne les départage pas : il les laisse vivre et
+  dit au journal que le code a servi deux fois, avec les deux `u-…`. C'est
+  écrit dans la spécification (décision 26) — effacer automatiquement l'un
+  des deux serait une arme. Tranchez hors ligne si vous le voulez
+  (`--forget`).
+- **La limite de débit est en mémoire**, cinq échecs par minute et par
+  adresse, et **ne se réplique pas** : chaque banc compte les siens. Elle ne
+  survit pas à un redémarrage, et c'est voulu — ce n'est pas un état du
+  produit, c'est une garde du moment.
 
 **Les comptes qui s'effacent** (`docs/modele.md` §2.1, depuis 0.11.0). Un
 compte se ferme depuis un appareil, de la même main qui l'a ouvert

@@ -123,6 +123,25 @@ pub struct Reglages {
     /// titulaire ou `--forget`. **Les deux racines doivent porter la même
     /// valeur** (`replication.md` §8) : c'est une consigne de déploiement.
     pub orphelins_jours: u64,
+    /// La clé publique de l'exploitant (`--operator-key`) : ce contre quoi la
+    /// signature de `POST /v1/invitations` se vérifie (`protocole.md` §2.2).
+    ///
+    /// **Obligatoire sous la posture `invitation`, interdite nulle part** :
+    /// une racine qui exige une invitation sans pouvoir en émettre est une
+    /// racine où personne n'entre. Sous les autres postures, la ressource
+    /// n'existe pas et répond `404`.
+    ///
+    /// C'est la forme exacte de `--peer-key` : un fichier, trente-deux octets
+    /// bruts, une clé PUBLIQUE. La partie privée vit là où l'exploitant émet
+    /// ses invitations, jamais sur le banc.
+    pub exploitant: Option<PathBuf>,
+    /// Ce que vit une invitation (`--invitation-ttl`), en secondes.
+    ///
+    /// **Vingt-quatre heures par défaut, une semaine au plus** : une
+    /// invitation s'envoie à quelqu'un qui n'est pas devant vous, là où les
+    /// dix minutes d'un code d'enrôlement supposent l'humain devant ses deux
+    /// écrans.
+    pub invitation_ttl_s: u64,
 }
 
 /// Le geste `--forget` : effacer CE compte, hors ligne, et s'arrêter.
@@ -210,8 +229,15 @@ pub enum Faute {
     },
     /// Un réglage obligatoire qui manque.
     Manque(&'static str),
-    /// `--attestation` a reçu autre chose que `required` ou `optional`.
+    /// `--attestation` a reçu autre chose que `required`, `optional` ou
+    /// `invitation`.
     AttestationInconnue(String),
+    /// `--attestation invitation` sans `--operator-key`.
+    InvitationSansCle,
+    /// `--invitation-ttl 0` : une invitation qui ne vit pas n'invite personne.
+    InvitationTtlNul,
+    /// `--invitation-ttl` au-delà d'une semaine.
+    InvitationTtlTropLong(u64),
     /// `--apple-environment` a reçu autre chose que `production` ou
     /// `development`.
     EnvironnementInconnu(String),
@@ -255,7 +281,19 @@ impl core::fmt::Display for Faute {
             Self::AttestationInconnue(quoi) => {
                 write!(
                     sortie,
-                    "--attestation attend `required` ou `optional`, et non « {quoi} »"
+                    "--attestation attend `required`, `optional` ou `invitation`, et non « {quoi} »"
+                )
+            }
+            Self::InvitationSansCle => sortie.write_str(
+                "--attestation invitation exige --operator-key : une racine qui exige une \
+                 invitation sans pouvoir en émettre est une racine où personne n'entre",
+            ),
+            Self::InvitationTtlNul => sortie
+                .write_str("--invitation-ttl 0 : une invitation qui ne vit pas n'invite personne"),
+            Self::InvitationTtlTropLong(quoi) => {
+                write!(
+                    sortie,
+                    "--invitation-ttl {quoi} : une semaine au plus ({INVITATION_TTL_MAX_S} secondes)"
                 )
             }
             Self::PasUnNombre { drapeau, donnee } => {
@@ -304,6 +342,13 @@ impl core::fmt::Display for Faute {
 
 impl std::error::Error for Faute {}
 
+/// Ce que vit une invitation par défaut : vingt-quatre heures
+/// (`protocole.md` §2.2).
+pub const INVITATION_TTL_DEFAUT_S: u64 = 24 * 60 * 60;
+
+/// Ce qu'une invitation peut vivre au plus : une semaine.
+pub const INVITATION_TTL_MAX_S: u64 = 7 * 24 * 60 * 60;
+
 /// Ce qu'on affiche quand on ne sait pas quoi faire.
 pub const USAGE: &str = "\
 asl-server — an air-service-locator service directory.
@@ -316,7 +361,7 @@ asl-server — an air-service-locator service directory.
   --idle         <seconds>  the idle timeout announced to peers  (default: 30)
   --keepalive    <seconds>  the keepalive cadence requested      (default: 10)
   --retention    <days>     the journal retention                (default: 90)
-  --attestation  <required|optional>                             (required)
+  --attestation  <required|optional|invitation>                  (required)
   --apple-app    <id>       the Apple app identifier             (with the env.)
   --apple-environment <production|development>                   (with the app)
   --android-roots <path>    a PEM file of pinned Android attestation roots;
@@ -327,6 +372,11 @@ asl-server — an air-service-locator service directory.
   --peer         <host:port> the other root                      (with --peer-key)
   --peer-key     <path>     the other root's public identity key, 32 raw bytes
   --peer-ca      <path>     the CA that validates the peer's TLS cert, PEM
+  --operator-key <path>     the operator's public Ed25519 key, 32 raw bytes;
+                            its signature opens POST /v1/invitations
+                            (REQUIRED with `--attestation invitation`)
+  --invitation-ttl <seconds> how long an invitation code lives
+                            (default: 86400, one day; one week at most)
   --orphans      <days>     erase an account once ALL its devices have been
                             revoked for that many days; 0 = never (default: 30)
   --new-identity-key <path> write a new identity key there (0600), print the
@@ -344,6 +394,12 @@ device enrollment unless the matching platform is configured — `--apple-app` a
 and `--android-signer` together for the Android key attestation —, and
 `optional` lets anyone create an account. Neither can be chosen on your behalf.
 No third party is ever called: the Android roots are files you pin.
+
+`invitation` is the third posture, for a root that wants no manufacturer in its
+loop at all: nobody opens an account without a code the operator issued through
+`POST /v1/invitations`, signed by the key of `--operator-key`. The operator's
+PRIVATE key never goes on the bench. Both roots must carry the SAME public key:
+invitations replicate, and the alias hands out a root at random.
 
 The socket is DUAL-STACK: IPv6 first, IPv4 accepted on the same socket.
 The directory REFUSES to start as root — it needs no privilege at all.
@@ -415,6 +471,8 @@ impl Reglages {
         let mut pair_adresse: Option<String> = None;
         let mut pair_cle: Option<PathBuf> = None;
         let mut pair_ca: Option<PathBuf> = None;
+        let mut exploitant: Option<PathBuf> = None;
+        let mut invitation_ttl_s = INVITATION_TTL_DEFAUT_S;
 
         let mut arguments = arguments.into_iter();
         while let Some(drapeau) = arguments.next() {
@@ -440,6 +498,7 @@ impl Reglages {
                     politique = Some(match donnee.as_ref() {
                         "required" => asl_auth::Politique::AttestationExigee,
                         "optional" => asl_auth::Politique::AttestationFacultative,
+                        "invitation" => asl_auth::Politique::Invitation,
                         autre => return Err(Faute::AttestationInconnue(autre.to_owned())),
                     });
                 }
@@ -460,6 +519,8 @@ impl Reglages {
                 "--peer" => pair_adresse = Some(adresse_de_pair(valeur()?.as_ref())?),
                 "--peer-key" => pair_cle = Some(PathBuf::from(valeur()?.as_ref())),
                 "--peer-ca" => pair_ca = Some(PathBuf::from(valeur()?.as_ref())),
+                "--operator-key" => exploitant = Some(PathBuf::from(valeur()?.as_ref())),
+                "--invitation-ttl" => invitation_ttl_s = nombre(drapeau, valeur()?.as_ref())?,
                 autre => {
                     return Err(match ancien(autre) {
                         Some((ancien, nouveau)) => Faute::Ancien { ancien, nouveau },
@@ -522,6 +583,26 @@ impl Reglages {
             },
             identite,
             orphelins_jours,
+            // **LA POSTURE `invitation` EXIGE LA CLÉ** (`protocole.md` §2.2) :
+            // sans elle, aucun code ne peut être émis, et une racine où
+            // personne n'entre n'est pas une racine — c'est la règle
+            // d'`--attestation` sans valeur, appliquée un cran plus loin. Un
+            // service voué à échouer ne démarre pas.
+            exploitant: match (politique, exploitant) {
+                (Some(asl_auth::Politique::Invitation), None) => {
+                    return Err(Faute::InvitationSansCle);
+                }
+                (_, donnee) => donnee,
+            },
+            // **UNE SEMAINE AU PLUS**, et le refus est net : un plafond qu'on
+            // dépasserait en silence ne serait pas un plafond.
+            invitation_ttl_s: match invitation_ttl_s {
+                0 => return Err(Faute::InvitationTtlNul),
+                trop if trop > INVITATION_TTL_MAX_S => {
+                    return Err(Faute::InvitationTtlTropLong(trop));
+                }
+                bon => bon,
+            },
         })
     }
 

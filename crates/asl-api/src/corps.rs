@@ -66,6 +66,19 @@ pub const PREUVE_APPAREIL_OCTETS: usize = 64;
 /// la preuve. L'attestation, variable, vient après.
 pub const COMPTE_PREFIXE_OCTETS: usize = 1 + CLE_APPAREIL_OCTETS + PREUVE_APPAREIL_OCTETS;
 
+/// Ce qu'un code d'invitation occupe dans la case d'attestation : dix
+/// symboles, la forme de `asl_cle::CODE_SYMBOLES` (`protocole.md` §2.2).
+pub const CODE_INVITATION_OCTETS: usize = 10;
+
+/// Le corps de `POST /v1/invitations` : le genre, puis la signature Ed25519
+/// de l'exploitant. Soixante-cinq octets, **sans identifiant** — il n'existe
+/// pas de `o-…` (`protocole.md` §2.1 bis).
+pub const INVITATION_CORPS_OCTETS: usize = 1 + 64;
+
+/// Le genre que porte la preuve d'un exploitant. Égal à
+/// `asl_cle::GENRE_EXPLOITANT`.
+pub const GENRE_EXPLOITANT: u8 = b'o';
+
 /// Ce qu'une attestation peut faire, au plus.
 ///
 /// # POURQUOI 8 Kio, ET NON LA BORNE D'`asl-attest`
@@ -211,6 +224,18 @@ impl<'a> CreationDeCompte<'a> {
         if plateforme.attend_une_attestation() {
             if attestation.is_empty() {
                 return Err(Erreur::AttestationManquante);
+            }
+            // **UNE INVITATION FAIT DIX OCTETS, NI PLUS NI MOINS**
+            // (`protocole.md` §2.2). Les deux autres plates-formes portent une
+            // chaîne de certificats, dont la longueur n'est pas connue ;
+            // celle-ci porte un code, et un code a une forme. La refuser ici
+            // évite que l'étage 3 reçoive dix-neuf octets et en lise dix.
+            if matches!(plateforme, PlateformeAttestation::Invitation)
+                && attestation.len() != CODE_INVITATION_OCTETS
+            {
+                return Err(Erreur::AttestationInattendue {
+                    obtenue: attestation.len(),
+                });
             }
         } else if !attestation.is_empty() {
             return Err(Erreur::AttestationInattendue {

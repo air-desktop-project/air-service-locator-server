@@ -522,6 +522,66 @@ pub fn identifiant_de_racine(cle: &ClePublique) -> Identifiant {
 /// penser.
 pub const DOMAINE_PREUVE_DE_RACINE: &[u8] = b"air-service-locator/v1/preuve-de-racine\x00";
 
+/// Le séparateur de domaine de la preuve d'un **exploitant** — celui qui émet
+/// une invitation (`protocole.md` §2.2).
+///
+/// # POURQUOI UN QUATRIÈME DOMAINE, ET NON [`DOMAINE`] AVEC LE GENRE `o`
+///
+/// La même raison qu'au-dessus, et une de plus. [`DOMAINE`] prouve « je suis
+/// cette machine-ci », et son message NOMME la machine : seize octets
+/// d'identifiant entre le genre et le défi. Un exploitant n'a pas
+/// d'identifiant — il n'y a qu'une clé qui satisfasse ce rôle, celle de
+/// `--operator-key`, et lui en inventer un le ferait entrer dans le modèle
+/// par une porte dérobée. Son message est donc plus court, et **deux messages
+/// de longueurs différentes sous un même domaine sont exactement ce qu'un
+/// domaine sert à éviter** : que les octets de l'un se lisent comme ceux de
+/// l'autre.
+pub const DOMAINE_EXPLOITANT: &[u8] = b"air-service-locator/v1/exploitant\x00";
+
+/// Le genre que porte la preuve d'un exploitant, en tête de son corps.
+///
+/// **Ce n'est pas un genre d'identifiant** ([`asl_id::Genre`]) : il n'existe
+/// pas de `o-…`, et il n'en existera pas. C'est l'octet qui dit de quoi ce
+/// corps parle, là où les autres verbes le déduisent de l'identifiant qu'ils
+/// portent.
+pub const GENRE_EXPLOITANT: u8 = b'o';
+
+/// La taille du message que signe un exploitant.
+///
+/// La forme de [`MESSAGE_OCTETS`] **sans les seize octets d'identifiant** : le
+/// domaine, le genre, le défi, la liaison.
+pub const MESSAGE_EXPLOITANT_OCTETS: usize =
+    DOMAINE_EXPLOITANT.len() + 1 + DEFI_OCTETS + LIAISON_OCTETS;
+
+/// Compose le message que signe l'exploitant pour émettre une invitation.
+///
+/// Le défi est celui que `GET /v1/defi` a rendu sur cette connexion, et la
+/// liaison celle de cette connexion : sans elle, une signature obtenue
+/// ailleurs vaudrait ici.
+#[must_use]
+pub fn message_d_exploitant(
+    defi: &Defi,
+    liaison: &LiaisonDeCanal,
+) -> [u8; MESSAGE_EXPLOITANT_OCTETS] {
+    const _: () = assert!(
+        MESSAGE_EXPLOITANT_OCTETS == DOMAINE_EXPLOITANT.len() + 1 + DEFI_OCTETS + LIAISON_OCTETS,
+        "la taille du message d'exploitant ne correspond plus à la somme de ses champs"
+    );
+
+    let genre = [GENRE_EXPLOITANT];
+    let source = DOMAINE_EXPLOITANT
+        .iter()
+        .chain(genre.iter())
+        .chain(defi.octets().iter())
+        .chain(liaison.octets().iter());
+
+    let mut message = [0_u8; MESSAGE_EXPLOITANT_OCTETS];
+    for (place, octet) in message.iter_mut().zip(source) {
+        *place = *octet;
+    }
+    message
+}
+
 /// La taille du message d'une preuve de racine.
 ///
 /// La même forme que [`MESSAGE_OCTETS`] : le domaine, le genre, l'identifiant,
@@ -585,6 +645,26 @@ impl ClePublique {
             return false;
         }
         let message = message_de_preuve_de_racine(racine, defi, liaison);
+        let signature = SignatureDalek::from_bytes(signature.octets());
+        self.0.verify(&message, &signature).is_ok()
+    }
+
+    /// Cette clé est-elle celle de l'exploitant, et a-t-elle signé CE défi sur
+    /// CETTE connexion ? (`protocole.md` §2.2.)
+    ///
+    /// **Aucun identifiant à comparer**, contrairement à
+    /// [`ClePublique::prouve_la_racine`] : il n'existe pas de `o-…`, et il n'y
+    /// a qu'une clé qui tienne ce rôle — celle que `--operator-key` déclare,
+    /// c'est-à-dire celle-ci. La composition du message vit ici, comme toutes
+    /// les autres, pour que les deux camps dérivent identiquement.
+    #[must_use]
+    pub fn prouve_l_exploitant(
+        &self,
+        defi: &Defi,
+        liaison: &LiaisonDeCanal,
+        signature: &Signature,
+    ) -> bool {
+        let message = message_d_exploitant(defi, liaison);
         let signature = SignatureDalek::from_bytes(signature.octets());
         self.0.verify(&message, &signature).is_ok()
     }
@@ -672,6 +752,23 @@ impl CleSecrete {
         let message = message_de_preuve_de_racine(racine, defi, liaison);
         (racine, Signature(self.0.sign(&message).to_bytes()))
     }
+
+    /// Signe l'émission d'une invitation (`protocole.md` §2.2).
+    ///
+    /// **C'est la clé de l'EXPLOITANT qui appelle ceci** — celle dont
+    /// `--operator-key` porte la partie publique sur le banc, et dont la
+    /// partie privée reste là où l'on émet. Rien n'est rendu qu'une
+    /// signature : il n'y a pas d'identifiant à composer, puisqu'il n'existe
+    /// pas de `o-…`.
+    ///
+    /// Elle vit ici, avec sa vérification, pour la raison de tout ce module :
+    /// **les deux camps doivent dériver identiquement**, et deux copies de la
+    /// composition finiraient par diverger.
+    #[must_use]
+    pub fn signer_l_exploitant(&self, defi: &Defi, liaison: &LiaisonDeCanal) -> Signature {
+        let message = message_d_exploitant(defi, liaison);
+        Signature(self.0.sign(&message).to_bytes())
+    }
 }
 
 // ── Le code d'enrôlement ────────────────────────────────────────────────────
@@ -709,6 +806,20 @@ pub const EMPREINTE_OCTETS: usize = 32;
 
 /// Le séparateur de domaine de l'empreinte d'un code.
 const DOMAINE_CODE: &[u8] = b"air-service-locator/v1/code-d-enrolement\x00";
+
+/// Le séparateur de domaine de l'empreinte d'un code d'INVITATION.
+///
+/// # POURQUOI UN SECOND DOMAINE, POUR LA MÊME FORME DE CODE
+///
+/// Les deux codes ont la même forme — dix symboles de Crockford, parce qu'un
+/// humain les recopie dans les mêmes conditions — et n'ouvrent pas la même
+/// porte : l'un lie une clé à une machine déjà déclarée, l'autre ouvre
+/// l'entrée du service (`protocole.md` §2.2). Deux tables les rangent, et
+/// aucune recherche ne peut donc les confondre ; ce domaine-ci ferme le cas
+/// qui reste — que les mêmes dix symboles, tirés deux fois par hasard,
+/// donnent la même empreinte dans deux registres qui ne parlent pas de la
+/// même chose. C'est la règle de [`DOMAINE`], appliquée là aussi.
+const DOMAINE_INVITATION: &[u8] = b"air-service-locator/v1/code-d-invitation\x00";
 
 /// Combien de temps un code vaut, en secondes.
 ///
@@ -876,6 +987,70 @@ impl CodeEnrolement {
         let mut condensat = sha2::Sha256::new();
         condensat.update(DOMAINE_CODE);
         condensat.update(self.symboles);
+        let mut octets = [0_u8; EMPREINTE_OCTETS];
+        octets.copy_from_slice(&condensat.finalize());
+        octets
+    }
+}
+
+/// Le code court qu'un exploitant émet pour qu'un compte s'ouvre.
+///
+/// # LA MÊME FORME QU'UN CODE D'ENRÔLEMENT, ET PAS LE MÊME RÔLE
+///
+/// Dix symboles, usage unique, empreinte seule sur le disque : un humain le
+/// recopie dans les mêmes conditions, et rien ne justifierait de lui donner
+/// une autre forme. Mais il n'ouvre pas la même porte — un code d'enrôlement
+/// lie une clé à une machine DÉJÀ déclarée par un compte, celui-ci ouvre
+/// l'entrée du service (`protocole.md` §2.2). C'est un type à part pour que
+/// rien ne les échange par inadvertance, et son empreinte a son domaine
+/// ([`DOMAINE_INVITATION`]).
+///
+/// Il vit vingt-quatre heures et non dix minutes : il s'envoie à quelqu'un qui
+/// n'est pas devant vous.
+#[derive(Debug, Clone, Copy)]
+pub struct CodeInvitation(CodeEnrolement);
+
+impl CodeInvitation {
+    /// Fabrique un code à partir de huit octets d'entropie.
+    ///
+    /// L'aléa vient de l'appelant, comme pour [`CodeEnrolement`].
+    #[must_use]
+    pub fn depuis_entropie(entropie: [u8; 8]) -> Self {
+        Self(CodeEnrolement::depuis_entropie(entropie))
+    }
+
+    /// Lit un code tapé par un humain.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Faute::CodeLongueur`], [`Faute::CodeSymboleInvalide`].
+    pub fn analyser(texte: &str) -> Result<Self, Faute> {
+        Ok(Self(CodeEnrolement::analyser(texte)?))
+    }
+
+    /// Le texte canonique, en majuscules.
+    #[must_use]
+    pub fn texte(&self) -> &str {
+        self.0.texte()
+    }
+
+    /// Le texte groupé pour l'œil : `XXXXX-XXXXX`.
+    #[must_use]
+    pub fn texte_groupe(&self) -> TexteCode {
+        self.0.texte_groupe()
+    }
+
+    /// L'empreinte sous laquelle l'annuaire range ce code.
+    ///
+    /// SHA-256 du domaine des invitations, puis des symboles canoniques —
+    /// **jamais celui d'un code d'enrôlement**, quand bien même les dix
+    /// symboles seraient les mêmes.
+    #[must_use]
+    pub fn empreinte(&self) -> [u8; EMPREINTE_OCTETS] {
+        use sha2::Digest as _;
+        let mut condensat = sha2::Sha256::new();
+        condensat.update(DOMAINE_INVITATION);
+        condensat.update(self.0.texte().as_bytes());
         let mut octets = [0_u8; EMPREINTE_OCTETS];
         octets.copy_from_slice(&condensat.finalize());
         octets
