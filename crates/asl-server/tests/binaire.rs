@@ -92,8 +92,21 @@ fn eteindre(serveur: &mut Child) {
             libc::kill(pid, libc::SIGTERM);
         }
     }
-    // Il s'éteint en deux temps ; s'il s'attarde, on ne bloque pas l'essai.
-    for _ in 0..50 {
+    // **L'ATTENTE DÉPASSE LA GRÂCE DU SERVEUR, ET S'EN DÉDUIT.** Il s'éteint en
+    // deux temps (RFC 9114 §5.2) et garde ses connexions `GRACE_EXTINCTION_US`
+    // — la fenêtre entière dès qu'une voie entre racines est ouverte. Cette
+    // attente valait cinq secondes, recopiées à la main : exactement la grâce.
+    // Le SIGKILL tombait donc à l'instant où le serveur finissait de sortir, et
+    // sous la mesure de couverture, finir, c'est écrire son profil — tué en
+    // pleine écriture, il laissait un `.profraw` à l'en-tête corrompu, et
+    // `llvm-profdata` refusait toute la fusion (« no profile can be merged »).
+    // La couverture de `main` en a échoué une fois sur deux, sans rien dire.
+    let attente = std::time::Duration::from_micros(asl_loop_tokio::GRACE_EXTINCTION_US)
+        .saturating_add(std::time::Duration::from_secs(10));
+    let limite = std::time::Instant::now()
+        .checked_add(attente)
+        .expect("une échéance à quelques secondes se représente");
+    while std::time::Instant::now() < limite {
         match serveur.try_wait() {
             Ok(Some(_)) => return,
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
