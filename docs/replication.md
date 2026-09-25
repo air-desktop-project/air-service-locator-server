@@ -331,7 +331,7 @@ le disque.
 | `appareil-revoque` | identifiant | Marquer, retirer le jeton. Toujours. |
 | `appareil-atteste` | identifiant ‖ attestation (1) | **Toujours**, révoqué ou non (§3.2) — poser la valeur si l'appareil est `aucune` ou `attendue` ; s'il porte déjà une valeur prouvée, rien : une clé ne s'atteste qu'une fois, et deux racines ne peuvent en avoir vu qu'une. Un appareil `attendue` qui devient `android` ou `apple` est désormais vivant ici aussi : sa prochaine preuve est servie. Décidé le 2026-09-21. |
 | `description` | appareil ‖ description | Le plus récent. |
-| `poussee` | appareil ‖ jeton | **Plus écrite depuis la 0.18.1** (décision 27) : lue encore, pour un journal qui la porterait ; le plus récent, refusé si l'appareil est révoqué. |
+| `poussee` | appareil ‖ jeton | **Plus écrite depuis la 0.19.0** (décision 27) : lue encore, pour un journal qui la porterait ; le plus récent, refusé si l'appareil est révoqué. |
 | `point-de-poussee` | appareil ‖ point ‖ clé et secret facultatifs | Le plus récent ; refusé si l'appareil est révoqué. Genre **20**. |
 | `machine` | identifiant ‖ machine, sans clé | Insérer si absent. |
 | `machine-modifiee` | identifiant ‖ champs présents ‖ nom ‖ capacités | Le plus récent, champ par champ. Retirer `annonce` ferme les connexions ici aussi. |

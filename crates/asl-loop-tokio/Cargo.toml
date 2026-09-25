@@ -17,6 +17,7 @@ asl-id.workspace = true
 asl-keystore.workspace = true
 asl-proto.workspace = true
 asl-registre.workspace = true
+asl-reveil.workspace = true
 asl-session.workspace = true
 asl-store.workspace = true
 ams-proto-http.workspace = true
@@ -46,7 +47,18 @@ libc.workspace = true
 rustls.workspace = true
 tokio.workspace = true
 
+[features]
+# **LA PORTE D'ESSAI DU RÉVEILLEUR** (`reveil::Reveilleur::resoudre_pour_un_essai`) :
+# tout nom se résout en une adresse donnée, qui échappe au jugement des
+# adresses — de quoi joindre un faux serveur de poussée sur la boucle locale.
+# **JAMAIS PAR DÉFAUT** : seuls les essais de cette crate l'activent, par la
+# ligne de `[dev-dependencies]` ci-dessous ; `asl-server` ne l'active pas, et
+# le binaire livré ne la contient donc pas.
+porte-d-essai = []
+
 [dev-dependencies]
+# La porte d'essai, pour les essais de bout en bout de cette crate seulement.
+asl-loop-tokio = { path = ".", features = ["porte-d-essai"] }
 # LE HARNAIS D'ESSAI D'`air-mail-server`, ET ICI C'EST SA PLACE EXACTE.
 #
 # Cette crate n'est pas une bibliothèque cliente — c'est le constat de la tranche

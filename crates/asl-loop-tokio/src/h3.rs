@@ -76,7 +76,19 @@ struct ParConnexion {
     /// continue. La connexion tombe, le reste tombe avec elle, et le tireur
     /// redemande un instantané entier — qui fusionne, sans dommage.
     reste_d_instantane: Option<VecDeque<Vec<u8>>>,
+    /// Le compte dont cette connexion écoute les nouvelles
+    /// (`GET /v1/nouvelles`), s'il en écoute.
+    ///
+    /// **UN FLUX PAR CONNEXION** : `asl-session` rend `409` au second. Le
+    /// compte est celui de l'appareil au moment où le flux s'ouvre ; une
+    /// révocation ferme la connexion, et le flux avec elle.
+    nouvelles_de: Option<Identifiant>,
 }
+
+/// La ligne qu'une autorisation reçue écrit sur le flux des nouvelles
+/// (`protocole.md` §2.2) : le genre, et rien d'autre — l'application relit la
+/// liste qui fait foi.
+const LIGNE_AUTORISATION: &[u8] = b"{\"quoi\":\"autorisation\"}\n";
 
 /// Ce qu'un flux de la voie porte AU PLUS, en octets de charge `DATA`.
 ///
@@ -473,6 +485,12 @@ struct Service<'a> {
     suite: &'a mut Option<SuiteAuPair>,
     /// Ce qu'il reste d'un instantané que cette connexion tire par parts.
     reste_d_instantane: &'a mut Option<VecDeque<Vec<u8>>>,
+    /// Le compte dont cette connexion écoute les nouvelles, s'il y en a un.
+    nouvelles_de: &'a mut Option<Identifiant>,
+    /// Les comptes qu'une autorisation écrite sur CETTE requête doit
+    /// réveiller. `Annuaire::au_tour` les verse aux flux des nouvelles et au
+    /// réveilleur — jamais ici : la boucle ne fait pas d'appel sortant.
+    a_reveiller: &'a mut Vec<Identifiant>,
 }
 
 impl ams_h3::Service for Service<'_> {
@@ -615,6 +633,19 @@ impl Service<'_> {
             // **RIEN À CHERCHER** : ouvrir le flux ne dépend d'aucun état, et
             // ce qui s'y écrira ensuite n'est pas une réponse à une requête.
             Besoin::EcouterLesPoussees => Trouvaille::Rien,
+            // **LES NOUVELLES, ELLES, RAPPORTENT UN FAIT** : le compte de
+            // l'appareil, s'il est encore vivant — c'est lui que le flux
+            // écoutera —, et si cette connexion en tient déjà un.
+            Besoin::EcouterLesNouvelles => {
+                if self.nouvelles_de.is_some() {
+                    Trouvaille::Conflit
+                } else if let Some(compte) = self.compte_de_la_connexion() {
+                    *self.nouvelles_de = Some(compte);
+                    Trouvaille::Fait
+                } else {
+                    Trouvaille::Rien
+                }
+            }
 
             // ── CE QUI CRÉE ─────────────────────────────────────────────
             //
@@ -661,11 +692,12 @@ impl Service<'_> {
             } => self.autoriser(*a, *portee, etiquette),
 
             // ── CE QUI RETIRE ───────────────────────────────────────────
-            Besoin::PoserJetonDePoussee {
+            Besoin::PoserPointDePoussee {
                 appareil,
-                plateforme,
-                jeton,
-            } => self.poser_un_jeton(*appareil, *plateforme, jeton),
+                point,
+                cle,
+                secret,
+            } => self.poser_un_point(*appareil, point, *cle, *secret),
             Besoin::PoserDescription {
                 appareil,
                 systeme,
@@ -1517,7 +1549,7 @@ impl Service<'_> {
 
     /// Accorde une autorisation à un autre compte.
     fn autoriser(
-        &self,
+        &mut self,
         a: Identifiant,
         portee: asl_api::corps::Portee,
         etiquette: &str,
@@ -1607,7 +1639,15 @@ impl Service<'_> {
             portee,
             etiquette,
         ) {
-            Ok(()) => Trouvaille::AutorisationCreee(quelle),
+            Ok(()) => {
+                // **L'ÉCRITURE EST COMMISE : LE BÉNÉFICIAIRE EST À RÉVEILLER**
+                // (`protocole.md` §2.2, décision 9). D'ici, et d'ici seulement
+                // — l'autre racine appliquera l'autorisation sans réveiller
+                // personne. Rien ne part pendant cette requête : `au_tour`
+                // verse le compte aux flux et au réveilleur, hors de la boucle.
+                self.a_reveiller.push(a);
+                Trouvaille::AutorisationCreee(quelle)
+            }
             Err(_) => Trouvaille::Rien,
         }
     }
@@ -1713,21 +1753,22 @@ impl Service<'_> {
         }
     }
 
-    /// Dépose ou renouvelle le jeton de poussée d'un appareil.
+    /// Dépose le point de poussée de l'appareil de cette connexion —
+    /// **pour lui-même seulement** (`protocole.md` §2.2).
     ///
-    /// # C'EST LA CONNEXION QUI DÉSIGNE L'APPAREIL, ET LE CHEMIN DOIT SUIVRE
-    ///
-    /// Le jeton vient du système du téléphone qui le porte, et personne d'autre
-    /// ne l'a. Déposer pour un autre appareil détournerait ses notifications —
-    /// c'est-à-dire celles d'un compte vers le téléphone de qui l'a volé.
+    /// Le point vient du distributeur du téléphone qui le porte, et personne
+    /// d'autre ne l'a. Déposer pour un autre appareil détournerait ses
+    /// notifications — c'est-à-dire celles d'un compte vers le téléphone de
+    /// qui l'a volé.
     ///
     /// **Le refus rend `Rien`, donc `404`.** Dire « ce n'est pas vous » à qui
     /// vise l'identifiant d'un autre confirmerait que cet identifiant existe.
-    fn poser_un_jeton(
+    fn poser_un_point(
         &self,
         vise: Identifiant,
-        plateforme: asl_api::corps::Plateforme,
-        jeton: &str,
+        point: &asl_api::point::UrlDePoussee<'_>,
+        cle: Option<[u8; asl_api::point::CLE_RECEPTEUR_OCTETS]>,
+        secret: Option<[u8; asl_api::point::SECRET_RECEPTEUR_OCTETS]>,
     ) -> Trouvaille {
         let Some(moi) = self.session.appareil() else {
             return Trouvaille::Rien;
@@ -1735,33 +1776,27 @@ impl Service<'_> {
         if moi != vise {
             return Trouvaille::Rien;
         }
-        // **UN APPAREIL RÉVOQUÉ NE DÉPOSE PLUS.** `compte_de_la_connexion`
-        // écarte déjà les révoqués, et c'est ce qui compte ici : sans elle, un
-        // téléphone déclaré perdu pourrait redéposer son jeton et continuer de
-        // recevoir les notifications du compte.
+        // **UN APPAREIL RÉVOQUÉ NE DÉPOSE PLUS** : sans cette garde, un
+        // téléphone déclaré perdu redéposerait son point et continuerait
+        // d'être réveillé pour ce compte. L'entrepôt la redit dans sa
+        // transaction.
         let Some(_compte) = self.compte_de_la_connexion() else {
             return Trouvaille::Rien;
         };
-        let Ok(jeton) = asl_registre::JetonRange::nouveau(jeton) else {
+        // La forme a été tenue par `asl-api`, bornes comprises : une longueur
+        // refusée ici serait un invariant cassé, et `Rien` le mot juste.
+        let Ok(rangee) = asl_registre::PointRange::nouveau(point.texte()) else {
             return Trouvaille::Rien;
         };
-        match self.entrepot.poser_jeton(
-            vise,
-            asl_registre::Provenance::Ici,
-            match plateforme {
-                asl_api::corps::Plateforme::Apns => asl_registre::Plateforme::Apns,
-                asl_api::corps::Plateforme::Fcm => asl_registre::Plateforme::Fcm,
-            },
-            jeton,
-        ) {
-            Ok(()) => Trouvaille::Fait,
-            Err(_) => Trouvaille::Rien,
+        match self.entrepot.poser_point(vise, rangee, cle, secret) {
+            Ok(true) => Trouvaille::Fait,
+            Ok(false) | Err(_) => Trouvaille::Rien,
         }
     }
 
     /// Pose ce qu'un appareil dit de lui-même — **pour lui-même seulement**.
     ///
-    /// La même garde que [`Service::poser_un_jeton`], et pour la même forme :
+    /// La même garde que [`Service::poser_un_point`], et pour la même forme :
     /// c'est l'appareil de CETTE connexion qui parle de lui, et viser un autre
     /// rend le `404` de ce qui n'existe pas. Un appareil révoqué ne se décrit
     /// plus non plus — `compte_de_la_connexion` l'écarte —, non qu'il y ait un
@@ -2633,6 +2668,20 @@ pub struct Annuaire<'a> {
     /// Vivant le temps d'un `a_la_lecture` : déposé par le service, ramassé
     /// par la boucle juste après, jamais gardé d'un tour à l'autre.
     suite: Option<SuiteAuPair>,
+    /// Les comptes qu'une autorisation écrite ICI doit réveiller, en
+    /// attendant le prochain tour (`protocole.md` §2.2, décision 9).
+    a_reveiller: Vec<Identifiant>,
+    /// Par où les comptes à réveiller partent vers le réveilleur
+    /// (`crate::reveil`), s'il y en a un — `--push-roots`.
+    ///
+    /// # UN CANAL, ET RIEN QUI ATTENDE
+    ///
+    /// L'envoi est un appel sortant — résolution, TCP, TLS, jusqu'à cinq
+    /// secondes. La boucle sert TOUTES les connexions (la leçon de la
+    /// 0.18.0) : elle pose le compte dans le canal, et c'est une tâche à part
+    /// qui résout, se connecte et attend. Sans réveilleur, rien ne part, et
+    /// le flux des nouvelles est servi quand même.
+    reveil: Option<tokio::sync::mpsc::UnboundedSender<Identifiant>>,
 }
 
 impl<'a> Annuaire<'a> {
@@ -2685,7 +2734,18 @@ impl<'a> Annuaire<'a> {
             pair_attendu,
             suite: None,
             fermetures: None,
+            a_reveiller: Vec::new(),
+            reveil: None,
         }
+    }
+
+    /// Branche le réveilleur : chaque autorisation écrite ici lui passera le
+    /// compte bénéficiaire (`protocole.md` §2.2).
+    ///
+    /// **APPELÉ UNE FOIS, AU MONTAGE**, et seulement quand l'exploitant a
+    /// donné `--push-roots` : sans lui, rien ne part.
+    pub fn reveiller_par(&mut self, reveil: tokio::sync::mpsc::UnboundedSender<Identifiant>) {
+        self.reveil = Some(reveil);
     }
 
     /// Règle ce que vit une invitation, en millisecondes
@@ -2848,6 +2908,30 @@ impl<'a> Annuaire<'a> {
     /// **Une seule traduction par tour, et la liste est vidée.** Un pair qui
     /// ouvrirait une connexion neuve après coup ne s'authentifierait pas : sa
     /// clé n'est plus là. Il n'y a donc rien à retenir.
+    /// Verse les comptes à réveiller : une ligne sur chaque flux des
+    /// nouvelles qui les écoute, et le compte au réveilleur.
+    ///
+    /// **RIEN N'ATTEND ICI** : écrire une ligne est une consigne à la boucle,
+    /// passer un compte au réveilleur est un envoi sur un canal sans borne.
+    /// Ce que le réveilleur fera — résoudre, se connecter, attendre cinq
+    /// secondes — se passe dans sa tâche.
+    fn reveiller(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut a_pousser = Vec::new();
+        for compte in core::mem::take(&mut self.a_reveiller) {
+            for (clef, etat) in &self.connexions {
+                if etat.nouvelles_de == Some(compte) {
+                    a_pousser.push((clef.clone(), LIGNE_AUTORISATION.to_vec()));
+                }
+            }
+            if let Some(reveil) = &self.reveil {
+                // Un réveilleur arrêté ne rend pas l'autorisation fausse : elle
+                // est écrite, et l'application la verra à la relecture.
+                let _ = reveil.send(compte);
+            }
+        }
+        a_pousser
+    }
+
     fn consignes_de_fermeture(&mut self) -> crate::quic::Consignes {
         if self.revoques.is_empty() {
             return crate::quic::Consignes::default();
@@ -3013,6 +3097,7 @@ impl Application for Annuaire<'_> {
                 }
             }
         }
+        a_pousser.extend(self.reveiller());
         let mut consignes = self.consignes_de_fermeture();
         consignes.a_pousser = a_pousser;
         consignes
@@ -3071,6 +3156,7 @@ impl Application for Annuaire<'_> {
             session: Session::new(liaison),
             flux_pair: None,
             reste_d_instantane: None,
+            nouvelles_de: None,
         });
         self.servies = self.servies.saturating_add(1);
         // §6.2.1 : notre flux de contrôle et nos réglages, tout de suite — puis
@@ -3110,6 +3196,7 @@ impl Application for Annuaire<'_> {
             session,
             flux_pair,
             reste_d_instantane,
+            nouvelles_de,
         } = etat;
         let racine_avant = session.racine();
         let mut service = Service {
@@ -3139,6 +3226,8 @@ impl Application for Annuaire<'_> {
             flux_pair_tenu: flux_pair.is_some(),
             suite: &mut self.suite,
             reste_d_instantane,
+            nouvelles_de,
+            a_reveiller: &mut self.a_reveiller,
         };
         if let Err(faute) = conducteur.on_readable(&mut Pont(connexion), &mut service, flux) {
             Self::condamner(connexion, &faute);

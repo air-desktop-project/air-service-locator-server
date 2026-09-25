@@ -2295,11 +2295,11 @@ async fn une_racine_seule_dit_qu_elle_est_seule_a_une_machine_et_a_personne_d_au
 }
 
 #[tokio::test]
-async fn un_jeton_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
+async fn un_point_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
     // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
     //
-    // Le jeton vient du système du téléphone qui le porte, et personne d'autre
-    // ne l'a. Déposer pour l'appareil d'un AUTRE détournerait ses notifications
+    // Le point vient du distributeur du téléphone qui le porte, et personne
+    // d'autre ne l'a. Déposer pour l'appareil d'un AUTRE détournerait ses notifications
     // — c'est-à-dire celles d'un compte vers le téléphone de qui l'a volé.
     //
     // Le refus est un `404`, et non un `403` : dire « ce n'est pas vous » à qui
@@ -2322,7 +2322,7 @@ async fn un_jeton_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
         21,
         cible.as_bytes(),
         None,
-        br#"{"plateforme":"apns","jeton":"c0ffee"}"#,
+        br#"{"plateforme":"unifiedpush","point":"https://ntfy.example.org/upAb3kZq9"}"#,
         b"application/json",
     )
     .await;
@@ -2341,7 +2341,7 @@ async fn un_jeton_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
         21,
         cible.as_bytes(),
         None,
-        br#"{"plateforme":"fcm","jeton":"vole"}"#,
+        br#"{"plateforme":"unifiedpush","point":"https://ntfy.example.org/vole"}"#,
         b"application/json",
     )
     .await;
@@ -2363,7 +2363,7 @@ async fn un_jeton_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
         21,
         cible.as_bytes(),
         None,
-        br#"{"plateforme":"windows","jeton":"x"}"#,
+        br#"{"plateforme":"apns","jeton":"c0ffee"}"#,
         b"application/json",
     )
     .await;
@@ -2371,7 +2371,7 @@ async fn un_jeton_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
     assert_eq!(
         champ(&champs(alice.recu(20)), b":status"),
         Some(&b"400"[..]),
-        "une plate-forme inconnue est une requête mal formée"
+        "apns n'est plus accepté : une requête mal formée"
     );
 
     let _ = dire_stop.send(());

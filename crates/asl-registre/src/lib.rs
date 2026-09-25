@@ -121,7 +121,7 @@ pub enum Faute {
     },
     /// Un texte porte un octet qui ne s'imprime pas.
     ///
-    /// # ELLE N'EXISTE QUE POUR LE JETON DE POUSSÉE, ET IL FAUT DIRE POURQUOI
+    /// # ELLE N'EXISTE QUE POUR LA POUSSÉE, ET IL FAUT DIRE POURQUOI
     ///
     /// Partout ailleurs, une longueur corrompue se voit : elle dépasse le
     /// tableau. **Le jeton de poussée est le seul texte dont la borne vaut 255**,
@@ -130,7 +130,9 @@ pub enum Faute {
     ///
     /// Ce qui reste pour voir la corruption est le contenu : un jeton est du
     /// texte imprimable, et un octet nul au milieu trahit une longueur qu'on a
-    /// allongée.
+    /// allongée. Le point de poussée ([`PointRange`]) porte le même contrôle :
+    /// sa longueur peut, elle, dépasser son tableau et se dénoncer, mais une
+    /// longueur allongée EN DEÇÀ de 1024 ne le fait pas.
     NonImprimable {
         /// Où, dans le texte.
         position: usize,
@@ -1704,6 +1706,244 @@ impl JetonPoussee {
     }
 }
 
+// ── Le point de poussée (`protocole.md` §2.2, 2026-09-25) ───────────────────
+
+/// Ce qu'un point de poussée peut faire, en octets. Égal à
+/// `asl_api::POINT_MAX`.
+///
+/// # POURQUOI UN SECOND RANGEMENT, ET NON LE JETON AGRANDI
+///
+/// Le jeton tenait dans un [`Court`], dont la longueur tient sur un octet : 255
+/// au plus. Une URL UnifiedPush est plus longue que cela chez certains
+/// distributeurs, et la spécification a fixé 1024. Agrandir [`JetonPoussee`]
+/// aurait changé la taille d'une table que les bases portent déjà — une
+/// reprise de format pour un champ qu'aucun appareil n'a jamais rempli. Une
+/// table à elle ne change rien à celles d'hier.
+pub const POINT_OCTETS_MAX: usize = 1024;
+
+/// Ce que la clé publique du récepteur occupe (RFC 8291) : un point P-256
+/// non compressé. Égal à `asl_api::CLE_RECEPTEUR_OCTETS`.
+pub const CLE_RECEPTEUR_OCTETS: usize = 65;
+
+/// Ce que le secret d'authentification du récepteur occupe (RFC 8291). Égal à
+/// `asl_api::SECRET_RECEPTEUR_OCTETS`.
+pub const SECRET_RECEPTEUR_OCTETS: usize = 16;
+
+/// Un point de poussée rangé : une URL de longueur bornée, sans allocation.
+///
+/// C'est un [`Court`] dont la longueur tient sur DEUX octets, gros-boutiste —
+/// la seule différence, et la raison d'un type à part plutôt que d'un paramètre
+/// de plus sur l'autre : `Court` est employé partout avec sa longueur d'un
+/// octet, et la lui faire porter à deux déplacerait tous les formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointRange {
+    /// Les octets, dont seuls les premiers comptent.
+    octets: [u8; POINT_OCTETS_MAX],
+    /// Combien en comptent.
+    longueur: usize,
+}
+
+impl PointRange {
+    /// Range ce texte, ou refuse s'il est trop long.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Longueur`] au-delà de [`POINT_OCTETS_MAX`].
+    pub fn nouveau(texte: &str) -> Result<Self, Faute> {
+        let source = texte.as_bytes();
+        if source.len() > POINT_OCTETS_MAX {
+            return Err(Faute::Longueur {
+                annoncee: source.len(),
+                maximum: POINT_OCTETS_MAX,
+            });
+        }
+        let mut octets = [0_u8; POINT_OCTETS_MAX];
+        poser(&mut octets, source);
+        Ok(Self {
+            octets,
+            longueur: source.len(),
+        })
+    }
+
+    /// Ce qu'il porte.
+    #[must_use]
+    pub fn octets(&self) -> &[u8] {
+        self.octets.get(..self.longueur).unwrap_or_default()
+    }
+
+    /// Écrit la longueur puis les octets. Occupe `2 + POINT_OCTETS_MAX`.
+    fn ecrire(&self, sortie: &mut [u8]) {
+        // La longueur tient sur deux octets : `nouveau` a refusé au-delà de
+        // 1024.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "la longueur est bornée par POINT_OCTETS_MAX, 1024"
+        )]
+        poser(sortie, &(self.longueur as u16).to_be_bytes());
+        poser(sortie.get_mut(2..).unwrap_or_default(), &self.octets);
+    }
+
+    /// Relit ce qu'[`PointRange::ecrire`] a écrit.
+    fn lire(octets: &[u8]) -> Result<Self, Faute> {
+        let mut longueur = [0_u8; 2];
+        poser(&mut longueur, octets);
+        let annoncee = usize::from(u16::from_be_bytes(longueur));
+        if annoncee > POINT_OCTETS_MAX {
+            return Err(Faute::Longueur {
+                annoncee,
+                maximum: POINT_OCTETS_MAX,
+            });
+        }
+        let corps = octets.get(2..).unwrap_or_default();
+        if !bourrage_nul(corps.get(annoncee..).unwrap_or_default()) {
+            return Err(Faute::Bourrage);
+        }
+        let mut rangees = [0_u8; POINT_OCTETS_MAX];
+        poser(&mut rangees, corps);
+        let point = Self {
+            octets: rangees,
+            longueur: annoncee,
+        };
+        // Même contrôle que le jeton, pour la même raison : c'est du texte
+        // imprimable, et un octet qui ne l'est pas trahit une corruption.
+        if let Some(position) = point
+            .octets()
+            .iter()
+            .position(|octet| !octet.is_ascii_graphic())
+        {
+            return Err(Faute::NonImprimable { position });
+        }
+        Ok(point)
+    }
+}
+
+/// Ce qu'un point de poussée occupe : la provenance, l'estampille, le point
+/// avec sa longueur, un octet de présence, la clé et le secret.
+pub const POINT_DE_POUSSEE_OCTETS: usize = PROVENANCE_OCTETS
+    + ESTAMPILLE_OCTETS
+    + 2
+    + POINT_OCTETS_MAX
+    + 1
+    + CLE_RECEPTEUR_OCTETS
+    + SECRET_RECEPTEUR_OCTETS;
+
+/// Le point par lequel l'annuaire réveille un appareil : une URL UnifiedPush.
+///
+/// # CE QUI EST RANGÉ, ET CE QUI NE L'EST PAS
+///
+/// L'URL, et les deux champs facultatifs de RFC 8291 — rangés sans servir,
+/// pour que le repli chiffré (`protocole.md` §2.2, « Le repli, s'il le
+/// faut ») ne coûte pas un format de plus. **Ce que la racine apprend en
+/// envoyant n'est pas ici** : qu'un point est mort, qu'un hôte reçoit trop,
+/// cela vit en mémoire et ne se réplique pas (`replication.md`, décision 27).
+///
+/// **La forme de l'URL n'est pas revérifiée ici**, pour la raison écrite en
+/// tête du module : `asl_api::point_de_poussee` la tient, et l'envoi la relit
+/// avant de résoudre quoi que ce soit.
+///
+/// Rangé sous l'identifiant de l'appareil, et retiré avec lui.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointDePoussee {
+    /// D'où vient cet enregistrement.
+    pub provenance: Provenance,
+    /// Sa dernière écriture. Entre deux points, le plus récent gagne.
+    pub estampille: Estampille,
+    /// L'URL, telle que le distributeur l'a donnée.
+    pub point: PointRange,
+    /// La clé publique du récepteur, si l'appareil l'a donnée.
+    pub cle: Option<[u8; CLE_RECEPTEUR_OCTETS]>,
+    /// Le secret d'authentification du récepteur, si l'appareil l'a donné.
+    pub secret: Option<[u8; SECRET_RECEPTEUR_OCTETS]>,
+}
+
+impl PointDePoussee {
+    /// Le bit qui dit que la clé est là.
+    const PRESENTE_CLE: u8 = 0b0000_0001;
+    /// Le bit qui dit que le secret est là.
+    const PRESENT_SECRET: u8 = 0b0000_0010;
+    /// Où commence l'octet de présence.
+    const PRESENCE: usize = PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + 2 + POINT_OCTETS_MAX;
+    /// Où commence la clé.
+    const CLE: usize = Self::PRESENCE + 1;
+    /// Où commence le secret.
+    const SECRET: usize = Self::CLE + CLE_RECEPTEUR_OCTETS;
+
+    /// Écrit ce point.
+    pub fn ecrire(&self, sortie: &mut [u8; POINT_DE_POUSSEE_OCTETS]) {
+        // Ce qu'un champ absent laisse doit être nul : le tampon est à nous,
+        // mais l'encodage doit rester canonique quel qu'il soit.
+        sortie.fill(0);
+        self.provenance
+            .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
+        let apres_estampille = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        self.estampille.ecrire(
+            sortie
+                .get_mut(PROVENANCE_OCTETS..apres_estampille)
+                .unwrap_or_default(),
+        );
+        self.point
+            .ecrire(sortie.get_mut(apres_estampille..).unwrap_or_default());
+        let mut presents = 0_u8;
+        if let Some(cle) = &self.cle {
+            presents |= Self::PRESENTE_CLE;
+            poser(sortie.get_mut(Self::CLE..).unwrap_or_default(), cle);
+        }
+        if let Some(secret) = &self.secret {
+            presents |= Self::PRESENT_SECRET;
+            poser(sortie.get_mut(Self::SECRET..).unwrap_or_default(), secret);
+        }
+        poser_un(
+            sortie.get_mut(Self::PRESENCE..).unwrap_or_default(),
+            presents,
+        );
+    }
+
+    /// Relit un point.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un point : une provenance ou une
+    /// estampille illisible, une longueur au-delà de 1024, un octet qui ne
+    /// s'imprime pas, un bit de présence inconnu, ou du bourrage non nul — la
+    /// place d'un champ absent comprise.
+    pub fn lire(octets: &[u8; POINT_DE_POUSSEE_OCTETS]) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        let apres = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        let estampille =
+            Estampille::lire(octets.get(PROVENANCE_OCTETS..apres).unwrap_or_default())?;
+        let point = PointRange::lire(octets.get(apres..Self::PRESENCE).unwrap_or_default())?;
+        let presents = octets.get(Self::PRESENCE).copied().unwrap_or(0);
+        if presents & !(Self::PRESENTE_CLE | Self::PRESENT_SECRET) != 0 {
+            return Err(Faute::Etiquette { lue: presents });
+        }
+        let place_de_la_cle = octets.get(Self::CLE..Self::SECRET).unwrap_or_default();
+        let place_du_secret = octets.get(Self::SECRET..).unwrap_or_default();
+        let cle = if presents & Self::PRESENTE_CLE == 0 {
+            if !bourrage_nul(place_de_la_cle) {
+                return Err(Faute::Bourrage);
+            }
+            None
+        } else {
+            Some(copie(place_de_la_cle))
+        };
+        let secret = if presents & Self::PRESENT_SECRET == 0 {
+            if !bourrage_nul(place_du_secret) {
+                return Err(Faute::Bourrage);
+            }
+            None
+        } else {
+            Some(copie(place_du_secret))
+        };
+        Ok(Self {
+            provenance,
+            estampille,
+            point,
+            cle,
+            secret,
+        })
+    }
+}
+
 // ── La description d'un appareil ────────────────────────────────────────────
 
 /// Le système qu'un appareil fait tourner.
@@ -2487,8 +2727,8 @@ pub mod sans_dates {
 /// Ce que l'en-tête d'une opération occupe : le genre, puis l'estampille.
 pub const OPERATION_ENTETE_OCTETS: usize = 1 + ESTAMPILLE_OCTETS;
 
-/// Ce que la plus grande charge occupe — celle d'un jeton de poussée.
-const CHARGE_OCTETS_MAX: usize = IDENTIFIANT_OCTETS + POUSSEE_OCTETS;
+/// Ce que la plus grande charge occupe — celle d'un point de poussée.
+const CHARGE_OCTETS_MAX: usize = IDENTIFIANT_OCTETS + POINT_DE_POUSSEE_OCTETS;
 
 /// Ce qu'une opération occupe, au plus. C'est la taille du tampon dans lequel
 /// [`Operation::ecrire`] écrit ; ce qu'elle a réellement occupé est rendu.
@@ -2507,7 +2747,7 @@ pub const OPERATION_OCTETS_MAX: usize = OPERATION_ENTETE_OCTETS + CHARGE_OCTETS_
 /// de la charge, donc **aucune longueur ne vient du réseau**, et il n'y a pas de
 /// second décodeur : ce qui se lit sur le fil est ce qui se lit sur le disque.
 ///
-/// # LES SEIZE GENRES SONT CEUX DE `replication.md` §5.2
+/// # LES GENRES SONT CEUX DE `replication.md` §5.2
 ///
 /// Un par écriture locale possible, et aucun pour ce qui ne se réplique pas —
 /// l'expiration d'un code, le retrait d'un jeton par son appareil n'ont pas
@@ -2576,11 +2816,23 @@ pub enum Operation {
         enregistrement: Description,
     },
     /// Un jeton de poussée. Le plus récent ; refusé si l'appareil est révoqué.
+    ///
+    /// **Plus écrite depuis 0.19.0** : `apns` et `fcm` sont refusés à la
+    /// dépose. Elle se lit encore — un pair d'avant peut l'émettre, un
+    /// journal d'avant la porter.
     Poussee {
         /// L'appareil.
         appareil: Identifiant,
         /// L'enregistrement.
         enregistrement: JetonPoussee,
+    },
+    /// Un point de poussée (`replication.md` §5.2, genre 20). Le plus récent ;
+    /// refusé si l'appareil est révoqué.
+    PointDePoussee {
+        /// L'appareil.
+        appareil: Identifiant,
+        /// L'enregistrement.
+        enregistrement: PointDePoussee,
     },
     /// Une machine déclarée, sans clé. Insérer si absent.
     Machine {
@@ -2693,7 +2945,8 @@ pub enum Operation {
 /// n'y avait que quatorze genres. Le quinzième, `compte-efface`, a pris seize
 /// plutôt que de déplacer un cadre que les deux racines savaient déjà lire ;
 /// le seizième, `appareil-atteste`, dix-sept ; puis `invitation` dix-huit et
-/// `invitation-consommee` dix-neuf (2026-09-24).
+/// `invitation-consommee` dix-neuf (2026-09-24) ; `point-de-poussee` vingt
+/// (2026-09-25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenreOperation {
     /// `compte`.
@@ -2732,12 +2985,14 @@ pub enum GenreOperation {
     Invitation,
     /// `invitation-consommee`.
     InvitationConsommee,
+    /// `point-de-poussee`.
+    PointDePoussee,
 }
 
 impl GenreOperation {
-    /// Les dix-huit, dans l'ordre de `replication.md` §5.2 — et l'ordre de
-    /// leurs étiquettes, de 1 à 14, puis 16 à 19 (voir l'en-tête du type).
-    pub const TOUS: [Self; 18] = [
+    /// Les dix-neuf, dans l'ordre de `replication.md` §5.2 — et l'ordre de
+    /// leurs étiquettes, de 1 à 14, puis 16 à 20 (voir l'en-tête du type).
+    pub const TOUS: [Self; 19] = [
         Self::Compte,
         Self::Alias,
         Self::Appareil,
@@ -2756,6 +3011,7 @@ impl GenreOperation {
         Self::AppareilAtteste,
         Self::Invitation,
         Self::InvitationConsommee,
+        Self::PointDePoussee,
     ];
 
     /// Son étiquette, en tête du cadre.
@@ -2780,6 +3036,7 @@ impl GenreOperation {
             Self::AppareilAtteste => 17,
             Self::Invitation => 18,
             Self::InvitationConsommee => 19,
+            Self::PointDePoussee => 20,
         }
     }
 
@@ -2809,6 +3066,7 @@ impl GenreOperation {
             17 => Self::AppareilAtteste,
             18 => Self::Invitation,
             19 => Self::InvitationConsommee,
+            20 => Self::PointDePoussee,
             lue => return Err(Faute::Etiquette { lue }),
         })
     }
@@ -2839,6 +3097,7 @@ impl GenreOperation {
             Self::Autorisation => IDENTIFIANT_OCTETS + AUTORISATION_OCTETS,
             Self::Invitation => EMPREINTE_OCTETS + INVITATION_OCTETS,
             Self::InvitationConsommee => EMPREINTE_OCTETS,
+            Self::PointDePoussee => IDENTIFIANT_OCTETS + POINT_DE_POUSSEE_OCTETS,
         }
     }
 
@@ -2877,6 +3136,7 @@ impl Operation {
             Self::CompteEfface { .. } => GenreOperation::CompteEfface,
             Self::Invitation { .. } => GenreOperation::Invitation,
             Self::InvitationConsommee { .. } => GenreOperation::InvitationConsommee,
+            Self::PointDePoussee { .. } => GenreOperation::PointDePoussee,
         }
     }
 
@@ -2964,6 +3224,18 @@ impl Operation {
             } => {
                 ecrire_identifiant(*appareil, charge);
                 let mut octets = [0_u8; POUSSEE_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::PointDePoussee {
+                appareil,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*appareil, charge);
+                let mut octets = [0_u8; POINT_DE_POUSSEE_OCTETS];
                 enregistrement.ecrire(&mut octets);
                 poser(
                     charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
@@ -3180,6 +3452,10 @@ impl Operation {
             GenreOperation::Poussee => Self::Poussee {
                 appareil: lire_identifiant(charge, Genre::Appareil)?,
                 enregistrement: JetonPoussee::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::PointDePoussee => Self::PointDePoussee {
+                appareil: lire_identifiant(charge, Genre::Appareil)?,
+                enregistrement: PointDePoussee::lire(&copie(apres_identifiant))?,
             },
             GenreOperation::Machine => Self::Machine {
                 machine: lire_identifiant(charge, Genre::Machine)?,
@@ -3626,9 +3902,9 @@ mod tests {
         ESTAMPILLE_OCTETS, ETIQUETTE_DE_FIN, Effacement, Enrolement, EntreeJournal, Estampille,
         Faute, GenreOperation, IDENTIFIANT_OCTETS, JETON_OCTETS_MAX, JetonPoussee, JetonRange,
         MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, OPERATION_ENTETE_OCTETS,
-        OPERATION_OCTETS_MAX, Operation, PORTEE_OCTETS, POUSSEE_OCTETS, PROVENANCE_OCTETS,
-        Plateforme, Portee, Provenance, SERVICE_OCTETS, Service, Systeme, Verdict, ancien,
-        sans_dates,
+        OPERATION_OCTETS_MAX, Operation, POINT_DE_POUSSEE_OCTETS, POINT_OCTETS_MAX, PORTEE_OCTETS,
+        POUSSEE_OCTETS, PROVENANCE_OCTETS, Plateforme, PointDePoussee, PointRange, Portee,
+        Provenance, SERVICE_OCTETS, Service, Systeme, Verdict, ancien, sans_dates,
     };
 
     /// Un identifiant de ce genre, reproductible.
@@ -4941,6 +5217,127 @@ mod tests {
         );
     }
 
+    // ── Le point de poussée ─────────────────────────────────────────────────
+
+    /// Un point de poussée, reproductible.
+    fn un_point(cle: Option<[u8; 65]>, secret: Option<[u8; 16]>) -> PointDePoussee {
+        PointDePoussee {
+            provenance: Provenance::Ici,
+            estampille: e(15),
+            point: PointRange::nouveau("https://ntfy.example.org/upAb3kZq9").expect("il tient"),
+            cle,
+            secret,
+        }
+    }
+
+    /// Où la longueur du point se trouve.
+    const LONGUEUR_DU_POINT: usize = PROVENANCE_OCTETS + ESTAMPILLE_OCTETS;
+    /// Où l'octet de présence se trouve.
+    const PRESENCE: usize = LONGUEUR_DU_POINT + 2 + POINT_OCTETS_MAX;
+
+    #[test]
+    fn un_point_fait_l_aller_retour_avec_ou_sans_ses_champs_facultatifs() {
+        for (cle, secret) in [
+            (None, None),
+            (Some([0x04; 65]), None),
+            (None, Some([0x5E; 16])),
+            (Some([0x04; 65]), Some([0x5E; 16])),
+        ] {
+            let point = un_point(cle, secret);
+            // Un tampon sale : l'écriture doit le remettre à zéro.
+            let mut octets = [0xFF_u8; POINT_DE_POUSSEE_OCTETS];
+            point.ecrire(&mut octets);
+            assert_eq!(PointDePoussee::lire(&octets), Ok(point));
+        }
+    }
+
+    #[test]
+    fn un_point_venu_d_un_pair_et_a_la_borne_fait_l_aller_retour() {
+        let long = "a".repeat(POINT_OCTETS_MAX);
+        let point = PointDePoussee {
+            provenance: Provenance::Annuaire(un(Genre::Annuaire, 2)),
+            point: PointRange::nouveau(&long).expect("1024 tient"),
+            ..un_point(None, None)
+        };
+        let mut octets = [0_u8; POINT_DE_POUSSEE_OCTETS];
+        point.ecrire(&mut octets);
+        assert_eq!(PointDePoussee::lire(&octets), Ok(point));
+        assert_eq!(point.point.octets().len(), POINT_OCTETS_MAX);
+
+        let trop = "a".repeat(POINT_OCTETS_MAX + 1);
+        assert_eq!(
+            PointRange::nouveau(&trop),
+            Err(Faute::Longueur {
+                annoncee: POINT_OCTETS_MAX + 1,
+                maximum: POINT_OCTETS_MAX,
+            })
+        );
+    }
+
+    #[test]
+    fn un_point_corrompu_est_refuse() {
+        let point = un_point(Some([0x04; 65]), None);
+        let mut octets = [0_u8; POINT_DE_POUSSEE_OCTETS];
+
+        // La provenance, puis l'estampille.
+        point.ecrire(&mut octets);
+        octets[0] = 9;
+        assert_eq!(
+            PointDePoussee::lire(&octets),
+            Err(Faute::Etiquette { lue: 9 })
+        );
+        point.ecrire(&mut octets);
+        octets[PROVENANCE_OCTETS + 8] = Genre::Machine.prefixe();
+        assert_eq!(
+            PointDePoussee::lire(&octets),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+
+        // Une longueur au-delà du tableau se dénonce d'elle-même.
+        point.ecrire(&mut octets);
+        octets[LONGUEUR_DU_POINT..LONGUEUR_DU_POINT + 2].copy_from_slice(&1025_u16.to_be_bytes());
+        assert_eq!(
+            PointDePoussee::lire(&octets),
+            Err(Faute::Longueur {
+                annoncee: 1025,
+                maximum: POINT_OCTETS_MAX
+            })
+        );
+
+        // Allongée en deçà, ce sont les zéros qui la trahissent.
+        point.ecrire(&mut octets);
+        octets[LONGUEUR_DU_POINT..LONGUEUR_DU_POINT + 2].copy_from_slice(&40_u16.to_be_bytes());
+        assert_eq!(
+            PointDePoussee::lire(&octets),
+            Err(Faute::NonImprimable { position: 34 })
+        );
+
+        // Raccourcie, c'est le bourrage.
+        point.ecrire(&mut octets);
+        octets[LONGUEUR_DU_POINT + 1] = 3;
+        assert_eq!(PointDePoussee::lire(&octets), Err(Faute::Bourrage));
+
+        // Un bit de présence inconnu.
+        point.ecrire(&mut octets);
+        octets[PRESENCE] |= 0b100;
+        assert_eq!(
+            PointDePoussee::lire(&octets),
+            Err(Faute::Etiquette { lue: 0b101 })
+        );
+
+        // La place d'un champ absent qui n'est pas nulle — la clé, puis le
+        // secret.
+        let sans = un_point(None, None);
+        sans.ecrire(&mut octets);
+        octets[PRESENCE + 1] = 1;
+        assert_eq!(PointDePoussee::lire(&octets), Err(Faute::Bourrage));
+        sans.ecrire(&mut octets);
+        octets[POINT_DE_POUSSEE_OCTETS - 1] = 1;
+        assert_eq!(PointDePoussee::lire(&octets), Err(Faute::Bourrage));
+    }
+
     // ── La description d'un appareil ────────────────────────────────────────
 
     /// Une description, reproductible.
@@ -5439,7 +5836,7 @@ mod tests {
     // ── Les opérations ──────────────────────────────────────────────────────
 
     /// Une opération de chaque genre, dans l'ordre de `replication.md` §5.2.
-    fn une_de_chaque() -> [Operation; 18] {
+    fn une_de_chaque() -> [Operation; 19] {
         [
             Operation::Compte {
                 compte: un(Genre::Utilisateur, 1),
@@ -5522,6 +5919,10 @@ mod tests {
             Operation::InvitationConsommee {
                 empreinte: [0x1F; EMPREINTE_OCTETS],
             },
+            Operation::PointDePoussee {
+                appareil: un(Genre::Appareil, 2),
+                enregistrement: un_point(Some([0x04; 65]), Some([0x5E; 16])),
+            },
         ]
     }
 
@@ -5537,6 +5938,7 @@ mod tests {
                 GenreOperation::AppareilAtteste => 17,
                 GenreOperation::Invitation => 18,
                 GenreOperation::InvitationConsommee => 19,
+                GenreOperation::PointDePoussee => 20,
                 _ => rang + 1,
             };
             assert_eq!(
@@ -5630,10 +6032,10 @@ mod tests {
 
     #[test]
     fn un_genre_inconnu_est_refuse_zero_compris() {
-        // Quinze est le cadre de fin, vingt le premier au-delà du dernier
-        // genre (`invitation-consommee` tient dix-neuf) : aucun des deux
+        // Quinze est le cadre de fin, vingt et un le premier au-delà du
+        // dernier genre (`point-de-poussee` tient vingt) : aucun des deux
         // n'est une opération.
-        for lue in [0_u8, 15, 20, 200] {
+        for lue in [0_u8, 15, 21, 200] {
             let mut octets = [0_u8; OPERATION_OCTETS_MAX];
             octets[0] = lue;
             assert_eq!(Operation::lire(&octets), Err(Faute::Etiquette { lue }));
@@ -5802,6 +6204,18 @@ mod tests {
                 "{operation:?}"
             );
         }
+        // Et le point de poussée, venu après : un appareil, rien d'autre.
+        let point = une_de_chaque()[18];
+        assert_eq!(point.genre(), GenreOperation::PointDePoussee);
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        point.ecrire(e(1), &mut sortie);
+        sortie[OPERATION_ENTETE_OCTETS] = b'z';
+        assert_eq!(
+            Operation::lire(&sortie),
+            Err(Faute::Genre {
+                attendu: Genre::Appareil
+            })
+        );
     }
 
     #[test]
@@ -5814,6 +6228,7 @@ mod tests {
                 | Operation::Appareil { .. }
                 | Operation::Description { .. }
                 | Operation::Poussee { .. }
+                | Operation::PointDePoussee { .. }
                 | Operation::Machine { .. }
                 | Operation::Service { .. }
                 | Operation::Autorisation { .. } => OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS,
@@ -5923,13 +6338,16 @@ mod tests {
     }
 
     #[test]
-    fn la_plus_grande_charge_est_celle_du_jeton_et_le_tampon_la_tient() {
+    fn la_plus_grande_charge_est_celle_du_point_et_le_tampon_la_tient() {
         // `OPERATION_OCTETS_MAX` est la taille du tampon d'écriture : si un
         // genre l'excédait, `ecrire` tronquerait en silence.
         for genre in GenreOperation::TOUS {
             assert!(genre.octets() <= OPERATION_OCTETS_MAX, "{genre:?}");
         }
-        assert_eq!(GenreOperation::Poussee.octets(), OPERATION_OCTETS_MAX);
+        assert_eq!(
+            GenreOperation::PointDePoussee.octets(),
+            OPERATION_OCTETS_MAX
+        );
     }
 
     // ── Le cadre de fin d'un instantané ─────────────────────────────────────
