@@ -199,6 +199,43 @@ cat > "$arbre/usr/share/doc/asl-server/android.conf.exemple" <<'EXEMPLE'
 Environment="ASL_ANDROID=--android-roots /etc/asl-server/racines-android/google.pem --android-app org.airdesktop.servicelocator --android-signer 5ea316f1b50f2ce54b8225aba85ff5cc8238a710b8fae44b4f3a195aadeb5f68"
 EXEMPLE
 chmod 0644 "$arbre/usr/share/doc/asl-server/android.conf.exemple"
+
+# **LES RACINES DE POUSSÉE NE SONT PAS ÉPINGLÉES NON PLUS** (`protocole.md`
+# §2.2, C19) : le drop-in nomme un fichier que l'exploitant choisit. Rien n'est
+# téléchargé ni expédié — le paquet de certificats de la distribution est déjà
+# sur la machine, et c'est lui que le modèle nomme.
+cat > "$arbre/usr/share/doc/asl-server/poussee.conf.exemple" <<'EXEMPLE'
+# À copier sous /etc/systemd/system/asl-server.service.d/poussee.conf, pour
+# que les autorisations accordées réveillent les appareils du bénéficiaire
+# (protocole.md §2.2, « Les notifications »).
+#
+# `--push-roots <PEM>` nomme les autorités contre lesquelles l'annuaire vérifie
+# le certificat d'un serveur de poussée UnifiedPush — ntfy.sh, ou celui que
+# l'utilisateur héberge. Pour joindre les serveurs publics, le paquet de
+# certificats de la distribution suffit (paquet `ca-certificates`) :
+#   /etc/ssl/certs/ca-certificates.crt
+# Rien n'est téléchargé ; un serveur privé sous votre propre autorité se
+# joint en nommant un fichier qui la porte.
+#
+# C'est le seul appel sortant d'une racine en dehors de son pair : un POST
+# VIDE, TLS 1.3 seulement, cinq secondes, une tentative, et jamais vers une
+# adresse qui n'est pas unicast globale. Le pare-feu doit laisser sortir TCP
+# vers le port 443.
+#
+# **DÉPLOYEZ LES DEUX RACINES AVANT QU'UN APPAREIL DÉPOSE UN POINT** : une
+# racine d'avant 0.19.0 refuse l'opération `point-de-poussee` (genre 20), et
+# fermerait la voie de réplication en le disant.
+#
+# L'affectation ENTIÈRE entre guillemets, comme pour la réplication, puis
+# `systemctl restart asl-server`.
+#
+# Vide, cette variable laisse la racine sans notification, en le disant au
+# démarrage ; `GET /v1/nouvelles` reste servi.
+
+[Service]
+Environment="ASL_POUSSEE=--push-roots /etc/ssl/certs/ca-certificates.crt"
+EXEMPLE
+chmod 0644 "$arbre/usr/share/doc/asl-server/poussee.conf.exemple"
 dit "binaire, unité, /etc/asl-server, racines et tables d'exemple, documentation"
 
 titre "dépendances, calculées et non devinées"
@@ -295,6 +332,11 @@ qu'un paquet ne peut pas décider.
 
          /usr/share/doc/asl-server/android.conf.exemple
          /usr/share/doc/asl-server/racines-android/google.pem
+
+     Pour que les autorisations réveillent les appareils (facultatif) : les
+     autorités des serveurs de poussée — le paquet de la distribution suffit :
+
+         /usr/share/doc/asl-server/poussee.conf.exemple
 
   2. le certificat, émis pour le nom sous lequel cet annuaire répond :
 

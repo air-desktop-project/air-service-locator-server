@@ -4106,3 +4106,474 @@ async fn la_racine_tiree_prouve_son_identite_sur_le_defi_du_tireur() {
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
+
+// ── Les notifications (`protocole.md` §2.2, 2026-09-25) ─────────────────────
+//
+// # UN FAUX SERVEUR DE POUSSÉE, EN VRAI HTTPS, ET LA PORTE D'ESSAI
+//
+// Le réveilleur refuse d'appeler la boucle locale — c'est sa règle la plus
+// élémentaire. Pour qu'un envoi atteigne un faux serveur sur `127.0.0.1`,
+// ces essais ouvrent la porte d'essai (`Reveilleur::resoudre_pour_un_essai`,
+// fonctionnalité `porte-d-essai`, activée par les seules dépendances de
+// développement de cette crate) : le nom du point se résout en l'adresse du
+// faux serveur, qui échappe au jugement. **Rien d'autre n'est contourné** :
+// le TLS se vérifie contre la racine de banc donnée comme `--push-roots`, le
+// certificat porte le nom du point (`localhost`), et la requête est celle du
+// produit, octet pour octet. Le dernier essai ferme la porte, et le même nom
+// est alors refusé par la règle de bouclage.
+
+/// Un faux serveur de poussée : il accepte des connexions TLS sur la boucle
+/// locale, lit une requête jusqu'à la fin de ses en-têtes, rend ce statut, et
+/// rapporte ce qu'il a lu.
+fn faux_serveur_de_poussee(
+    chaine: &[u8],
+    cle: &[u8],
+    statut: &'static str,
+) -> (SocketAddr, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+    use std::io::{Read, Write};
+
+    let config = Arc::new(ams_tls::server_config(chaine, cle).expect("un serveur TLS"));
+    let ecoute = std::net::TcpListener::bind("127.0.0.1:0").expect("une écoute TCP");
+    let adresse = ecoute.local_addr().expect("une adresse");
+    let (rapporter, rapports) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        for arrivee in ecoute.incoming() {
+            let Ok(tcp) = arrivee else { return };
+            let _ = tcp.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+            let Ok(connexion) = rustls::ServerConnection::new(Arc::clone(&config)) else {
+                continue;
+            };
+            let mut tls = rustls::StreamOwned::new(connexion, tcp);
+            let mut requete = Vec::new();
+            let mut tampon = [0_u8; 1024];
+            while !requete.windows(4).any(|fin| fin == b"\r\n\r\n") {
+                match tls.read(&mut tampon) {
+                    Ok(0) | Err(_) => break,
+                    Ok(lus) => requete.extend_from_slice(&tampon[..lus]),
+                }
+            }
+            let _ =
+                tls.write_all(format!("HTTP/1.1 {statut}\r\nContent-Length: 0\r\n\r\n").as_bytes());
+            let _ = tls.flush();
+            if rapporter.send(requete).is_err() {
+                return;
+            }
+        }
+    });
+    (adresse, rapports)
+}
+
+/// Lève l'annuaire avec un réveilleur, s'il y en a un — le montage du
+/// binaire quand `--push-roots` est donné.
+async fn lever_avec_reveil(
+    chaine: &[u8],
+    cle: &[u8],
+    entrepot: Arc<Entrepot>,
+    reveilleur: Option<asl_loop_tokio::reveil::Reveilleur>,
+) -> (
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Comptes>,
+) {
+    let tls = Arc::new(configuration_tls(chaine, cle).expect("une configuration TLS"));
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("une socket");
+    let adresse = socket.local_addr().expect("une adresse");
+    let (dire_stop, entendre_stop) = tokio::sync::oneshot::channel();
+    let tache = tokio::spawn(async move {
+        let tirer = || Some(asl_cle::Defi::depuis_octets([0x5A; 32]));
+        let compteur = std::sync::atomic::AtomicU8::new(1);
+        let nommer = || {
+            let rang = compteur.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some([rang; 16])
+        };
+        let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
+        let mut application = Annuaire::new(
+            &entrepot,
+            &tirer,
+            &nommer,
+            asl_auth::Politique::AttestationFacultative,
+            Attestations::AUCUNE,
+            bail,
+            Voie {
+                journal: &journaliser,
+                ..Voie::AUCUNE
+            },
+        );
+        let reveil = reveilleur.map(|reveilleur| {
+            let (dire, entendre) = tokio::sync::mpsc::unbounded_channel();
+            application.reveiller_par(dire);
+            tokio::spawn(reveilleur.reveiller_sans_fin(entendre))
+        });
+        let arret = async {
+            let _ = entendre_stop.await;
+        };
+        let comptes = servir_quic(socket, tls, 16, 30_000_000, &mut application, arret)
+            .await
+            .expect("l'écoute rend ses comptes");
+        if let Some(reveil) = reveil {
+            reveil.abort();
+        }
+        comptes
+    });
+    (adresse, dire_stop, tache)
+}
+
+/// Fait tourner ce client jusqu'à ce que ce flux porte ce motif, ou que la
+/// patience s'épuise. Rend `true` s'il l'a porté.
+async fn attendre_dans_le_flux(
+    client: &mut ams_quic_client::Client,
+    flux: u64,
+    motif: &[u8],
+    combien: usize,
+) -> bool {
+    let depart = std::time::Instant::now();
+    while depart.elapsed() < std::time::Duration::from_secs(10) {
+        let vus = client
+            .recu(flux)
+            .windows(motif.len())
+            .filter(|fenetre| *fenetre == motif)
+            .count();
+        if vus >= combien {
+            return true;
+        }
+        client.parler().await;
+        client.ecouter().await;
+    }
+    false
+}
+
+/// Ce que le faux serveur a reçu dans ce délai, s'il a reçu quelque chose.
+async fn recue_dans(
+    rapports: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    delai: std::time::Duration,
+) -> Option<Vec<u8>> {
+    tokio::time::timeout(delai, rapports.recv())
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Dépose ce point pour cet appareil, sur sa propre connexion.
+async fn deposer_un_point(
+    client: &mut ams_quic_client::Client,
+    flux: u64,
+    appareil: Identifiant,
+    point: &str,
+) {
+    let cible = format!("/v1/appareils/{}/poussee", appareil.texte());
+    let corps = format!(r#"{{"plateforme":"unifiedpush","point":"{point}"}}"#);
+    // `21` est l'index QPACK de `:method: PUT`.
+    ams_quic_client::envoyer_avec_media(
+        client,
+        flux,
+        21,
+        cible.as_bytes(),
+        None,
+        corps.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(client, flux).await;
+    assert_eq!(
+        champ(&champs(client.recu(flux)), b":status"),
+        Some(&b"204"[..]),
+        "le point est déposé"
+    );
+}
+
+#[tokio::test]
+async fn une_autorisation_ecrite_ici_reveille_le_beneficiaire_et_une_repliquee_non() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // 1. Une autorisation ÉCRITE ICI réveille le bénéficiaire : un `POST` vide
+    //    part vers son point, avec la requête constante du produit, et une
+    //    ligne arrive sur son flux `GET /v1/nouvelles`. La réponse au `POST`
+    //    n'a rien attendu.
+    // 2. **DÉCISION 9** : le point et une autorisation arrivés de l'AUTRE
+    //    racine ne font rien partir d'ici — ni envoi, ni ligne. Le point
+    //    répliqué sert pourtant : c'est lui que l'autorisation locale réveille.
+    // 3. Un second réveil dans la minute ne part pas (le frein par appareil),
+    //    mais la ligne du flux, elle, arrive : elle ne coûte rien à personne.
+    // 4. Un second flux des nouvelles sur la même connexion : `409`.
+    let (autorite, racine, chaine, cle) = materiel("reveil");
+    let (base, fichier) = entrepot("reveil");
+    let base = Arc::new(base);
+    let (point_de_poussee, mut recues) = faux_serveur_de_poussee(&chaine, &cle, "201 Created");
+    let reveilleur = asl_loop_tokio::reveil::Reveilleur::nouveau(
+        Arc::clone(&base),
+        &racine,
+        Box::new(journaliser),
+    )
+    .expect("la racine de banc s'épingle")
+    .resoudre_pour_un_essai(point_de_poussee);
+    assert_eq!(reveilleur.racines(), 1);
+    let (adresse, dire_stop, tache) =
+        lever_avec_reveil(&chaine, &cle, Arc::clone(&base), Some(reveilleur)).await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte_a, _appareil_a, _) = creer_un_compte(&mut alice, 0, 0xA2).await;
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, telephone_b, _) = creer_un_compte(&mut bob, 0, 0xB2).await;
+
+    // ── LE POINT ARRIVE DE L'AUTRE RACINE, ET UNE AUTORISATION AUSSI ────────
+    let pair = Identifiant::depuis_entropie(Genre::Annuaire, [0xAA; 16]);
+    let estampille = |compteur| asl_registre::Estampille {
+        compteur,
+        racine: pair,
+    };
+    let repliquee = |compteur, operation| asl_registre::Cadre::Operation {
+        estampille: estampille(compteur),
+        operation,
+    };
+    base.appliquer(
+        pair,
+        &repliquee(
+            1,
+            asl_registre::Operation::PointDePoussee {
+                appareil: telephone_b,
+                enregistrement: asl_registre::PointDePoussee {
+                    provenance: Provenance::Ici,
+                    estampille: estampille(1),
+                    point: asl_registre::PointRange::nouveau("https://localhost/up/bob")
+                        .expect("il tient"),
+                    cle: None,
+                    secret: None,
+                },
+            },
+        ),
+        true,
+    )
+    .expect("le point s'applique");
+
+    // Bob écoute ses nouvelles sur sa connexion tenue.
+    ams_quic_client::envoyer_une_requete(&mut bob, 12, 17, b"/v1/nouvelles", None, b"").await;
+    let depart = std::time::Instant::now();
+    while bob.recu(12).is_empty() && depart.elapsed() < std::time::Duration::from_secs(10) {
+        bob.parler().await;
+        bob.ecouter().await;
+    }
+    assert_eq!(
+        champ(&champs(bob.recu(12)), b":status"),
+        Some(&b"200"[..]),
+        "le flux des nouvelles s'ouvre"
+    );
+    assert!(!bob.fin_recue(12), "et il ne se ferme pas");
+    // Un second flux sur la même connexion : un par connexion.
+    ams_quic_client::envoyer_une_requete(&mut bob, 16, 17, b"/v1/nouvelles", None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut bob, 16).await;
+    assert_eq!(
+        champ(&champs(bob.recu(16)), b":status"),
+        Some(&b"409"[..]),
+        "un flux des nouvelles par connexion"
+    );
+
+    let autorisation_repliquee = Identifiant::depuis_entropie(Genre::Autorisation, [0xAA; 16]);
+    base.appliquer(
+        pair,
+        &repliquee(
+            2,
+            asl_registre::Operation::Autorisation {
+                autorisation: autorisation_repliquee,
+                enregistrement: asl_registre::Autorisation {
+                    provenance: Provenance::Ici,
+                    estampille: estampille(2),
+                    par: compte_a,
+                    a: compte_b,
+                    portee: asl_registre::Portee::ToutLeCompte,
+                    revoquee: false,
+                    etiquette: nom_de_machine("chez l'autre"),
+                },
+            },
+        ),
+        true,
+    )
+    .expect("l'autorisation s'applique");
+    assert!(
+        !attendre_dans_le_flux(&mut bob, 12, b"autorisation", 1).await,
+        "une autorisation répliquée n'écrit rien sur le flux (décision 9)"
+    );
+    assert_eq!(
+        recue_dans(&mut recues, std::time::Duration::from_millis(500)).await,
+        None,
+        "une autorisation répliquée ne réveille personne d'ici (décision 9)"
+    );
+
+    // ── ALICE AUTORISE BOB, ICI ─────────────────────────────────────────────
+    let demande = format!(
+        r#"{{"a":"{}","portee":"tout","etiquette":"banc"}}"#,
+        compte_b.texte()
+    );
+    let (statut, rendu) = poster(
+        &mut alice,
+        12,
+        b"/v1/autorisations",
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+
+    let requete = recue_dans(&mut recues, std::time::Duration::from_secs(10))
+        .await
+        .expect("le point répliqué est réveillé par l'autorisation locale");
+    assert_eq!(
+        String::from_utf8_lossy(&requete),
+        "POST /up/bob HTTP/1.1\r\nHost: localhost\r\nTTL: 86400\r\nTopic: nouvelles\r\n\
+         Urgency: normal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "la requête constante, et un corps vide"
+    );
+    assert!(
+        attendre_dans_le_flux(&mut bob, 12, b"{\"quoi\":\"autorisation\"}\n", 1).await,
+        "une ligne sur le flux des nouvelles : {:?}",
+        String::from_utf8_lossy(bob.recu(12))
+    );
+
+    // ── UNE SECONDE DANS LA MINUTE : LA LIGNE, PAS L'ENVOI ──────────────────
+    let demande = format!(
+        r#"{{"a":"{}","portee":"tout","etiquette":"encore"}}"#,
+        compte_b.texte()
+    );
+    let (statut, _) = poster(
+        &mut alice,
+        16,
+        b"/v1/autorisations",
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    assert!(
+        attendre_dans_le_flux(&mut bob, 12, b"{\"quoi\":\"autorisation\"}\n", 2).await,
+        "la seconde ligne arrive"
+    );
+    assert_eq!(
+        recue_dans(&mut recues, std::time::Duration::from_secs(1)).await,
+        None,
+        "un appareil se réveille une fois par minute"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn un_point_mort_et_une_adresse_de_bouclage_se_journalisent() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // Les deux lignes qu'un exploitant doit voir en premier (§2.2, « Échec ») :
+    // un point qui répond `410` est dit mort, avec l'appareil et le statut ;
+    // et un point dont le nom mène à la boucle locale est refusé AVANT toute
+    // connexion — ici sans porte d'essai : `localhost` se résout par le
+    // système, et la règle de bouclage le refuse.
+    let (autorite, racine, chaine, cle) = materiel("reveil-journal");
+
+    // ── 410 ─────────────────────────────────────────────────────────────────
+    let (base, fichier) = entrepot("reveil-mort");
+    let base = Arc::new(base);
+    let (point_de_poussee, mut recues) = faux_serveur_de_poussee(&chaine, &cle, "410 Gone");
+    let reveilleur = asl_loop_tokio::reveil::Reveilleur::nouveau(
+        Arc::clone(&base),
+        &racine,
+        Box::new(journaliser),
+    )
+    .expect("la racine de banc s'épingle")
+    .resoudre_pour_un_essai(point_de_poussee);
+    let (adresse, dire_stop, tache) =
+        lever_avec_reveil(&chaine, &cle, Arc::clone(&base), Some(reveilleur)).await;
+    let mut alice = connecter(&racine, adresse).await;
+    let _ = creer_un_compte(&mut alice, 0, 0xA3).await;
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, telephone_b, _) = creer_un_compte(&mut bob, 0, 0xB3).await;
+    deposer_un_point(&mut bob, 12, telephone_b, "https://localhost/up/mort").await;
+    let demande = format!(
+        r#"{{"a":"{}","portee":"tout","etiquette":"x"}}"#,
+        compte_b.texte()
+    );
+    let (statut, _) = poster(
+        &mut alice,
+        12,
+        b"/v1/autorisations",
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    assert!(
+        recue_dans(&mut recues, std::time::Duration::from_secs(10))
+            .await
+            .is_some(),
+        "l'envoi part"
+    );
+    let mort = format!("point mort — appareil {telephone_b}, statut 410");
+    let mut vu = false;
+    for _ in 0..50_u32 {
+        vu = JOURNAL
+            .lock()
+            .expect("le journal")
+            .iter()
+            .any(|ligne| ligne.contains(&mort));
+        if vu {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(vu, "le journal dit le point mort : {mort}");
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_file(&fichier);
+
+    // ── LA BOUCLE LOCALE, SANS PORTE D'ESSAI ────────────────────────────────
+    let (base, fichier) = entrepot("reveil-bouclage");
+    let base = Arc::new(base);
+    let reveilleur = asl_loop_tokio::reveil::Reveilleur::nouveau(
+        Arc::clone(&base),
+        &racine,
+        Box::new(journaliser),
+    )
+    .expect("la racine de banc s'épingle");
+    let (adresse, dire_stop, tache) =
+        lever_avec_reveil(&chaine, &cle, Arc::clone(&base), Some(reveilleur)).await;
+    let mut alice = connecter(&racine, adresse).await;
+    let _ = creer_un_compte(&mut alice, 0, 0xA4).await;
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, telephone_b, _) = creer_un_compte(&mut bob, 0, 0xB4).await;
+    deposer_un_point(&mut bob, 12, telephone_b, "https://localhost/up/interne").await;
+    let demande = format!(
+        r#"{{"a":"{}","portee":"tout","etiquette":"x"}}"#,
+        compte_b.texte()
+    );
+    let (statut, _) = poster(
+        &mut alice,
+        12,
+        b"/v1/autorisations",
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    let refus = format!(
+        "réveil refusé par les règles d'adresse — appareil {telephone_b}, hôte localhost, \
+         règle « bouclage »"
+    );
+    let mut vu = false;
+    for _ in 0..50_u32 {
+        vu = JOURNAL
+            .lock()
+            .expect("le journal")
+            .iter()
+            .any(|ligne| ligne.contains(&refus));
+        if vu {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(vu, "le journal dit le refus, l'hôte et la règle : {refus}");
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}

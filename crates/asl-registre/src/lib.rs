@@ -2761,6 +2761,15 @@ pub const OPERATION_OCTETS_MAX: usize = OPERATION_ENTETE_OCTETS + CHARGE_OCTETS_
 /// et [`Operation::ecrire`] la prend à part. Une opération est un fait daté par
 /// la racine qui l'écrit, et le même fait peut être rejoué par un instantané
 /// avec l'estampille d'origine — c'est pourquoi les deux se séparent.
+///
+/// **Le point de poussée fait mille deux cents octets, les autres quelques
+/// centaines** : c'est la raison de [`Cadre`], et elle vaut ici — une
+/// opération vit sur la pile le temps d'être écrite ou appliquée, et cette
+/// crate n'alloue pas.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "une opération vit sur la pile le temps d'une lecture, et la crate n'alloue pas"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
     /// Un compte créé. Insérer si absent.

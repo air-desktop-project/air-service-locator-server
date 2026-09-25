@@ -194,6 +194,20 @@ grep -qE './etc/asl-server/racines-android' "$essai/contenu" \
 grep -q '^Environment="ASL_ANDROID=--android-roots .*"$' scripts/paquet.sh \
     || rate "le gabarit du drop-in Android ne cite pas l'affectation en entier"
 
+# **LES NOTIFICATIONS SONT OPTIONNELLES, ET AUCUNE AUTORITÉ N'EST ÉPINGLÉE
+# PAR LE PAQUET** (`protocole.md` §2.2). `$ASL_POUSSEE` non cité, vide par
+# défaut : sans lui, rien ne part.
+grep -q 'ASL_POUSSEE' "$essai/unite-nue" \
+    || rate "l'unité ne passe pas --push-roots par l'environnement"
+grep -q '\${ASL_POUSSEE}' "$essai/unite-nue" \
+    && rate "les accolades donneraient un argument VIDE au lieu de le retirer"
+grep -q '^Environment=ASL_POUSSEE' "$essai/unite-nue" \
+    && rate "l'unité ÉPINGLE des autorités de poussée — le paquet choisit à la place de l'exploitant"
+grep -q './usr/share/doc/asl-server/poussee.conf.exemple' "$essai/contenu" \
+    || rate "le fragment des notifications n'est pas expédié"
+grep -q '^Environment="ASL_POUSSEE=--push-roots .*"$' scripts/paquet.sh \
+    || rate "le gabarit du drop-in des notifications ne cite pas l'affectation en entier"
+
 # **ET LA TABLE DU PARE-FEU NON PLUS N'EST PAS CHARGÉE.** Un paquet qui la
 # poserait sous `/etc/nftables.conf` fermerait des ports sur une machine qu'il ne
 # connaît pas — à commencer, si elle est mal relue, par celui du `ssh`.
@@ -283,6 +297,7 @@ commencer
 # CE QU'UN SCRIPT IMPRIME EST CE QUE L'EXPLOITANT RECOPIE.
 for chemin in /usr/share/doc/asl-server/attestation.conf.exemple \
         /usr/share/doc/asl-server/android.conf.exemple \
+        /usr/share/doc/asl-server/poussee.conf.exemple \
         /usr/share/doc/asl-server/racines-android/google.pem; do
     grep -qF "$chemin" "$essai/CONTROLE/postinst" \
         || rate "le \`postinst\` ne nomme pas $chemin"

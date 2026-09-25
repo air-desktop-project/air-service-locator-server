@@ -12,7 +12,7 @@
 //!
 //! 1. **Rien ne panique**, sur aucun octet ni aucune adresse.
 //! 2. **UN CODE N'EST RENDU QUE D'UNE LIGNE ENTIÈRE** qui commence par
-//!    `HTTP/1.1 ` ou `HTTP/1.0 `, et il a trois chiffres ; ce qui suit la
+//!    `HTTP/1.1 ` ou `HTTP/1.0 `, et il va de 100 à 599 ; ce qui suit la
 //!    ligne ne change jamais le verdict — seule la ligne se lit.
 //! 3. **UNE IPv4 ENFOUIE SE JUGE COMME ELLE-MÊME** : `::ffff:a.b.c.d` et
 //!    `64:ff9b::a.b.c.d` rendent le verdict de `a.b.c.d`. Recalculé ici depuis
@@ -31,7 +31,7 @@ fuzz_target!(|octets: &[u8]| {
     // ── 2. LA LIGNE DE STATUT ───────────────────────────────────────────────
     match lire_le_statut(octets) {
         Statut::Code(code) => {
-            assert!((100..=999).contains(&code), "un code de {code}");
+            assert!((100..=599).contains(&code), "un code de {code}");
             assert!(
                 octets.starts_with(b"HTTP/1.1 ") || octets.starts_with(b"HTTP/1.0 "),
                 "un code lu d'autre chose qu'une ligne HTTP/1.x"

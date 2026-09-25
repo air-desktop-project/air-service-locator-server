@@ -214,6 +214,9 @@ fn seule_la_ligne_de_statut_se_lit() {
         b"HTTP/1.1 20\r\n",
         b"HTTP/1.1 2000\r\n",
         b"HTTP/1.1 2x0 OK\r\n",
+        // Le fuzz l'a trouvé : trois chiffres, mais aucune classe de statut.
+        b"HTTP/1.1 014\r\n",
+        b"HTTP/1.1 600 Au-dela\r\n",
         b"http/1.1 200 OK\r\n",
         b"SSH-2.0-OpenSSH\r\n",
         b"\r\n",

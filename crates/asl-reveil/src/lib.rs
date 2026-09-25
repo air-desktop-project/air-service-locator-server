@@ -260,7 +260,7 @@ pub enum Statut {
 ///
 /// **Seule la ligne compte** (§2.2, « La sécurité », 3) : les en-têtes et le
 /// corps ne sont pas lus. `HTTP/1.1 ` ou `HTTP/1.0 `, trois chiffres, puis
-/// une espace ou la fin de la ligne. Au-delà de [`LIGNE_DE_STATUT_MAX`] sans
+/// une espace ou la fin de la ligne ; le premier chiffre de `1` à `5`. Au-delà de [`LIGNE_DE_STATUT_MAX`] sans
 /// fin de ligne, c'est illisible — un serveur qui fait attendre une ligne sans
 /// fin ne la verra pas lue.
 #[must_use]
@@ -280,8 +280,10 @@ pub fn lire_le_statut(octets: &[u8]) -> Statut {
         return Statut::Illisible;
     };
     match reste {
-        [c, d, u] | [c, d, u, b' ', ..]
-            if c.is_ascii_digit() && d.is_ascii_digit() && u.is_ascii_digit() =>
+        // Trois chiffres, et le premier dit une classe qui existe : de `1xx`
+        // à `5xx` (RFC 9110 §15). `014` n'est pas un statut.
+        [c @ b'1'..=b'5', d, u] | [c @ b'1'..=b'5', d, u, b' ', ..]
+            if d.is_ascii_digit() && u.is_ascii_digit() =>
         {
             Statut::Code(
                 u16::from(c.saturating_sub(b'0'))

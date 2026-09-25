@@ -177,6 +177,33 @@ journal d'exploitation dit pourquoi. `paquet/racines-android/google.pem` est la
 racine de Google, telle que la capture réelle l'a rendue ; aucune n'est
 épinglée par défaut.
 
+**Les notifications** (`docs/protocole.md` §2.2, **servies depuis 0.19.0**) :
+une autorisation accordée sur CETTE racine réveille les appareils vivants du
+bénéficiaire d'un `POST` **vide** vers le point UnifiedPush que chacun a
+déposé, et écrit `{"quoi":"autorisation"}` sur les flux `GET /v1/nouvelles`
+qu'ils tiennent ici. Aucun serveur d'Apple ni de Google n'est appelé :
+
+```sh
+cargo run -p asl-server -- … \
+    --push-roots /etc/ssl/certs/ca-certificates.crt   # les autorités des serveurs de poussée
+```
+
+`--push-roots` se lit comme `--peer-ca` et `--android-roots` : un fichier PEM
+que VOUS désignez, rien de téléchargé, rien d'épinglé par défaut. **Pour
+joindre ntfy.sh et les distributeurs publics, le paquet de certificats de la
+distribution suffit** (`ca-certificates` sur Ubuntu) ; un distributeur
+auto-hébergé sous votre propre autorité se joint en nommant un fichier qui la
+porte. **Sans ce réglage, rien ne part** — ni résolution, ni connexion —, le
+démarrage le dit, et `GET /v1/nouvelles` reste servi. C'est le seul appel
+sortant d'une racine en dehors de son pair, et il est borné : le nom est
+résolu à chaque envoi et **toutes** ses adresses doivent être unicast globales
+(une seule adresse privée, de bouclage, de lien local… refuse l'envoi), la
+connexion va à l'adresse vérifiée, TLS 1.3 seulement, cinq secondes, une
+tentative, aucune redirection suivie ; un réveil par minute et par appareil,
+soixante envois par minute et par hôte, huit en vol. Le journal
+d'exploitation dit les points morts (`404`/`410`) et chaque refus des règles
+d'adresse.
+
 Les quatre vont ensemble. Sans `--identity-key`, la racine tourne seule et le
 dit au démarrage. Chacune ouvre une connexion sortante vers l'autre et y **tire
 sans fin** ce que l'autre a écrit ; une écriture faite chez l'une est chez
@@ -415,6 +442,35 @@ chemin arrivent comme deux arguments.
   deux ne servent pas 0.14.0** : un banc d'avant ne saurait pas lire les
   opérations `invitation` (18) et `invitation-consommee` (19), et fermerait
   la voie en le disant — il ne saute rien.
+**Les notifications** (`docs/protocole.md` §2.2, **servies depuis 0.19.0**),
+facultatives, sur le modèle de `/usr/share/doc/asl-server/poussee.conf.exemple` :
+
+```sh
+systemctl edit asl-server
+# [Service]
+# Environment="ASL_POUSSEE=--push-roots /etc/ssl/certs/ca-certificates.crt"
+```
+
+- **DÉPLOYEZ LES DEUX RACINES EN 0.19.0 AVANT QU'UN APPAREIL DÉPOSE UN
+  POINT.** Le point se réplique par l'opération `point-de-poussee` (genre 20),
+  et une racine d'avant ne la connaît pas : elle fermerait la voie en le
+  disant, et ne sauterait rien. L'ordre sûr est celui des invitations —
+  les deux bancs à la suite, puis seulement l'app Android qui dépose.
+- **Rien à reprendre au déploiement.** Les points ont leur propre table,
+  `points-de-poussee`, qui naît vide à l'ouverture ; aucun enregistrement
+  existant ne change de taille ni de sens, le format de l'entrepôt reste le
+  troisième, la voie ne se coupe pas et le journal d'opérations n'est pas
+  vidé.
+- **`apns` et `fcm` sont refusés** (`400`) à `PUT /v1/appareils/{a}/poussee` :
+  aucune app ne les déposait. Les jetons déjà rangés restent lisibles et ne
+  servent à rien.
+- **Le pare-feu doit laisser sortir TCP vers le port 443** — la table
+  expédiée (`nftables-asl.conf`) ne filtre pas la sortie.
+- Le point est **répliqué** pour que la racine où l'autorisation s'ÉCRIT le
+  trouve ; c'est elle, et elle seule, qui envoie (décision 9). Ce qu'une
+  racine apprend en envoyant — un point mort, un hôte trop sollicité — reste
+  en mémoire, chez elle.
+
 ### Frapper la clé d'exploitation, et émettre (depuis 0.15.0)
 
 Les deux gestes sont dans le même binaire, et **aucun ne tourne sur un banc** :

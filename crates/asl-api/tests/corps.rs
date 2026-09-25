@@ -1305,7 +1305,9 @@ fn chaque_regle_de_forme_refuse_ce_qu_elle_nomme() {
 #[test]
 fn base64url_n_admet_qu_une_ecriture_de_chaque_valeur() {
     for longueur in [0_usize, 1, 2, 3, 16, 65] {
-        let octets: Vec<u8> = (0..longueur).map(|rang| (rang * 37) as u8).collect();
+        let octets: Vec<u8> = (0..longueur)
+            .map(|rang| u8::try_from(rang * 37 % 256).unwrap())
+            .collect();
         let mut tampon = [0_u8; 88];
         let texte = encoder_base64url(&octets, &mut tampon).unwrap().to_vec();
         assert_eq!(texte.len(), longueur_base64url(longueur));
