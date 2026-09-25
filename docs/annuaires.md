@@ -135,7 +135,7 @@ sélective et relève du §5.
 | | Se synchronise ? |
 |---|---|
 | Comptes, alias publics, clés publiques des appareils | Oui |
-| Descriptions d'appareils, jetons de poussée, révocations | Oui |
+| Descriptions d'appareils, points de poussée, révocations | Oui |
 | Machines, leurs capacités, leur clé publique | Oui |
 | **Codes d'enrôlement en attente** | Oui |
 | Services **déclarés** (nom, machine, propriétaire) | Oui |
