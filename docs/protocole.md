@@ -589,9 +589,10 @@ celle de qui a fabriqué l'enclave — Google pour les Android certifiés, Apple
 pour iOS. C'est inhérent à « prouver du matériel », et c'est un fichier, pas un
 service. Sur iOS, il n'y a pas d'autre attestation que celle d'Apple, et App
 Attest reste : vérifié hors ligne, sans autre compte que celui qui signe déjà
-l'app. Et **les notifications** (§2.6 de `modele.md`) passent encore par APNs et
-FCM — c'est la dépendance qui reste à regarder, sous le même principe ;
-UnifiedPush est la voie à instruire pour Android.
+l'app. Et **les notifications** (§2.6 de `modele.md`) n'appellent plus ni
+Apple ni Google : un point de poussée UnifiedPush choisi par l'utilisateur sur
+Android, la connexion tenue sur le Mac, et sur un iPhone la relecture à
+l'ouverture — tranché le 2026-09-25, §2.2, « Les notifications ».
 
 ### 2.1 bis Ce que porte chaque corps, et pourquoi ce n'est pas toujours du JSON
 
@@ -728,7 +729,8 @@ l'empêcherait de comprendre.
 | `POST /v1/appareils` | Enrôle un appareil de plus. **Signé par un appareil déjà enrôlé.** L'appareil entre `aucune` en posture facultative, **`attendue` en posture exigée** — vivant seulement quand il aura présenté sa chaîne (voir ci-dessous). |
 | `POST /v1/attestation` | **La preuve d'un appareil qui rejoint, avec la chaîne d'attestation de sa clé** — le `POST /v1/defi` du genre `a`, augmenté de la plate-forme et de la chaîne, sur la connexion où le défi a été tiré AVANT que la clé soit générée. N'exige rien : c'est elle, la preuve. `204` ; la connexion est désormais celle de cet appareil, et son `attestation` dit sous quoi il est entré. Voir ci-dessous. |
 | `GET /v1/appareils` | Les appareils de MON compte, révoqués compris et marqués : l'écran « Compte ». Chacun rend `appareil`, `attestation`, `revoque`, et — s'il les a posés — `plateforme` et `modele`. |
-| `PUT /v1/appareils/{a}/poussee` | Dépose ou renouvelle le jeton APNs / FCM. **Pour soi seulement** ; voir ci-dessous. |
+| `PUT /v1/appareils/{a}/poussee` | Dépose ou renouvelle le **point de poussée** de cet appareil : une URL UnifiedPush, que l'annuaire réveillera d'un message VIDE. **Pour soi seulement** ; voir ci-dessous. |
+| `GET /v1/nouvelles` | **Le flux des nouvelles de MON compte**, sur la connexion tenue d'un appareil : une ligne par événement, sans rien de plus. Ce qu'un Mac résident reçoit sans aucun serveur de poussée. Voir ci-dessous. |
 | `PUT /v1/appareils/{a}/description` | Dit ce que cet appareil est : `{"plateforme": "macos", "modele": "MacBook Pro (2019)"}`, la plate-forme parmi `ios`, `android`, `macos`. **Pour soi seulement**, même règle que la poussée ; voir ci-dessous. |
 | `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. **Il est marqué, non effacé** : l'écran qu'on regarde après avoir perdu un téléphone doit montrer ce qu'on a retiré. La révocation du **dernier** appareil vivant ouvre le délai des orphelins (`modele.md` §2.1). |
 | `DELETE /v1/compte` | **Efface MON compte** — celui de la clé qui signe. Tout part dans une transaction : appareils, machines et services, autorisations dans les deux sens, alias libéré ; reste l'identifiant marqué effacé. `204`, puis l'annuaire ferme la connexion : la clé qui a demandé est révoquée. Voir ci-dessous. |
@@ -747,7 +749,7 @@ l'empêcherait de comprendre.
 | `GET /v1/utilisateurs/{u}` | **Confirme qu'un identifiant existe**, et rien d'autre : ni nom, ni machines, ni services. Sert à ce qu'une faute de frappe ne produise pas une autorisation muette. |
 | `GET /v1/moi/appareils` | **Les appareils du compte de la machine qui demande**, révoqués compris — lecture seule, voie machine. Voir §3. |
 | `GET /v1/utilisateurs/{u}/machines` | **Les machines de `u` que le demandeur a le droit de voir** — les siennes si `u` est lui, sinon celles que les autorisations de `u` envers lui couvrent (`modele.md` §2.5). Voir ci-dessous. Servi aussi sur la voie machine (§3). |
-| `POST /v1/autorisations` | Accorde. Bénéficiaire `u-…`, portée, étiquette. Déclenche la notification. |
+| `POST /v1/autorisations` | Accorde. Bénéficiaire `u-…`, portée, étiquette. **Réveille les appareils du bénéficiaire** — voir « Les notifications ». |
 | `GET /v1/autorisations` | Les deux sens : ce que j'ai accordé, ce qu'on m'a accordé. |
 | `DELETE /v1/autorisations/{g}` | Révoque. Effet immédiat. |
 | `GET /v1/expositions` | **Ce qui est exposé de MOI**, relation par relation. Tout utilisateur, pas seulement l'administrateur. |
@@ -832,36 +834,239 @@ code avant d'ouvrir un compte, et ne le demande pas ailleurs — elle ne
 négocie pas davantage, et un annuaire qui répondrait un mot qu'elle ne
 connaît pas se traite comme une version trop récente, non comme une panne.
 
-### Ce qu'un jeton de poussée exige, et ce qu'il ne promet pas
+### Le point de poussée — ce qu'un appareil dépose, et ce qu'il ne promet pas
 
-**Un appareil ne dépose que pour LUI-MÊME.** Le jeton vient du système du
-téléphone qui le porte, et personne d'autre ne l'a ; déposer pour un autre
-détournerait ses notifications, c'est-à-dire celles d'un compte vers le téléphone
-de qui l'a volé. Viser l'appareil d'un autre rend **`404`**, comme un appareil qui
-n'existe pas — le distinguer confirmerait l'existence de l'identifiant visé.
+```jsonc
+PUT /v1/appareils/{a}/poussee
+{"plateforme": "unifiedpush", "point": "https://ntfy.example.org/upAb3kZq9…"}
+```
 
-**Un corps mal formé rend `400`**, et non `404` : là, la faute est bien celle de
-l'appelant, et il vise son propre appareil.
+**Un appareil ne dépose que pour LUI-MÊME.** Le point vient du distributeur
+installé sur le téléphone qui le porte, et personne d'autre ne l'a ; déposer
+pour un autre détournerait ses notifications, c'est-à-dire celles d'un compte
+vers le téléphone de qui l'a volé. Viser l'appareil d'un autre rend **`404`**,
+comme un appareil qui n'existe pas — le distinguer confirmerait l'existence de
+l'identifiant visé. **Un corps mal formé rend `400`** : là, la faute est celle
+de l'appelant, et il vise son propre appareil.
 
-**Un seul jeton par appareil, et le neuf remplace l'ancien.** Apple et Google font
-tourner les leurs ; en garder deux enverrait chaque notification en double, dont
-une à un jeton mort — et un jeton mort répété finit par faire retirer le droit
-d'en envoyer.
+**Un seul point par appareil, et le neuf remplace l'ancien.** Le distributeur
+en donne un nouveau quand l'utilisateur en change ; en garder deux réveillerait
+deux fois, dont une fois un point mort. **Le point part avec l'appareil qu'on
+révoque**, dans la même écriture. **Il n'y a pas de verbe de retrait** : un
+utilisateur qui coupe les notifications se désinscrit auprès de son
+distributeur, le point meurt, et l'annuaire l'apprend au premier envoi (voir
+« Échec »). Un appareil dont on ne veut plus est un appareil qu'on révoque.
 
-**Le jeton part avec l'appareil qu'on révoque**, dans la même écriture. L'appareil,
-lui, reste marqué : l'écran d'après une perte doit montrer ce qu'on a retiré. Le
-jeton n'a rien à montrer.
+**Ce qui est exigé du point porte sur sa FORME, et c'est déjà une défense**
+(voir « La sécurité ») : `https://` et rien d'autre ; un **nom DNS**, jamais une
+adresse littérale — le certificat se vérifie contre un nom, et une adresse
+littérale est la forme la plus directe d'une requête détournée ; le port **443**,
+implicite ou écrit ; ni identifiants (`user@`), ni fragment ; de l'ASCII
+imprimable, au plus **1024 octets**. Deux champs facultatifs, `"cle"` (la clé
+publique P-256 du récepteur, 65 octets en base64url) et `"secret"` (16 octets
+en base64url), sont acceptés et rangés sans servir : ce sont ceux de RFC 8291,
+gardés pour le repli dit plus bas, afin qu'il ne coûte pas un format de plus.
 
-**L'annuaire ne lit pas le jeton.** Ni sa forme, ni sa longueur attendue : c'est
-une chaîne opaque, et le seul juge de sa validité est le service qui l'a émis. Ce
-qui est exigé ne porte pas sur le sens — de l'ASCII imprimable, non vide, et au
-plus 255 octets, qui est ce qu'une longueur sur un octet permet. Un jeton vide
-n'est pas un retrait déguisé ; **il n'y a pas de verbe de retrait**, et un
-appareil qui n'en veut plus est un appareil qu'on révoque.
+**`apns` et `fcm` sont refusés, `400`.** Le verbe les acceptait depuis le début
+et rien ne s'en servait — « l'envoi n'est pas écrit », disait cette section, et
+c'était la vérité. Ni l'app Android ni l'app iOS ne les déposent (vérifié le
+2026-09-25 dans les deux dépôts) : les refuser ne casse personne, et accepter
+un jeton qu'aucun code n'emploiera est une promesse qu'on sait ne pas tenir.
 
-**Et l'ENVOI n'est pas écrit.** Ce verbe range le jeton ; rien ne s'en sert
-encore. Le dire ici est plus honnête que de laisser croire qu'une notification
-part parce que l'application a réussi son dépôt.
+**Le rangement.** Une table à elle, à taille fixe (provenance, estampille,
+longueur, point, et les deux champs facultatifs) : **une table qui s'ajoute ne
+change aucun format**, comme celle des invitations. L'ancienne rangée du jeton
+(`JetonPoussee`, 255 octets au plus — trop court pour une URL) n'est plus
+écrite ; elle se lit encore, et partira avec l'opération qui la porte.
+
+### Les notifications — sans Apple ni Google, et ce que cela coûte
+
+**Décidé le 2026-09-25.** B doit apprendre qu'A l'a autorisé sans avoir à ouvrir
+son application au bon moment (`modele.md` §2.6), et aucun service d'Apple ou de
+Google ne doit être appelé pour cela (C19). Les deux exigences ne se concilient
+pas partout, et cette section dit, plate-forme par plate-forme, ce qui a été
+choisi et ce que cela coûte.
+
+**Ce qui déclenche : un seul événement.** Une autorisation accordée à B
+(`POST /v1/autorisations`) réveille tous les appareils vivants de B. Rien
+d'autre ne notifie. **Elle part de la racine qui a écrit l'autorisation**, jamais
+de celle qui l'applique (`replication.md`, décision 9) : un utilisateur ne doit
+pas être réveillé deux fois. **Et elle part hors de la boucle** : une tâche à
+part, après la validation de l'écriture ; la réponse à `POST /v1/autorisations`
+ne l'attend pas, et la boucle QUIC — une tâche qui sert toutes les connexions —
+ne s'arrête pas le temps d'un appel sortant (la leçon de la 0.18.0).
+
+**Ce qu'elle porte : RIEN.** Le message est **vide**. L'application réveillée
+affiche une notification locale générique — « Du nouveau dans Service
+Locator » — et c'est à l'ouverture qu'elle relit et montre qui a accordé quoi.
+Trois raisons, et la première décide :
+
+- **Un téléphone réveillé ne peut pas lire.** La clé d'un appareil ne s'emploie
+  qu'après un geste biométrique (`modele.md` §2.2), et il n'y a personne devant
+  l'écran pour le faire : l'application réveillée en arrière-plan ne peut pas se
+  connecter. Un contenu détaillé devrait donc voyager DANS le message.
+- **Ce message traverse un serveur de poussée.** Choisi par l'utilisateur, le
+  sien peut-être — mais un serveur. Vide, il ne lui apprend que l'heure.
+- **Un écran verrouillé n'affiche alors rien qui désigne quelqu'un** — mieux
+  que ce que `modele.md` §2.6 promettait, qui y mettait l'identifiant d'A.
+
+*Écarté* : le contenu pauvre de §2.6, chiffré de bout en bout (RFC 8291). Le
+serveur de poussée ne le lirait pas, mais il faudrait écrire et éprouver un
+chiffrement de plus pour afficher un `u-…` que l'utilisateur ne reconnaît pas
+sans ouvrir l'app — où il le verra de toute façon, avec son contexte.
+
+**Android : UnifiedPush.** L'utilisateur installe un *distributeur* — ntfy,
+auto-hébergeable, ou un autre de son choix. L'application obtient de lui, par le
+connecteur UnifiedPush, un **point de terminaison** (une URL), et le dépose ici.
+Pour réveiller l'appareil, l'annuaire envoie à cette URL un message Web Push
+vide (RFC 8030). **Est-ce « sans tiers » au sens de C19 ?** C19 interdit que le
+service DÉPENDE d'un tiers que le produit impose. Ici, le service marche sans
+poussée (la relecture, plus bas), et le serveur de poussée est désigné par
+l'utilisateur, jamais par le produit — comme une adresse de courrier qu'on
+donne à un service. L'annuaire l'appelle, et il faut le dire : c'est le seul
+appel sortant d'une racine en dehors de son pair, et c'est pourquoi la section
+« La sécurité » existe. *Écartés* : FCM (Google, imposé) ; un distributeur
+intégré à l'app (une socket tenue en permanence par application, ce que les
+distributeurs mutualisent justement).
+
+**iOS : pas de poussée.** Un iPhone ne réveille une application en
+arrière-plan que par APNs, et c'est la limite dure. Trois voies ont été pesées :
+
+- **(a) aucune poussée** — la relecture à l'ouverture, seule ;
+- **(b) APNs, choix de l'exploitant, désactivé par défaut** — comme C19 traite
+  l'attestation. Il faudrait la clé du compte développeur Apple posée sur les
+  racines, un client HTTP/2 vers les serveurs d'Apple, un jeton signé (ES256),
+  et l'autorisation `aps-environment` dans l'app ;
+- **(c) le rafraîchissement en arrière-plan** d'iOS — l'app tourne parfois,
+  quand le système le décide ; mais elle ne peut pas se connecter sans geste
+  biométrique, donc elle n'apprendrait rien. Écarté.
+
+**Choisi : (a).** Ce que cela coûte, sans détour : **un utilisateur d'iPhone
+apprend une autorisation reçue quand il ouvre l'application, pas avant.** Le
+service n'y perd rien — la notification est une commodité, la liste fait foi
+(§2.6) ; l'utilisateur y perd l'immédiateté. (b) reste la porte si un exploitant
+la veut : nommée ici, non écrite ; elle appellerait Apple, ce que C19 ne tolère
+que comme un choix de l'exploitant, et elle demanderait sa propre spécification.
+
+**macOS : la connexion tenue, et aucun serveur de poussée.** L'app du Mac est
+résidente et tient sa connexion. Elle ouvre **`GET /v1/nouvelles`** (ci-dessous)
+et reçoit une ligne par événement ; elle relit alors, et affiche une
+notification **locale** — le système la montre sans passer par Apple. La
+limite : la connexion tenue est celle que l'utilisateur a ouverte d'un Touch
+ID ; si la veille ou un changement de réseau la rompt, la reconnexion redemande
+le geste, et rien n'arrive jusque-là. Le même flux sert les apps Android et iOS
+tant qu'elles sont au premier plan.
+
+**Le repli, partout : la relecture à l'ouverture.** C'est ce qui marche quand
+tout le reste échoue — poussée perdue, distributeur absent, iPhone. À
+l'ouverture, et à chaque ligne de `GET /v1/nouvelles`, l'application relit
+`GET /v1/autorisations` et montre **la différence** avec l'ensemble des `g-…`
+reçus qu'elle a déjà montrés, qu'elle garde localement. Ni compteur ni date à
+ajouter à l'annuaire : la liste est la vérité, la différence est locale.
+
+### La sécurité : l'annuaire appelle une URL qu'un appareil lui a donnée
+
+C'est la première fois qu'une racine se connecte à une adresse qu'elle n'a pas
+choisie, et c'est une porte à trois abus : **la requête détournée** (SSRF — viser
+un service interne, joignable du réseau de la racine et pas d'Internet),
+**l'amplification** (faire envoyer la racine vers une victime), **le sondage**
+(apprendre, aux erreurs et aux délais, ce qui répond derrière). Défenses :
+
+1. **À la dépose, la forme** — dite plus haut : `https`, un nom DNS, le port 443,
+   ni identifiants ni fragment, 1024 octets au plus.
+2. **À l'envoi, l'adresse.** Le nom est résolu **à chaque envoi**, et si **une
+   seule** des adresses rendues n'est pas une adresse unicast globale,
+   l'envoi est refusé — le nom est tenu pour hostile, on ne se rabat pas sur
+   une autre. Sont refusées : bouclage, non spécifiée, privées (RFC 1918,
+   `fc00::/7`), lien local (`169.254.0.0/16`, `fe80::/10`), partage
+   (`100.64.0.0/10`), multidiffusion, documentation, réservées, et toute
+   adresse IPv4 enfouie dans une IPv6 (`::ffff:0:0/96`, `64:ff9b::/96`,
+   `2002::/16`, Teredo) jugée comme l'IPv4 qu'elle porte. **La connexion se fait
+   à l'adresse vérifiée**, sans nouvelle résolution — c'est ce qui défait le
+   rebinding DNS, où la seconde résolution n'est plus la première ; le nom sert
+   au SNI et à la vérification du certificat.
+3. **Rien à suivre, rien à lire.** Une redirection est un échec, jamais un
+   chemin ; de la réponse, seule la ligne de statut compte, le corps n'est pas
+   lu ; **cinq secondes** pour tout — TCP, TLS, requête, statut.
+4. **Rien à choisir pour l'attaquant**, sauf l'URL : la méthode (`POST`), les
+   en-têtes et le corps (vide) sont fixes.
+5. **Le débit, borné en mémoire** : un appareil est réveillé **une fois par
+   minute** au plus par racine — dix autorisations dans la minute font un seul
+   réveil ; un même hôte reçoit **soixante envois par minute** au plus ; **huit**
+   envois au plus sont en vol. Rien de cela n'est rangé ni répliqué : ce sont
+   des freins, pas des faits.
+
+**Ce qui reste, et se dit.** Qui tient les appareils de B peut faire envoyer la
+racine vers un hôte PUBLIC de son choix, un `POST` vide par minute et par
+appareil ; sous une posture `optional`, les comptes sont libres, et c'est la
+limite par hôte qui borne alors l'envoi vers une même victime — par racine :
+deux racines, cent vingt par minute. Une limite qu'on ne peut pas tenir : un
+distributeur à une adresse publique qui relaierait vers un réseau interne ; la
+racine n'en sait rien, et c'est la responsabilité de qui l'exploite.
+
+### Échec — une tentative, et pas de file
+
+**Une tentative, jamais davantage, et rien ne se range pour plus tard** : c'est
+une commodité, et une file persistante ferait d'un envoi raté une dette. Un
+`2xx` est un succès. **`404` ou `410` : l'abonnement est mort** — l'utilisateur
+a changé de distributeur ou s'est désinscrit ; la racine le retient **en
+mémoire** et n'y envoie plus rien tant que l'appareil n'a pas déposé un point
+neuf. Ce n'est ni rangé ni répliqué : chaque racine l'apprend à son premier
+essai, et répliquer une mort ferait croire à une racine ce que l'autre a vu de
+son réseau. **`429`, `5xx`, délai dépassé** : l'envoi est abandonné ; le prochain
+événement réessaiera. Le journal d'exploitation dit les points morts
+(l'appareil et le statut) et **chaque refus des règles d'adresse** (l'appareil,
+l'hôte, la règle) — c'est ce qu'un exploitant doit voir en premier.
+
+### Le client sortant — ce que la pile a déjà, et ce qu'elle n'a pas
+
+Envoyer à un serveur Web Push demande un client **HTTPS sur TCP** ; ce dépôt ne
+parle que HTTP/3 sur QUIC. La pile d'`air-mail-server` a ce qu'il faut pour le
+TLS : `ams-tls` fournit un client TLS 1.3 en Rust pur (`rustls` avec
+`rustls-rustcrypto`, pas une ligne de C), celui du relais de courrier sortant,
+avec une vérification des certificats par `webpki` contre un magasin qu'on lui
+donne. **Les racines viennent d'un fichier** que l'exploitant désigne,
+`--push-roots <fichier PEM>` — typiquement le paquet de certificats de la
+distribution —, épinglées comme `--android-roots` (C19) ; **sans ce réglage,
+rien ne part**, le journal le dit au démarrage, et `GET /v1/nouvelles` reste
+servi. La résolution passe par celle du système, comme le tireur la fait déjà
+pour `--peer`. **HTTP/1.1, et le strict nécessaire** : `POST`, `Host`,
+`TTL: 86400`, `Topic: nouvelles` (RFC 8030 §5.4 : un message neuf remplace chez
+le serveur de poussée un message du même sujet encore en attente — la
+coalescence se fait là aussi), `Urgency: normal`, `Content-Length: 0`,
+`Connection: close` ; puis la ligne de statut. Pas de HTTP/2 : une requête
+minuscule, une fois par minute au plus, n'en demande pas. **Et TLS 1.3
+seulement** : un distributeur qui ne parle que TLS 1.2 n'est pas servi.
+
+**Le repli, s'il le faut.** Un corps vide est un message Web Push valide
+(RFC 8030) et le plus sûr à faire traverser un serveur de poussée. Si
+l'épreuve sur un vrai téléphone montrait qu'un distributeur ou le connecteur ne
+délivre pas un message vide, le repli est de chiffrer (RFC 8291) une
+**constante** avec la clé et le secret que le connecteur fournit — d'où les
+deux champs facultatifs du point, rangés dès maintenant : le message ne dirait
+toujours rien, et seule la PR de code aurait à l'écrire. Pas de VAPID
+(RFC 8292) en première version : ntfy ne l'exige pas ; si un distributeur
+l'exige, ce sera une clé d'exploitant de plus, `--vapid-key`, nommée ici.
+
+### `GET /v1/nouvelles` — les nouvelles, sur une connexion tenue
+
+```
+GET /v1/nouvelles
+        (dans la connexion d'un appareil, prouvée)
+{"quoi": "autorisation"}
+{"quoi": "autorisation"}
+…
+```
+
+**Exige un appareil**, et ne dit que son propre compte. **La réponse ne se
+termine jamais**, comme `GET /v1/poussees` (§1.4) : `200`, sans
+`content-length`, un objet par ligne, sans enveloppe. **Une ligne dit qu'il y a
+du neuf, et de quel genre — rien d'autre** : l'application relit la liste qui
+fait foi. La connexion est authentifiée, et le genre pourrait en dire plus sans
+risque ; il ne le fait pas pour que les deux voies, poussée et flux, déclenchent
+la même relecture. Un seul genre aujourd'hui, `autorisation` ; un lecteur saute
+ceux qu'il ne connaît pas. **Ouvert à la demande, un par connexion**, et fermé
+avec elle.
 
 ### Ce qu'une description d'appareil est, et ce qu'elle n'est pas
 

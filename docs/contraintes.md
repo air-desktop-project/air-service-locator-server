@@ -796,9 +796,13 @@ d'un code n'y tient qu'à la seconde près entre deux racines (`replication.md`
 §3.2). Une racine qui n'appelle personne paie en vigilance ce qu'elle
 n'emprunte à aucun tiers.
 
-**Ce qu'elle ne couvre pas encore : les notifications.** APNs et FCM
-(`modele.md` §2.6) sont des services tiers, et l'appareil les appelle pour
-recevoir. Le principe vaut pour eux aussi ; la voie à instruire est UnifiedPush
-pour Android, et l'absence de poussée — la relecture à l'ouverture — comme repli
-partout. C'est un chantier à part, et il est nommé ici pour qu'il ne soit pas
-oublié.
+**Les notifications, depuis le 2026-09-25 : ni APNs ni FCM.** L'annuaire ne
+les appelle pas, et les apps ne les emploient pas (`modele.md` §2.6,
+`protocole.md` §2.2 « Les notifications »). Sur Android, un point de poussée
+**UnifiedPush**, que l'utilisateur choisit — c'est son serveur de poussée, pas
+celui du produit, et le service marche sans lui ; sur macOS, la connexion que
+l'app tient déjà ; sur iOS, **aucune poussée** : la relecture à l'ouverture,
+qui est aussi le repli partout. C'est le prix de C19 le plus visible pour un
+utilisateur : un iPhone n'apprend une autorisation qu'en ouvrant l'app. APNs
+reste une porte **nommée, non écrite** : si un exploitant la voulait, elle
+serait son choix et désactivée par défaut, comme l'attestation.

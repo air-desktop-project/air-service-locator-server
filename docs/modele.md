@@ -125,7 +125,7 @@ compte dans un état qu'aucun autre chemin ne produit :
 
 | | Ce qu'il en advient |
 |---|---|
-| Les **appareils** | Tous révoqués, celui qui demande compris ; leurs enregistrements, leurs jetons de poussée et leurs descriptions **effacés**. Il n'y a plus d'écran « Compte » à qui montrer ce qu'on a retiré. |
+| Les **appareils** | Tous révoqués, celui qui demande compris ; leurs enregistrements, leurs points de poussée et leurs descriptions **effacés**. Il n'y a plus d'écran « Compte » à qui montrer ce qu'on a retiré. |
 | Les **machines** | Clés révoquées, connexions fermées, baux tombés (§2.3, « Révoquer ») ; les codes d'enrôlement en cours annulés ; les enregistrements **effacés**, et leurs **services** déclarés avec eux. |
 | Les **autorisations**, accordées ET reçues | **Retirées** — effacées, non marquées. L'autre partie ne voit **plus rien** : la ligne quitte sa liste, et ses machines ne résolvent plus rien de ce compte, à la seconde, comme après une révocation. Une ligne « révoquée » qui nommerait un compte qui n'existe plus lui montrerait un `u-…` sur lequel `GET /v1/utilisateurs/{u}` répond désormais `404` ; c'est ce qu'il faut lui épargner. |
 | L'**alias** | **Libéré.** L'alias est une réclamation (`replication.md` §3.2) ; l'effacement retire la réclamation, exactement comme `DELETE /v1/alias`. Si un autre compte l'attendait en file, il l'obtient. |
@@ -308,7 +308,7 @@ jamais l'utilisateur : il n'y a pas de mot de passe dans ce produit.
 | `identifiant` | `a-` + 26 caractères. |
 | `clé publique` | La partie publique d'une clé qui vit dans le matériel sécurisé du téléphone et ne peut être employée qu'après une confirmation biométrique. **P-256** — la Secure Enclave et StrongBox ne font que cette courbe (`protocole.md` §2.1). |
 | `attestation` | Sous quoi l'appareil est entré : `aucune`, `apple` (App Attest), `android` (l'attestation de clé du Keystore, contre une racine que l'exploitant épingle), `invitation` (un code émis par l'exploitant, servi depuis le 2026-09-24 — `protocole.md` §2.2), ou **`attendue`** — une clé apportée par un autre appareil du compte sous une posture exigée, que son porteur n'a pas encore prouvée ni attestée : il n'est pas entré (2026-09-21, `protocole.md` §2.2). `google` — Play Integrity — n'a jamais été acceptée et est abandonnée (`protocole.md` §2.1, décision du 2026-09-16, C19). **Une valeur, pas une absence** : un annuaire en posture facultative laisse entrer des appareils sans preuve, et il faut pouvoir dire lesquels — c'est ce qu'on regarde le jour où l'on resserre, pour savoir qui prévenir. |
-| `jeton de poussée` | APNs ou FCM, pour les notifications (§2.6). Lié à l'appareil, révoqué avec lui. |
+| `point de poussée` | Une URL UnifiedPush, que le distributeur choisi par l'utilisateur a donnée à l'appareil — pour les notifications (§2.6), sur Android. Déposée par l'appareil lui-même, une seule, révoquée avec lui. Ni APNs ni FCM depuis le 2026-09-25 (C19). |
 | `plateforme` | `ios`, `android` ou `macos` — ce que l'appareil fait tourner. **Déclaré par l'appareil lui-même**, absent tant qu'il ne l'a pas fait. |
 | `modele` | « iPhone 17 », « MacBook Pro (2019) » — le nom de son **modèle**, libre, 1 à 64 octets, aux règles du nom de machine (§2.3). Déclaré avec la plate-forme, absent avec elle. |
 | `enrôlé le` | Date. |
@@ -679,20 +679,29 @@ numéro, ni nom : il ne les a pas.
 B doit apprendre qu'A l'a autorisé, sans avoir à ouvrir son application au bon
 moment.
 
-L'annuaire pousse donc une notification vers les appareils enrôlés de B — APNs
-sur iOS, FCM sur Android. Chaque appareil enrôle un jeton de poussée, qui est
-lié à l'appareil et se révoque avec lui.
+**Et aucun service d'Apple ni de Google n'est appelé pour cela** (C19, décidé le
+2026-09-25). L'annuaire réveille les appareils de B par ce que chaque
+plate-forme permet sans eux : sur **Android**, un message vers le point de
+poussée UnifiedPush que l'utilisateur a choisi (son distributeur, ntfy ou un
+autre) ; sur **macOS**, une ligne dans la connexion que l'app résidente tient
+déjà ; sur **iOS**, rien — un iPhone ne réveille une application que par
+APNs, et l'utilisateur d'iPhone apprend l'autorisation en ouvrant l'app. Le
+détail, et ce que chaque choix coûte : `protocole.md` §2.2, « Les
+notifications ».
 
 **La notification est une commodité, jamais la source de vérité.** Elle peut
-être refusée par l'utilisateur, perdue par la plate-forme, ou arriver en retard.
+être refusée par l'utilisateur, perdue en route, ou arriver en retard.
 L'autorisation existe dès qu'A l'a accordée ; la liste dans l'application de B
-est ce qui fait foi. Un produit qui ferait dépendre un droit d'accès de
-l'arrivée d'un message chez Apple ou chez Google reposerait sur un service qu'il
-ne contrôle pas.
+est ce qui fait foi, et l'application montre, à l'ouverture, ce qu'elle
+n'avait pas encore montré. Un produit qui ferait dépendre un droit d'accès de
+l'arrivée d'un message reposerait sur un service qu'il ne contrôle pas.
 
-**Son contenu est délibérément pauvre** : « <identifiant> vous a accordé
-l'accès à des services ». Ni nom de machine, ni adresse — une notification
-s'affiche sur un écran verrouillé, devant qui se trouve là.
+**Son contenu est vide.** Le message ne dit rien — ni qui, ni quoi :
+l'application affiche « Du nouveau dans Service Locator », et c'est ouverte,
+après le geste biométrique qui déverrouille sa clé, qu'elle montre qui a
+accordé l'accès. Ni nom de machine, ni adresse, ni identifiant : une
+notification s'affiche sur un écran verrouillé, devant qui se trouve là, et
+traverse un serveur de poussée qui n'a pas à le savoir.
 
 ### 2.7 Annuaire
 
