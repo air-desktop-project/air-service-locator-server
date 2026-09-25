@@ -432,6 +432,15 @@ pub enum Erreur {
     },
     /// Une plate-forme est déclarée, mais aucune attestation ne suit.
     AttestationManquante,
+    /// Un point de poussée qui n'a pas la forme exigée (`protocole.md` §2.2) :
+    /// la règle qu'il enfreint, en clair.
+    ///
+    /// **La règle est dite à l'appelant**, et c'est sans risque : il vise son
+    /// propre appareil, et la forme exigée est publique.
+    PointRefuse {
+        /// La règle enfreinte.
+        regle: &'static str,
+    },
 }
 
 impl fmt::Display for Erreur {
@@ -577,6 +586,7 @@ impl fmt::Display for Erreur {
             Self::AttestationManquante => {
                 f.write_str("une plate-forme est déclarée, mais aucune attestation ne suit")
             }
+            Self::PointRefuse { regle } => write!(f, "point de poussée refusé : {regle}"),
         }
     }
 }

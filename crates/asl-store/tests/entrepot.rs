@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
     AliasRange, Attestation, Cadre, Capacites, Cause, Compte, Effacement, EntreeJournal,
-    Estampille, JetonRange, NomRange, Operation, Plateforme, Portee, Provenance, Systeme, Verdict,
+    Estampille, JetonRange, NomRange, Operation, Plateforme, PointRange, Portee, Provenance,
+    Systeme, Verdict,
 };
 use asl_store::{Efface, Entrepot, Faute, RACINE_SANS_IDENTITE, Rattrapage, Retrait};
 
@@ -1254,6 +1255,9 @@ fn racines_de_l_instantane(base: &Entrepot) -> Vec<Identifiant> {
                     Operation::Poussee { enregistrement, .. } => {
                         racines.push(enregistrement.estampille.racine);
                     }
+                    Operation::PointDePoussee { enregistrement, .. } => {
+                        racines.push(enregistrement.estampille.racine);
+                    }
                     _ => {}
                 }
                 racines
@@ -2311,6 +2315,160 @@ fn revoquer_un_appareil_emporte_son_jeton() {
         base.jeton(quel).expect("lisible").is_none(),
         "le jeton part avec l'appareil"
     );
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+// ── Les points de poussée (`protocole.md` §2.2, 2026-09-25) ─────────────────
+
+/// Un point de poussée vers ce chemin.
+fn un_point(chemin: &str) -> PointRange {
+    PointRange::nouveau(&format!("https://ntfy.example.org/{chemin}")).expect("il tient")
+}
+
+/// Un appareil vivant de ce compte.
+fn un_appareil_de(base: &Entrepot, quel: Identifiant, compte: Identifiant) {
+    base.creer_appareil(
+        quel,
+        Provenance::Ici,
+        compte,
+        [0x77; 33],
+        Attestation::Aucune,
+    )
+    .expect("écrit");
+}
+
+#[test]
+fn un_point_se_depose_se_remplace_et_se_journalise() {
+    let (base, fichier) = entrepot("point");
+    let quel = un(Genre::Appareil, 3);
+    un_appareil_de(&base, quel, un(Genre::Utilisateur, 1));
+    assert!(base.point(quel).expect("lisible").is_none());
+
+    assert!(
+        base.poser_point(quel, un_point("ancien"), Some([0x04; 65]), None)
+            .expect("écrit")
+    );
+    let lu = base.point(quel).expect("lisible").expect("il est là");
+    assert_eq!(lu.point.octets(), b"https://ntfy.example.org/ancien");
+    assert_eq!(lu.cle, Some([0x04; 65]));
+    assert_eq!(lu.secret, None);
+
+    // **LE NEUF REMPLACE L'ANCIEN**, la clé comprise : un point neuf vient
+    // d'un distributeur neuf, et ce qu'il n'a pas donné n'est plus.
+    assert!(
+        base.poser_point(quel, un_point("neuf"), None, Some([0x11; 16]))
+            .expect("écrit")
+    );
+    let lu = base.point(quel).expect("lisible").expect("il est là");
+    assert_eq!(lu.point.octets(), b"https://ntfy.example.org/neuf");
+    assert_eq!((lu.cle, lu.secret), (None, Some([0x11; 16])));
+    assert_eq!(lu.estampille, e(3), "le plus récent");
+
+    // Chaque dépôt est une opération `point-de-poussee`, sous son estampille.
+    let journal = operations(&base, 1);
+    assert_eq!(
+        journal.last(),
+        Some(&(
+            e(3),
+            Operation::PointDePoussee {
+                appareil: quel,
+                enregistrement: lu,
+            }
+        ))
+    );
+    // Et l'instantané le porte, pour la racine qui s'amorce.
+    assert!(instantane(&base).iter().any(|cadre| matches!(
+        cadre,
+        Cadre::Operation {
+            operation: Operation::PointDePoussee { appareil, .. },
+            ..
+        } if *appareil == quel
+    )));
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+#[test]
+fn un_appareil_absent_ou_revoque_ne_depose_pas_de_point() {
+    let (base, fichier) = entrepot("point-refuse");
+    let absent = un(Genre::Appareil, 4);
+    assert!(
+        !base
+            .poser_point(absent, un_point("x"), None, None)
+            .expect("lisible")
+    );
+    assert!(base.point(absent).expect("lisible").is_none());
+
+    let revoque = un(Genre::Appareil, 5);
+    un_appareil_de(&base, revoque, un(Genre::Utilisateur, 1));
+    base.revoquer_appareil(revoque, REVOQUE_LE)
+        .expect("révoqué");
+    let avant = base.compteur().expect("lisible");
+    assert!(
+        !base
+            .poser_point(revoque, un_point("x"), None, None)
+            .expect("lisible")
+    );
+    assert!(base.point(revoque).expect("lisible").is_none());
+    assert_eq!(
+        base.compteur().expect("lisible"),
+        avant,
+        "rien n'est estampillé, rien n'est journalisé"
+    );
+
+    let _ = std::fs::remove_file(fichier);
+}
+
+#[test]
+fn le_point_part_avec_l_appareil_et_seuls_les_vivants_du_compte_sont_reveilles() {
+    let (base, fichier) = entrepot("points-du-compte");
+    let thierry = un(Genre::Utilisateur, 1);
+    let lea = un(Genre::Utilisateur, 2);
+    let (pixel, fp5, sans_point, perdu) = (
+        un(Genre::Appareil, 1),
+        un(Genre::Appareil, 2),
+        un(Genre::Appareil, 3),
+        un(Genre::Appareil, 4),
+    );
+    base.creer_compte(thierry, Provenance::Ici, None)
+        .expect("écrit");
+    base.creer_compte(lea, Provenance::Ici, None)
+        .expect("écrit");
+    for quel in [pixel, sans_point, perdu] {
+        un_appareil_de(&base, quel, thierry);
+    }
+    un_appareil_de(&base, fp5, lea);
+    for quel in [pixel, fp5, perdu] {
+        assert!(
+            base.poser_point(quel, un_point(&quel.to_string()), None, None)
+                .expect("écrit")
+        );
+    }
+
+    // **RÉVOQUER EMPORTE LE POINT**, dans la même écriture : un téléphone
+    // déclaré perdu ne doit plus être réveillé pour ce compte.
+    base.revoquer_appareil(perdu, REVOQUE_LE).expect("révoqué");
+    assert!(base.point(perdu).expect("lisible").is_none());
+
+    let reveilles: Vec<Identifiant> = base
+        .points_du_compte(thierry)
+        .expect("lisible")
+        .into_iter()
+        .map(|(quel, _)| quel)
+        .collect();
+    assert_eq!(
+        reveilles,
+        vec![pixel],
+        "un vivant, avec un point, de CE compte"
+    );
+    assert_eq!(base.points_du_compte(lea).expect("lisible").len(), 1);
+
+    // **EFFACER LE COMPTE EMPORTE SES POINTS.**
+    base.effacer_compte(thierry, Cause::Titulaire, REVOQUE_LE)
+        .expect("effacé");
+    assert!(base.point(pixel).expect("lisible").is_none());
+    assert!(base.points_du_compte(thierry).expect("lisible").is_empty());
 
     let _ = std::fs::remove_file(fichier);
 }

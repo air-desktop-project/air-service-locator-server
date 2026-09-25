@@ -52,6 +52,7 @@ pub mod h3;
 pub mod pont;
 pub mod privileges;
 pub mod quic;
+pub mod reveil;
 pub mod sonde;
 pub mod tireur;
 pub mod vivier;

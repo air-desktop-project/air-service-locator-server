@@ -20,6 +20,11 @@
 //!    caractère qui change l'affichage de ce qui l'entoure.
 //! 4. **UN NOM ACCEPTÉ TIENT DANS LA PLACE QUE L'ENTREPÔT LUI RÉSERVE.** Sans
 //!    cela, une requête bien formée finirait en `500`.
+//! 6. **UN POINT DE POUSSÉE ACCEPTÉ A LA FORME QUE L'ENVOI SUPPOSE**
+//!    (`protocole.md` §2.2) : `https://`, un nom DNS dont la dernière étiquette
+//!    n'est pas numérique, sans `@`, sans `#`, le port 443 ou rien, de l'ASCII
+//!    graphique, 1024 octets au plus ; une clé commence par `0x04`. Vérifié
+//!    sur ce qui est RENDU — l'hôte, la cible —, pas sur l'entrée.
 //! 5. **UN ALIAS ACCEPTÉ RESTE DE L'ASCII GRAPHIQUE.** C'est la propriété qui
 //!    sépare une CLÉ d'un texte d'affichage : l'alias se cherche, se compare, et
 //!    repart dans un chemin — deux écritures d'une même valeur feraient croire à
@@ -32,9 +37,49 @@ use libfuzzer_sys::fuzz_target;
 use asl_api::corps::{
     ATTESTATION_CORPS_MAX, AppareilRendu, AttestationDAppareil, AutorisationRendue,
     CLE_APPAREIL_OCTETS, COMPTE_CORPS_MAX, CORPS_MAX, CreationDeCompte, DeclarationMachine,
-    DemandeAlias, DemandeAutorisation, DescriptionAppareil, MachineRendue, MachineVue,
-    NOM_MACHINE_MAX, PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
+    DemandeAlias, DemandeAutorisation, DepotPoint, DescriptionAppareil, MachineRendue, MachineVue,
+    NOM_MACHINE_MAX, POINT_CORPS_MAX, PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
 };
+use asl_api::point::{POINT_MAX, UrlDePoussee};
+
+/// Ce point a-t-il la forme que l'envoi suppose ? Recopié ICI, à dessein,
+/// comme [`invisible`] : la règle est relue sur ce que l'analyseur a RENDU.
+fn verifier_le_point(point: &UrlDePoussee<'_>) {
+    let texte = point.texte();
+    assert!(texte.len() <= POINT_MAX, "un point de plus de 1024 octets");
+    assert!(texte.starts_with("https://"), "un point sans https://");
+    assert!(
+        texte.bytes().all(|octet| octet.is_ascii_graphic()),
+        "un point porte un octet non graphique"
+    );
+    assert!(!texte.contains('#'), "un point porte un fragment");
+    let hote = point.hote();
+    assert!(
+        !hote.is_empty() && hote.len() <= 253,
+        "un hôte vide ou trop long"
+    );
+    assert!(
+        hote.bytes()
+            .all(|octet| octet.is_ascii_alphanumeric() || octet == b'-' || octet == b'.'),
+        "un hôte porte autre chose qu'un nom DNS : {hote}"
+    );
+    let derniere = hote.rsplit('.').next().unwrap_or_default();
+    assert!(
+        !derniere.bytes().all(|octet| octet.is_ascii_digit()),
+        "un hôte finit par une étiquette numérique : {hote}"
+    );
+    // L'autorité est l'hôte, avec au plus `:443`.
+    let apres = &texte["https://".len()..];
+    let autorite = &apres[..apres.find(['/', '?']).unwrap_or(apres.len())];
+    assert!(
+        autorite == hote || autorite == format!("{hote}:443"),
+        "l'autorité {autorite} n'est pas l'hôte {hote}"
+    );
+    let (devant, cible) = point.cible();
+    let cible = format!("{devant}{cible}");
+    assert!(cible.starts_with('/'), "la cible ne commence pas par /");
+    assert!(texte.ends_with(&cible[devant.len()..]));
+}
 
 /// Ce caractère change-t-il l'affichage de ce qui l'entoure ?
 ///
@@ -49,6 +94,26 @@ const fn invisible(caractere: char) -> bool {
 }
 
 fuzz_target!(|octets: &[u8]| {
+    // ── 6. LE POINT DE POUSSÉE ──────────────────────────────────────────────
+    if let Ok(texte) = core::str::from_utf8(octets)
+        && let Ok(point) = UrlDePoussee::analyser(texte)
+    {
+        verifier_le_point(&point);
+    }
+    if let Ok(depot) = DepotPoint::decoder(octets) {
+        verifier_le_point(&depot.point);
+        if let Some(cle) = depot.cle {
+            assert_eq!(cle[0], 0x04, "une clé qui n'est pas un point non compressé");
+        }
+        let mut sortie = [0_u8; POINT_CORPS_MAX];
+        let combien = depot
+            .encoder(&mut sortie)
+            .expect("ce qui a été compris se réécrit");
+        let ecrit = &sortie[..combien];
+        let relu = DepotPoint::decoder(ecrit).expect("ce qu'on écrit se relit");
+        assert_eq!(relu, depot, "l'aller-retour a changé le dépôt");
+    }
+
     if let Ok(machine) = DeclarationMachine::decoder(octets) {
         // ── 3. LE NOM NE PORTE RIEN DE CE QUI EST REFUSÉ ────────────────────
         for caractere in machine.nom.chars() {

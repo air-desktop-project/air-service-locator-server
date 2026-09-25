@@ -1066,7 +1066,12 @@ fait foi. La connexion est authentifiée, et le genre pourrait en dire plus sans
 risque ; il ne le fait pas pour que les deux voies, poussée et flux, déclenchent
 la même relecture. Un seul genre aujourd'hui, `autorisation` ; un lecteur saute
 ceux qu'il ne connaît pas. **Ouvert à la demande, un par connexion**, et fermé
-avec elle.
+avec elle. Un second `GET /v1/nouvelles` sur la même connexion rend
+**`409`** ; un appareil révoqué depuis sa preuve, **`401`**. **Une ligne ne
+s'écrit que sur la racine qui a écrit l'autorisation** (décision 9, comme la
+poussée) : un Mac dont la connexion tient l'autre racine l'apprend à la
+relecture — la règle est la même que pour les deux voies, et l'écart est de ceux
+que le repli couvre.
 
 ### Ce qu'une description d'appareil est, et ce qu'elle n'est pas
 

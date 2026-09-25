@@ -1,0 +1,15 @@
+[package]
+name = "asl-reveil"
+description = "Ce que l'annuaire décide avant de réveiller un appareil : quelles adresses il appelle, la requête qu'il envoie, ce qu'il lit de la réponse, et ses freins — sans entrée-sortie."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+asl-api.workspace = true
+asl-id.workspace = true
+
+[lints]
+workspace = true

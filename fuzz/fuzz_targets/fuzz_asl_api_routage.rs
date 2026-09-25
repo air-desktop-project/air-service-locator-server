@@ -66,6 +66,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Annonce => "/v1/annonce".to_owned(),
         Ressource::Defi => "/v1/defi".to_owned(),
         Ressource::Poussees => "/v1/poussees".to_owned(),
+        Ressource::Nouvelles => "/v1/nouvelles".to_owned(),
         Ressource::Vu => "/v1/vu".to_owned(),
         Ressource::Version => "/v1/version".to_owned(),
         Ressource::Comptes => "/v1/comptes".to_owned(),

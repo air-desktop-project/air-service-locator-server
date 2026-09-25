@@ -23,7 +23,7 @@ use asl_id::{Genre, Identifiant};
 use asl_registre::{
     Appareil, Attestation, Autorisation, Cadre, Capacites, Cause, Compte, Description, Effacement,
     Enrolement, Estampille, JetonPoussee, JetonRange, Machine, NomRange, Operation, Plateforme,
-    Portee, Provenance, Service, Systeme,
+    PointDePoussee, PointRange, Portee, Provenance, Service, Systeme,
 };
 use asl_store::{Applique, Entrepot, MotifDeRefus};
 
@@ -279,6 +279,14 @@ fn prelude() -> Vec<(Estampille, Operation)> {
                 enregistrement: appareil(est(pair(), 8), c1),
             },
         ),
+        // Un appareil qui reste vivant : celui dont le point se dispute.
+        (
+            est(pair(), 10),
+            Operation::Appareil {
+                appareil: un(Genre::Appareil, 4),
+                enregistrement: appareil(est(pair(), 10), c1),
+            },
+        ),
         (
             est(pair(), 9),
             Operation::Autorisation {
@@ -295,6 +303,18 @@ fn prelude() -> Vec<(Estampille, Operation)> {
             },
         ),
     ]
+}
+
+/// Un point de poussée sous cette estampille, vers ce chemin.
+fn point(estampille: Estampille, chemin: &str) -> PointDePoussee {
+    PointDePoussee {
+        provenance: Provenance::Ici,
+        estampille,
+        point: PointRange::nouveau(&format!("https://ntfy.example.org/{chemin}"))
+            .expect("il tient"),
+        cle: None,
+        secret: None,
+    }
 }
 
 /// Les conflits — un par ligne de §3.2 qui se résout par une règle
@@ -336,6 +356,38 @@ fn conflits() -> Vec<(Estampille, Operation)> {
                     plateforme: Plateforme::Apns,
                     jeton: JetonRange::nouveau("un-jeton").expect("un jeton"),
                 },
+            },
+        ),
+        // Le point de poussée (décision 27) — sur d1, que l'autre côté
+        // révoque : refusé dans un ordre, retiré dans l'autre.
+        (
+            est(pair(), 140),
+            Operation::PointDePoussee {
+                appareil: d1,
+                enregistrement: point(est(pair(), 140), "d1"),
+            },
+        ),
+        // Sur d4, vivant, déposé des deux côtés : le plus récent gagne.
+        (
+            est(autre(), 141),
+            Operation::PointDePoussee {
+                appareil: un(Genre::Appareil, 4),
+                enregistrement: point(est(autre(), 141), "ancien"),
+            },
+        ),
+        (
+            est(pair(), 142),
+            Operation::PointDePoussee {
+                appareil: un(Genre::Appareil, 4),
+                enregistrement: point(est(pair(), 142), "neuf"),
+            },
+        ),
+        // Sur d3, dont le compte est effacé : jamais posé, ou retiré avec lui.
+        (
+            est(pair(), 143),
+            Operation::PointDePoussee {
+                appareil: d3,
+                enregistrement: point(est(pair(), 143), "d3"),
             },
         ),
         // Ligne « attesté d'un côté, révoqué de l'autre » (2026-09-21) — d1
@@ -711,6 +763,29 @@ fn l_invariant_de_convergence() {
             .expect("lisible")
             .is_none(),
         "le jeton déposé pendant la fenêtre est parti avec la révocation"
+    );
+    // Le point : parti avec la révocation, le plus récent sur un vivant,
+    // parti avec l'effacement.
+    assert!(
+        base.point(un(Genre::Appareil, 1))
+            .expect("lisible")
+            .is_none(),
+        "un point sur un appareil révoqué ne tient pas"
+    );
+    assert_eq!(
+        base.point(un(Genre::Appareil, 4))
+            .expect("lisible")
+            .expect("un point")
+            .point
+            .octets(),
+        b"https://ntfy.example.org/neuf",
+        "le point le plus récent gagne"
+    );
+    assert!(
+        base.point(un(Genre::Appareil, 3))
+            .expect("lisible")
+            .is_none(),
+        "un point sur un appareil effacé ne tient pas"
     );
     // Ligne « attesté, révoqué » : les deux faits tiennent, dans les deux
     // ordres — l'écran d'après une perte montre que la clé était attestée.

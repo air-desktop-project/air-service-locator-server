@@ -58,8 +58,8 @@ use asl_registre::{
     CleLiee, Compte, DESCRIPTION_OCTETS, Description, EMPREINTE_OCTETS, ENROLEMENT_OCTETS,
     ENTREE_OCTETS, ESTAMPILLE_OCTETS, Effacement, Enrolement, EntreeJournal, Estampille,
     IDENTIFIANT_OCTETS, INVITATION_OCTETS, Invitation, JetonPoussee, JetonRange, MACHINE_OCTETS,
-    Machine, NomRange, OPERATION_OCTETS_MAX, Operation, POUSSEE_OCTETS, Plateforme, Portee,
-    Provenance, SERVICE_OCTETS, Service, Systeme,
+    Machine, NomRange, OPERATION_OCTETS_MAX, Operation, POINT_DE_POUSSEE_OCTETS, POUSSEE_OCTETS,
+    Plateforme, PointDePoussee, PointRange, Portee, Provenance, SERVICE_OCTETS, Service, Systeme,
 };
 use redb::{
     Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableHandle,
@@ -115,6 +115,21 @@ const APPAREILS: TableDefinition<'_, &[u8], &[u8; APPAREIL_OCTETS]> =
 /// requêtes un champ que presque aucune ne regarde.
 const POUSSEES: TableDefinition<'_, &[u8], &[u8; POUSSEE_OCTETS]> =
     TableDefinition::new("poussees");
+
+/// Les points de poussée, **par identifiant d'appareil** (`protocole.md` §2.2,
+/// 2026-09-25).
+///
+/// # UNE TABLE À ELLE, ET AUCUNE REPRISE DE FORMAT
+///
+/// L'URL d'un point ne tient pas dans les 255 octets d'un jeton, et agrandir
+/// [`POUSSEES`] aurait changé la taille d'une table que les bases portent
+/// déjà. Celle-ci naît vide à l'ouverture d'une base d'hier ; [`POUSSEES`]
+/// n'est plus écrite que par l'application d'une opération d'avant.
+///
+/// **Le point part avec l'appareil qu'on révoque**, dans la même écriture,
+/// comme le jeton.
+const POINTS: TableDefinition<'_, &[u8], &[u8; POINT_DE_POUSSEE_OCTETS]> =
+    TableDefinition::new("points-de-poussee");
 
 /// Ce que chaque appareil dit de lui-même, **par identifiant d'appareil**.
 ///
@@ -946,6 +961,8 @@ impl Entrepot {
             // format reste 3 : la reprise 2→3 avait dû relire et réécrire
             // deux tables, ce n'est pas le cas ici.
             ecriture.open_table(INVITATIONS)?;
+            // Et de même pour les points de poussée (2026-09-25).
+            ecriture.open_table(POINTS)?;
             ecriture.open_table(ALIAS)?;
             ecriture.open_table(SERVICES)?;
             ecriture.open_table(SERVICES_PAR_NOM)?;
@@ -1905,6 +1922,9 @@ impl Entrepot {
             table.insert(clef_appareil.as_slice(), &octets)?;
             let mut poussees = ecriture.open_table(POUSSEES)?;
             poussees.remove(clef_appareil.as_slice())?;
+            ecriture
+                .open_table(POINTS)?
+                .remove(clef_appareil.as_slice())?;
             journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
@@ -1985,6 +2005,11 @@ impl Entrepot {
 
     /// Dépose ou renouvelle le jeton de cet appareil.
     ///
+    /// **Le service ne l'appelle plus depuis 0.19.0** : `apns` et `fcm` sont
+    /// refusés à la dépose (`protocole.md` §2.2). La table se lit encore, et
+    /// une opération `poussee` venue d'une racine d'avant s'y applique ; ce
+    /// verbe reste pour les essais qui la remplissent.
+    ///
     /// **UN SEUL JETON PAR APPAREIL, ET LE NEUF REMPLACE L'ANCIEN.** Apple et
     /// Google font tourner les leurs : en garder deux ferait envoyer chaque
     /// notification en double, dont une à un jeton mort.
@@ -2039,6 +2064,123 @@ impl Entrepot {
             Some(brut) => Ok(Some(JetonPoussee::lire(brut.value())?)),
             None => Ok(None),
         }
+    }
+
+    // ── Les points de poussée (`protocole.md` §2.2, 2026-09-25) ─────────────
+
+    /// Dépose ou renouvelle le point de poussée de cet appareil, et dit s'il
+    /// a été posé.
+    ///
+    /// **UN SEUL POINT PAR APPAREIL, ET LE NEUF REMPLACE L'ANCIEN** : le
+    /// distributeur en donne un nouveau quand l'utilisateur en change, et en
+    /// garder deux réveillerait deux fois, dont une fois un point mort.
+    ///
+    /// **Un appareil absent ou révoqué ne dépose rien** — `false`, et rien
+    /// n'est journalisé. L'appelant l'a déjà vérifié sur sa connexion ; le
+    /// revérifier DANS la transaction ferme la course avec une révocation
+    /// appliquée depuis l'autre racine entre les deux, qui laisserait ici un
+    /// point que là-bas l'opération refuserait.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn poser_point(
+        &self,
+        appareil: Identifiant,
+        point: PointRange,
+        cle: Option<[u8; asl_registre::CLE_RECEPTEUR_OCTETS]>,
+        secret: Option<[u8; asl_registre::SECRET_RECEPTEUR_OCTETS]>,
+    ) -> Result<bool, Faute> {
+        let ecriture = self.base.begin_write()?;
+        let journalisee;
+        {
+            let clef_appareil = clef(appareil);
+            match ecriture
+                .open_table(APPAREILS)?
+                .get(clef_appareil.as_slice())?
+            {
+                Some(brut) if !Appareil::lire(brut.value())?.revoque() => {}
+                _ => return Ok(false),
+            }
+            let estampille = estampiller(&ecriture, self.racine)?;
+            let enregistrement = PointDePoussee {
+                provenance: Provenance::Ici,
+                estampille,
+                point,
+                cle,
+                secret,
+            };
+            let mut octets = [0_u8; POINT_DE_POUSSEE_OCTETS];
+            enregistrement.ecrire(&mut octets);
+            ecriture
+                .open_table(POINTS)?
+                .insert(clef_appareil.as_slice(), &octets)?;
+            journalisee = journaliser_l_operation(
+                &ecriture,
+                estampille,
+                Provenance::Ici,
+                &Operation::PointDePoussee {
+                    appareil,
+                    enregistrement,
+                },
+            )?;
+        }
+        self.commettre_une_operation(ecriture, journalisee)?;
+        Ok(true)
+    }
+
+    /// Le point de cet appareil, s'il en a déposé un.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn point(&self, appareil: Identifiant) -> Result<Option<PointDePoussee>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let table = lecture.open_table(POINTS)?;
+        match table.get(clef(appareil).as_slice())? {
+            Some(brut) => Ok(Some(PointDePoussee::lire(brut.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Les points des appareils VIVANTS de ce compte : ceux qu'une
+    /// autorisation accordée à ce compte réveille (`protocole.md` §2.2).
+    ///
+    /// Un appareil révoqué n'a plus de point — sa révocation l'a retiré —,
+    /// et il est écarté quand même : ce que cette liste dit, c'est « à qui
+    /// l'on envoie », et la réponse ne doit pas dépendre d'un retrait qu'on
+    /// croit avoir fait.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn points_du_compte(
+        &self,
+        compte: Identifiant,
+    ) -> Result<Vec<(Identifiant, PointDePoussee)>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let index = lecture.open_table(APPAREILS_PAR_COMPTE)?;
+        let appareils = lecture.open_table(APPAREILS)?;
+        let points = lecture.open_table(POINTS)?;
+        let (debut, fin) = intervalle(compte);
+        let mut rendus = Vec::new();
+        for entree in index.range(debut.as_slice()..fin.as_slice())? {
+            let (_, clef_appareil) = entree?;
+            let clef_appareil = clef_appareil.value();
+            let Some(appareil) = appareils.get(clef_appareil)? else {
+                continue;
+            };
+            if Appareil::lire(appareil.value())?.revoque() {
+                continue;
+            }
+            if let Some(point) = points.get(clef_appareil)? {
+                rendus.push((
+                    depuis_clef(clef_appareil)?,
+                    PointDePoussee::lire(point.value())?,
+                ));
+            }
+        }
+        Ok(rendus)
     }
 
     // ── Les descriptions d'appareil ─────────────────────────────────────────
@@ -3066,6 +3208,22 @@ impl Entrepot {
             );
         }
 
+        let points = lecture.open_table(POINTS)?;
+        for entree in points.iter()? {
+            let (clef, valeur) = entree?;
+            let point = PointDePoussee::lire(valeur.value())?;
+            if point.provenance != Provenance::Ici {
+                continue;
+            }
+            suite.ajouter(
+                point.estampille,
+                &Operation::PointDePoussee {
+                    appareil: depuis_clef(clef.value())?,
+                    enregistrement: point,
+                },
+            );
+        }
+
         let poussees = lecture.open_table(POUSSEES)?;
         for entree in poussees.iter()? {
             let (clef, valeur) = entree?;
@@ -3545,6 +3703,7 @@ impl Entrepot {
             let mut appareils = ecriture.open_table(APPAREILS)?;
             let mut appareils_par_compte = ecriture.open_table(APPAREILS_PAR_COMPTE)?;
             let mut poussees = ecriture.open_table(POUSSEES)?;
+            let mut points = ecriture.open_table(POINTS)?;
             let mut condamnes_appareils = Vec::new();
             for entree in appareils.iter()? {
                 let (clef, valeur) = entree?;
@@ -3560,6 +3719,7 @@ impl Entrepot {
                 appareils.remove(clef.as_slice())?;
                 appareils_par_compte.remove(clef_index.as_slice())?;
                 poussees.remove(clef.as_slice())?;
+                points.remove(clef.as_slice())?;
             }
             combien = combien.saturating_add(condamnes_appareils.len());
 
@@ -3686,6 +3846,7 @@ fn effacer_dans(
         let mut index = ecriture.open_table(APPAREILS_PAR_COMPTE)?;
         let mut appareils = ecriture.open_table(APPAREILS)?;
         let mut poussees = ecriture.open_table(POUSSEES)?;
+        let mut points = ecriture.open_table(POINTS)?;
         let mut descriptions = ecriture.open_table(DESCRIPTIONS)?;
         let (debut, fin) = intervalle(qui);
         let mut condamnes = Vec::new();
@@ -3697,6 +3858,7 @@ fn effacer_dans(
             index.remove(clef_index.as_slice())?;
             appareils.remove(clef_appareil.as_slice())?;
             poussees.remove(clef_appareil.as_slice())?;
+            points.remove(clef_appareil.as_slice())?;
             descriptions.remove(clef_appareil.as_slice())?;
             retrait.a_fermer.push(depuis_clef(clef_appareil)?);
         }
@@ -3812,6 +3974,7 @@ fn provenance_de(operation: &Operation) -> Option<Provenance> {
         Operation::Appareil { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Description { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Poussee { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::PointDePoussee { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Machine { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Enrolement { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Invitation { enregistrement, .. } => Some(enregistrement.provenance),
@@ -3870,6 +4033,10 @@ fn appliquer_dans(
             appareil,
             enregistrement,
         } => appliquer_poussee(ecriture, *appareil, enregistrement),
+        Operation::PointDePoussee {
+            appareil,
+            enregistrement,
+        } => appliquer_point(ecriture, *appareil, enregistrement),
         Operation::Machine {
             machine,
             enregistrement,
@@ -4118,6 +4285,9 @@ fn appliquer_appareil_revoque(
     ecriture
         .open_table(POUSSEES)?
         .remove(clef_appareil.as_slice())?;
+    ecriture
+        .open_table(POINTS)?
+        .remove(clef_appareil.as_slice())?;
     effets.a_fermer.push(quel);
     Ok(())
 }
@@ -4226,6 +4396,43 @@ fn appliquer_poussee(
     };
     let mut octets = [0_u8; POUSSEE_OCTETS];
     poussee.ecrire(&mut octets);
+    table.insert(clef_appareil.as_slice(), &octets)?;
+    Ok(())
+}
+
+/// `point-de-poussee` — le plus récent ; refusé si l'appareil est révoqué
+/// (`docs/replication.md` §5.2, décision 27). La règle du jeton, pour la même
+/// raison : la révocation a retiré le point, et ce qui arrive après elle ne
+/// le remet pas.
+///
+/// **L'appliquer ne réveille personne** (décision 9) : le point doit être là
+/// où la notification part, mais c'est la racine qui ÉCRIT une autorisation
+/// qui envoie — et cette fonction ne sait rien d'un envoi.
+fn appliquer_point(
+    ecriture: &WriteTransaction,
+    appareil: Identifiant,
+    enregistrement: &PointDePoussee,
+) -> Result<(), Faute> {
+    let clef_appareil = clef(appareil);
+    match ecriture
+        .open_table(APPAREILS)?
+        .get(clef_appareil.as_slice())?
+    {
+        Some(brut) if !Appareil::lire(brut.value())?.revoque() => {}
+        _ => return Ok(()),
+    }
+    let mut table = ecriture.open_table(POINTS)?;
+    if let Some(brut) = table.get(clef_appareil.as_slice())?
+        && PointDePoussee::lire(brut.value())?.estampille >= enregistrement.estampille
+    {
+        return Ok(());
+    }
+    let point = PointDePoussee {
+        provenance: Provenance::Ici,
+        ..*enregistrement
+    };
+    let mut octets = [0_u8; POINT_DE_POUSSEE_OCTETS];
+    point.ecrire(&mut octets);
     table.insert(clef_appareil.as_slice(), &octets)?;
     Ok(())
 }
@@ -5057,6 +5264,12 @@ impl Reestampillable for JetonPoussee {
     }
 }
 
+impl Reestampillable for PointDePoussee {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
 impl Reestampillable for Description {
     fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
         reestampiller_les_champs!(self, de, vers, estampille)
@@ -5094,6 +5307,7 @@ impl Reestampillable for Operation {
             Self::Appareil { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Description { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Poussee { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::PointDePoussee { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Machine { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Enrolement { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Invitation { enregistrement, .. } => enregistrement.reestampiller(de, vers),
@@ -5208,6 +5422,17 @@ fn reestampiller(
             POUSSEES,
             JetonPoussee::lire,
             JetonPoussee::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            POINTS,
+            PointDePoussee::lire,
+            PointDePoussee::ecrire,
             de,
             vers,
         )?

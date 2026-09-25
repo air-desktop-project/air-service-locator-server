@@ -80,9 +80,10 @@ use ams_h3::Reponse;
 use ams_proto_http::{Method, RequestHead, StatusCode};
 use asl_api::corps::{
     AttestationDAppareil, Capacites, CreationDeCompte, DeclarationMachine, DemandeAlias,
-    DemandeAutorisation, DepotJeton, DescriptionAppareil, ModificationMachine, Plateforme,
+    DemandeAutorisation, DepotPoint, DescriptionAppareil, ModificationMachine,
     PlateformeAttestation, Portee, Systeme,
 };
+use asl_api::point::UrlDePoussee;
 use asl_api::{Exigence, Ressource};
 use asl_cle::{CleAppareil, ClePublique, Defi, LiaisonDeCanal, Signature, SignatureAppareil};
 use asl_cle::{CodeEnrolement, TexteCode};
@@ -99,6 +100,15 @@ use asl_registre::AliasRange;
 const _: () = assert!(
     asl_api::corps::NOM_MACHINE_MAX == asl_registre::NOM_OCTETS_MAX,
     "le nom d'une machine ne se range pas : les deux bornes ont divergé"
+);
+
+/// **LE POINT DE POUSSÉE ACCEPTÉ SE RANGE**, pour la même raison : `asl-api`
+/// borne l'URL, la clé et le secret, `asl-registre` borne ce qu'il range.
+const _: () = assert!(
+    asl_api::point::POINT_MAX == asl_registre::POINT_OCTETS_MAX
+        && asl_api::point::CLE_RECEPTEUR_OCTETS == asl_registre::CLE_RECEPTEUR_OCTETS
+        && asl_api::point::SECRET_RECEPTEUR_OCTETS == asl_registre::SECRET_RECEPTEUR_OCTETS,
+    "le point de poussée ne se range pas : les bornes ont divergé"
 );
 
 /// Ce qu'un corps de requête peut faire, en octets.
@@ -307,6 +317,18 @@ pub enum Besoin<'a> {
     /// verdict n'est pas une réponse à une requête, il arrive quand la sonde a
     /// fini.
     EcouterLesPoussees,
+    /// Ouvrir le flux des nouvelles du compte de cet appareil
+    /// (`protocole.md` §2.2, `GET /v1/nouvelles`, 2026-09-25).
+    ///
+    /// # LA MÊME MÉCANIQUE QUE LES POUSSÉES, ET UN FAIT À RAPPORTER
+    ///
+    /// La réponse est vide et ne se termine pas ; ce qui s'y écrit — une
+    /// ligne `{"quoi":"autorisation"}` par autorisation reçue — ne passe pas
+    /// par [`repondre`]. Mais l'étage 3 a quelque chose à dire, lui : si
+    /// l'appareil est encore vivant ([`Trouvaille::Fait`]), s'il tient déjà
+    /// un flux sur cette connexion ([`Trouvaille::Conflit`], `409` — **un par
+    /// connexion**), ou s'il ne l'est plus (`401`).
+    EcouterLesNouvelles,
     /// Une preuve de possession a été présentée, et elle ne vaut pas.
     ///
     /// # POURQUOI CE N'EST PAS UN `Deja(401)`
@@ -449,29 +471,33 @@ pub enum Besoin<'a> {
     /// voisine : ceux qui ont besoin de la lire n'ont pas encore de clé. La
     /// version est un fait du binaire, que l'étage 3 rapporte.
     Version,
-    /// Déposer ou renouveler le jeton de poussée d'un appareil.
+    /// Déposer ou renouveler le point de poussée d'un appareil
+    /// (`protocole.md` §2.2, « Le point de poussée »).
     ///
     /// # UN APPAREIL NE DÉPOSE QUE POUR LUI-MÊME
     ///
-    /// Le jeton vient du système d'exploitation du téléphone qui le porte :
+    /// Le point vient du distributeur installé sur le téléphone qui le porte :
     /// personne d'autre ne l'a. Un appareil qui en déposerait un pour un autre
     /// détournerait donc les notifications d'un frère vers lui — c'est-à-dire
     /// vers celui qui tient un téléphone volé.
     ///
     /// **Le refus se cache derrière le `404` des autres** : dire « ce n'est pas
     /// vous » à qui vise l'identifiant d'un autre confirmerait que cet
-    /// identifiant existe.
-    PoserJetonDePoussee {
+    /// identifiant existe. Un corps mal formé, lui, rend `400` : la faute est
+    /// celle de l'appelant.
+    PoserPointDePoussee {
         /// L'appareil visé, qui doit être celui de cette connexion.
         appareil: Identifiant,
-        /// À qui présenter ce jeton.
-        plateforme: Plateforme,
-        /// Le jeton, tel que la plate-forme l'a donné.
-        jeton: &'a str,
+        /// Le point, dont la forme tient.
+        point: UrlDePoussee<'a>,
+        /// La clé publique du récepteur, rangée sans servir.
+        cle: Option<[u8; asl_api::point::CLE_RECEPTEUR_OCTETS]>,
+        /// Le secret du récepteur, rangé sans servir.
+        secret: Option<[u8; asl_api::point::SECRET_RECEPTEUR_OCTETS]>,
     },
     /// Dire ce que cet appareil est : son système, son modèle.
     ///
-    /// **POUR SOI SEULEMENT, COMME LE JETON**, et le refus se cache derrière le
+    /// **POUR SOI SEULEMENT, COMME LE POINT**, et le refus se cache derrière le
     /// même `404`. La raison est moins grave — décrire l'appareil d'un autre ne
     /// détourne rien — mais la règle est la même parce qu'elle est plus simple à
     /// tenir qu'une exception : c'est l'appareil qui parle de lui, sur sa
@@ -1223,6 +1249,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
             service: service.as_str(),
         },
         Ressource::Poussees => Besoin::EcouterLesPoussees,
+        Ressource::Nouvelles => Besoin::EcouterLesNouvelles,
         Ressource::Vu => Besoin::OuSuisJeVu,
         Ressource::Version => Besoin::Version,
         Ressource::Replication => Besoin::EtatDeLaReplication,
@@ -1280,11 +1307,12 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
                 Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
         },
-        Ressource::PousseeAppareil { appareil } => match DepotJeton::decoder(corps) {
-            Ok(depot) => Besoin::PoserJetonDePoussee {
+        Ressource::PousseeAppareil { appareil } => match DepotPoint::decoder(corps) {
+            Ok(depot) => Besoin::PoserPointDePoussee {
                 appareil,
-                plateforme: depot.plateforme,
-                jeton: depot.jeton,
+                point: depot.point,
+                cle: depot.cle,
+                secret: depot.secret,
             },
             Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
         },
@@ -1742,6 +1770,28 @@ pub fn repondre<'o>(
             .avec_champ(b"content-type", JSON_MEDIA)
             .tenue(),
 
+        // **LA MÊME RÉPONSE TENUE**, quand l'étage 3 a pris le flux. Un second
+        // flux sur la même connexion est un conflit — un par connexion —, et
+        // un appareil qui n'est plus vivant n'écoute rien : `401`, la clé qui
+        // a signé n'ouvre plus ce compte.
+        Besoin::EcouterLesNouvelles => match trouvaille {
+            Trouvaille::Fait => Reponse::new(StatusCode::OK, &[])
+                .avec_champ(b"content-type", JSON_MEDIA)
+                .tenue(),
+            Trouvaille::Conflit => composer(
+                StatusCode::CONFLICT,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::CONFLICT),
+                sortie,
+            ),
+            _ => composer(
+                StatusCode::UNAUTHORIZED,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::UNAUTHORIZED),
+                sortie,
+            ),
+        },
+
         Besoin::MesMachines => match trouvaille {
             Trouvaille::Machines(quoi) => composer_une_liste(quoi, sortie),
             // Rien lu, ou une trouvaille d'un autre besoin : un tableau vide, et
@@ -2015,7 +2065,7 @@ pub fn repondre<'o>(
         // il doit savoir pourquoi on lui dit non.
         Besoin::RevoquerAppareil { .. }
         | Besoin::ModifierMachine { .. }
-        | Besoin::PoserJetonDePoussee { .. }
+        | Besoin::PoserPointDePoussee { .. }
         | Besoin::PoserDescription { .. }
         | Besoin::RevoquerCleMachine { .. }
         | Besoin::RevoquerAutorisation { .. }
@@ -5079,32 +5129,25 @@ mod creations {
         );
     }
 
-    // ── Le jeton de poussée ─────────────────────────────────────────────────
+    // ── Le point de poussée (`protocole.md` §2.2, 2026-09-25) ───────────────
 
     #[test]
-    fn les_deux_bornes_du_jeton_sont_le_meme_nombre() {
-        // **`asl-api` RECOPIE LA BORNE DU MAGASIN**, parce qu'une grammaire ne
-        // dépend pas d'un rangement. Cet essai est la seule chose qui relie les
-        // deux copies : sans lui, un jeton accepté par le décodeur serait refusé
-        // à l'écriture, et le téléphone cesserait silencieusement d'être joint.
-        assert_eq!(asl_api::corps::JETON_MAX, asl_registre::JETON_OCTETS_MAX);
-    }
-
-    #[test]
-    fn un_depot_de_jeton_se_lit_et_rend_204() {
+    fn un_depot_de_point_se_lit_et_rend_204() {
         let appareil = un(Genre::Appareil, 5);
         let cible = alloc::format!("/v1/appareils/{}/poussee", appareil.texte());
         let quoi = besoin(
             &session_d_appareil(),
             &tete(b"PUT", cible.as_bytes()),
-            br#"{"plateforme":"apns","jeton":"c0ffee"}"#,
+            br#"{"plateforme":"unifiedpush","point":"https://ntfy.example.org/up"}"#,
         );
         assert_eq!(
             quoi,
-            Besoin::PoserJetonDePoussee {
+            Besoin::PoserPointDePoussee {
                 appareil,
-                plateforme: asl_api::corps::Plateforme::Apns,
-                jeton: "c0ffee",
+                point: asl_api::point::UrlDePoussee::analyser("https://ntfy.example.org/up")
+                    .unwrap(),
+                cle: None,
+                secret: None,
             }
         );
 
@@ -5122,14 +5165,56 @@ mod creations {
     }
 
     #[test]
-    fn un_depot_mal_forme_est_refuse() {
+    fn le_flux_des_nouvelles_s_ouvre_une_fois_par_connexion_et_pour_un_vivant() {
+        let quoi = besoin(&session_d_appareil(), &tete(b"GET", b"/v1/nouvelles"), b"");
+        assert_eq!(quoi, Besoin::EcouterLesNouvelles);
+
+        let mut session = session_d_appareil();
+        let mut sortie = [0_u8; 512];
+        let reponse = repondre(&mut session, &quoi, &Trouvaille::Fait, None, &mut sortie);
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert!(reponse.est_tenue(), "le flux doit rester ouvert");
+        assert!(reponse.body().is_empty());
+        let noms: alloc::vec::Vec<&[u8]> = reponse.fields().map(|(nom, _)| nom).collect();
+        assert!(!noms.contains(&b"content-length".as_slice()), "{noms:?}");
+
+        // Un second flux sur la même connexion : `409`.
+        let reponse = repondre(&mut session, &quoi, &Trouvaille::Conflit, None, &mut sortie);
+        assert_eq!(reponse.status(), StatusCode::CONFLICT);
+        assert!(!reponse.est_tenue());
+        // Un appareil qui n'est plus vivant : `401`.
+        let reponse = repondre(&mut session, &quoi, &Trouvaille::Rien, None, &mut sortie);
+        assert_eq!(reponse.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn le_flux_des_nouvelles_exige_un_appareil() {
+        // Ni une connexion nue, ni une machine : un appareil, sur SON compte.
+        let sans = Session::new(liaison());
+        assert_eq!(
+            besoin(&sans, &tete(b"GET", b"/v1/nouvelles"), b""),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+        let mut machine = Session::new(liaison());
+        machine.pair = Some(un(Genre::Machine, 9));
+        assert_eq!(
+            besoin(&machine, &tete(b"GET", b"/v1/nouvelles"), b""),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn un_depot_mal_forme_ou_d_avant_est_refuse() {
         let appareil = un(Genre::Appareil, 5);
         let cible = alloc::format!("/v1/appareils/{}/poussee", appareil.texte());
         for corps in [
             &b"{}"[..],
-            &br#"{"plateforme":"apns"}"#[..],
-            &br#"{"plateforme":"windows","jeton":"x"}"#[..],
-            &br#"{"plateforme":"apns","jeton":""}"#[..],
+            &br#"{"plateforme":"unifiedpush"}"#[..],
+            // **`apns` ET `fcm` NE SONT PLUS ACCEPTÉS** : `400`.
+            &br#"{"plateforme":"apns","jeton":"c0ffee"}"#[..],
+            &br#"{"plateforme":"fcm","point":"https://ntfy.sh/up"}"#[..],
+            &br#"{"plateforme":"unifiedpush","point":"http://ntfy.sh/up"}"#[..],
+            &br#"{"plateforme":"unifiedpush","point":"https://10.0.0.1/up"}"#[..],
         ] {
             assert_eq!(
                 besoin(

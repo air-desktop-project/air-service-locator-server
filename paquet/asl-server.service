@@ -47,6 +47,18 @@
 # les attestations Android (elle en dit la cause au journal), ce qui n'est pas
 # un défaut : c'est une racine qui ne les vérifie pas encore.
 #
+# ── LES NOTIFICATIONS SONT OPTIONNELLES, ET SUIVENT LA MÊME MÉCANIQUE ───────
+#
+# `protocole.md` §2.2 (2026-09-25) : `--push-roots <PEM>` donne à l'annuaire
+# les autorités contre lesquelles il vérifie les serveurs de poussée — le seul
+# appel sortant d'une racine en dehors de son pair. Aucune n'est épinglée par
+# le paquet : le drop-in nomme le fichier, typiquement le paquet de
+# certificats de la distribution — modèle sous
+# `/usr/share/doc/asl-server/poussee.conf.exemple`. `$ASL_POUSSEE`, NON CITÉ,
+# est vide tant qu'un drop-in ne le remplit pas, et une racine sans lui
+# n'envoie RIEN — ni résolution, ni connexion —, le dit au démarrage, et sert
+# quand même `GET /v1/nouvelles`.
+#
 # ── LA RÉPLICATION EST OPTIONNELLE, ET SUIT LA MÊME MÉCANIQUE ────────────────
 #
 # `docs/replication.md` §8 : `--identity-key`, `--peer`, `--peer-key` et
@@ -86,6 +98,7 @@ ExecStart=/usr/bin/asl-server \
     --key /etc/asl-server/cle.pem \
     --attestation $ASL_ATTESTATION \
     $ASL_ANDROID \
+    $ASL_POUSSEE \
     $ASL_REPLICATION
 
 # **PAS DE `Restart=always`.** Les fautes qui empêchent cet annuaire de démarrer

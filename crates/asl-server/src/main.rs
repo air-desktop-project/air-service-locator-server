@@ -39,7 +39,8 @@ use std::sync::Arc;
 
 use asl_loop_tokio::h3::Voie;
 use asl_loop_tokio::{
-    Annuaire, EtatDeLaVoie, Tireur, configuration_tls, refuser_root, servir_quic,
+    Annuaire, EtatDeLaVoie, Tireur, configuration_tls, refuser_root, reveil::Reveilleur,
+    servir_quic,
 };
 use asl_store::{Entrepot, RACINE_SANS_IDENTITE};
 
@@ -186,6 +187,18 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         .android
         .as_ref()
         .map(|android| racines_android(&android.racines))
+        .transpose()?;
+
+    // **LES RACINES DE POUSSÉE AUSSI** (`--push-roots`) : un fichier absent,
+    // illisible ou sans autorité se dit avant qu'une base soit verrouillée.
+    let racines_de_poussee = reglages
+        .racines_de_poussee
+        .as_ref()
+        .map(|chemin| {
+            std::fs::read(chemin)
+                .map_err(|quoi| format!("--push-roots {} : {quoi}", chemin.display()))
+                .map(|pem| (chemin.clone(), pem))
+        })
         .transpose()?;
 
     let entrepot = Arc::new(Entrepot::ouvrir(&reglages.entrepot, racine)?);
@@ -365,6 +378,39 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         }
         application.invitations_vivent(reglages.invitation_ttl_s.saturating_mul(1_000));
 
+        // **LE RÉVEILLEUR, S'IL Y A DES RACINES** (`protocole.md` §2.2). Une
+        // tâche à part : la boucle lui passe le compte bénéficiaire de chaque
+        // autorisation écrite ICI, et c'est elle qui résout, se connecte et
+        // attend. Sans `--push-roots`, rien ne part — et c'est dit.
+        let reveilleur = match &racines_de_poussee {
+            Some((chemin, pem)) => {
+                let reveilleur = Reveilleur::nouveau(
+                    Arc::clone(&entrepot),
+                    pem,
+                    Box::new(|ligne| eprintln!("asl-server : {ligne}")),
+                )
+                .map_err(|quoi| format!("--push-roots {} : {quoi}", chemin.display()))?;
+                eprintln!(
+                    "asl-server : notifications — {} racine(s) de poussée épinglée(s) \
+                     (--push-roots {}) : une autorisation accordée ICI réveille les appareils \
+                     du bénéficiaire, d'un POST vide vers leur point UnifiedPush (TLS 1.3, \
+                     cinq secondes, une tentative).",
+                    reveilleur.racines(),
+                    chemin.display(),
+                );
+                let (reveil, entendre_reveil) = tokio::sync::mpsc::unbounded_channel();
+                application.reveiller_par(reveil);
+                Some(tokio::spawn(reveilleur.reveiller_sans_fin(entendre_reveil)))
+            }
+            None => {
+                eprintln!(
+                    "asl-server : sans --push-roots : AUCUNE notification ne part — ni \
+                     résolution, ni connexion. GET /v1/nouvelles reste servi."
+                );
+                None
+            }
+        };
+
         // **LE TIREUR : LA CONNEXION SORTANTE** (`docs/replication.md` §2.1).
         // Quand `--peer` est réglé, une tâche ouvre une connexion vers le pair,
         // prouve les deux identités, et applique ce qu'il a écrit. Ce qu'elle
@@ -417,6 +463,9 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         balayeur.abort();
         if let Some(tireur) = tireur {
             tireur.abort();
+        }
+        if let Some(reveilleur) = reveilleur {
+            reveilleur.abort();
         }
         eprintln!(
             "asl-server : arrêté. {} connexions acceptées, {} refusées, \

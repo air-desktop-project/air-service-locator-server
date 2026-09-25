@@ -142,6 +142,15 @@ pub struct Reglages {
     /// dix minutes d'un code d'enrôlement supposent l'humain devant ses deux
     /// écrans.
     pub invitation_ttl_s: u64,
+    /// Les racines contre lesquelles les serveurs de poussée se vérifient
+    /// (`--push-roots`, un PEM) — typiquement le paquet de certificats de la
+    /// distribution (`protocole.md` §2.2, « Le client sortant »).
+    ///
+    /// **SANS ELLES, RIEN NE PART** : ni résolution, ni connexion, et le
+    /// démarrage le dit. `GET /v1/nouvelles` reste servi. Épinglées comme
+    /// `--android-roots` (C19) : un fichier que l'exploitant désigne, jamais
+    /// un magasin lu en silence.
+    pub racines_de_poussee: Option<PathBuf>,
 }
 
 /// Le geste `--forget` : effacer CE compte, hors ligne, et s'arrêter.
@@ -400,6 +409,9 @@ asl-server — an air-service-locator service directory.
                             (default: 86400, one day; one week at most)
   --orphans      <days>     erase an account once ALL its devices have been
                             revoked for that many days; 0 = never (default: 30)
+  --push-roots   <path>     the CAs that validate push servers' TLS certs, PEM
+                            — typically /etc/ssl/certs/ca-certificates.crt;
+                            without it, NO notification is ever sent
   --new-identity-key <path> write a new identity key there (0600), print the
                             public key and the `n-…` it gives, then exit
   --new-operator-key <path> write a new OPERATOR key there (0600) and its
@@ -442,6 +454,14 @@ Without `--identity-key`, the root runs alone and stamps its writes under
 sixteen zeros, and says so. `--peer`, `--peer-key` and `--identity-key` go
 together; `--new-identity-key` writes `<path>` (the private key) and
 `<path>.pub` (the public key, to carry to the other root as its `--peer-key`).
+
+`--push-roots` turns notifications on: an authorization granted HERE wakes the
+grantee's live devices with an EMPTY POST to the UnifiedPush endpoint each one
+deposited. It is the only outbound call a root makes besides its peer: the name
+is resolved on every send, any non-global address refuses the send, TLS 1.3
+only, five seconds, one attempt. Nothing is downloaded: to reach ntfy.sh, point
+it at the distribution's CA bundle. Without it, nothing is resolved nor sent,
+and `GET /v1/nouvelles` is still served.
 
 `--orphans` only counts REVOCATIONS, never silence: a phone in a drawer is a
 living device. Both roots must carry the same value. `--forget` is the human
@@ -507,6 +527,7 @@ impl Reglages {
         let mut pair_ca: Option<PathBuf> = None;
         let mut exploitant: Option<PathBuf> = None;
         let mut invitation_ttl_s = INVITATION_TTL_DEFAUT_S;
+        let mut racines_de_poussee: Option<PathBuf> = None;
 
         let mut arguments = arguments.into_iter();
         while let Some(drapeau) = arguments.next() {
@@ -555,6 +576,7 @@ impl Reglages {
                 "--peer-ca" => pair_ca = Some(PathBuf::from(valeur()?.as_ref())),
                 "--operator-key" => exploitant = Some(PathBuf::from(valeur()?.as_ref())),
                 "--invitation-ttl" => invitation_ttl_s = nombre(drapeau, valeur()?.as_ref())?,
+                "--push-roots" => racines_de_poussee = Some(PathBuf::from(valeur()?.as_ref())),
                 autre => {
                     return Err(match ancien(autre) {
                         Some((ancien, nouveau)) => Faute::Ancien { ancien, nouveau },
@@ -637,6 +659,7 @@ impl Reglages {
                 }
                 bon => bon,
             },
+            racines_de_poussee,
         })
     }
 
@@ -934,6 +957,27 @@ mod tests {
                 .is_empty()
         );
         assert!(!Faute::AppleIncomplet.to_string().is_empty());
+    }
+
+    #[test]
+    fn sans_push_roots_rien_ne_part_et_avec_le_fichier_est_retenu() {
+        let lus = Reglages::depuis(minimum()).expect("le minimum suffit");
+        assert_eq!(lus.racines_de_poussee, None);
+        let lus = Reglages::depuis(avec(&[
+            "--push-roots",
+            "/etc/ssl/certs/ca-certificates.crt",
+        ]))
+        .expect("un fichier de racines");
+        assert_eq!(
+            lus.racines_de_poussee,
+            Some(std::path::PathBuf::from(
+                "/etc/ssl/certs/ca-certificates.crt"
+            ))
+        );
+        assert_eq!(
+            Reglages::depuis(avec(&["--push-roots"])).map(|_| ()),
+            Err(Faute::SansValeur("--push-roots".to_owned()))
+        );
     }
 
     #[test]

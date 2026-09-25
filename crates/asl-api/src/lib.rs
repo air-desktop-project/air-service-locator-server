@@ -44,6 +44,7 @@
 #![no_std]
 
 pub mod corps;
+pub mod point;
 
 use asl_id::{Genre, Identifiant};
 use asl_proto::NomService;
@@ -174,6 +175,16 @@ pub enum Ressource<'a> {
     /// seule n'en a aucun, et lui ouvrir ce flux lui donnerait un flux qui ne
     /// dira jamais rien — en tenant une ressource des deux côtés.
     Poussees,
+    /// `/v1/nouvelles` — **le flux des nouvelles du compte de l'appareil qui
+    /// demande** (`protocole.md` §2.2, 2026-09-25).
+    ///
+    /// La même forme que [`Ressource::Poussees`] — `GET` ouvre un flux dont la
+    /// réponse ne se termine pas, une ligne par événement — et un autre
+    /// public : un APPAREIL, sur sa connexion tenue, qui n'apprend que ce qui
+    /// arrive à SON compte. **Aucun chemin ne nomme le compte**, pour la raison
+    /// écrite sur [`Ressource::AppareilsDuProprietaire`] : un appareil ne sort
+    /// pas du sien.
+    Nouvelles,
     /// `/v1/vu` — **d'où l'annuaire voit cette connexion**, sans rien annoncer.
     ///
     /// # POURQUOI UNE ROUTE, ALORS QUE L'ANNONCE REND DÉJÀ CETTE ADRESSE
@@ -348,7 +359,8 @@ pub enum Ressource<'a> {
         /// L'appareil visé.
         appareil: Identifiant,
     },
-    /// `/v1/appareils/{a}/poussee` — déposer un jeton APNs ou FCM.
+    /// `/v1/appareils/{a}/poussee` — déposer un point de poussée UnifiedPush.
+    /// Le chemin est celui du jeton d'avant, qui n'est plus accepté.
     PousseeAppareil {
         /// L'appareil visé.
         appareil: Identifiant,
@@ -478,6 +490,7 @@ impl Ressource<'_> {
             | Self::Vu
             | Self::Version
             | Self::Poussees
+            | Self::Nouvelles
             | Self::ServicesMachine { .. }
             | Self::Expositions
             | Self::AliasResolu { .. }
@@ -865,6 +878,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
             machine: identifiant(machine, Genre::Machine)?,
         }),
         ["v1", "poussees"] => Ok(Ressource::Poussees),
+        ["v1", "nouvelles"] => Ok(Ressource::Nouvelles),
         ["v1", "vu"] => Ok(Ressource::Vu),
         ["v1", "version"] => Ok(Ressource::Version),
         ["v1", "replication"] => Ok(Ressource::Replication),

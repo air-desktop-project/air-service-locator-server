@@ -1,8 +1,11 @@
 //! Les corps de l'API mobile : ce qu'ils acceptent, et ce qu'ils refusent.
 
 use asl_api::corps::{
-    CORPS_MAX, Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation, DepotJeton,
-    JETON_MAX, ModificationMachine, NOM_MACHINE_MAX, Plateforme, Portee,
+    CORPS_MAX, Capacites, DeclarationMachine, DemandeAlias, DemandeAutorisation, DepotPoint,
+    ModificationMachine, NOM_MACHINE_MAX, POINT_CORPS_MAX, Portee,
+};
+use asl_api::point::{
+    POINT_MAX, UrlDePoussee, decoder_base64url, encoder_base64url, longueur_base64url,
 };
 use asl_id::{Genre, Identifiant};
 use asl_proto::Erreur;
@@ -1026,137 +1029,317 @@ fn une_portee_illisible_est_refusee() {
     );
 }
 
-// ── Déposer un jeton de poussée ─────────────────────────────────────────────
+// ── Déposer un point de poussée ─────────────────────────────────────────────
+
+/// Une clé de récepteur plausible, en base64url : `0x04` puis soixante-quatre
+/// octets.
+fn cle_b64() -> String {
+    let mut cle = [0x5A_u8; 65];
+    cle[0] = 0x04;
+    let mut tampon = [0_u8; 88];
+    String::from_utf8(encoder_base64url(&cle, &mut tampon).unwrap().to_vec()).unwrap()
+}
+
+/// Un secret plausible, en base64url.
+fn secret_b64() -> String {
+    let mut tampon = [0_u8; 22];
+    String::from_utf8(
+        encoder_base64url(&[0x11; 16], &mut tampon)
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
+}
 
 #[test]
-fn un_depot_se_lit_et_se_reecrit_a_l_identique() {
-    for octets in [
-        &br#"{"plateforme":"apns","jeton":"c0ffee"}"#[..],
-        &br#"{"plateforme":"fcm","jeton":"e:Z-_9"}"#[..],
+fn un_depot_de_point_se_lit_et_se_reecrit_a_l_identique() {
+    let cle = cle_b64();
+    let secret = secret_b64();
+    for corps in [
+        r#"{"plateforme":"unifiedpush","point":"https://ntfy.example.org/upAb3kZq9"}"#.to_owned(),
+        format!(r#"{{"plateforme":"unifiedpush","point":"https://ntfy.sh/up?x=1","cle":"{cle}"}}"#),
+        format!(
+            r#"{{"plateforme":"unifiedpush","point":"https://ntfy.sh:443/up","secret":"{secret}"}}"#
+        ),
+        format!(
+            r#"{{"plateforme":"unifiedpush","point":"https://a.b/c","cle":"{cle}","secret":"{secret}"}}"#
+        ),
     ] {
-        let lu = DepotJeton::decoder(octets).expect("il se lit");
-        let mut tampon = [0_u8; 128];
+        let lu = DepotPoint::decoder(corps.as_bytes()).expect("il se lit");
+        let mut tampon = [0_u8; POINT_CORPS_MAX];
         let ecrit = lu.encoder(&mut tampon).expect("il se réécrit");
-        assert_eq!(
-            &tampon[..ecrit],
-            octets,
-            "{}",
-            String::from_utf8_lossy(octets)
-        );
+        assert_eq!(&tampon[..ecrit], corps.as_bytes(), "{corps}");
     }
 }
 
 #[test]
-fn l_ordre_des_champs_ne_compte_pas() {
-    let lu = DepotJeton::decoder(br#"{"jeton":"c0ffee","plateforme":"fcm"}"#).expect("il se lit");
-    assert_eq!(lu.plateforme, Plateforme::Fcm);
-    assert_eq!(lu.jeton, "c0ffee");
+fn l_ordre_des_champs_du_point_ne_compte_pas() {
+    let corps = format!(
+        r#"{{"secret":"{}","point":"https://ntfy.sh/up","plateforme":"unifiedpush"}}"#,
+        secret_b64()
+    );
+    let lu = DepotPoint::decoder(corps.as_bytes()).expect("il se lit");
+    assert_eq!(lu.point.hote(), "ntfy.sh");
+    assert_eq!(lu.secret, Some([0x11; 16]));
+    assert_eq!(lu.cle, None);
 }
 
 #[test]
-fn les_deux_plateformes_et_elles_seules() {
-    // **LA LISTE EST FERMÉE.** Un jeton ne veut rien dire hors du service qui
-    // l'a émis, et l'annuaire doit savoir à qui le présenter.
-    assert_eq!(Plateforme::depuis_le_mot("apns"), Some(Plateforme::Apns));
-    assert_eq!(Plateforme::depuis_le_mot("fcm"), Some(Plateforme::Fcm));
-    for mot in ["APNS", "windows", "", "apns "] {
-        assert_eq!(Plateforme::depuis_le_mot(mot), None, "{mot}");
-    }
-    for plateforme in [Plateforme::Apns, Plateforme::Fcm] {
-        assert_eq!(
-            Plateforme::depuis_le_mot(plateforme.mot()),
-            Some(plateforme)
+fn apns_et_fcm_sont_refuses_et_rien_d_autre_n_est_une_plateforme() {
+    // `protocole.md` §2.2 : acceptés depuis le début, jamais employés.
+    for mot in ["apns", "fcm"] {
+        let corps = format!(r#"{{"plateforme":"{mot}","point":"https://ntfy.sh/up"}}"#);
+        assert!(
+            matches!(
+                DepotPoint::decoder(corps.as_bytes()),
+                Err(Erreur::PointRefuse { .. })
+            ),
+            "{mot}"
         );
     }
     assert!(matches!(
-        DepotJeton::decoder(br#"{"plateforme":"windows","jeton":"x"}"#),
+        DepotPoint::decoder(br#"{"plateforme":"UnifiedPush","point":"https://ntfy.sh/up"}"#),
         Err(Erreur::ChampInconnu { .. })
     ));
 }
 
 #[test]
-fn un_jeton_vide_ou_trop_long_est_refuse() {
-    // **UN JETON VIDE N'EST PAS UN RETRAIT DÉGUISÉ.** C'est un champ qu'on a
-    // oublié de remplir, et le prendre pour un dépôt ferait présenter la chaîne
-    // vide à Apple.
+fn un_depot_de_point_incomplet_inconnu_ou_double_est_refuse() {
     assert_eq!(
-        DepotJeton::decoder(br#"{"plateforme":"apns","jeton":""}"#).map(|_| ()),
-        Err(Erreur::NomVide)
-    );
-
-    let juste = "a".repeat(JETON_MAX);
-    let corps = format!(r#"{{"plateforme":"apns","jeton":"{juste}"}}"#);
-    assert!(
-        DepotJeton::decoder(corps.as_bytes()).is_ok(),
-        "la borne passe"
-    );
-
-    let trop = "a".repeat(JETON_MAX + 1);
-    let corps = format!(r#"{{"plateforme":"apns","jeton":"{trop}"}}"#);
-    assert_eq!(
-        DepotJeton::decoder(corps.as_bytes()).map(|_| ()),
-        Err(Erreur::NomTropLong {
-            obtenue: JETON_MAX + 1
-        })
-    );
-}
-
-#[test]
-fn un_depot_incomplet_inconnu_ou_double_est_refuse() {
-    assert_eq!(
-        DepotJeton::decoder(br#"{"jeton":"c0ffee"}"#).map(|_| ()),
+        DepotPoint::decoder(br#"{"point":"https://ntfy.sh/up"}"#).map(|_| ()),
         Err(Erreur::ChampManquant { nom: "plateforme" })
     );
     assert_eq!(
-        DepotJeton::decoder(br#"{"plateforme":"apns"}"#).map(|_| ()),
-        Err(Erreur::ChampManquant { nom: "jeton" })
+        DepotPoint::decoder(br#"{"plateforme":"unifiedpush"}"#).map(|_| ()),
+        Err(Erreur::ChampManquant { nom: "point" })
     );
     assert!(matches!(
-        DepotJeton::decoder(br#"{"plateforme":"apns","couleur":"bleu","jeton":"x"}"#),
+        DepotPoint::decoder(br#"{"plateforme":"unifiedpush","jeton":"x"}"#),
         Err(Erreur::ChampInconnu { .. })
     ));
     assert!(matches!(
-        DepotJeton::decoder(br#"{"plateforme":"apns","plateforme":"fcm","jeton":"x"}"#),
+        DepotPoint::decoder(
+            br#"{"plateforme":"unifiedpush","point":"https://a.b/","point":"https://a.b/"}"#
+        ),
         Err(Erreur::ChampEnDouble { .. })
     ));
 }
 
 #[test]
-fn un_depot_mal_cadre_est_refuse() {
+fn un_depot_de_point_mal_cadre_est_refuse() {
     for octets in [
         &b""[..],
-        &b"["[..],
         &br#"{}"#[..],
-        &br#"{"plateforme" "apns","jeton":"x"}"#[..],
-        &br#"{"plateforme":"apns" "jeton":"x"}"#[..],
-        &br#"{"plateforme":"apns","jeton":"x""#[..],
-        &br#"{"plateforme":"apns","jeton":"x"}y"#[..],
-        // **UN JETON N'EST PAS UN NOMBRE**, et le lecteur de chaînes le dit.
-        &br#"{"plateforme":"apns","jeton":42}"#[..],
-        // Un échappement est refusé : aucune valeur de ce protocole n'en emploie.
-        &br#"{"plateforme":"apns","jeton":"a\nb"}"#[..],
+        &br#"{"plateforme" "unifiedpush"}"#[..],
+        &br#"{"plateforme":"unifiedpush" "point":"https://a.b/"}"#[..],
+        &br#"{"plateforme":"unifiedpush","point":"https://a.b/""#[..],
+        &br#"{"plateforme":"unifiedpush","point":"https://a.b/"}y"#[..],
+        &br#"{"plateforme":"unifiedpush","point":42}"#[..],
+        // Un point dont la forme ne tient pas.
+        &br#"{"plateforme":"unifiedpush","point":"http://a.b/"}"#[..],
     ] {
         assert!(
-            DepotJeton::decoder(octets).is_err(),
+            DepotPoint::decoder(octets).is_err(),
             "{:?} devrait être refusé",
             String::from_utf8_lossy(octets)
         );
     }
-
-    let trop = vec![b'{'; CORPS_MAX + 1];
+    let trop = vec![b'{'; POINT_CORPS_MAX + 1];
     assert_eq!(
-        DepotJeton::decoder(&trop).map(|_| ()),
+        DepotPoint::decoder(&trop).map(|_| ()),
         Err(Erreur::MessageTropLong {
-            obtenue: CORPS_MAX + 1
+            obtenue: POINT_CORPS_MAX + 1
         })
     );
 }
 
 #[test]
-fn un_depot_ne_tient_pas_dans_un_tampon_trop_court() {
-    let lu = DepotJeton::decoder(br#"{"plateforme":"apns","jeton":"c0ffee"}"#).expect("il se lit");
+fn une_cle_ou_un_secret_mal_ecrits_sont_refuses() {
+    let mauvais = [
+        // Trop court, trop long, un symbole hors de l'alphabet, du remplissage.
+        r#""cle":"BAAA""#.to_owned(),
+        format!(r#""cle":"{}A""#, cle_b64()),
+        format!(r#""cle":"{}""#, cle_b64().replacen('W', "+", 1)),
+        format!(r#""secret":"{}==""#, secret_b64()),
+        // Une clé qui n'est pas un point non compressé : premier octet 0x02.
+        format!(r#""cle":"{}""#, cle_b64().replacen('B', "A", 1)),
+        // Les bits de queue d'un secret qui ne valent pas zéro : une seconde
+        // écriture des mêmes octets.
+        format!(r#""secret":"{}B""#, &secret_b64()[..21]),
+    ];
+    for champ in mauvais {
+        let corps = format!(r#"{{"plateforme":"unifiedpush","point":"https://a.b/",{champ}}}"#);
+        assert!(
+            matches!(
+                DepotPoint::decoder(corps.as_bytes()),
+                Err(Erreur::PointRefuse { .. })
+            ),
+            "{champ}"
+        );
+    }
+}
+
+#[test]
+fn un_depot_de_point_ne_tient_pas_dans_un_tampon_trop_court() {
+    let corps = format!(
+        r#"{{"plateforme":"unifiedpush","point":"https://a.b/","cle":"{}"}}"#,
+        cle_b64()
+    );
+    let lu = DepotPoint::decoder(corps.as_bytes()).expect("il se lit");
     let mut tampon = [0_u8; 8];
-    assert!(lu.encoder(&mut tampon).is_err());
+    assert_eq!(lu.encoder(&mut tampon), Err(Erreur::TamponTropPetit));
+}
+
+// ── La forme d'un point ─────────────────────────────────────────────────────
+
+/// La règle qu'un point enfreint, ou rien.
+fn regle(texte: &str) -> Option<&'static str> {
+    match UrlDePoussee::analyser(texte) {
+        Ok(_) => None,
+        Err(Erreur::PointRefuse { regle }) => Some(regle),
+        Err(autre) => panic!("{texte} : {autre:?}"),
+    }
+}
+
+#[test]
+fn un_point_bien_forme_se_decoupe_en_hote_et_cible() {
+    let point = UrlDePoussee::analyser("https://ntfy.example.org/upAb3kZq9?up=1").unwrap();
+    assert_eq!(point.texte(), "https://ntfy.example.org/upAb3kZq9?up=1");
+    assert_eq!(point.hote(), "ntfy.example.org");
+    assert_eq!(point.cible(), ("", "/upAb3kZq9?up=1"));
+
+    // Le port 443 écrit ne reste pas dans l'hôte.
+    let point = UrlDePoussee::analyser("https://ntfy.sh:443/up").unwrap();
+    assert_eq!(point.hote(), "ntfy.sh");
+    // Sans chemin, la cible est `/` ; une requête sans chemin reçoit le sien.
+    assert_eq!(
+        UrlDePoussee::analyser("https://ntfy.sh").unwrap().cible(),
+        ("/", "")
+    );
+    assert_eq!(
+        UrlDePoussee::analyser("https://ntfy.sh?x").unwrap().cible(),
+        ("/", "?x")
+    );
+    // Un nom d'une seule étiquette est un nom : c'est l'envoi qui jugera où
+    // il mène.
+    assert_eq!(regle("https://localhost/up"), None);
+    // La borne passe, pas un octet de plus.
+    let chemin = "a".repeat(POINT_MAX - "https://a.b/".len());
+    assert_eq!(regle(&format!("https://a.b/{chemin}")), None);
+    assert_eq!(
+        regle(&format!("https://a.b/{chemin}a")),
+        Some("1024 octets au plus")
+    );
+}
+
+#[test]
+fn chaque_regle_de_forme_refuse_ce_qu_elle_nomme() {
+    let cas: &[(&str, &str)] = &[
+        ("http://ntfy.sh/up", "https:// et rien d'autre"),
+        ("HTTPS://ntfy.sh/up", "https:// et rien d'autre"),
+        ("ftp://ntfy.sh/up", "https:// et rien d'autre"),
+        ("https://ntfy.sh/u p", "de l'ASCII imprimable, sans espace"),
+        ("https://ntfy.sh/é", "de l'ASCII imprimable, sans espace"),
+        ("https://ntfy.sh/up#x", "pas de fragment"),
+        ("https://moi@ntfy.sh/up", "pas d'identifiants"),
+        ("https://moi:secret@ntfy.sh/up", "pas d'identifiants"),
+        ("https://ntfy.sh:8443/up", "le port 443, implicite ou écrit"),
+        ("https://ntfy.sh:/up", "le port 443, implicite ou écrit"),
+        ("https://ntfy.sh:0443/up", "le port 443, implicite ou écrit"),
+        ("https://[::1]/up", "un nom DNS, pas une adresse"),
+        ("https://127.0.0.1/up", "un nom DNS, pas une adresse"),
+        ("https://127.1/up", "un nom DNS, pas une adresse"),
+        ("https://2130706433/up", "un nom DNS, pas une adresse"),
+        ("https://0x7f000001/up", "un nom DNS, pas une adresse"),
+        ("https://0X7F.0.0.1/up", "un nom DNS, pas une adresse"),
+        ("https:///up", "un nom DNS de 1 à 253 octets"),
+        (
+            "https://a..b/up",
+            "un nom DNS : lettres, chiffres, tirets, points",
+        ),
+        (
+            "https://-a.b/up",
+            "un nom DNS : lettres, chiffres, tirets, points",
+        ),
+        (
+            "https://a-.b/up",
+            "un nom DNS : lettres, chiffres, tirets, points",
+        ),
+        (
+            "https://a_b.c/up",
+            "un nom DNS : lettres, chiffres, tirets, points",
+        ),
+        (
+            "https://a.b./up",
+            "un nom DNS : lettres, chiffres, tirets, points",
+        ),
+    ];
+    for (texte, attendue) in cas {
+        assert_eq!(regle(texte), Some(*attendue), "{texte}");
+    }
+    // Une étiquette de soixante-trois passe, pas de soixante-quatre ; un nom
+    // de plus de 253 octets ne passe pas.
+    let etiquette = "a".repeat(63);
+    assert_eq!(regle(&format!("https://{etiquette}.b/")), None);
+    assert_eq!(
+        regle(&format!("https://{etiquette}a.b/")),
+        Some("un nom DNS : lettres, chiffres, tirets, points")
+    );
+    let long = [etiquette.as_str(); 4].join(".");
+    assert_eq!(
+        regle(&format!("https://{long}/")),
+        Some("un nom DNS de 1 à 253 octets")
+    );
+    // `0x` sans chiffres hexadécimaux derrière n'est pas une adresse.
+    assert_eq!(regle("https://a.0xg/"), None);
+    // Et chaque refus se dit à un humain.
+    assert!(
+        Erreur::PointRefuse {
+            regle: "pas de fragment"
+        }
+        .to_string()
+        .contains("pas de fragment")
+    );
+}
+
+#[test]
+fn base64url_n_admet_qu_une_ecriture_de_chaque_valeur() {
+    for longueur in [0_usize, 1, 2, 3, 16, 65] {
+        let octets: Vec<u8> = (0..longueur)
+            .map(|rang| u8::try_from(rang * 37 % 256).unwrap())
+            .collect();
+        let mut tampon = [0_u8; 88];
+        let texte = encoder_base64url(&octets, &mut tampon).unwrap().to_vec();
+        assert_eq!(texte.len(), longueur_base64url(longueur));
+        assert!(!texte.contains(&b'='));
+        let texte = String::from_utf8(texte).unwrap();
+        if longueur == 16 {
+            assert_eq!(
+                decoder_base64url::<16>(&texte).map(|o| o.to_vec()),
+                Some(octets)
+            );
+        }
+    }
+    // Une sortie trop courte ne s'écrit pas.
+    let mut petit = [0_u8; 2];
+    assert_eq!(encoder_base64url(&[1, 2, 3], &mut petit), None);
+    // Le vecteur de RFC 4648 §10, sans remplissage, et avec les deux
+    // symboles propres à base64url.
+    let mut tampon = [0_u8; 8];
+    assert_eq!(
+        encoder_base64url(b"foob", &mut tampon),
+        Some(&b"Zm9vYg"[..])
+    );
+    assert_eq!(
+        encoder_base64url(&[0xFB, 0xFF], &mut tampon),
+        Some(&b"-_8"[..])
+    );
+    assert_eq!(decoder_base64url::<2>("-_8"), Some([0xFB, 0xFF]));
+    assert_eq!(
+        decoder_base64url::<2>("-_9"),
+        None,
+        "bits de queue non nuls"
+    );
 }
 
 // ── Décrire son appareil ────────────────────────────────────────────────────
@@ -2323,6 +2506,9 @@ mod compte {
             Erreur::PlateformeInconnue { octet: 7 },
             Erreur::AttestationInattendue { obtenue: 3 },
             Erreur::AttestationManquante,
+            Erreur::PointRefuse {
+                regle: "pas de fragment",
+            },
         ];
         for faute in fautes {
             assert!(!faute.to_string().is_empty());

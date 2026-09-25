@@ -23,6 +23,11 @@ use asl_id::{Genre, Identifiant};
 use asl_proto::Erreur;
 use asl_proto::cadrage::Lecteur;
 
+use crate::point::{
+    CLE_RECEPTEUR_OCTETS, SECRET_RECEPTEUR_OCTETS, UrlDePoussee, decoder_base64url,
+    encoder_base64url,
+};
+
 /// La longueur maximale d'un corps de cette API, en octets.
 ///
 /// Le plus long tient dans deux cents octets : un nom de soixante-quatre, un
@@ -42,18 +47,11 @@ pub const CORPS_MAX: usize = 512;
 /// stockage qui décide, parce que c'est elle qui peut refuser.
 pub const NOM_MACHINE_MAX: usize = 64;
 
-/// Ce qu'un jeton de poussée peut faire. Égal à `asl_registre::JETON_OCTETS_MAX`.
-///
-/// **RECOPIÉ PLUTÔT QU'IMPORTÉ** : `asl-api` est une grammaire, et dépendre du
-/// magasin pour connaître une borne ferait remonter une décision de rangement
-/// dans un décodeur. Les deux nombres sont comparés par un essai.
-pub const JETON_MAX: usize = 255;
-
 // ── Créer un compte, avec preuve et attestation ─────────────────────────────
 
 /// Ce qu'occupe une clé publique d'appareil : un point P-256, SEC1 compressé.
 ///
-/// **RECOPIÉ PLUTÔT QU'IMPORTÉ**, comme [`JETON_MAX`] : `asl-api` est une
+/// **RECOPIÉ PLUTÔT QU'IMPORTÉ**, comme [`crate::point::POINT_MAX`] : `asl-api` est une
 /// grammaire, et `asl_cle` est à l'étage 2. Égal à `asl_cle::CLE_APPAREIL_OCTETS`,
 /// et `asl-session` — qui connaît les deux — tient l'égalité.
 pub const CLE_APPAREIL_OCTETS: usize = 33;
@@ -1758,78 +1756,61 @@ impl<'a> DemandeAlias<'a> {
     }
 }
 
-// ── Déposer un jeton de poussée ─────────────────────────────────────────────
+// ── Déposer un point de poussée (`protocole.md` §2.2, 2026-09-25) ─────────
 
 /// Les champs de `PUT /v1/appareils/{a}/poussee`.
-const CHAMPS_JETON: [&str; 2] = ["plateforme", "jeton"];
+const CHAMPS_POINT: [&str; 4] = ["plateforme", "point", "cle", "secret"];
 
-/// La plate-forme qui délivrera la notification.
+/// Ce qu'un corps de dépôt de point peut faire, en octets.
 ///
-/// **DEUX, ET C'EST UNE LISTE FERMÉE.** Un jeton ne veut rien dire hors du
-/// service qui l'a émis, et l'annuaire doit savoir à qui le présenter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Plateforme {
-    /// Apple Push Notification service.
-    Apns,
-    /// Firebase Cloud Messaging.
-    Fcm,
-}
-
-impl Plateforme {
-    /// Le mot qui la désigne sur le fil.
-    #[must_use]
-    pub const fn mot(self) -> &'static str {
-        match self {
-            Self::Apns => "apns",
-            Self::Fcm => "fcm",
-        }
-    }
-
-    /// Ce que ce mot désigne, s'il désigne quelque chose.
-    #[must_use]
-    pub fn depuis_le_mot(mot: &str) -> Option<Self> {
-        match mot {
-            "apns" => Some(Self::Apns),
-            "fcm" => Some(Self::Fcm),
-            _ => None,
-        }
-    }
-}
+/// Le plus long tient en douze cents : un point de 1024, la clé et le secret
+/// en base64url (87 et 22), les noms des champs et leur ponctuation. La
+/// borne ordinaire, [`CORPS_MAX`], est faite pour des noms de soixante-quatre
+/// octets et ne le tiendrait pas.
+pub const POINT_CORPS_MAX: usize = 2048;
 
 /// Ce que `PUT /v1/appareils/{a}/poussee` dépose.
 ///
-/// # L'ANNUAIRE NE LIT PAS LE JETON, ET N'A PAS À LE FAIRE
+/// ```jsonc
+/// {"plateforme": "unifiedpush", "point": "https://ntfy.example.org/upAb3kZq9…",
+///  "cle": "BN…", "secret": "q1…"}   // les deux derniers, facultatifs
+/// ```
 ///
-/// Il ne vérifie ni sa forme, ni sa longueur attendue, ni qu'il ressemble à ce
-/// qu'Apple ou Google émettent aujourd'hui. **Un jeton est une chaîne opaque**,
-/// et le seul juge de sa validité est le service qui l'a émis.
+/// # UNE SEULE PLATE-FORME, ET LES DEUX D'AVANT SONT REFUSÉES
 ///
-/// Ce qui EST exigé tient en deux points, et aucun ne porte sur le sens : il
-/// s'écrit en ASCII imprimable — ce que [`Lecteur::chaine`] impose déjà —, et il
-/// n'est pas vide. Un jeton vide n'est pas un dépôt, c'est un champ qu'on a
-/// oublié de remplir ; **le retrait, lui, n'a pas de verbe** et n'est pas un
-/// jeton vide déguisé.
+/// `apns` et `fcm` étaient acceptés depuis le début et rien ne s'en servait ;
+/// ni l'app Android ni l'app iOS ne les déposent. Les accepter serait une
+/// promesse qu'on sait ne pas tenir : ils rendent [`Erreur::PointRefuse`],
+/// donc `400`.
+///
+/// # LA CLÉ ET LE SECRET SONT RANGÉS SANS SERVIR
+///
+/// Ce sont ceux de RFC 8291, pour le repli chiffré que `protocole.md` §2.2
+/// nomme : le jour où il faudrait l'écrire, il n'aurait pas à changer ce
+/// corps ni le rangement. Leur forme est tenue dès aujourd'hui — une clé est
+/// un point P-256 non compressé (65 octets, le premier à `0x04`), un secret
+/// seize octets —, pour qu'aucun appareil ne prenne l'habitude d'envoyer
+/// autre chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DepotJeton<'a> {
-    /// À qui présenter ce jeton.
-    pub plateforme: Plateforme,
-    /// Le jeton, tel que la plate-forme l'a donné.
-    pub jeton: &'a str,
+pub struct DepotPoint<'a> {
+    /// Le point, dont la forme tient.
+    pub point: UrlDePoussee<'a>,
+    /// La clé publique du récepteur, si l'appareil l'a donnée.
+    pub cle: Option<[u8; CLE_RECEPTEUR_OCTETS]>,
+    /// Le secret d'authentification du récepteur, si l'appareil l'a donné.
+    pub secret: Option<[u8; SECRET_RECEPTEUR_OCTETS]>,
 }
 
-impl<'a> DepotJeton<'a> {
-    /// Décode un dépôt de jeton.
-    ///
-    /// ```jsonc
-    /// {"plateforme": "apns", "jeton": "c0ffee…"}
-    /// ```
+impl<'a> DepotPoint<'a> {
+    /// Décode un dépôt de point.
     ///
     /// # Erreurs
     ///
-    /// Celles du cadrage, plus [`Erreur::ChampManquant`], [`Erreur::NomVide`]
-    /// pour un jeton vide et [`Erreur::NomTropLong`] au-delà de [`JETON_MAX`].
+    /// Celles du cadrage, plus [`Erreur::ChampManquant`] et
+    /// [`Erreur::PointRefuse`] — pour une plate-forme d'avant, un point dont
+    /// la forme ne tient pas, une clé ou un secret mal écrits.
     pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
-        if octets.len() > CORPS_MAX {
+        if octets.len() > POINT_CORPS_MAX {
             return Err(Erreur::MessageTropLong {
                 obtenue: octets.len(),
             });
@@ -1838,13 +1819,14 @@ impl<'a> DepotJeton<'a> {
         lecteur.attendre(b'{', "un objet")?;
 
         let mut vus = 0_u8;
-        let mut plateforme: Option<Plateforme> = None;
-        let mut jeton: Option<&'a str> = None;
+        let mut point: Option<UrlDePoussee<'a>> = None;
+        let mut cle = None;
+        let mut secret = None;
 
         loop {
             let position_cle = lecteur.position();
-            let cle = lecteur.chaine()?;
-            let rang = CHAMPS_JETON.iter().position(|champ| *champ == cle).ok_or(
+            let nom = lecteur.chaine()?;
+            let rang = CHAMPS_POINT.iter().position(|champ| *champ == nom).ok_or(
                 Erreur::ChampInconnu {
                     position: position_cle,
                 },
@@ -1860,20 +1842,33 @@ impl<'a> DepotJeton<'a> {
             lecteur.attendre(b':', "deux-points")?;
             let position = lecteur.position();
             let texte = lecteur.chaine()?;
-            if rang == 0 {
-                plateforme = Some(
-                    Plateforme::depuis_le_mot(texte).ok_or(Erreur::ChampInconnu { position })?,
-                );
-            } else {
-                if texte.is_empty() {
-                    return Err(Erreur::NomVide);
+            match rang {
+                0 => match texte {
+                    "unifiedpush" => {}
+                    "apns" | "fcm" => {
+                        return Err(Erreur::PointRefuse {
+                            regle: "apns et fcm ne sont plus acceptés : unifiedpush",
+                        });
+                    }
+                    _ => return Err(Erreur::ChampInconnu { position }),
+                },
+                1 => point = Some(UrlDePoussee::analyser(texte)?),
+                2 => {
+                    cle = Some(
+                        decoder_base64url::<CLE_RECEPTEUR_OCTETS>(texte)
+                            .filter(|octets| octets.first() == Some(&0x04))
+                            .ok_or(Erreur::PointRefuse {
+                                regle: "cle : 65 octets en base64url, un point P-256 non compressé",
+                            })?,
+                    );
                 }
-                if texte.len() > JETON_MAX {
-                    return Err(Erreur::NomTropLong {
-                        obtenue: texte.len(),
-                    });
+                _ => {
+                    secret = Some(decoder_base64url::<SECRET_RECEPTEUR_OCTETS>(texte).ok_or(
+                        Erreur::PointRefuse {
+                            regle: "secret : 16 octets en base64url",
+                        },
+                    )?);
                 }
-                jeton = Some(texte);
             }
 
             lecteur.sauter_blancs();
@@ -1893,13 +1888,15 @@ impl<'a> DepotJeton<'a> {
         }
         lecteur.fin()?;
 
-        let plateforme = plateforme.ok_or(Erreur::ChampManquant {
-            nom: CHAMPS_JETON[0],
+        if vus & 1 == 0 {
+            return Err(Erreur::ChampManquant {
+                nom: CHAMPS_POINT[0],
+            });
+        }
+        let point = point.ok_or(Erreur::ChampManquant {
+            nom: CHAMPS_POINT[1],
         })?;
-        let jeton = jeton.ok_or(Erreur::ChampManquant {
-            nom: CHAMPS_JETON[1],
-        })?;
-        Ok(Self { plateforme, jeton })
+        Ok(Self { point, cle, secret })
     }
 
     /// Encode ce dépôt, et rend le nombre d'octets écrits.
@@ -1909,10 +1906,17 @@ impl<'a> DepotJeton<'a> {
     /// [`Erreur::TamponTropPetit`].
     pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
         let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
-        ecrivain.pousser(b"{\"plateforme\":\"");
-        ecrivain.pousser(self.plateforme.mot().as_bytes());
-        ecrivain.pousser(b"\",\"jeton\":\"");
-        ecrivain.pousser(self.jeton.as_bytes());
+        ecrivain.pousser(b"{\"plateforme\":\"unifiedpush\",\"point\":\"");
+        ecrivain.pousser(self.point.texte().as_bytes());
+        let mut tampon = [0_u8; 88];
+        if let Some(cle) = &self.cle {
+            ecrivain.pousser(b"\",\"cle\":\"");
+            ecrivain.pousser(encoder_base64url(cle, &mut tampon).unwrap_or_default());
+        }
+        if let Some(secret) = &self.secret {
+            ecrivain.pousser(b"\",\"secret\":\"");
+            ecrivain.pousser(encoder_base64url(secret, &mut tampon).unwrap_or_default());
+        }
         ecrivain.pousser(b"\"}");
         ecrivain.achever()
     }
@@ -1928,7 +1932,7 @@ const CHAMPS_DESCRIPTION: [&str; 2] = ["plateforme", "modele"];
 /// **TROIS, ET LA LISTE EST FERMÉE** : les trois applications de ce produit.
 /// Sur le fil, le champ s'appelle `plateforme` — c'est le mot des applications
 /// —, et le type ne s'appelle pas ainsi pour ne pas se confondre avec
-/// [`Plateforme`], qui dit à qui présenter un jeton de poussée.
+/// l'ancienne plate-forme d'un jeton de poussée.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Systeme {
     /// iOS — un iPhone ou un iPad.

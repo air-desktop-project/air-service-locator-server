@@ -917,6 +917,28 @@ fn l_etat_de_la_replication_exige_une_machine_et_ne_se_lit_que_par_get() {
     }
 }
 
+// ── Les nouvelles (`protocole.md` §2.2, 2026-09-25) ────────────────────────
+
+#[test]
+fn les_nouvelles_exigent_un_appareil_et_ne_se_lisent_que_par_get() {
+    // Un flux sur la connexion d'un appareil, et rien qui nomme un compte : un
+    // appareil n'apprend que ce qui arrive au sien.
+    let resolu = resoudre(Methode::Get, b"/v1/nouvelles").expect("elles se routent");
+    assert_eq!(resolu.ressource, Ressource::Nouvelles);
+    assert_eq!(resolu.exigence, Exigence::Appareil);
+    assert!(resolu.sert);
+    for methode in [Methode::Post, Methode::Put, Methode::Patch, Methode::Delete] {
+        assert!(
+            !resoudre(methode, b"/v1/nouvelles").unwrap().sert,
+            "{methode:?}"
+        );
+    }
+    assert_eq!(
+        resoudre(Methode::Get, b"/v1/nouvelles/u-0"),
+        Err(Erreur::RessourceInconnue)
+    );
+}
+
 // ── Effacer mon compte ──────────────────────────────────────────────────────
 
 #[test]

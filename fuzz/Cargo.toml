@@ -58,6 +58,9 @@ path = "../crates/asl-id"
 [dependencies.asl-proto]
 path = "../crates/asl-proto"
 
+[dependencies.asl-reveil]
+path = "../crates/asl-reveil"
+
 [dependencies.asl-annuaire]
 path = "../crates/asl-annuaire"
 
@@ -235,6 +238,13 @@ bench = false
 [[bin]]
 name = "fuzz_asl_keystore"
 path = "fuzz_targets/fuzz_asl_keystore.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_asl_reveil"
+path = "fuzz_targets/fuzz_asl_reveil.rs"
 test = false
 doc = false
 bench = false
