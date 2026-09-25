@@ -403,7 +403,7 @@ impl Tireur {
             }
             if !lot.is_empty() {
                 lecture.cadres = lecture.cadres.saturating_add(lot.len());
-                let appliques = self.appliquer_un_lot(pair, &lot, instantane)?;
+                let appliques = self.appliquer_un_lot(pair, lot, instantane).await?;
                 lecture.rattrapes = lecture.rattrapes.saturating_add(appliques);
             }
             if fin_vue {
@@ -428,16 +428,36 @@ impl Tireur {
     /// Applique ce lot en une transaction, journalise chaque refus avec son
     /// genre et son compteur (§8), transmet ce qu'il faut fermer, et rend
     /// combien d'opérations ont été appliquées.
-    fn appliquer_un_lot(
+    ///
+    /// # L'ÉCRITURE SE FAIT HORS DE LA BOUCLE
+    ///
+    /// `appliquer_la_suite` est synchrone : une transaction `redb`, et un
+    /// `fsync`. Appelée ici même, elle tenait un fil du runtime le temps de
+    /// l'écriture — et la boucle QUIC de cette racine, UNE tâche qui sert
+    /// toutes ses connexions, pouvait rester à l'arrêt tout un amorçage :
+    /// plus de réponse à personne, keepalives compris. Mesuré le 2026-09-25
+    /// (deux binaires en alternance, même charge) : l'essai qui amorce
+    /// plusieurs milliers d'enregistrements tombait six fois sur dix, zéro
+    /// une fois l'écriture déportée. `spawn_blocking` et non `block_in_place`,
+    /// qui panique sous un runtime à un fil.
+    async fn appliquer_un_lot(
         &self,
         pair: Identifiant,
-        lot: &[Cadre],
+        lot: Vec<Cadre>,
         instantane: bool,
     ) -> Result<usize, Faute> {
-        let verdicts = self
-            .entrepot
-            .appliquer_la_suite(pair, lot, instantane)
-            .map_err(Faute::Entrepot)?;
+        let entrepot = Arc::clone(&self.entrepot);
+        let (lot, verdicts) = tokio::task::spawn_blocking(move || {
+            let verdicts = entrepot.appliquer_la_suite(pair, &lot, instantane);
+            (lot, verdicts)
+        })
+        .await
+        .map_err(|arret| match arret.try_into_panic() {
+            // Une panique de l'entrepôt remonte comme avant, dans cette tâche.
+            Ok(panique) => std::panic::resume_unwind(panique),
+            Err(_) => Faute::Interrompue,
+        })?;
+        let verdicts = verdicts.map_err(Faute::Entrepot)?;
         let mut appliquees = 0_usize;
         for (cadre, verdict) in lot.iter().zip(verdicts) {
             match verdict {
@@ -570,6 +590,9 @@ pub enum Faute {
     FinHorsInstantane,
     /// L'entrepôt a refusé.
     Entrepot(asl_store::Faute),
+    /// L'application d'un lot a été annulée avant de commencer : l'annuaire
+    /// s'arrête, et rien n'a été écrit.
+    Interrompue,
 }
 
 impl core::fmt::Display for Faute {
@@ -596,6 +619,9 @@ impl core::fmt::Display for Faute {
                 f.write_str("un cadre de fin est arrivé sur le flux des opérations")
             }
             Self::Entrepot(quoi) => write!(f, "l'entrepôt a refusé : {quoi}"),
+            Self::Interrompue => {
+                f.write_str("l'application d'un lot a été annulée : l'annuaire s'arrête")
+            }
         }
     }
 }
