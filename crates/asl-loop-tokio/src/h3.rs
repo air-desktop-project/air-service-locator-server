@@ -29,6 +29,8 @@
 //! Elle est donc rangée avec le conducteur, sous l'identifiant local de la
 //! connexion, et les deux disparaissent ensemble.
 
+mod domaines;
+
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -875,6 +877,19 @@ impl Service<'_> {
             Besoin::PoserAlias { alias } => self.poser_l_alias(Some(alias)),
             Besoin::RetirerAlias => self.poser_l_alias(None),
             Besoin::EffacerMonCompte => self.effacer_mon_compte(),
+
+            // ── LES DOMAINES (`h3/domaines.rs`) ─────────────────────────
+            Besoin::MesDomaines => self.rassembler_mes_domaines(),
+            Besoin::CreerDomaine { alias } => self.creer_un_domaine(*alias),
+            Besoin::ChercherDomaines { clef } => self.chercher_des_domaines(clef),
+            Besoin::LireDomaine { domaine } => self.lire_un_domaine(*domaine),
+            Besoin::SupprimerDomaine { domaine } => self.supprimer_un_domaine(*domaine),
+            Besoin::PoserAliasDeDomaine { domaine, alias } => {
+                self.poser_l_alias_de_domaine(*domaine, *alias)
+            }
+            Besoin::RattacherMachine { machine, domaine } => {
+                self.rattacher_une_machine(*machine, *domaine)
+            }
 
             // ── LA VOIE ENTRE RACINES ───────────────────────────────────
             //

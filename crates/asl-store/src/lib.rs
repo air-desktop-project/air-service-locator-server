@@ -69,6 +69,10 @@ use redb::{
 // ── Les tables ──────────────────────────────────────────────────────────────
 
 /// Les comptes, par identifiant.
+mod domaines;
+
+pub use domaines::SuppressionDeDomaine;
+
 const COMPTES: TableDefinition<'_, &[u8], &[u8; COMPTE_OCTETS]> = TableDefinition::new("comptes");
 
 /// Les machines, par identifiant.
@@ -765,6 +769,9 @@ pub struct Retrait {
     pub autorisations: usize,
     /// L'alias a-t-il été libéré ?
     pub alias: bool,
+    /// Combien de domaines sont partis avec le compte, leur alias avec eux
+    /// (`docs/modele.md` §2.11).
+    pub domaines: usize,
     /// Les machines et appareils du compte : ce dont les connexions doivent
     /// tomber ici, comme après une révocation (`protocole.md` §2.1 quater).
     pub a_fermer: Vec<Identifiant>,
@@ -835,6 +842,8 @@ pub struct Entrepot {
     /// la reprise pour `révoqué le` (`docs/modele.md` §2.2) — zéro le plus
     /// souvent, et une fois seulement.
     dates_de_reprise: usize,
+    /// Combien de comptes ont reçu leur premier domaine à l'ouverture.
+    premiers_domaines: usize,
 }
 
 impl Entrepot {
@@ -918,6 +927,7 @@ impl Entrepot {
     /// Prépare les tables et lit le compteur, quel que soit le support.
     fn amorcer(base: Database, racine: Identifiant) -> Result<Self, Faute> {
         let reestampilles;
+        let premiers_domaines;
         let mut dates_de_reprise = 0_usize;
         {
             let ecriture = base.begin_write()?;
@@ -973,6 +983,14 @@ impl Entrepot {
             ecriture.open_table(APPAREILS_PAR_COMPTE)?;
             ecriture.open_table(POUSSEES)?;
             ecriture.open_table(DESCRIPTIONS)?;
+            // Et les domaines (2026-09-26) : six tables neuves, aucune forme
+            // ancienne ne change.
+            ecriture.open_table(domaines::DOMAINES)?;
+            ecriture.open_table(domaines::DOMAINES_PAR_COMPTE)?;
+            ecriture.open_table(domaines::ALIAS_DE_DOMAINES)?;
+            ecriture.open_table(domaines::DOMAINES_PAR_ALIAS)?;
+            ecriture.open_table(domaines::RATTACHEMENTS)?;
+            ecriture.open_table(domaines::MACHINES_PAR_DOMAINE)?;
             ecriture.open_table(JOURNAL)?;
             ecriture.open_table(RANG)?;
             ecriture.open_table(OPERATIONS)?;
@@ -980,6 +998,11 @@ impl Entrepot {
             // **APRÈS QUE LES TABLES EXISTENT, DANS LA MÊME TRANSACTION** : ce
             // que la racine sans identité a estampillé passe sous l'identité
             // réelle, ou rien ne bouge.
+            // **LE PREMIER DOMAINE DES COMPTES D'HIER** (`docs/modele.md`
+            // §2.11) : déduit, sous l'estampille du compte, une fois — et
+            // AVANT le ré-estampillage, qui le passe sous l'identité réelle
+            // avec le reste s'il y a lieu.
+            premiers_domaines = domaines::reprendre_les_premiers_domaines(&ecriture)?;
             reestampilles = if racine == RACINE_SANS_IDENTITE {
                 0
             } else {
@@ -1027,7 +1050,16 @@ impl Entrepot {
             derniere_operation: std::sync::atomic::AtomicU64::new(compteur),
             reestampilles,
             dates_de_reprise,
+            premiers_domaines,
         })
+    }
+
+    /// Combien de comptes d'avant les domaines ont reçu, à l'ouverture, leur
+    /// premier domaine (`docs/modele.md` §2.11) — une fois, et zéro ensuite.
+    /// C'est au journal d'exploitation de le dire.
+    #[must_use]
+    pub const fn premiers_domaines(&self) -> usize {
+        self.premiers_domaines
     }
 
     /// Combien d'enregistrements et d'opérations l'ouverture a ré-estampillés
@@ -1193,6 +1225,11 @@ impl Entrepot {
                     clef_compte.as_slice(),
                 )?;
             }
+            drop(comptes);
+            drop(reclamations);
+            // **LE PREMIER DOMAINE, DANS LA MÊME TRANSACTION** : un compte a
+            // toujours au moins un domaine, dès sa naissance.
+            domaines::naitre_premier_domaine(&ecriture, qui, estampille)?;
             journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
@@ -2515,6 +2552,8 @@ impl Entrepot {
             let mut octets = [0_u8; COMPTE_OCTETS];
             enregistrement.ecrire(&mut octets);
             comptes.insert(clef_compte.as_slice(), &octets)?;
+            // Le premier domaine, comme pour tout compte : voir `creer_compte`.
+            domaines::naitre_premier_domaine(&ecriture, compte, estampille_compte)?;
             journaliser_l_operation(
                 &ecriture,
                 estampille_compte,
@@ -3091,6 +3130,11 @@ impl Entrepot {
             );
         }
 
+        // **LES DOMAINES APRÈS LES COMPTES** : un domaine exige son
+        // propriétaire chez le lecteur, et ses suppressions exigent tous les
+        // domaines du compte.
+        domaines::instantane_des_domaines(&lecture, &mut suite)?;
+
         let machines = lecture.open_table(MACHINES)?;
         for entree in machines.iter()? {
             let (clef, valeur) = entree?;
@@ -3323,6 +3367,10 @@ impl Entrepot {
                 );
             }
         }
+
+        // **LES ALIAS ET LES RATTACHEMENTS EN DERNIER** : un rattachement
+        // exige sa machine chez le lecteur, et un alias son domaine.
+        domaines::instantane_des_alias_et_rattachements(&lecture, &mut suite)?;
 
         // **LE COMPTEUR DE COUPE EST LU DANS LA MÊME TRANSACTION** : tout ce
         // qui a été écrit jusqu'à lui est dans l'instantané, et tout ce qui
@@ -3753,6 +3801,7 @@ impl Entrepot {
             }
             combien = combien.saturating_add(condamnes_codes.len());
         }
+        combien = combien.saturating_add(domaines::oublier_ce_qui_vient_de(&ecriture, annuaire)?);
         ecriture.commit()?;
         Ok(combien)
     }
@@ -3839,7 +3888,11 @@ fn effacer_dans(
     estampille: Estampille,
 ) -> Result<Retrait, Faute> {
     let clef_compte = clef(qui);
-    let mut retrait = Retrait::default();
+    // ── LES DOMAINES : effacés, les machines d'AUTRES comptes détachées ─────
+    let mut retrait = Retrait {
+        domaines: domaines::effacer_les_domaines(ecriture, qui)?,
+        ..Retrait::default()
+    };
 
     // ── LES APPAREILS : effacés, avec leur jeton et leur description ────────
     {
@@ -3883,6 +3936,7 @@ fn effacer_dans(
             let quelle = depuis_clef(clef_machine)?;
             index.remove(clef_index.as_slice())?;
             machines.remove(clef_machine.as_slice())?;
+            domaines::oublier_le_rattachement(ecriture, quelle)?;
             if let Some(empreinte) = codes_par_machine.remove(clef_machine.as_slice())? {
                 codes.remove(empreinte.value())?;
                 retrait.codes = retrait.codes.saturating_add(1);
@@ -3980,7 +4034,11 @@ fn provenance_de(operation: &Operation) -> Option<Provenance> {
         Operation::Invitation { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Service { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Autorisation { enregistrement, .. } => Some(enregistrement.provenance),
-        Operation::Alias { .. }
+        Operation::Domaine { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::DomaineAlias { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::MachineDomaine { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::DomaineSupprime { .. }
+        | Operation::Alias { .. }
         | Operation::AppareilRevoque { .. }
         | Operation::AppareilAtteste { .. }
         | Operation::MachineModifiee { .. }
@@ -4091,6 +4149,21 @@ fn appliquer_dans(
             estampille,
             effets,
         ),
+        Operation::Domaine {
+            domaine,
+            enregistrement,
+        } => domaines::appliquer_domaine(ecriture, *domaine, enregistrement),
+        Operation::DomaineSupprime { domaine } => {
+            domaines::appliquer_domaine_supprime(ecriture, *domaine, estampille)
+        }
+        Operation::DomaineAlias {
+            domaine,
+            enregistrement,
+        } => domaines::appliquer_domaine_alias(ecriture, *domaine, enregistrement),
+        Operation::MachineDomaine {
+            machine,
+            enregistrement,
+        } => domaines::appliquer_machine_domaine(ecriture, *machine, enregistrement),
     }
 }
 
@@ -4155,6 +4228,7 @@ fn appliquer_compte(
     let mut octets = [0_u8; COMPTE_OCTETS];
     compte.ecrire(&mut octets);
     comptes.insert(clef_compte.as_slice(), &octets)?;
+    drop(comptes);
     if let Some(alias) = &compte.alias {
         let mut reclamations = ecriture.open_table(ALIAS)?;
         reclamations.insert(
@@ -4162,6 +4236,10 @@ fn appliquer_compte(
             clef_compte.as_slice(),
         )?;
     }
+    // **LE PREMIER DOMAINE VOYAGE AVEC LE COMPTE, SANS OPÉRATION** : il se
+    // déduit de lui, sous son estampille, et chaque racine le fait naître au
+    // même enregistrement (`docs/modele.md` §2.11).
+    domaines::naitre_premier_domaine(ecriture, qui, compte.estampille)?;
     Ok(())
 }
 
@@ -5300,6 +5378,30 @@ impl Reestampillable for Autorisation {
     }
 }
 
+impl Reestampillable for asl_registre::Domaine {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        let mut bouge = reestampiller_les_champs!(self, de, vers, estampille);
+        if let Some(quand) = self.supprime.as_mut() {
+            let apres = sous(*quand, de, vers);
+            bouge |= apres != *quand;
+            *quand = apres;
+        }
+        bouge
+    }
+}
+
+impl Reestampillable for asl_registre::AliasDeDomaineRange {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
+impl Reestampillable for asl_registre::Rattachement {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
 impl Reestampillable for Operation {
     fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
         match self {
@@ -5313,6 +5415,9 @@ impl Reestampillable for Operation {
             Self::Invitation { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Service { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Autorisation { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::Domaine { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::DomaineAlias { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::MachineDomaine { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::CleMachine { code, .. } => {
                 let apres = sous(*code, de, vers);
                 let bouge = apres != *code;
@@ -5326,6 +5431,7 @@ impl Reestampillable for Operation {
             | Self::CleMachineRevoquee { .. }
             | Self::AutorisationRevoquee { .. }
             | Self::InvitationConsommee { .. }
+            | Self::DomaineSupprime { .. }
             | Self::CompteEfface { .. } => false,
         }
     }
@@ -5475,6 +5581,44 @@ fn reestampiller(
         .len(),
     );
 
+    // ── LES DOMAINES, LEUR ALIAS, LES RATTACHEMENTS ─────────────────────────
+    //
+    // Aucune estampille n'entre dans une clé d'index de ces tables : les
+    // enregistrements se réécrivent, et les index restent tels quels.
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            domaines::DOMAINES,
+            asl_registre::Domaine::lire,
+            asl_registre::Domaine::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            domaines::ALIAS_DE_DOMAINES,
+            asl_registre::AliasDeDomaineRange::lire,
+            asl_registre::AliasDeDomaineRange::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            domaines::RATTACHEMENTS,
+            asl_registre::Rattachement::lire,
+            asl_registre::Rattachement::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+
     // ── LE JOURNAL D'OPÉRATIONS ─────────────────────────────────────────────
     let mut journal = ecriture.open_table(OPERATIONS)?;
     let mut bouges = Vec::new();
@@ -5607,5 +5751,63 @@ mod essais {
         );
         drop(reprise);
         let _ = std::fs::remove_file(&ou);
+    }
+
+    #[test]
+    fn un_compte_d_avant_les_domaines_recoit_son_premier_a_la_reprise() {
+        // **LA REPRISE SE SIMULE EN RETIRANT CE QU'UNE VERSION D'HIER
+        // N'AVAIT PAS** : le premier domaine, son index, et la marque de la
+        // reprise. Deux bases qui la font chacune de leur côté arrivent au
+        // même enregistrement — tout y est déduit du compte.
+        let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0x42; 16]);
+        let premier = asl_registre::premier_domaine(compte);
+        let mut enregistrements = Vec::new();
+        for quoi in ["domaines-reprise-a", "domaines-reprise-b"] {
+            let ou = chemin(quoi);
+            {
+                let base = Entrepot::ouvrir(&ou, racine()).expect("neuve");
+                base.creer_compte(compte, Provenance::Ici, None)
+                    .expect("écrit");
+                assert_eq!(
+                    base.premiers_domaines(),
+                    0,
+                    "une base neuve n'a rien à reprendre"
+                );
+            }
+            {
+                let base = Database::open(&ou).expect("ouvrable");
+                let ecriture = base.begin_write().expect("écrivable");
+                {
+                    let mut domaines = ecriture
+                        .open_table(super::domaines::DOMAINES)
+                        .expect("la table");
+                    let clef_domaine = super::clef(premier);
+                    domaines.remove(clef_domaine.as_slice()).expect("retiré");
+                    let mut index = ecriture
+                        .open_table(super::domaines::DOMAINES_PAR_COMPTE)
+                        .expect("l'index");
+                    index
+                        .remove(super::paire(compte, premier).as_slice())
+                        .expect("retiré");
+                    let mut table = ecriture.open_table(RACINE).expect("la table racine");
+                    table
+                        .remove(super::domaines::CLEF_DES_PREMIERS_DOMAINES)
+                        .expect("retirée");
+                }
+                ecriture.commit().expect("commis");
+            }
+            let reprise = Entrepot::ouvrir(&ou, racine()).expect("rouvrable");
+            assert_eq!(reprise.premiers_domaines(), 1);
+            let rangee = reprise.domaine(premier).expect("lisible").expect("repris");
+            assert_eq!(rangee.proprietaire, compte);
+            enregistrements.push(rangee);
+            drop(reprise);
+            // Une seconde ouverture ne reprend plus rien.
+            let encore = Entrepot::ouvrir(&ou, racine()).expect("rouvrable");
+            assert_eq!(encore.premiers_domaines(), 0);
+            drop(encore);
+            let _ = std::fs::remove_file(&ou);
+        }
+        assert_eq!(enregistrements[0], enregistrements[1]);
     }
 }

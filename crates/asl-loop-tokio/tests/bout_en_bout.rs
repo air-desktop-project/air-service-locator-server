@@ -5312,3 +5312,287 @@ async fn une_cle_revoquee_ferme_la_connexion_du_daemon_avec_la_reponse() {
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
+
+// ── Les domaines (`protocole.md` §2.2, 2026-09-26) ──────────────────────────
+
+/// Un `GET` sur cette cible, et le statut et le corps de la réponse.
+async fn lire_json(
+    client: &mut ams_quic_client::Client,
+    flux: u64,
+    cible: &[u8],
+) -> (Vec<u8>, String) {
+    ams_quic_client::envoyer_une_requete(client, flux, 17, cible, None, b"").await;
+    let rendu = ams_quic_client::attendre_la_reponse(client, flux).await;
+    let statut = champ(&champs(client.recu(flux)), b":status")
+        .expect("un statut")
+        .to_vec();
+    (statut, String::from_utf8_lossy(&rendu).into_owned())
+}
+
+/// Un `PUT` JSON, et le statut. `21` est l'index QPACK de `:method: PUT`.
+async fn poser_json(
+    client: &mut ams_quic_client::Client,
+    flux: u64,
+    cible: &[u8],
+    corps: &[u8],
+) -> Vec<u8> {
+    ams_quic_client::envoyer_avec_media(client, flux, 21, cible, None, corps, b"application/json")
+        .await;
+    let _ = ams_quic_client::attendre_la_reponse(client, flux).await;
+    champ(&champs(client.recu(flux)), b":status")
+        .expect("un statut")
+        .to_vec()
+}
+
+/// Un `DELETE`, et le statut. `16` est l'index QPACK de `:method: DELETE`.
+async fn retirer(client: &mut ams_quic_client::Client, flux: u64, cible: &[u8]) -> Vec<u8> {
+    ams_quic_client::envoyer_une_requete(client, flux, 16, cible, None, b"").await;
+    let _ = ams_quic_client::attendre_la_reponse(client, flux).await;
+    champ(&champs(client.recu(flux)), b":status")
+        .expect("un statut")
+        .to_vec()
+}
+
+#[tokio::test]
+async fn les_domaines_se_creent_se_cherchent_rangent_des_machines_et_gardent_le_dernier() {
+    let (autorite, racine, chaine, cle) = materiel("domaines-api");
+    let (base, fichier) = entrepot("domaines-api");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    // ── A : SON PREMIER DOMAINE, NÉ AVEC LE COMPTE ──────────────────────────
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA1).await;
+    let premier_a = asl_registre::premier_domaine(compte_a);
+    let (statut, liste) = lire_json(&mut alice, 8, b"/v1/domaines").await;
+    assert_eq!(statut, b"200", "{liste}");
+    assert!(liste.contains(premier_a.texte().as_str()), "{liste}");
+    assert!(
+        liste.contains("\"heberge_par\":\"racines\"")
+            && liste.contains("\"droits\":[\"administrer\",\"rattacher\",\"voir\",\"localiser\"]"),
+        "{liste}"
+    );
+
+    // Un second, avec un alias écrit décomposé : il se range en NFC.
+    let (statut, rendu) = poster(
+        &mut alice,
+        12,
+        b"/v1/domaines",
+        "{\"alias\":\"Maison e\u{0301}te\u{0301}\"}".as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let maison_a = Identifiant::analyser(&valeur_json(&rendu, "domaine")).expect("un domaine");
+    assert_eq!(maison_a.genre(), Genre::Domaine);
+    let cible_maison_a = format!("/v1/domaines/{}", maison_a.texte().as_str());
+    let (statut, detail) = lire_json(&mut alice, 16, cible_maison_a.as_bytes()).await;
+    assert_eq!(statut, b"200", "{detail}");
+    assert!(detail.contains("\"alias\":\"Maison été\""), "{detail}");
+    assert!(detail.contains("\"machines\":[]"), "{detail}");
+
+    // Un corps qu'on ne sait pas lire, un alias qu'on ne peut pas ranger :
+    // `400`.
+    let (statut, _) = poster(&mut alice, 20, b"/v1/domaines", b"[]", b"application/json").await;
+    assert_eq!(statut, b"400");
+    let trop = format!("{{\"alias\":\"{}\"}}", "a".repeat(65));
+    let (statut, _) = poster(
+        &mut alice,
+        24,
+        b"/v1/domaines",
+        trop.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"400");
+
+    // ── B : LE MÊME ALIAS, EN CAPITALES ─────────────────────────────────────
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, _, _) = creer_un_compte(&mut bob, 0, 0xB1).await;
+    let (statut, rendu) = poster(
+        &mut bob,
+        8,
+        b"/v1/domaines",
+        "{\"alias\":\"MAISON ÉTÉ\"}".as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let maison_b = Identifiant::analyser(&valeur_json(&rendu, "domaine")).expect("un domaine");
+
+    // La recherche les rend tous les deux — une LISTE, sans propriétaire.
+    let (statut, trouves) =
+        lire_json(&mut bob, 12, b"/v1/domaines?alias=maison%20%C3%A9t%C3%A9").await;
+    assert_eq!(statut, b"200", "{trouves}");
+    assert!(
+        trouves.contains(maison_a.texte().as_str()) && trouves.contains(maison_b.texte().as_str()),
+        "{trouves}"
+    );
+    assert!(trouves.contains("\"autorite\":\"racines\""), "{trouves}");
+    assert!(
+        !trouves.contains(compte_a.texte().as_str()) && !trouves.contains("proprietaire"),
+        "une recherche ne rend ni propriétaire ni machine : {trouves}"
+    );
+    // Rien ne porte « Maisons » : une liste vide, et `200`.
+    let (statut, vide) = lire_json(&mut bob, 16, b"/v1/domaines?alias=Maisons").await;
+    assert_eq!((statut.as_slice(), vide.as_str()), (&b"200"[..], "[]"));
+    // Sans preuve, rien.
+    assert_eq!(
+        statut_de(&racine, adresse, "/v1/domaines?alias=Maison").await,
+        b"401"
+    );
+
+    // Le domaine d'un autre n'existe pas pour qui le demande.
+    let cible_maison_b = format!("/v1/domaines/{}", maison_b.texte().as_str());
+    let (statut, _) = lire_json(&mut alice, 28, cible_maison_b.as_bytes()).await;
+    assert_eq!(statut, b"404");
+    assert_eq!(
+        retirer(&mut alice, 32, cible_maison_b.as_bytes()).await,
+        b"404"
+    );
+    let alias_maison_b = format!("{cible_maison_b}/alias");
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            36,
+            alias_maison_b.as_bytes(),
+            br#"{"alias":"x"}"#
+        )
+        .await,
+        b"404"
+    );
+
+    // ── RANGER UNE MACHINE ──────────────────────────────────────────────────
+    let (statut, rendu) = poster(
+        &mut alice,
+        40,
+        b"/v1/machines",
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    let machine = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let cible_machine = format!("/v1/machines/{}/domaine", machine.texte().as_str());
+    let vers_maison_a = format!("{{\"domaine\":\"{}\"}}", maison_a.texte().as_str());
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            44,
+            cible_machine.as_bytes(),
+            vers_maison_a.as_bytes()
+        )
+        .await,
+        b"204"
+    );
+    let (_, detail) = lire_json(&mut alice, 48, cible_maison_a.as_bytes()).await;
+    assert!(
+        detail.contains(machine.texte().as_str()) && detail.contains("\"nom\":\"grenier\""),
+        "{detail}"
+    );
+    // Dans le domaine d'un autre : `403`. La machine d'un autre : `404`.
+    let vers_maison_b = format!("{{\"domaine\":\"{}\"}}", maison_b.texte().as_str());
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            52,
+            cible_machine.as_bytes(),
+            vers_maison_b.as_bytes()
+        )
+        .await,
+        b"403"
+    );
+    assert_eq!(
+        poser_json(
+            &mut bob,
+            20,
+            cible_machine.as_bytes(),
+            vers_maison_b.as_bytes()
+        )
+        .await,
+        b"404"
+    );
+    // Un corps qui ne nomme pas un domaine : `400`. Un domaine qui n'existe
+    // pas : `404`.
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            56,
+            cible_machine.as_bytes(),
+            br#"{"domaine":"x"}"#
+        )
+        .await,
+        b"400"
+    );
+    let inconnu = format!(
+        "{{\"domaine\":\"{}\"}}",
+        Identifiant::depuis_entropie(Genre::Domaine, [0x77; 16])
+            .texte()
+            .as_str()
+    );
+    assert_eq!(
+        poser_json(&mut alice, 60, cible_machine.as_bytes(), inconnu.as_bytes()).await,
+        b"404"
+    );
+
+    // ── L'ALIAS CHANGE, PUIS PART ───────────────────────────────────────────
+    let alias_maison_a = format!("{cible_maison_a}/alias");
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            64,
+            alias_maison_a.as_bytes(),
+            br#"{"alias":"Bureau"}"#
+        )
+        .await,
+        b"204"
+    );
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            68,
+            alias_maison_a.as_bytes(),
+            br#"{"alias":""}"#
+        )
+        .await,
+        b"400"
+    );
+    let (_, trouves) =
+        lire_json(&mut alice, 72, b"/v1/domaines?alias=Maison%20%C3%A9t%C3%A9").await;
+    assert!(
+        !trouves.contains(maison_a.texte().as_str()) && trouves.contains(maison_b.texte().as_str()),
+        "{trouves}"
+    );
+    assert_eq!(
+        retirer(&mut alice, 76, alias_maison_a.as_bytes()).await,
+        b"204"
+    );
+    let (_, detail) = lire_json(&mut alice, 80, cible_maison_a.as_bytes()).await;
+    assert!(!detail.contains("\"alias\""), "{detail}");
+
+    // ── LA MACHINE SORT, LE PREMIER PART, LE DERNIER RESTE ──────────────────
+    assert_eq!(
+        retirer(&mut alice, 84, cible_machine.as_bytes()).await,
+        b"204"
+    );
+    let cible_premier_a = format!("/v1/domaines/{}", premier_a.texte().as_str());
+    assert_eq!(
+        retirer(&mut alice, 88, cible_premier_a.as_bytes()).await,
+        b"204"
+    );
+    let (_, liste) = lire_json(&mut alice, 92, b"/v1/domaines").await;
+    assert!(
+        !liste.contains(premier_a.texte().as_str()) && liste.contains(maison_a.texte().as_str()),
+        "{liste}"
+    );
+    assert_eq!(
+        retirer(&mut alice, 96, cible_maison_a.as_bytes()).await,
+        b"409",
+        "un compte a toujours au moins un domaine"
+    );
+    let _ = compte_b;
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}

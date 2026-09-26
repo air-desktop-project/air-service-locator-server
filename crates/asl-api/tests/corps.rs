@@ -2762,3 +2762,246 @@ mod attestation {
         assert_eq!(juste.encoder(&mut petit), Err(Erreur::TamponTropPetit));
     }
 }
+
+// ── Les domaines (2026-09-26) ───────────────────────────────────────────────
+
+mod domaines {
+    use asl_api::domaine::{
+        CreationDeDomaine, DROITS_DU_PROPRIETAIRE, DomaineDetaille, DomaineRendu, DomaineTrouve,
+        MachineDeDomaine, PoseDAlias, Rattachement,
+    };
+    use asl_id::{Genre, Identifiant};
+    use asl_proto::Erreur;
+
+    fn un(genre: Genre, graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(genre, [graine; 16])
+    }
+
+    #[test]
+    fn une_creation_porte_un_alias_ou_rien() {
+        assert_eq!(
+            CreationDeDomaine::decoder(b""),
+            Ok(CreationDeDomaine { alias: None })
+        );
+        assert_eq!(
+            CreationDeDomaine::decoder(b"{}"),
+            Ok(CreationDeDomaine { alias: None })
+        );
+        assert_eq!(
+            CreationDeDomaine::decoder(b" { } "),
+            Ok(CreationDeDomaine { alias: None })
+        );
+        assert_eq!(
+            CreationDeDomaine::decoder("{\"alias\":\"Maison été\"}".as_bytes()),
+            Ok(CreationDeDomaine {
+                alias: Some("Maison été")
+            })
+        );
+        assert!(matches!(
+            CreationDeDomaine::decoder(b"{\"nom\":\"x\"}"),
+            Err(Erreur::ChampInconnu { .. })
+        ));
+        assert_eq!(
+            CreationDeDomaine::decoder(b"{\"alias\":\"\"}"),
+            Err(Erreur::NomVide)
+        );
+        let long = format!("{{\"alias\":\"{}\"}}", "a".repeat(256));
+        assert_eq!(
+            CreationDeDomaine::decoder(long.as_bytes()),
+            Err(Erreur::NomTropLong { obtenue: 256 })
+        );
+        assert!(CreationDeDomaine::decoder(b"[]").is_err());
+        assert!(CreationDeDomaine::decoder(b"{} x").is_err());
+        let enorme = vec![b' '; asl_api::corps::CORPS_MAX + 1];
+        assert!(matches!(
+            CreationDeDomaine::decoder(&enorme),
+            Err(Erreur::MessageTropLong { .. })
+        ));
+    }
+
+    #[test]
+    fn une_pose_d_alias_porte_un_alias() {
+        assert_eq!(
+            PoseDAlias::decoder(b"{\"alias\":\"Maison\"}"),
+            Ok(PoseDAlias { alias: "Maison" })
+        );
+        assert!(matches!(
+            PoseDAlias::decoder(b"{\"domaine\":\"Maison\"}"),
+            Err(Erreur::ChampInconnu { .. })
+        ));
+        assert_eq!(
+            PoseDAlias::decoder(b"{\"alias\":\"\"}"),
+            Err(Erreur::NomVide)
+        );
+        assert!(PoseDAlias::decoder(b"{}").is_err());
+        let enorme = vec![b' '; asl_api::corps::CORPS_MAX + 1];
+        assert!(matches!(
+            PoseDAlias::decoder(&enorme),
+            Err(Erreur::MessageTropLong { .. })
+        ));
+    }
+
+    #[test]
+    fn un_rattachement_porte_un_domaine_et_rien_d_autre() {
+        let d = un(Genre::Domaine, 4);
+        let corps = format!("{{\"domaine\":\"{}\"}}", d.texte().as_str());
+        assert_eq!(
+            Rattachement::decoder(corps.as_bytes()),
+            Ok(Rattachement { domaine: d })
+        );
+        let machine = un(Genre::Machine, 4);
+        let corps = format!("{{\"domaine\":\"{}\"}}", machine.texte().as_str());
+        assert!(matches!(
+            Rattachement::decoder(corps.as_bytes()),
+            Err(Erreur::IdentifiantInvalide { .. })
+        ));
+        assert!(matches!(
+            Rattachement::decoder(b"{\"machine\":\"x\"}"),
+            Err(Erreur::ChampInconnu { .. })
+        ));
+        let enorme = vec![b' '; asl_api::corps::CORPS_MAX + 1];
+        assert!(matches!(
+            Rattachement::decoder(&enorme),
+            Err(Erreur::MessageTropLong { .. })
+        ));
+    }
+
+    /// Chaque étape du cadrage refuse ce qui lui manque, pour les trois
+    /// corps : ni un deux-points absent, ni une valeur qui n'est pas une
+    /// chaîne, ni une virgule de trop, ni un reste après l'objet ne passent.
+    #[test]
+    fn un_corps_mal_cadre_est_refuse_a_chaque_etape() {
+        for corps in [
+            &b"{1}"[..],
+            b"{\"alias\" x",
+            b"{\"alias\":1}",
+            b"{\"alias\":\"a\",}",
+            b"{\"alias\":\"a\"} x",
+        ] {
+            assert!(CreationDeDomaine::decoder(corps).is_err(), "{corps:?}");
+        }
+        for corps in [
+            &b"[]"[..],
+            b"{\"alias\" x",
+            b"{\"alias\":\"a\",}",
+            b"{\"alias\":\"a\"} x",
+        ] {
+            assert!(PoseDAlias::decoder(corps).is_err(), "{corps:?}");
+        }
+        let d = un(Genre::Domaine, 4);
+        let d = d.texte();
+        let d = d.as_str();
+        for corps in [
+            "[]".to_owned(),
+            "{1}".to_owned(),
+            "{\"domaine\" x".to_owned(),
+            "{\"domaine\":1}".to_owned(),
+            format!("{{\"domaine\":\"{d}\",}}"),
+            format!("{{\"domaine\":\"{d}\"}} x"),
+        ] {
+            assert!(Rattachement::decoder(corps.as_bytes()).is_err(), "{corps}");
+        }
+    }
+
+    #[test]
+    fn ce_que_l_annuaire_rend_s_ecrit_comme_on_le_lit() {
+        let d = un(Genre::Domaine, 1);
+        let u = un(Genre::Utilisateur, 2);
+        let m = un(Genre::Machine, 3);
+        let mut sortie = [0_u8; 1024];
+
+        let rendu = DomaineRendu {
+            domaine: d,
+            proprietaire: u,
+            alias: Some("Maison"),
+            droits: &DROITS_DU_PROPRIETAIRE,
+        };
+        let combien = rendu.encoder(&mut sortie).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&sortie[..combien]).unwrap(),
+            format!(
+                "{{\"domaine\":\"{}\",\"proprietaire\":\"{}\",\"alias\":\"Maison\",\
+                 \"heberge_par\":\"racines\",\"droits\":[\"administrer\",\"rattacher\",\
+                 \"voir\",\"localiser\"]}}",
+                d.texte().as_str(),
+                u.texte().as_str()
+            )
+        );
+        // Sans alias, le champ est absent ; sans droit, la liste est vide.
+        let combien = DomaineRendu {
+            alias: None,
+            droits: &[],
+            ..rendu
+        }
+        .encoder(&mut sortie)
+        .unwrap();
+        let texte = core::str::from_utf8(&sortie[..combien]).unwrap();
+        assert!(!texte.contains("alias"), "{texte}");
+        assert!(texte.ends_with("\"droits\":[]}"), "{texte}");
+
+        let machines = [
+            MachineDeDomaine {
+                machine: m,
+                proprietaire: u,
+                nom: Some("grenier"),
+            },
+            MachineDeDomaine {
+                machine: m,
+                proprietaire: u,
+                nom: None,
+            },
+        ];
+        let combien = DomaineDetaille {
+            domaine: rendu,
+            machines: &machines,
+        }
+        .encoder(&mut sortie)
+        .unwrap();
+        let texte = core::str::from_utf8(&sortie[..combien]).unwrap();
+        assert!(
+            texte.ends_with(&format!(
+                ",\"machines\":[{{\"machine\":\"{m}\",\"proprietaire\":\"{u}\",\"nom\":\"grenier\"}},\
+                 {{\"machine\":\"{m}\",\"proprietaire\":\"{u}\"}}]}}",
+                m = m.texte().as_str(),
+                u = u.texte().as_str()
+            )),
+            "{texte}"
+        );
+        let combien = DomaineDetaille {
+            domaine: rendu,
+            machines: &[],
+        }
+        .encoder(&mut sortie)
+        .unwrap();
+        assert!(
+            core::str::from_utf8(&sortie[..combien])
+                .unwrap()
+                .ends_with(",\"machines\":[]}")
+        );
+
+        let combien = DomaineTrouve { domaine: d }.encoder(&mut sortie).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&sortie[..combien]).unwrap(),
+            format!(
+                "{{\"domaine\":\"{}\",\"autorite\":\"racines\"}}",
+                d.texte().as_str()
+            )
+        );
+
+        // Un tampon trop court se dit.
+        let mut court = [0_u8; 8];
+        assert_eq!(rendu.encoder(&mut court), Err(Erreur::TamponTropPetit));
+        assert_eq!(
+            DomaineDetaille {
+                domaine: rendu,
+                machines: &machines,
+            }
+            .encoder(&mut court),
+            Err(Erreur::TamponTropPetit)
+        );
+        assert_eq!(
+            DomaineTrouve { domaine: d }.encoder(&mut court),
+            Err(Erreur::TamponTropPetit)
+        );
+    }
+}

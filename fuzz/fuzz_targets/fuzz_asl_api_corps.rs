@@ -25,6 +25,11 @@
 //!    n'est pas numérique, sans `@`, sans `#`, le port 443 ou rien, de l'ASCII
 //!    graphique, 1024 octets au plus ; une clé commence par `0x04`. Vérifié
 //!    sur ce qui est RENDU — l'hôte, la cible —, pas sur l'entrée.
+//! 7. **UN ALIAS DE DOMAINE ACCEPTÉ NE PORTE RIEN DE CE QUI EST REFUSÉ**
+//!    (2026-09-26) : il est non vide, tient dans deux cent cinquante-cinq
+//!    octets bruts, et ne porte ni guillemet, ni barre oblique inverse, ni
+//!    contrôle, ni caractère qui change l'affichage de ce qui l'entoure — ce
+//!    que `asl-registre` normalisera ensuite. Un rattachement nomme un `d-…`.
 //! 5. **UN ALIAS ACCEPTÉ RESTE DE L'ASCII GRAPHIQUE.** C'est la propriété qui
 //!    sépare une CLÉ d'un texte d'affichage : l'alias se cherche, se compare, et
 //!    repart dans un chemin — deux écritures d'une même valeur feraient croire à
@@ -40,7 +45,22 @@ use asl_api::corps::{
     DemandeAlias, DemandeAutorisation, DepotPoint, DescriptionAppareil, MachineRendue, MachineVue,
     NOM_MACHINE_MAX, POINT_CORPS_MAX, PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
 };
+use asl_api::domaine::{ALIAS_BRUT_MAX, CreationDeDomaine, PoseDAlias, Rattachement};
 use asl_api::point::{POINT_MAX, UrlDePoussee};
+
+/// Un alias de domaine accepté ne porte rien de ce qui est refusé.
+fn verifier_l_alias_de_domaine(alias: &str) {
+    assert!(!alias.is_empty() && alias.len() <= ALIAS_BRUT_MAX);
+    for caractere in alias.chars() {
+        assert!(
+            caractere != '"'
+                && caractere != '\\'
+                && !caractere.is_control()
+                && !invisible(caractere),
+            "un alias de domaine accepté porte {caractere:?}"
+        );
+    }
+}
 
 /// Ce point a-t-il la forme que l'envoi suppose ? Recopié ICI, à dessein,
 /// comme [`invisible`] : la règle est relue sur ce que l'analyseur a RENDU.
@@ -94,6 +114,17 @@ const fn invisible(caractere: char) -> bool {
 }
 
 fuzz_target!(|octets: &[u8]| {
+    // ── 7. LES DOMAINES ─────────────────────────────────────────────────────
+    if let Ok(CreationDeDomaine { alias: Some(alias) }) = CreationDeDomaine::decoder(octets) {
+        verifier_l_alias_de_domaine(alias);
+    }
+    if let Ok(pose) = PoseDAlias::decoder(octets) {
+        verifier_l_alias_de_domaine(pose.alias);
+    }
+    if let Ok(rattachement) = Rattachement::decoder(octets) {
+        assert_eq!(rattachement.domaine.genre(), asl_id::Genre::Domaine);
+    }
+
     // ── 6. LE POINT DE POUSSÉE ──────────────────────────────────────────────
     if let Ok(texte) = core::str::from_utf8(octets)
         && let Ok(point) = UrlDePoussee::analyser(texte)

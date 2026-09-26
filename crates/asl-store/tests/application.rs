@@ -302,7 +302,70 @@ fn prelude() -> Vec<(Estampille, Operation)> {
                 enregistrement: enrolement(est(pair(), 50), m3),
             },
         ),
+        // Les domaines (2026-09-26) : un second domaine pour c1, où m1 est
+        // rangée — les deux suppressions concurrentes le viseront avec le
+        // premier ; et un domaine de c3, que son effacement emportera, où m2
+        // — une machine de c1 — est rangée.
+        (
+            est(pair(), 60),
+            Operation::Domaine {
+                domaine: un(Genre::Domaine, 2),
+                enregistrement: domaine(est(pair(), 60), c1),
+            },
+        ),
+        (
+            est(pair(), 61),
+            Operation::MachineDomaine {
+                machine: m1,
+                enregistrement: rattachement(est(pair(), 61), Some(un(Genre::Domaine, 2))),
+            },
+        ),
+        (
+            est(pair(), 62),
+            Operation::Domaine {
+                domaine: un(Genre::Domaine, 9),
+                enregistrement: domaine(est(pair(), 62), c3),
+            },
+        ),
+        (
+            est(pair(), 63),
+            Operation::MachineDomaine {
+                machine: m2,
+                enregistrement: rattachement(est(pair(), 63), Some(un(Genre::Domaine, 9))),
+            },
+        ),
     ]
+}
+
+/// Un domaine né sous cette estampille, à ce propriétaire.
+fn domaine(estampille: Estampille, proprietaire: Identifiant) -> asl_registre::Domaine {
+    asl_registre::Domaine {
+        provenance: Provenance::Ici,
+        estampille,
+        proprietaire,
+        supprime: None,
+    }
+}
+
+/// Un rattachement sous cette estampille.
+fn rattachement(
+    estampille: Estampille,
+    domaine: Option<Identifiant>,
+) -> asl_registre::Rattachement {
+    asl_registre::Rattachement {
+        provenance: Provenance::Ici,
+        estampille,
+        domaine,
+    }
+}
+
+/// Un alias de domaine posé sous cette estampille.
+fn alias_de_domaine(estampille: Estampille, texte: &str) -> asl_registre::AliasDeDomaineRange {
+    asl_registre::AliasDeDomaineRange {
+        provenance: Provenance::Ici,
+        estampille,
+        alias: Some(asl_registre::AliasDeDomaine::nouveau(texte).expect("un alias")),
+    }
 }
 
 /// Un point de poussée sous cette estampille, vers ce chemin.
@@ -657,6 +720,64 @@ fn conflits() -> Vec<(Estampille, Operation)> {
                 code: est(pair(), 130),
             },
         ),
+        // ── Les domaines (2026-09-26) ───────────────────────────────────
+        //
+        // Deux suppressions concurrentes des deux domaines de c1 : chacune
+        // acceptée là où il en restait deux. **Le plus ancien reste**, dans
+        // tous les ordres — le premier, né avec le compte.
+        (
+            est(pair(), 140),
+            Operation::DomaineSupprime {
+                domaine: asl_registre::premier_domaine(c1),
+            },
+        ),
+        (
+            est(autre(), 141),
+            Operation::DomaineSupprime {
+                domaine: un(Genre::Domaine, 2),
+            },
+        ),
+        // Et le même domaine supprimé des deux côtés : la marque garde la
+        // plus PETITE estampille, dans tous les ordres.
+        (
+            est(pair(), 146),
+            Operation::DomaineSupprime {
+                domaine: un(Genre::Domaine, 2),
+            },
+        ),
+        // Un alias posé des deux côtés : le plus récent.
+        (
+            est(pair(), 142),
+            Operation::DomaineAlias {
+                domaine: asl_registre::premier_domaine(c2),
+                enregistrement: alias_de_domaine(est(pair(), 142), "Maison"),
+            },
+        ),
+        (
+            est(autre(), 143),
+            Operation::DomaineAlias {
+                domaine: asl_registre::premier_domaine(c2),
+                enregistrement: alias_de_domaine(est(autre(), 143), "Cave"),
+            },
+        ),
+        // Une machine rangée d'un côté, sortie de l'autre : le plus récent.
+        (
+            est(pair(), 144),
+            Operation::MachineDomaine {
+                machine: m3,
+                enregistrement: rattachement(
+                    est(pair(), 144),
+                    Some(asl_registre::premier_domaine(c2)),
+                ),
+            },
+        ),
+        (
+            est(autre(), 145),
+            Operation::MachineDomaine {
+                machine: m3,
+                enregistrement: rattachement(est(autre(), 145), None),
+            },
+        ),
     ]
 }
 
@@ -708,6 +829,24 @@ fn instantane_dans_l_ordre(quoi: &str, ordre: &[usize]) -> Vec<Vec<u8>> {
     instantane
 }
 
+/// Ce qui diffère entre deux instantanés, décodé : les cadres de l'un qui ne
+/// sont pas dans l'autre, et réciproquement. Un message d'échec qui dit QUEL
+/// fait diverge vaut mieux que deux tableaux d'octets.
+fn differences(un: &[Vec<u8>], autre: &[Vec<u8>]) -> String {
+    let decoder = |octets: &Vec<u8>| format!("{:?}", Cadre::lire(octets).map(|(cadre, _)| cadre));
+    let seulement = |a: &[Vec<u8>], b: &[Vec<u8>]| -> Vec<String> {
+        a.iter()
+            .filter(|cadre| !b.contains(cadre))
+            .map(decoder)
+            .collect()
+    };
+    format!(
+        "\n  seulement à gauche : {:#?}\n  seulement à droite : {:#?}",
+        seulement(un, autre),
+        seulement(autre, un)
+    )
+}
+
 #[test]
 fn l_invariant_de_convergence() {
     let combien = conflits().len();
@@ -717,10 +856,11 @@ fn l_invariant_de_convergence() {
 
     // Les deux ordres extrêmes : direct et inversé.
     let inverse: Vec<usize> = (0..combien).rev().collect();
-    assert_eq!(
-        instantane_dans_l_ordre("inverse", &inverse),
-        reference,
-        "l'ordre inversé ne converge pas vers le même entrepôt"
+    let inverse_rendu = instantane_dans_l_ordre("inverse", &inverse);
+    assert!(
+        inverse_rendu == reference,
+        "l'ordre inversé ne converge pas vers le même entrepôt : {}",
+        differences(&inverse_rendu, &reference)
     );
 
     // Un large échantillon de permutations : chacune doit rendre le MÊME
@@ -1527,5 +1667,98 @@ fn un_instantane_rend_nos_propres_estampilles_et_l_ecrit_les_compte() {
     assert_eq!(base.ecrit().expect("lisible"), 42, "il ne recule jamais");
 
     drop(base);
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn les_domaines_convergent_vers_ce_que_les_regles_annoncent() {
+    let (base, chemin) = entrepot("domaines-verifie");
+    for (estampille, operation) in prelude() {
+        appliquer(&base, estampille, operation);
+    }
+    for (estampille, operation) in conflits() {
+        appliquer(&base, estampille, operation);
+    }
+    let c1 = un(Genre::Utilisateur, 1);
+    let c2 = un(Genre::Utilisateur, 2);
+    let c3 = un(Genre::Utilisateur, 3);
+    // Les deux suppressions concurrentes : le premier domaine de c1, le plus
+    // ancien, a survécu ; l'autre est supprimé, et m1 en est sortie.
+    let vivants: Vec<Identifiant> = base
+        .domaines_de_compte(c1)
+        .expect("lisible")
+        .into_iter()
+        .map(|(quel, _)| quel)
+        .collect();
+    assert_eq!(vivants, vec![asl_registre::premier_domaine(c1)]);
+    assert!(
+        base.domaine(un(Genre::Domaine, 2))
+            .expect("lisible")
+            .is_none()
+    );
+    assert_eq!(
+        base.domaine_de_machine(un(Genre::Machine, 1))
+            .expect("lisible"),
+        None
+    );
+    // Supprimé deux fois : la marque est la plus ancienne des deux, et c'est
+    // sous elle que l'instantané le dit.
+    let marques: Vec<Estampille> = base
+        .instantane()
+        .expect("l'instantané se lit")
+        .iter()
+        .filter_map(|octets| match Cadre::lire(octets) {
+            Ok((
+                Cadre::Operation {
+                    estampille,
+                    operation: Operation::DomaineSupprime { domaine },
+                },
+                _,
+            )) if domaine == un(Genre::Domaine, 2) => Some(estampille),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marques, vec![est(autre(), 141)]);
+    // L'alias posé des deux côtés : le plus récent, « Cave » — et la
+    // recherche le trouve, sans distinction de casse.
+    let p2 = asl_registre::premier_domaine(c2);
+    assert_eq!(
+        base.alias_de_domaine(p2)
+            .expect("lisible")
+            .map(|alias| alias.texte().to_owned()),
+        Some("Cave".to_owned())
+    );
+    let cave = asl_registre::ClefDeRecherche::de("CAVE").expect("une clé");
+    assert_eq!(base.domaines_par_alias(&cave).expect("lisible"), vec![p2]);
+    let maison = asl_registre::ClefDeRecherche::de("maison").expect("une clé");
+    assert!(
+        base.domaines_par_alias(&maison)
+            .expect("lisible")
+            .is_empty()
+    );
+    // m3, rangée puis sortie : sortie.
+    assert_eq!(
+        base.domaine_de_machine(un(Genre::Machine, 3))
+            .expect("lisible"),
+        None
+    );
+    // c3 effacé : ses domaines sont partis, et m2 — une machine de c1 qui y
+    // était rangée — en est sortie, sans être retirée à c1.
+    assert!(base.domaines_de_compte(c3).expect("lisible").is_empty());
+    assert!(
+        base.domaine(un(Genre::Domaine, 9))
+            .expect("lisible")
+            .is_none()
+    );
+    assert!(
+        base.machine(un(Genre::Machine, 2))
+            .expect("lisible")
+            .is_some()
+    );
+    assert_eq!(
+        base.domaine_de_machine(un(Genre::Machine, 2))
+            .expect("lisible"),
+        None
+    );
     let _ = std::fs::remove_file(&chemin);
 }

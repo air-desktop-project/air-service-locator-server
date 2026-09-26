@@ -44,6 +44,7 @@
 #![no_std]
 
 pub mod corps;
+pub mod domaine;
 pub mod point;
 
 use asl_id::{Genre, Identifiant};
@@ -123,6 +124,16 @@ pub enum Exigence {
     /// B qui part d'un `u-…` pour arriver à un port (`protocole.md` §3). Les
     /// deux passent par les arêtes du compte qui demande, et rien d'autre.
     AppareilOuMachineLecture,
+    /// **Un appareil du compte, OU une machine, quelle que soit sa
+    /// capacité** — « tout compte authentifié » (`protocole.md` §2.2,
+    /// 2026-09-26).
+    ///
+    /// C'est la recherche d'un domaine par son alias : elle ne rend qu'un
+    /// `d-…` et l'annuaire qui fait autorité, jamais ce qu'il contient, et un
+    /// daemon qui annonce peut avoir à la poser autant qu'un programme qui lit.
+    /// Elle reste fermée à qui n'a rien prouvé — la seule recherche publique du
+    /// produit est l'alias de compte.
+    AppareilOuMachine,
     /// **L'autre racine**, qui a prouvé sa clé d'identité — le genre `n` sur
     /// `POST /v1/defi` (`docs/replication.md` §2.2).
     ///
@@ -455,6 +466,33 @@ pub enum Ressource<'a> {
     /// `/v1/pair/instantane` — **l'état entier en suite d'opérations, puis le
     /// compteur de coupe** (`replication.md` §5.4). Fini, lui.
     PairInstantane,
+    /// `/v1/domaines` — **mes domaines** (`GET`), ou en créer un (`POST`)
+    /// (`protocole.md` §2.2, 2026-09-26).
+    Domaines,
+    /// `/v1/domaines?alias=…` — **chercher un domaine par son alias**.
+    ///
+    /// Une LISTE, toujours : l'alias de domaine n'est pas unique. Correspondance
+    /// exacte après NFC et pliage de casse, que `asl-registre` calcule.
+    RechercheDomaines {
+        /// L'alias cherché, encodé, vérifié.
+        alias: crate::domaine::AliasCherche<'a>,
+    },
+    /// `/v1/domaines/{d}` — le lire, ou le supprimer.
+    Domaine {
+        /// Le domaine visé.
+        domaine: Identifiant,
+    },
+    /// `/v1/domaines/{d}/alias` — poser ou retirer son alias.
+    AliasDomaine {
+        /// Le domaine visé.
+        domaine: Identifiant,
+    },
+    /// `/v1/machines/{m}/domaine` — ranger MA machine dans un domaine, ou l'en
+    /// sortir.
+    DomaineMachine {
+        /// La machine visée.
+        machine: Identifiant,
+    },
     /// `/v1/replication` — **l'état de la voie entre racines, vu d'ici**
     /// (`replication.md` §8) : le pair, la voie ouverte ou coupée, notre
     /// compteur, et jusqu'où l'on a appliqué ce que le pair a écrit — ou
@@ -498,6 +536,7 @@ impl Ressource<'_> {
             | Self::OuParNom { .. }
             | Self::PairOperations { .. }
             | Self::PairInstantane
+            | Self::RechercheDomaines { .. }
             | Self::Replication => &[Methode::Get],
             Self::PairPreuve => &[Methode::Post],
             Self::Appareil { .. }
@@ -506,9 +545,13 @@ impl Ressource<'_> {
             | Self::Autorisation { .. }
             | Self::Exposition { .. } => &[Methode::Delete],
             Self::PousseeAppareil { .. } | Self::DescriptionAppareil { .. } => &[Methode::Put],
+            Self::Domaine { .. } => &[Methode::Get, Methode::Delete],
+            Self::AliasDomaine { .. } | Self::DomaineMachine { .. } => {
+                &[Methode::Put, Methode::Delete]
+            }
             Self::Machine { .. } => &[Methode::Patch],
             Self::EnrolementMachine { .. } => &[Methode::Post],
-            Self::Appareils | Self::Machines | Self::Autorisations => {
+            Self::Appareils | Self::Machines | Self::Autorisations | Self::Domaines => {
                 &[Methode::Get, Methode::Post]
             }
             Self::Alias => &[Methode::Put, Methode::Delete],
@@ -561,6 +604,7 @@ impl Ressource<'_> {
             Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
             Self::Moi | Self::AppareilsDuProprietaire | Self::Replication => Exigence::Machine,
             Self::MachinesUtilisateur { .. } => Exigence::AppareilOuMachineLecture,
+            Self::RechercheDomaines { .. } => Exigence::AppareilOuMachine,
             Self::PairPreuve | Self::PairOperations { .. } | Self::PairInstantane => {
                 Exigence::Racine
             }
@@ -876,6 +920,27 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         }),
         ["v1", "machines", machine, "services"] => Ok(Ressource::ServicesMachine {
             machine: identifiant(machine, Genre::Machine)?,
+        }),
+        ["v1", "machines", machine, "domaine"] => Ok(Ressource::DomaineMachine {
+            machine: identifiant(machine, Genre::Machine)?,
+        }),
+        // **LA CHAÎNE DE REQUÊTE DÉCIDE DE LA RESSOURCE** : vide, ce sont mes
+        // domaines ; `alias=…`, une recherche. Tout autre paramètre est refusé
+        // plutôt qu'ignoré — même règle que `/v1/ou`.
+        ["v1", "domaines"] => {
+            if requete.is_empty() {
+                Ok(Ressource::Domaines)
+            } else {
+                Ok(Ressource::RechercheDomaines {
+                    alias: crate::domaine::AliasCherche::depuis_requete(requete)?,
+                })
+            }
+        }
+        ["v1", "domaines", domaine] => Ok(Ressource::Domaine {
+            domaine: identifiant(domaine, Genre::Domaine)?,
+        }),
+        ["v1", "domaines", domaine, "alias"] => Ok(Ressource::AliasDomaine {
+            domaine: identifiant(domaine, Genre::Domaine)?,
         }),
         ["v1", "poussees"] => Ok(Ressource::Poussees),
         ["v1", "nouvelles"] => Ok(Ressource::Nouvelles),
