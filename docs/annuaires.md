@@ -8,6 +8,16 @@ surtout pas se répliquer. Le reste est nommé comme ouvert plutôt que supposé
 résolu — la synchronisation entre autorités distinctes est le sujet où une
 décision prise à la légère coûte le plus cher, et le plus tard.
 
+**Le 2026-09-26, la fédération a pris une forme précise (Thierry)** : l'annuaire
+**local** d'un utilisateur, qui fait autorité sur des **domaines** (`modele.md`
+§2.11) et que les racines fédèrent (§2 bis, §4.1, §5.4). Trois choses écrites
+ici en sont renversées, et chacune le dit à sa place — **l'inscription libre**
+(§1, §4.1), **« le propriétaire des racines n'arbitre rien »** (§1, §4.3) pour
+ce qui est de l'inscription, et **« l'état vivant ne traverse pas la
+fédération »** (§3, §5.3). Le reste — l'annuaire `ordinaire` qui fait autorité
+sur des comptes, la confiance bilatérale, la réplication sélective — devient une
+suite nommée (§8).
+
 ---
 
 ## 1. TROIS relations, et les confondre serait la faute
@@ -24,7 +34,19 @@ le même protocole.
 | Qui décide | Personne — c'est de la haute disponibilité | L'annuaire qui s'enregistre | **Les DEUX administrateurs** |
 | Ce qu'on craint | Une panne | Un annuaire qui usurpe une identité | Un pair qui ment |
 
-**S'enregistrer auprès d'une racine ne donne accès à RIEN.** C'est se faire
+**Une quatrième relation, depuis le 2026-09-26 : la FÉDÉRATION d'un annuaire
+local** (§2 bis, §4.1, §5.4).
+
+| | **Fédération d'un annuaire local** |
+|---|---|
+| Entre qui | Un annuaire local et les racines |
+| Autorité | Différentes — les racines sur les comptes, le local sur les domaines qu'il héberge |
+| Ce qui circule | **Vers le local** : les machines rattachées à ses domaines, avec leurs clés et leurs révocations. **Vers les racines** : les services de ces machines et leur état vivant — identifiant, adresse, port, vivant ou non |
+| Qui décide | **Un administrateur des racines approuve l'inscription** (`modele.md` §2.12) |
+| Ce qu'on craint | Un annuaire qui affirmerait des adresses fausses, et ferait des racines le relais de son mensonge |
+
+**S'enregistrer auprès d'une racine ne donne accès à RIEN** — pour un annuaire
+`ordinaire`, qui ne demande qu'à être recensé (§4.1, suite nommée §8). C'est se faire
 recenser, pour que d'autres annuaires puissent vous trouver et vous proposer une
 relation. Une racine est un **registre et un entremetteur**, pas un dépositaire :
 elle ne détient pas les données des annuaires qu'elle recense.
@@ -34,6 +56,15 @@ administrateurs des deux annuaires concernés qui l'acceptent, jamais le
 propriétaire des racines. Il ne joue aucun rôle d'arbitre, et ne doit pas en
 jouer : un réseau où le fondateur décide qui parle à qui n'est pas une
 fédération.
+
+**Ce paragraphe ne vaut plus pour l'annuaire local, et c'est décidé** (2026-09-26,
+`replication.md` décision 32) : son inscription est **approuvée** par un
+administrateur des racines. Ce n'est pas décider « qui parle à qui » — deux
+annuaires locaux ne se parlent pas —, c'est décider **ce que les racines
+acceptent de servir en leur nom** : un annuaire local ne se contente pas d'être
+recensé, il fait porter par les racines l'état de ses services (§5.4). Ce qui
+reste vrai : entre deux annuaires `ordinaires`, la confiance est bilatérale et
+personne ne l'arbitre (§4.3, suite nommée §8).
 
 ## 2. L'autorité
 
@@ -49,6 +80,35 @@ compte a été créé.
   **refuse et la journalise**. Il ne la corrige pas, il ne l'ignore pas en
   silence : une assertion hors périmètre est soit un défaut, soit une attaque, et
   les deux méritent d'être vues.
+
+## 2 bis. L'autorité par DOMAINE — l'annuaire local
+
+**Décidé le 2026-09-26 (Thierry).** Un utilisateur déploie chez lui — sur une
+de ses machines, macOS ou Linux, Windows plus tard — une instance
+d'`asl-server` : son **annuaire local**. Il y héberge un ou plusieurs de ses
+domaines (`modele.md` §2.11), et **l'annuaire local fait autorité sur ce que
+ces domaines contiennent** ; les racines ne font autorité que sur la racine —
+les comptes, leurs appareils, leurs autorisations, et les domaines qu'aucun
+annuaire local n'héberge.
+
+**Ce que l'autorité se partage, à la ligne** — et le partage est ce qui la rend
+sûre (proposé dans son détail) :
+
+| Ce qui s'écrit | Où | Pourquoi là |
+|---|---|---|
+| Le compte, ses appareils, ses autorisations, son alias | **Racines** | Rien ne change : c'est le compte, et il n'est pas dans un domaine. |
+| Le domaine lui-même — propriétaire, alias, délégués, hébergeur | **Racines**, depuis les applications | Ce sont des décisions du **compte**, sous biométrie. Un annuaire local, qui n'est qu'une machine chez quelqu'un, ne doit pas pouvoir réécrire à qui appartient un domaine ni qui le gère. |
+| La machine — nom, capacités, clé, domaine de rattachement | **Racines**, depuis les applications | Même raison ; c'est aussi là que la clé s'enrôle. Les racines les **transmettent** à l'annuaire local qui héberge le domaine, pour qu'il authentifie les annonces (§5.4). |
+| **Les services** d'une machine rattachée à un domaine hébergé, et **leur état vivant** | **L'annuaire local** | C'est à lui que les daemons s'annoncent : il est le seul à les voir. Il en informe les racines (§5.4). |
+
+**C11 prend donc une forme nouvelle** : un annuaire local n'est cru que sur les
+services des machines rattachées aux domaines qu'il héberge, et qu'on lui a
+transmises. Une affirmation sur une autre machine est **refusée et journalisée**
+(`contraintes.md` C11).
+
+**Les machines d'un domaine hébergé s'annoncent à l'annuaire local**, qui relaie
+aux racines. Une machine sans domaine, ou dans un domaine hébergé par les
+racines, s'annonce aux racines comme aujourd'hui.
 
 ### L'ancre de confiance — deux adresses ET deux clés
 
@@ -143,6 +203,9 @@ sélective et relève du §5.
 | **Le bail — la connexion tenue, l'état `annoncé`** | **NON** |
 | **La joignabilité mesurée, les candidats d'adresse** | **NON** |
 | **Le journal** | **NON** |
+| **Domaines, leurs alias, leurs délégués, leur hébergeur ; le rattachement des machines** (2026-09-26) | Oui |
+| **Inscriptions d'annuaires locaux, leurs décisions ; le groupe des administrateurs** (2026-09-26) | Oui |
+| **L'état vivant des services fédérés** — adresse, port, vivant (§5.4) | **NON** entre racines : chaque racine le reçoit **de l'annuaire local**, qui les tient toutes les deux |
 
 **Le COMMENT a son propre document : [`replication.md`](replication.md)** — le
 transport, les deux racines qui écrivent et la règle de conflit, l'horloge, le
@@ -179,13 +242,41 @@ qui serait faux plus longtemps sans que rien ne le signale.
 
 ### 4.1 L'enregistrement auprès d'une racine
 
-1. Une entreprise ou un particulier **déploie son annuaire**.
-2. Il **s'enregistre auprès d'au moins une racine** — les deux adresses IPv6
-   sont dans le code, les deux clés publiques aussi (§2).
-3. La racine le recense : identifiant, clé publique, comment le joindre.
+~~1. Une entreprise ou un particulier **déploie son annuaire**.~~
+~~2. Il **s'enregistre auprès d'au moins une racine** — les deux adresses IPv6
+   sont dans le code, les deux clés publiques aussi (§2).~~
+~~3. La racine le recense : identifiant, clé publique, comment le joindre.~~
 
-C'est tout. **Aucune donnée n'est échangée, aucune confiance n'est accordée.**
-S'enregistrer, c'est figurer dans un annuaire d'annuaires.
+~~C'est tout. **Aucune donnée n'est échangée, aucune confiance n'est accordée.**
+S'enregistrer, c'est figurer dans un annuaire d'annuaires.~~
+
+**Renversé le 2026-09-26 pour l'annuaire local (Thierry ; `replication.md`
+décision 32) — l'inscription est APPROUVÉE.** Ce qui était écrit supposait un
+annuaire qui ne demandait aux racines que d'être recensé ; l'annuaire local leur
+demande de **servir l'état de ses services** (§5.4). La marche devient :
+
+1. L'utilisateur **déploie son annuaire local** et lui fait frapper sa clé
+   d'identité (`asl-server --new-identity-key`, comme une racine) — son `n-…`
+   s'en déduit (`modele.md` §2.7).
+2. Depuis l'application, il **déclare** cet annuaire à son compte ; l'annuaire
+   se présente aux racines avec sa clé et le code que l'application lui a
+   donné — le geste de l'enrôlement d'une machine (`protocole.md` §2.2,
+   proposé).
+3. L'inscription est **en attente**. **Un administrateur des racines l'accepte
+   ou la refuse** (`modele.md` §2.12), depuis son application ; un seul
+   suffit.
+4. Acceptée, l'annuaire peut **héberger** les domaines de son propriétaire —
+   que celui-ci lui confie un par un depuis l'application — et la voie de §5.4
+   s'ouvre.
+
+**Retirer une inscription** — par son propriétaire, par un administrateur, ou
+par l'effacement du compte — ferme la voie ; ses domaines reviennent aux
+racines, et leurs daemons, qui s'annonçaient chez lui, apparaissent `parti`
+jusqu'à ce qu'ils s'annoncent aux racines (§7). Un retrait est une révocation :
+il gagne toujours (`replication.md` §3.2).
+
+Pour un annuaire `ordinaire` — qui ferait autorité sur des comptes —, le
+recensement libre de l'ancien texte reste la proposition (§8).
 
 **Une seule racine suffit** — les deux se répliquent (§1). S'enregistrer auprès
 des deux ne fait qu'accélérer la propagation.
@@ -370,7 +461,11 @@ n'exposer que ce qu'on a délibérément choisi d'exposer.
 
 ### 5.3 L'état vivant ne traverse PAS la fédération — l'hybride
 
-**Décidé.** On réplique l'arbre durable ; l'état vivant se demande à l'annuaire
+**Renversé le 2026-09-26 pour l'annuaire local — voir §5.4.** Ce qui suit reste
+le raisonnement pour des annuaires `ordinaires` qui feraient autorité sur des
+comptes (§8) ; il ne décrit plus la v1.
+
+~~**Décidé.**~~ On réplique l'arbre durable ; l'état vivant se demande à l'annuaire
 d'autorité au moment de résoudre.
 
 | | |
@@ -418,6 +513,50 @@ pair a des abonnés. On aurait la fraîcheur sans la dépendance à la résoluti
 Ce n'est pas de la v1 : cela suppose de savoir qui s'intéresse à quoi, donc de
 tenir un état de plus — et cet état-là, lui, dirait à A quels de ses services
 intéressent qui, en permanence.
+
+### 5.4 L'état vivant des domaines hébergés TRAVERSE les racines
+
+**Décidé le 2026-09-26 (Thierry ; `replication.md` décision 34).** L'annuaire
+local transmet aux racines, pour chaque service des machines rattachées à ses
+domaines : **l'identifiant du service, l'adresse IP de la machine, le port de
+connexion, et s'il est vivant ou non.** Les racines le **servent aux clients**
+qui les interrogent — pas aux autres annuaires locaux —, et **seulement aux
+comptes à qui un accès a été accordé** : la règle de `GET /v1/ou` aujourd'hui,
+inchangée (C10).
+
+**Pourquoi on renverse §5.3.** L'hybride supposait que le client joigne
+l'annuaire d'autorité au moment de résoudre. **Un annuaire à la maison est
+souvent injoignable de l'extérieur** — derrière un NAT, un CGNAT, une box qui
+redémarre, une coupure de courant —, et le téléphone ou la machine d'un ami qui
+cherche un service n'est pas chez lui. Les applications ne parlent qu'aux
+racines, qui sont joignables ; c'est donc aux racines d'avoir la réponse.
+L'annuaire local, lui, joint toujours les racines : c'est **lui qui ouvre la
+connexion**, comme un daemon, et un NAT laisse sortir.
+
+**Ce que cela coûte, nommé.**
+
+- **Les racines apprennent l'adresse, le port et l'état de TOUS les services
+  fédérés** — ce que §5.3 voulait éviter. C'est un amendement de C13
+  (`contraintes.md`) : ces données vivent **en mémoire, comme un bail**, jamais
+  dans l'entrepôt, ne se répliquent pas entre racines (§3), et tombent quand la
+  voie de l'annuaire local tombe.
+- **Le graphe d'usage passe aux racines** pour ces services : c'est elles qui
+  résolvent, donc elles qui journalisent (`journal.md`, C18), et non plus
+  l'annuaire du propriétaire.
+- **Ce qu'un annuaire local affirme, les racines le répètent.** D'où
+  l'approbation (§4.1), et C11 dans sa forme nouvelle (§2 bis) : il n'est cru
+  que sur les machines de ses domaines.
+- **L'adresse est celle que l'annuaire local voit.** Sur IPv6, c'est l'adresse
+  globale de la machine, joignable. **Sur IPv4 derrière un NAT, c'est une
+  adresse privée**, qui ne dit rien à qui est dehors : le problème de la
+  traversée reste celui de `modele.md` §6.3, et il n'est pas résolu ici (§7).
+
+**Comment ça circule** (proposé dans le détail, `protocole.md` §3 ter) : la
+connexion de l'annuaire local vers **chaque** racine, authentifiée par sa clé
+d'identité comme entre racines ; dans un sens, les machines de ses domaines et
+leurs révocations ; dans l'autre, ses services et leur état. Chaque racine le
+reçoit directement : il n'y a rien à répliquer entre elles, et rien d'observé
+ne passe par la voie entre racines (`replication.md` §1).
 
 ---
 
@@ -495,3 +634,39 @@ Rassemblé, plutôt que dispersé.
 4. **La migration d'un compte d'un annuaire à un autre.**
 5. **L'utilisateur est-il notifié d'une exposition nouvelle qui le couvre ?**
    (§5.2) — proposé, parce qu'un droit de retrait qu'on ignore n'en est pas un.
+6. **Le passage d'un domaine des racines vers un annuaire local, et retour**
+   (2026-09-26). Pendant la bascule, les daemons s'annoncent encore à
+   l'ancien hébergeur : ils apparaissent `parti` jusqu'à ce qu'ils se
+   ré-annoncent au nouveau. Comment un daemon apprend que son domaine a changé
+   d'hébergeur — le lui pousser, ou qu'il le lise à la reconnexion — n'est pas
+   décidé.
+7. **Ce qui se passe quand l'annuaire local disparaît** — éteint, cassé,
+   jamais revenu. Ses services apparaissent `parti` dès que sa voie tombe ; au
+   bout de combien de temps ses domaines reviennent-ils d'eux-mêmes aux
+   racines, et le faut-il ?
+8. **La latence acceptable de « vivant »** propagé par un annuaire local :
+   combien de temps un service mort peut-il être servi comme vivant par les
+   racines ? Elle dépend du keepalive entre daemon et annuaire local, puis
+   entre annuaire local et racines.
+9. **IPv4 derrière un NAT** (§5.4) : l'adresse qu'un annuaire local transmet
+   n'est joignable que si la traversée est résolue (`modele.md` §6.3).
+10. **Le certificat de l'annuaire local.** Les daemons de la maison le
+    joignent en TLS : sous quelle autorité, et comment ils l'épinglent — sans
+    appeler de tiers (C19).
+11. **Les groupes généraux** (`modele.md` §2.12, §6).
+
+## 8. L'annuaire `ordinaire` et la confiance bilatérale — une suite nommée
+
+**Depuis le 2026-09-26, la fédération de la v1 est celle de l'annuaire local**
+(§2 bis, §4.1, §5.4) : il fait autorité sur des DOMAINES, pas sur des comptes ;
+ses comptes restent aux racines ; il ne parle qu'aux racines.
+
+Ce que ce document décrivait d'autre — un annuaire **`ordinaire`** où l'on crée
+des comptes, qui fait autorité sur eux, qui se relie à d'autres par une
+**confiance bilatérale** (§4.2–§4.4) et choisit ce qu'il réplique d'eux (§5.1–
+§5.3) — **n'est pas contredit, et n'est pas la v1.** C'est la forme qu'une
+entreprise voudrait peut-être, avec ses propres comptes ; elle reste écrite
+ci-dessus, avec ses raisons, pour le jour où ce besoin se présentera. Les deux
+formes sont compatibles : un annuaire `ordinaire` n'est pas un annuaire
+local, et C11 les tient chacun à son périmètre.
+

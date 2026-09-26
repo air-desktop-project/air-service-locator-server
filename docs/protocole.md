@@ -711,6 +711,7 @@ qu'on touche à quoi que ce soit de vivant.
 | Un appareil se révoque lui-même | `403` |
 | Le compte s'efface (`DELETE /v1/compte`) | `204`, puis la connexion est fermée — la clé qui a demandé n'existe plus |
 | L'alias demandé est pris | `409` |
+| Supprimer son **dernier** domaine (`modele.md` §2.11, 2026-09-26) | `409` — un compte a toujours au moins un domaine |
 
 **Les deux `404` sont le même `404`, et c'est la propriété qui compte.** Les
 distinguer dirait à qui essaie des identifiants au hasard lesquels existent — et
@@ -754,6 +755,24 @@ l'empêcherait de comprendre.
 | `DELETE /v1/autorisations/{g}` | Révoque. Effet immédiat. |
 | `GET /v1/expositions` | **Ce qui est exposé de MOI**, relation par relation. Tout utilisateur, pas seulement l'administrateur. |
 | `DELETE /v1/expositions/{relation}` | **Retire mes enregistrements** de cette exposition. Portée : tout mon compte, ou telle machine. |
+| `POST /v1/domaines` | **Crée un domaine** à MON compte (2026-09-26, `modele.md` §2.11), alias facultatif : `{"alias":"Maison"}`. `201`, `{"domaine":"d-…"}`. Le premier est créé par `POST /v1/comptes`, dans sa transaction. |
+| `GET /v1/domaines` | **Les domaines que je possède et ceux dont je suis délégué** : `[{"domaine":"d-…","proprietaire":"u-…","alias":"Maison","heberge_par":"racines"\|"n-…","role":"proprietaire"\|"delegue"}]`. |
+| `GET /v1/domaines?alias=…` | **La recherche par alias** : correspondance exacte après NFC et pliage simple de casse ; `[{"domaine":"d-…","autorite":"racines"\|"n-…"}]`, **tous** ceux qui portent l'alias, et `[]` si aucun. Ni propriétaire, ni machine. Servie sur la voie appareil **et** sur la voie machine — tout compte authentifié —, jamais sans preuve. Voir ci-dessous. |
+| `GET /v1/domaines/{d}` | Le domaine, ses délégués, et les machines qui y sont rattachées — `m-…` et propriétaire ; le nom, seulement pour mes machines. Propriétaire et délégués ; les autres, `404`. |
+| `PUT /v1/domaines/{d}/alias` | Pose ou change l'alias : `{"alias":"Maison"}`. Propriétaire ou délégué. **Jamais `409`** : l'alias de domaine n'est pas unique. `400` s'il n'est pas de l'UTF-8 admis (`modele.md` §2.11). |
+| `DELETE /v1/domaines/{d}/alias` | Le retire. |
+| `PUT /v1/domaines/{d}/delegues/{u}` | **Délègue** la gestion à un compte existant. Propriétaire seulement ; `404` si `u` n'existe pas. |
+| `DELETE /v1/domaines/{d}/delegues/{u}` | Retire la délégation — et détache du domaine les machines du délégué (proposé). Propriétaire seulement. |
+| `PUT /v1/machines/{m}/domaine` | **Rattache** MA machine : `{"domaine":"d-…"}` — un domaine que je possède ou dont je suis délégué. Une machine déjà rattachée est **déplacée**. |
+| `DELETE /v1/machines/{m}/domaine` | La détache : elle n'a plus de domaine. |
+| `DELETE /v1/domaines/{d}` | Supprime un domaine (proposé) : ses machines détachées, son alias et ses délégations retirés. **`409` si c'est mon dernier.** Propriétaire seulement. |
+| `POST /v1/annuaires` | **Déclare MON annuaire local** (proposé) : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription — dix symboles, à usage unique, comme un code d'enrôlement. L'annuaire le présente aux racines avec sa clé d'identité (§3 ter) ; l'inscription est alors **en attente**. |
+| `GET /v1/annuaires` | Mes annuaires locaux et l'état de leur inscription : `attendue`, `en attente`, `acceptée`, `refusée`, `retirée`. |
+| `DELETE /v1/annuaires/{n}` | Retire l'inscription de mon annuaire local ; ses domaines reviennent aux racines. |
+| `PUT /v1/domaines/{d}/hebergeur` | **Confie** mon domaine à mon annuaire local accepté : `{"annuaire":"n-…"}` ; `DELETE` le rend aux racines. Propriétaire seulement (proposé). |
+| `GET /v1/inscriptions` | **Les inscriptions en attente**, pour un administrateur des racines (`modele.md` §2.12) : `n-…`, propriétaire, adresse, date. Aux autres, `404`. |
+| `POST /v1/inscriptions/{n}/decision` | **Accepte ou refuse** : `{"accepte":true}`. Un administrateur suffit. Accepter une inscription retirée ou refusée, `409`. |
+| `POST /v1/administrateurs` | **Nomme** un administrateur des racines, `u-…` dans le corps, **sous la clé d'exploitant** (genre `o`, comme `POST /v1/invitations`). `DELETE /v1/administrateurs/{u}` le retire, sous la même clé. Sans `--operator-key`, `404`. |
 
 ### `GET /v1/vu` — d'où l'annuaire voit cette connexion
 
@@ -1191,6 +1210,40 @@ chemin d'entrepôt** — la règle des orphelins (`--orphans`, `modele.md` §2.1
 et `asl-server --forget <u-…>` écrivent la même opération, avec leur cause,
 et produisent les mêmes effets vivants. Il n'y a qu'une façon d'effacer un
 compte ; ce qui change est qui l'a voulu, et c'est dit dans la cause.
+
+### Les domaines — ce qu'une recherche par alias rend, et ce qu'elle tait
+
+**Décidé le 2026-09-26 (Thierry)** ; le modèle est dans `modele.md` §2.11 et
+§2.12, l'autorité dans `annuaires.md` §2 bis. Les verbes de la table sont
+**proposés** dans leur forme — chemins, corps, codes — ; ce qui est tranché est
+ce qu'ils font.
+
+```
+GET /v1/domaines?alias=Maison
+        (voie appareil ou voie machine — tout compte authentifié)
+
+[{"domaine": "d-7Q2H…", "autorite": "racines"},
+ {"domaine": "d-4K9M…", "autorite": "n-3P8X…"}]
+```
+
+**Une liste, toujours.** L'alias de domaine n'est pas unique : deux domaines
+« Maison » sont deux réponses, et aucune n'est la bonne — c'est celui qui
+cherche qui reconnaît la sienne. `autorite` dit **qui fait autorité** sur ce
+domaine : `racines`, ou l'annuaire local qui l'héberge.
+
+**Ce qu'elle tait** : le propriétaire, les machines, les services. Savoir
+qu'un domaine « Maison » existe n'ouvre rien — la résolution reste gardée par
+les autorisations entre comptes (§3, C10).
+
+**Ce qui la borne, et pourquoi c'est assez.** Correspondance **exacte**, après
+NFC et pliage simple de casse (`modele.md` §2.11) : pas de préfixe, pas de
+joker, pas de liste de tous les alias. Et **jamais sans preuve** : la
+recherche exige une connexion authentifiée, appareil ou machine, contrairement
+à `GET /v1/alias/{alias}` qui est public. **L'alias de domaine devient ainsi la
+deuxième surface énumérable de l'annuaire** (§3, « Ce qui rend l'annuaire non
+énumérable ») : on peut essayer des chaînes et apprendre lesquelles existent.
+Elle rend moins que l'alias de compte — un `d-…` dont on ne peut rien faire —
+et elle demande un compte pour être interrogée.
 
 ### Émettre une invitation — le seul secret que l'exploitant tient
 
@@ -1749,6 +1802,9 @@ se tromperait de coupable.
 - Un identifiant porte **128 bits** : il ne se devine pas.
 - **L'alias est la seule surface énumérable**, et il ne rend qu'un identifiant —
   jamais une machine, jamais un service, jamais un état (`modele.md` §2.1).
+  **Depuis le 2026-09-26, l'alias de domaine en est une seconde** — exacte,
+  réservée aux comptes authentifiés, et qui ne rend que des `d-…` (§2.2,
+  « Les domaines »).
 - **Le parc d'un compte ne se liste que sur autorisation de ce compte** :
   `GET /v1/utilisateurs/{u}/machines` rend ce qu'une arête accorde, et une liste
   vide à qui n'en a aucune (§2.2). Ce n'est pas une énumération : c'est ce que
@@ -1769,6 +1825,16 @@ C'est la raison pour laquelle les capacités ne sont pas cumulées par défaut
 opération visible dans l'application plutôt qu'enfouie dans un menu.
 
 ---
+
+### Un service d'un domaine hébergé se résout aux racines
+
+**Décidé le 2026-09-26** (`annuaires.md` §5.4). Quand la machine visée est
+rattachée à un domaine qu'un annuaire local héberge, `GET /v1/ou` répond **aux
+racines**, avec ce que l'annuaire local leur a transmis — l'adresse, le port,
+vivant ou non —, **et sous la même règle** : seulement si une autorisation
+couvre le demandeur (C10), et la même réponse, après le même délai, pour un
+service hors de portée et pour un service inexistant (C9). Le client ne sait
+pas, et n'a pas à savoir, que le service vit derrière un annuaire local.
 
 ## 3 bis. La voie entre racines — servie, pas encore tirée
 
@@ -1870,6 +1936,56 @@ journal, et la reprise réessaie la même opération — qui échouera pareil, e
 verra pareil, jusqu'à ce qu'un humain regarde.
 
 ---
+
+## 3 ter. La voie de l'annuaire local — proposée
+
+**Décidé le 2026-09-26 : qu'elle existe, et ce qu'elle porte** (`annuaires.md`
+§2 bis, §5.4). **Proposé : sa forme sur le fil**, qui reprend la voie entre
+racines (§3 bis) partout où elle convient.
+
+Le cinquième public : **un annuaire local inscrit**. Il n'est pas une racine —
+il ne fait autorité sur aucun compte —, et il n'est pas un daemon — il parle
+pour toutes les machines de ses domaines.
+
+**Il OUVRE, vers chaque racine.** Contrairement à la voie entre racines, où
+c'est le lecteur qui ouvre, ici c'est toujours l'annuaire local : il est à la
+maison, derrière un NAT que les racines ne traverseraient pas, et une connexion
+sortante passe. Il en tient **une par racine**, pour que chacune reçoive
+l'état de ses services directement — rien d'observé ne passe par la voie entre
+racines (`replication.md` §1).
+
+```
+GET  /v1/defi
+POST /v1/defi              genre `n` ‖ n-… (17) ‖ signature (64)
+                                        prouve sa clé d'identité, comme une racine
+POST /v1/annuaires/inscription   code (10)      la première fois : lie la clé au code
+                                                 que l'application a obtenu (§2.2)
+GET  /v1/federation/machines     SANS FIN — les machines rattachées à ses domaines :
+                                  m-…, clé, capacités, puis leurs changements et
+                                  leurs révocations
+POST /v1/federation/etat         SANS FIN, dans l'autre sens — ses services :
+                                  s-…, machine, nom, adresse, port, vivant ou non,
+                                  et chaque changement
+```
+
+**L'exigence est nouvelle** : une clé d'identité `n-…` **inscrite et
+acceptée**, pas celle de `--peer-key`. Une racine qui reçoit un `POST /v1/defi`
+de genre `n` cherche donc la clé dans deux endroits — son pair, et les
+inscriptions acceptées — et ce qu'elle accorde n'est pas la même chose : la
+voie entre racines d'un côté, celle-ci de l'autre. Une inscription retirée
+ferme la connexion, comme une clé de machine révoquée.
+
+**Ce que la racine vérifie de chaque cadre reçu** (C11) : que la machine est
+rattachée à un domaine que CET annuaire héberge. Sinon, refus et journal — et
+le flux se ferme, comme sur une opération illisible entre racines
+(`replication.md` §5.2).
+
+**Côté annuaire local** : un `asl-server` qui reçoit `--federation
+<hôte:port>` (l'alias des racines, ou les deux noms) et sa clé d'identité ; il
+authentifie les annonces des daemons de ses domaines avec les clés que
+`GET /v1/federation/machines` lui transmet, et reporte leur état. Il n'a
+**aucun compte** : ses domaines appartiennent à des comptes qui vivent aux
+racines.
 
 ## 4. Ce qui est nommé et repoussé
 

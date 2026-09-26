@@ -419,6 +419,7 @@ compte. Elle le prouve avec un secret, comme celle qui annonce.
 | `propriétaire` | Un utilisateur. **La machine le sait** : l'annuaire le lui rend à l'enrôlement et sur demande (`protocole.md` §2.0, §3), parce qu'une machine qui agit au nom d'un compte doit pouvoir dire lequel — à son exploitant comme à ses journaux. Identifiant public, comme le sien. |
 | `capacités` | `annonce`, `lecture`, ou les deux. Choisies à la déclaration, modifiables. |
 | `clé publique` | Ed25519, **ou rien**. Une machine déclarée n'en a pas encore : elle arrive à l'enrôlement, et la partie privée est générée SUR la machine et n'en sort jamais. |
+| `domaine` | Un `d-…`, **ou rien** (§2.11, 2026-09-26). Une machine est rattachée à **un seul** domaine à la fois, et seulement par son propriétaire ; on la déplace d'un domaine à l'autre. Les machines d'avant le domaine n'en ont pas, et n'en ont pas besoin : **le domaine n'est pas obligatoire.** |
 
 #### Le nom est le premier TEXTE LIBRE du produit, et c'est une décision
 
@@ -712,7 +713,7 @@ traverse un serveur de poussée qui n'a pas à le savoir.
 | `identifiant` | `n-` + 26 caractères. **Se déduit de la clé d'identité** — les seize premiers octets d'un SHA-256 à domaine séparé —, pour qu'épingler la clé épingle l'identifiant (`replication.md` §2.2 ; proposé, à confirmer). |
 | `propriétaire` | Un utilisateur. Les deux annuaires racines appartiennent à air-desktop-project. |
 | `clé de signature` | Ce avec quoi il signe les enregistrements dont il est l'autorité, et ce avec quoi il PROUVE qui il est à l'autre racine. **Ed25519, distincte de la clé TLS** : celle-ci tourne avec le certificat, celle-là est ce que l'autre épingle et ce que les estampilles nomment (§2.10). |
-| `rôle` | `racine` ou `ordinaire`. |
+| `rôle` | `racine`, **`local`** (2026-09-26), ou `ordinaire`. Un annuaire **local** est l'`asl-server` qu'un utilisateur fait tourner chez lui : il fait autorité sur les domaines qu'il héberge (§2.11), et il est **inscrit** auprès des racines après approbation (ci-dessous). `ordinaire` — l'annuaire qui fait autorité sur des COMPTES, relié à d'autres par une confiance bilatérale — reste décrit par `annuaires.md` §4–§5, et devient une suite nommée (`annuaires.md` §8). |
 | `pairs` | Les annuaires avec qui une relation de confiance est établie, et ce qui se réplique dans chaque sens. |
 
 Deux annuaires racines sont fournis par air-desktop-project — **deux, pour ne
@@ -725,14 +726,28 @@ vivent sur deux adresses IPv6 connues de tout annuaire, dont les clés publiques
 sont inscrites dans le code — c'est l'ancre de confiance, et une adresse seule
 n'y suffirait pas : qui détourne une route parle depuis cette adresse.
 
-Un annuaire neuf s'enregistre auprès d'au moins une racine. **Cela ne lui donne
+~~Un annuaire neuf s'enregistre auprès d'au moins une racine. **Cela ne lui donne
 accès à rien** : c'est figurer dans un annuaire d'annuaires, pour que d'autres
-puissent le trouver.
+puissent le trouver.~~
 
-**La confiance est BILATÉRALE, et le propriétaire des racines n'arbitre rien.**
+~~**La confiance est BILATÉRALE, et le propriétaire des racines n'arbitre rien.**
 Ce sont les administrateurs des deux annuaires concernés qui acceptent leur
 relation ; la racine ne fait que porter la demande. Un réseau où le fondateur
-déciderait qui parle à qui ne serait pas une fédération.
+déciderait qui parle à qui ne serait pas une fédération.~~
+
+**Renversé le 2026-09-26 (Thierry) — l'inscription d'un annuaire local est
+APPROUVÉE par les administrateurs des racines** (§2.12, `annuaires.md` §4,
+`replication.md` décision 32). Ce qui était écrit valait pour un annuaire qui
+ne demandait aux racines que d'être *recensé* : figurer dans un registre ne
+coûtait rien à personne, et le filtrer aurait fait du fondateur un arbitre sans
+raison. **Un annuaire local demande davantage** : que les racines portent, et
+servent à d'autres, l'état vivant des services qu'il héberge (§2.11). Ce qu'une
+racine sert en son nom, elle doit pouvoir le refuser — un annuaire qui
+affirmerait des adresses fausses ferait des racines le relais de son mensonge.
+L'approbation est donc le prix de ce service, et **un seul administrateur
+suffit** pour accepter comme pour refuser. Ce qui reste bilatéral, et que
+personne n'arbitre, est la confiance entre deux annuaires `ordinaires`
+(`annuaires.md` §4.3) — qui n'est pas la v1.
 
 Une fois la relation établie, **chaque administrateur choisit ce qu'il réplique
 chez lui**, en suivant la chaîne de possession — un utilisateur possède ses
@@ -824,6 +839,153 @@ modèle porte — `enrôlé le`, `révoqué le`, `effacé le` — restent celles
 racine qui a écrit, et se répliquent telles quelles. C'est ce qui fait que
 deux racines calculent la même échéance pour un compte orphelin (§2.1) :
 elles lisent la même date, pas chacune leur pendule.
+
+### 2.11 Domaine
+
+**Décidé le 2026-09-26 (Thierry).** Un domaine est **un lieu où l'on range des
+machines** — la maison, le bureau, le laboratoire —, et c'est l'unité qu'un
+annuaire local tient à la place des racines (`annuaires.md` §2 bis).
+
+| Champ | Ce que c'est |
+|---|---|
+| `identifiant` | `d-` + 26 caractères. **Public**, comme les autres. La lettre `d` est libre dans `asl-id::Genre` (u, a, m, s, g, n sont pris). |
+| `propriétaire` | **Un** compte. **C'est le compte qui possède le domaine, pas le domaine qui contient le compte** : un compte possède **un ou plusieurs** domaines — **toujours au moins un** —, et un domaine n'appartient qu'à un compte. |
+| `alias` | **Facultatif, non unique**, public (ci-dessous). |
+| `délégués` | Des comptes existants à qui le propriétaire a délégué la gestion (ci-dessous). |
+| `hébergé par` | `racines`, ou le `n-…` d'un annuaire local inscrit et approuvé (§2.7). |
+| `machines` | Celles qui y sont rattachées — **une machine n'est que dans un domaine à la fois** (§2.3). |
+
+**Plat.** Il n'y a pas de sous-domaine : un domaine ne contient pas de
+domaine. Ce qu'une hiérarchie achèterait — déléguer une branche — la délégation
+par domaine le donne déjà, sans que l'autorité ait à se chercher le long d'un
+arbre.
+
+#### Un domaine à la création du compte — et jamais moins d'un
+
+**Un compte a TOUJOURS au moins un domaine** (Thierry, 2026-09-26 : « de 1 à
+n », et non « de 0 à n »). Le premier lui est attribué **à la création du
+compte, dans la même transaction**, hébergé par les racines. C'est ce qui fait
+que l'utilisateur n'a jamais à comprendre ce qu'est un domaine pour commencer :
+il a déjà un endroit où ranger ses machines, et il ne coûte qu'un identifiant.
+
+**Supprimer son DERNIER domaine est refusé** — `409`, comme un alias pris : la
+demande est légitime, c'est l'état du compte qui s'y oppose (`protocole.md`
+§2.1 quinquies). **Seul l'effacement du compte les emporte tous**, et avec
+eux (proposé) :
+
+| Ce que le domaine tenait | Ce qu'il en advient à l'effacement du compte |
+|---|---|
+| Les machines du compte effacé | Elles partent avec lui, comme aujourd'hui (§2.1). |
+| Les machines de ses **délégués** rattachées à ses domaines | **Détachées** : elles restent à leurs propriétaires, sans domaine. Effacer un compte ne doit rien retirer à un autre. |
+| Les délégations qu'il avait accordées | Retirées. |
+| Les délégations qu'il avait reçues ailleurs | Retirées ; ses machines, qu'il avait pu rattacher chez d'autres, partent avec lui. |
+| L'alias de ses domaines | Retiré. |
+| Un annuaire local qui hébergeait ses domaines | Ne les héberge plus ; son inscription, si c'était le sien, est retirée (`annuaires.md` §4.1). |
+
+**À la création, et non à la demande**, et pour une raison de réplication en
+plus de celle de Thierry : un domaine créé en même temps que le compte l'est
+sur UNE racine, une fois, et voyage avec lui (`replication.md` §5.2). Un domaine
+« par défaut » que chaque racine fabriquerait de son côté, à la première
+lecture, en ferait deux — deux identifiants tirés au hasard pour le même
+compte, que rien ne départagerait.
+
+**Les comptes d'avant le 2026-09-26** reçoivent le leur **à la reprise de
+l'entrepôt, à la mise à jour** (proposé), avec un identifiant **déduit du
+`u-…`** — les seize premiers octets d'un SHA-256 à domaine séparé du compte,
+comme le `n-…` se déduit de sa clé (§2.7). **Déduit, et non tiré**, parce que
+les deux racines font la reprise chacune de son côté : un identifiant tiré en
+donnerait deux, un identifiant déduit donne le même, et l'invariant « au moins
+un » tient dès la mise à jour, sans fenêtre. Ce que la déduction coûte : qui
+connaît un `u-…` peut calculer le `d-…` de ce premier domaine. Il n'y apprend
+rien qu'il ne sache — un domaine ne rend ni machine ni service à qui n'y a pas
+droit, et le `u-…` est déjà public. L'autre voie, « à la première connexion
+d'une application », laissait des comptes sans domaine tant que personne ne
+s'y connectait, et deux applications sur deux racines pouvaient en créer deux.
+
+**Autant de domaines qu'on veut.** Un utilisateur en crée d'autres, depuis
+l'application, et en particulier pour son annuaire local : « chez moi, sur mon
+serveur asl, je peux créer autant de domaines que je veux ».
+
+#### La délégation — un niveau, et elle ne donne que ce qu'on possède déjà
+
+Le propriétaire délègue la gestion d'un domaine à des comptes **existants**.
+
+| Qui | Ce qu'il peut |
+|---|---|
+| **Le propriétaire** | Tout : l'alias, les délégués, l'hébergement, rattacher et détacher ses machines, supprimer le domaine. |
+| **Un délégué** | Voir le domaine ; **rattacher et détacher SES PROPRES machines** ; poser ou retirer l'alias. Rien sur les délégations. |
+
+**Un seul niveau** : un délégué ne délègue pas. **On ne rattache que des
+machines dont on est propriétaire**, délégué ou non — la délégation ouvre le
+domaine, jamais les machines d'un autre. Retirer une délégation détache du
+domaine les machines du délégué (proposé : sans quoi un ex-délégué garderait
+des machines dans un lieu qu'il ne gère plus).
+
+**Rattacher ne donne AUCUN droit de lecture.** Le propriétaire d'un domaine voit
+quelles machines y sont rattachées — leur `m-…` et leur propriétaire —, pas
+leurs services : l'accès reste une arête entre comptes (§2.5, C10), et un
+domaine n'en est pas une. Accorder l'accès à un domaine entier est une suite
+nommée (§6), pas la v1.
+
+C'est aussi une réponse partielle au premier point de §6 — les sous-comptes
+d'entreprise : une délégation par lieu plutôt que par compte.
+
+#### L'alias de domaine — lisible, pas unique
+
+Un domaine peut porter un **alias** : une chaîne lisible, pour qu'on le
+retrouve sans recopier 26 caractères. **Il n'est pas unique, et c'est ce qui le
+distingue de l'alias de compte** (§2.1) : deux domaines peuvent s'appeler
+« Maison ». Il n'y a donc rien à réclamer, rien à départager entre racines, et
+pas de file d'attente.
+
+| Règle | Pourquoi |
+|---|---|
+| **UTF-8 valide, 1 à 64 octets**, sans contrôle C0, DEL, C1, forceur de sens d'écriture ni marque d'ordre des octets | Les règles du nom de machine (§2.3), pour les mêmes raisons. |
+| **Rangé en forme normalisée NFC** | **Il se COMPARE**, contrairement au nom de machine : `é` s'écrit de deux façons, et deux écritures d'une même chaîne ne se trouveraient pas l'une l'autre. C'est exactement la raison que §2.3 donnait pour refuser le non-ASCII là où l'on compare — ici on l'accepte, et on normalise. |
+| **Recherche : correspondance EXACTE, après NFC et pliage de casse** | « maison » trouve « Maison ». Le pliage est le **pliage simple d'Unicode** (*simple case folding*, `CaseFolding.txt`, statuts C et S) : un caractère pour un caractère, la même table partout, sans dépendre d'une langue. Une règle locale — le `i` turc, qui ne se plie pas comme le nôtre — donnerait deux résultats à la même question selon la langue de celui qui la pose, et deux racines d'un même annuaire doivent répondre pareil. |
+| **La réponse est une LISTE** | Tous les domaines qui portent cet alias, chacun avec son `d-…` et l'annuaire `n-…` qui fait autorité sur lui. Aucun n'est « le bon » ; c'est à celui qui cherche de reconnaître le sien. |
+| **Réservée aux comptes authentifiés**, sans préfixe ni énumération | On ne trouve que ce dont on connaît déjà l'alias exact. Pas de recherche par début de chaîne, pas de liste des alias. |
+
+**C'est une donnée publique, choisie**, comme l'alias de compte et le nom de
+machine : une exception de C13, qui le dit. L'application doit le dire au moment
+de le poser : **« visible de tous les comptes »**. Ce que l'alias rend est un
+`d-…` et un `n-…` — **jamais le propriétaire, jamais une machine, jamais un
+service** : savoir qu'un domaine « Maison » existe n'ouvre aucune porte.
+
+**Ce que la normalisation coûte, nommé.** NFC et le pliage de casse demandent
+des tables Unicode, que l'étage 2 n'a pas aujourd'hui. Elles tiennent en Rust
+pur (C4) et sans entrée-sortie (C1) ; leur version doit être la même sur les
+deux racines et sur les annuaires locaux, sans quoi deux annuaires plieraient
+différemment un caractère récent. **La version d'Unicode est donc épinglée,
+comme la toolchain** (proposé).
+
+### 2.12 Groupe — v1 : les administrateurs des racines
+
+**Décidé le 2026-09-26 (Thierry).** Un groupe est un ensemble de comptes. **En
+v1, il n'y en a qu'un : les administrateurs des racines**, ceux qui acceptent ou
+refusent l'inscription d'un annuaire local (§2.7). La notion générale — des
+groupes que les utilisateurs créent, auxquels on accorde un accès — est une
+suite nommée (§6).
+
+| Règle | |
+|---|---|
+| **Un seul administrateur suffit** | pour accepter comme pour refuser une inscription. Pas de quorum : deux racines n'ont pas de majorité (`annuaires.md` §6), et un groupe de deux n'en aurait pas davantage. |
+| **Le premier membre** | est le compte de Thierry, posé **par la clé d'exploitant** (`--operator-key`, `protocole.md` §2.2) — la même caution que les invitations. |
+| **Ajouter, retirer un membre** | se fait **sous cette même clé**, et sous elle seule : un administrateur n'en nomme pas un autre. Retirer est une révocation, et gagne toujours (`replication.md` §3.2). |
+| **Identifiant** | Aucun en v1 : il n'y a qu'un groupe, et le nommer serait se répéter — l'argument même du genre `o` (`protocole.md` §2.2). Le jour où les groupes seront généraux, ils auront leur lettre. |
+
+**CE QUE CELA RENVERSE, ET IL FAUT LE DIRE.** La posture `invitation` avait
+écarté « un compte d'exploitation » pour une raison écrite : il aurait mis dans
+le modèle **un `u-…` qui vaut plus que les autres** (`protocole.md` §2.2,
+`replication.md` décision 26). Ce groupe en fait exister. La raison de changer
+est que l'approbation d'une inscription est un **jugement** — regarder qui
+demande, et décider —, pas un geste d'exploitation qu'on scripte sur la machine
+qui tient la clé : il se fait depuis une application, sous biométrie, par
+quelqu'un qui peut n'être pas devant le serveur. **Ce que le renversement
+garde de l'ancienne raison** : la clé d'exploitant reste la seule à pouvoir
+nommer un administrateur, et un administrateur ne peut rien d'autre qu'accepter
+ou refuser une inscription — il ne lit aucun compte, n'en efface aucun, ne voit
+aucun service qui ne lui a pas été accordé.
 
 ---
 
@@ -1081,3 +1243,15 @@ Nommé ici plutôt que supposé ailleurs.
 7. **Ce que devient une autorisation quand une machine change de capacités.**
    Retirer `lecture` à une machine de B doit-il couper ses résolutions en cours,
    ou seulement les suivantes ?
+8. **Accorder l'accès à un domaine entier** (2026-09-26). Les autorisations
+   restent de compte à compte en v1 (§2.5) ; une arête dont la portée serait un
+   domaine — « tout ce qui est rangé à la maison » — est une suite nommée.
+9. **Les groupes généraux** (§2.12) : des groupes que les utilisateurs créent,
+   et une autorisation accordée à un groupe. La v1 n'a que celui des
+   administrateurs des racines.
+10. **Supprimer un domaine qui n'est pas le dernier** (§2.11) : proposé — ses
+    machines sont détachées, son alias et ses délégations retirés,
+    l'identifiant marqué supprimé comme un compte effacé. Le dernier, lui, ne
+    se supprime pas (tranché) : `409`.
+11. **Le premier domaine des comptes d'avant le 2026-09-26** : à la reprise de
+    l'entrepôt, identifiant déduit du `u-…` (§2.11) — proposé.
