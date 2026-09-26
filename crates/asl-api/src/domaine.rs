@@ -44,10 +44,11 @@ pub const HEBERGE_PAR_LES_RACINES: &str = "racines";
 pub const DROITS_DU_PROPRIETAIRE: [&str; 4] = ["administrer", "rattacher", "voir", "localiser"];
 
 /// Ce qu'un membre du groupe d'administrateurs peut sur un domaine qu'il ne
-/// possède pas (2026-09-27) : l'administrer, et y ranger SES machines. Les
-/// droits `voir` et `localiser`, accordés à des groupes, viennent avec la PR
-/// suivante.
-pub const DROITS_D_UN_ADMINISTRATEUR: [&str; 2] = ["administrer", "rattacher"];
+/// possède pas : l'administrer, y ranger SES machines, et voir ce qui y est
+/// rangé — `administrer` emporte `rattacher` et `voir` (`modele.md` §2.13,
+/// 0.25.0). Ce qu'un compte peut vraiment sur un domaine est la RÉUNION de ses
+/// droits, que l'étage 3 calcule ; ce tableau n'en est que le cas ordinaire.
+pub const DROITS_D_UN_ADMINISTRATEUR: [&str; 3] = ["administrer", "rattacher", "voir"];
 
 /// Ce qu'un administrateur des racines peut sur le domaine racine : juger des
 /// inscriptions, et rien d'autre (`modele.md` §2.12).

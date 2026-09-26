@@ -126,6 +126,8 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::MembreGroupe { groupe, compte } => {
             format!("/v1/groupes/{groupe}/membres/{compte}")
         }
+        Ressource::Droits => "/v1/droits".to_owned(),
+        Ressource::Droit { droit } => format!("/v1/droits/{droit}"),
         Ressource::Administrateurs => "/v1/administrateurs".to_owned(),
         Ressource::Administrateur { compte } => format!("/v1/administrateurs/{compte}"),
     }

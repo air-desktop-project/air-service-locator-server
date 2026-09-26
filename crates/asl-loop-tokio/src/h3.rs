@@ -30,6 +30,7 @@
 //! connexion, et les deux disparaissent ensemble.
 
 mod domaines;
+mod droits;
 mod groupes;
 
 use std::collections::{HashMap, VecDeque};
@@ -904,6 +905,16 @@ impl Service<'_> {
             Besoin::SupprimerGroupe { groupe } => self.supprimer_un_groupe(*groupe),
             Besoin::AjouterMembre { groupe, compte } => self.ajouter_un_membre(*groupe, *compte),
             Besoin::RetirerMembre { groupe, compte } => self.retirer_un_membre(*groupe, *compte),
+
+            // ── LES DROITS (`h3/droits.rs`) ─────────────────────────────
+            Besoin::MesDroits => self.rassembler_mes_droits(),
+            Besoin::AccorderDroit {
+                groupe,
+                element,
+                droits,
+                etiquette,
+            } => self.accorder_un_droit(*groupe, *element, *droits, *etiquette),
+            Besoin::RetirerDroit { droit } => self.retirer_un_droit(*droit),
             Besoin::ChangerLesAdministrateurs {
                 defi,
                 signature,
@@ -1715,27 +1726,9 @@ impl Service<'_> {
             })
             .collect();
 
-        let autorisations = self
-            .entrepot
-            .autorisations_recues(demandeur)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|quoi| {
-                asl_auth::Autorisation::nouvelle(
-                    quoi.par,
-                    quoi.a,
-                    match quoi.portee {
-                        asl_registre::Portee::ToutLeCompte => asl_auth::Portee::ToutLeCompte,
-                        asl_registre::Portee::UneMachine(quelle) => {
-                            asl_auth::Portee::UneMachine(quelle)
-                        }
-                        asl_registre::Portee::UnService(quel) => asl_auth::Portee::UnService(quel),
-                    },
-                    quoi.revoquee,
-                )
-                .ok()
-            })
-            .collect();
+        // **CE QUE LE DEMANDEUR PEUT VOIR** (décision 40) : ses droits, ramenés
+        // à la forme qu'`asl-auth` juge.
+        let autorisations = self.acces_de(demandeur, asl_store::Voulu::Voir);
 
         Trouvaille::MachinesDe {
             demandeur,
@@ -2298,13 +2291,15 @@ impl Service<'_> {
             return Vec::new();
         };
 
-        // Le compte du demandeur, et ceux qui lui ont accordé quelque chose.
+        // Le compte du demandeur, et ceux dont il peut localiser quelque chose.
         let mut comptes = vec![rangee.proprietaire];
-        if let Ok(recues) = self.entrepot.autorisations_recues(rangee.proprietaire) {
-            for quoi in recues {
-                if !comptes.contains(&quoi.par) {
-                    comptes.push(quoi.par);
-                }
+        for acces in self
+            .entrepot
+            .acces(rangee.proprietaire, asl_store::Voulu::Localiser)
+            .unwrap_or_default()
+        {
+            if !comptes.contains(&acces.proprietaire) {
+                comptes.push(acces.proprietaire);
             }
         }
 
@@ -2551,6 +2546,37 @@ impl Service<'_> {
         Trouvaille::Appareils(elements)
     }
 
+    /// **Ce que ce compte peut voir ou localiser de ce que d'autres possèdent**,
+    /// dans la forme qu'`asl-auth` juge : le calcul des droits (décision 40),
+    /// une arête par accès. Écrit une fois pour les trois chemins qui lisent —
+    /// `GET /v1/ou`, la résolution par nom, les machines d'un utilisateur.
+    fn acces_de(
+        &self,
+        compte: Identifiant,
+        voulu: asl_store::Voulu,
+    ) -> Vec<asl_auth::Autorisation> {
+        self.entrepot
+            .acces(compte, voulu)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|acces| {
+                asl_auth::Autorisation::nouvelle(
+                    acces.proprietaire,
+                    compte,
+                    match acces.portee {
+                        asl_registre::Portee::ToutLeCompte => asl_auth::Portee::ToutLeCompte,
+                        asl_registre::Portee::UneMachine(quelle) => {
+                            asl_auth::Portee::UneMachine(quelle)
+                        }
+                        asl_registre::Portee::UnService(quel) => asl_auth::Portee::UnService(quel),
+                    },
+                    false,
+                )
+                .ok()
+            })
+            .collect()
+    }
+
     /// Les autorisations d'un compte, dans les deux sens.
     fn rassembler_les_autorisations(&self) -> Trouvaille {
         let Some(appareil) = self.session.appareil() else {
@@ -2702,27 +2728,8 @@ impl Service<'_> {
         let visee = self.entrepot.machine(machine).ok().flatten()?;
         let cible = asl_auth::Cible::nouvelle(service, machine, visee.proprietaire).ok()?;
 
-        let autorisations = self
-            .entrepot
-            .autorisations_recues(demandeur.proprietaire())
-            .ok()?
-            .into_iter()
-            .filter_map(|quoi| {
-                asl_auth::Autorisation::nouvelle(
-                    quoi.par,
-                    quoi.a,
-                    match quoi.portee {
-                        asl_registre::Portee::ToutLeCompte => asl_auth::Portee::ToutLeCompte,
-                        asl_registre::Portee::UneMachine(quelle) => {
-                            asl_auth::Portee::UneMachine(quelle)
-                        }
-                        asl_registre::Portee::UnService(quel) => asl_auth::Portee::UnService(quel),
-                    },
-                    quoi.revoquee,
-                )
-                .ok()
-            })
-            .collect();
+        // **CE QUE LE DEMANDEUR PEUT LOCALISER** (décision 40).
+        let autorisations = self.acces_de(demandeur.proprietaire(), asl_store::Voulu::Localiser);
 
         // **CE QUI EST ANNONCÉ, LU MAINTENANT ET RÉVÉLÉ PLUS TARD.** C'est
         // notre propre mémoire : la lire ne dit rien à personne. La RENDRE est

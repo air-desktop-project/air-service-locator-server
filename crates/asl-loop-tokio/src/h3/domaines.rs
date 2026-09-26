@@ -5,10 +5,12 @@
 //!
 //! Depuis la 0.24.0 (`docs/modele.md` §2.12), **un domaine se gère par les
 //! membres de son groupe d'administrateurs** — le propriétaire en est d'office
-//! et ne s'en retire pas. Eux posent l'alias, créent les groupes, en changent
-//! les membres, et rangent LEURS machines dans le domaine. **Le propriétaire
-//! seul le supprime.** Les droits fins accordés à d'autres groupes — `voir`,
-//! `localiser`, et `rattacher` sans administrer — viennent à la PR suivante.
+//! et ne s'en retire pas —, et depuis la 0.25.0 par ceux d'un groupe qui a
+//! reçu `administrer` sur lui (`docs/modele.md` §2.13). Eux posent l'alias,
+//! créent les groupes, en changent les membres, accordent des droits sur lui.
+//! **Le propriétaire seul le supprime.** Ranger SA machine demande
+//! `rattacher`, qu'`administrer` emporte ; le voir demande `voir`, que
+//! `localiser` et `administrer` emportent.
 //!
 //! Le **domaine racine** n'a pas d'enregistrement : il se déduit, et son
 //! propriétaire est le premier administrateur des racines nommé. Il n'a ni
@@ -38,8 +40,9 @@ impl Service<'_> {
     }
 
     /// `GET /v1/domaines` — les domaines vivants que je possède, **puis ceux
-    /// que j'administre** sans les posséder, le domaine racine compris si je
-    /// suis l'un des administrateurs des racines.
+    /// où l'un de mes groupes tient un droit** sans les posséder — administrés
+    /// compris —, le domaine racine compris si je suis l'un des
+    /// administrateurs des racines.
     pub(super) fn rassembler_mes_domaines(&self) -> Trouvaille {
         let Some(compte) = self.compte_de_la_connexion() else {
             return Trouvaille::Rien;
@@ -47,7 +50,7 @@ impl Service<'_> {
         let Ok(domaines) = self.entrepot.domaines_de_compte(compte) else {
             return Trouvaille::Rien;
         };
-        let Ok(administres) = self.entrepot.domaines_administres(compte) else {
+        let Ok(administres) = self.entrepot.domaines_ou_j_ai_un_droit(compte) else {
             return Trouvaille::Rien;
         };
         let mut elements: Vec<Vec<u8>> = domaines
@@ -62,8 +65,9 @@ impl Service<'_> {
         Trouvaille::Domaines(elements)
     }
 
-    /// Ce qu'on rend d'un domaine qu'on gère : son propriétaire, son alias,
-    /// ce qu'on peut sur lui. Rien si on ne le gère pas.
+    /// Ce qu'on rend d'un domaine où l'on tient un droit : son propriétaire, son
+    /// alias, ce qu'on peut sur lui — **la réunion** que l'entrepôt calcule.
+    /// Rien si l'on n'y peut rien.
     fn rendu_d_un_domaine(
         &self,
         compte: Identifiant,
@@ -80,14 +84,13 @@ impl Service<'_> {
                 &asl_api::domaine::DROITS_SUR_LE_DOMAINE_RACINE,
             ));
         }
-        let rangee = self.domaine_gere(compte, domaine)?;
+        let rangee = self.entrepot.domaine(domaine).ok().flatten()?;
+        let droits = self.entrepot.droits_sur_domaine(compte, domaine).ok()?;
+        if droits.est_vide() {
+            return None;
+        }
         let alias = self.entrepot.alias_de_domaine(domaine).ok().flatten();
-        let droits: &'static [&'static str] = if rangee.proprietaire == compte {
-            &asl_api::domaine::DROITS_DU_PROPRIETAIRE
-        } else {
-            &asl_api::domaine::DROITS_D_UN_ADMINISTRATEUR
-        };
-        Some((rangee.proprietaire, alias, droits))
+        Some((rangee.proprietaire, alias, droits.noms()))
     }
 
     /// Un domaine de la liste, encodé.
@@ -161,8 +164,8 @@ impl Service<'_> {
             .then_some(rangee)
     }
 
-    /// `GET /v1/domaines/{d}` — le domaine, ses groupes, et ce qui y est
-    /// rangé.
+    /// `GET /v1/domaines/{d}` — le domaine, ce qui y est rangé pour qui a
+    /// `voir`, et ses groupes pour qui l'administre.
     pub(super) fn lire_un_domaine(&self, domaine: Identifiant) -> Trouvaille {
         let Some(compte) = self.compte_de_la_connexion() else {
             return Trouvaille::Rien;
@@ -170,10 +173,15 @@ impl Service<'_> {
         let Some((proprietaire, alias, droits)) = self.rendu_d_un_domaine(compte, domaine) else {
             return Trouvaille::Rien;
         };
-        let groupes = self
-            .entrepot
-            .groupes_du_domaine(domaine)
-            .unwrap_or_default();
+        let administre = droits.contains(&"administrer");
+        let voit = administre || droits.contains(&"voir");
+        let groupes = if administre {
+            self.entrepot
+                .groupes_du_domaine(domaine)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let groupes_rendus: Vec<asl_api::groupe::GroupeRendu<'_>> = groupes
             .iter()
             .map(|lu| asl_api::groupe::GroupeRendu {
@@ -186,20 +194,23 @@ impl Service<'_> {
                 sorte: lu.sorte.nom(),
             })
             .collect();
-        let machines: Vec<(Identifiant, asl_registre::Machine)> = self
-            .entrepot
-            .machines_du_domaine(domaine)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|machine| {
-                let rangee = self.entrepot.machine(machine).ok().flatten()?;
-                Some((machine, rangee))
-            })
-            .collect();
-        // **LE NOM, POUR QUI A `voir` SUR LE DOMAINE** : dans cette tranche,
-        // ce sont ses administrateurs, qui voient donc le nom de tout ce qui y
-        // est rangé — y compris ce qu'un autre y a rattaché (`protocole.md`
-        // §2.2).
+        let machines: Vec<(Identifiant, asl_registre::Machine)> = if voit {
+            self.entrepot
+                .machines_du_domaine(domaine)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+        .into_iter()
+        .filter_map(|machine| {
+            let rangee = self.entrepot.machine(machine).ok().flatten()?;
+            Some((machine, rangee))
+        })
+        .collect();
+        // **LE NOM, POUR QUI A `voir` SUR LE DOMAINE** — ses administrateurs,
+        // et ceux qui ont reçu `voir` ou `localiser` : ils voient le nom de
+        // tout ce qui y est rangé, y compris ce qu'un autre y a rattaché
+        // (`protocole.md` §2.2).
         let vues: Vec<asl_api::domaine::MachineDeDomaine<'_>> = machines
             .iter()
             .map(|(machine, rangee)| asl_api::domaine::MachineDeDomaine {
@@ -295,10 +306,10 @@ impl Service<'_> {
             if self.entrepot.domaine(quel).ok().flatten().is_none() {
                 return Trouvaille::Rien;
             }
-            // **RANGER, C'EST ADMINISTRER LE DOMAINE** dans cette tranche : le
-            // propriétaire ou un membre de son groupe d'administrateurs. Le
-            // droit `rattacher` sans administrer vient à la PR suivante.
-            if !self.entrepot.administre(compte, quel).unwrap_or(false) {
+            // **RANGER DEMANDE `rattacher`** — qu'`administrer` emporte : le
+            // propriétaire, un membre de son groupe d'administrateurs, ou un
+            // groupe qui a reçu l'un ou l'autre (`docs/modele.md` §2.13).
+            if !self.entrepot.peut_ranger(compte, quel).unwrap_or(false) {
                 return Trouvaille::Refus;
             }
         }

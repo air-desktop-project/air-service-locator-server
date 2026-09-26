@@ -59,7 +59,7 @@ use asl_registre::{
     ENTREE_OCTETS, ESTAMPILLE_OCTETS, Effacement, Enrolement, EntreeJournal, Estampille,
     IDENTIFIANT_OCTETS, INVITATION_OCTETS, Invitation, JetonPoussee, JetonRange, MACHINE_OCTETS,
     Machine, NomRange, OPERATION_OCTETS_MAX, Operation, POINT_DE_POUSSEE_OCTETS, POUSSEE_OCTETS,
-    Plateforme, PointDePoussee, PointRange, Portee, Provenance, SERVICE_OCTETS, Service, Systeme,
+    Plateforme, PointDePoussee, PointRange, Provenance, SERVICE_OCTETS, Service, Systeme,
 };
 use redb::{
     Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableHandle,
@@ -70,9 +70,11 @@ use redb::{
 
 /// Les comptes, par identifiant.
 mod domaines;
+mod droits;
 mod groupes;
 
 pub use domaines::SuppressionDeDomaine;
+pub use droits::{Acces, EcritureDeDroit, Voulu};
 pub use groupes::{EcritureDeGroupe, GroupeLu};
 
 const COMPTES: TableDefinition<'_, &[u8], &[u8; COMPTE_OCTETS]> = TableDefinition::new("comptes");
@@ -852,6 +854,9 @@ pub struct Entrepot {
     /// Combien de groupes déduits — personnels, d'administrateurs — sont nés
     /// à l'ouverture, pour les comptes et les domaines d'avant les groupes.
     groupes_deduits: usize,
+    /// Combien d'autorisations d'hier sont devenues des droits à l'ouverture
+    /// (décision 41) — une fois.
+    autorisations_converties: usize,
 }
 
 impl Entrepot {
@@ -937,6 +942,7 @@ impl Entrepot {
         let reestampilles;
         let premiers_domaines;
         let groupes_deduits;
+        let autorisations_converties;
         let mut dates_de_reprise = 0_usize;
         {
             let ecriture = base.begin_write()?;
@@ -1006,6 +1012,11 @@ impl Entrepot {
             ecriture.open_table(groupes::MARQUES_DE_GROUPES)?;
             ecriture.open_table(groupes::ADHESIONS)?;
             ecriture.open_table(groupes::ADHESIONS_PAR_COMPTE)?;
+            // Et les droits (2026-09-27) : quatre tables neuves, de même.
+            ecriture.open_table(droits::DROITS)?;
+            ecriture.open_table(droits::DROITS_PAR_GROUPE)?;
+            ecriture.open_table(droits::DROITS_ACCORDES)?;
+            ecriture.open_table(droits::DROITS_PAR_ELEMENT)?;
             ecriture.open_table(JOURNAL)?;
             ecriture.open_table(RANG)?;
             ecriture.open_table(OPERATIONS)?;
@@ -1022,6 +1033,10 @@ impl Entrepot {
             // (`docs/modele.md` §2.12) : de même, une fois, avant le
             // ré-estampillage.
             groupes_deduits = groupes::reprendre_les_groupes_deduits(&ecriture)?;
+            // **LES AUTORISATIONS D'HIER DEVIENNENT DES DROITS** (décision
+            // 41) : APRÈS les groupes personnels, qu'un droit converti vise, et
+            // avant le ré-estampillage.
+            autorisations_converties = droits::reprendre_les_autorisations(&ecriture)?;
             reestampilles = if racine == RACINE_SANS_IDENTITE {
                 0
             } else {
@@ -1071,7 +1086,15 @@ impl Entrepot {
             dates_de_reprise,
             premiers_domaines,
             groupes_deduits,
+            autorisations_converties,
         })
+    }
+
+    /// Combien d'autorisations d'hier sont devenues des droits à l'ouverture
+    /// (décision 41) — une fois, et zéro ensuite.
+    #[must_use]
+    pub const fn autorisations_converties(&self) -> usize {
+        self.autorisations_converties
     }
 
     /// Combien de comptes d'avant les domaines ont reçu, à l'ouverture, leur
@@ -2770,204 +2793,6 @@ impl Entrepot {
         Ok(trouves)
     }
 
-    // ── Les autorisations ───────────────────────────────────────────────────
-
-    /// Accorde cette autorisation, et l'indexe dans les deux sens.
-    ///
-    /// # Errors
-    ///
-    /// [`Faute::Existe`] si l'autorisation existe, [`Faute::Base`] si la base
-    /// refuse.
-    pub fn accorder_autorisation(
-        &self,
-        quelle: Identifiant,
-        provenance: Provenance,
-        par: Identifiant,
-        a: Identifiant,
-        portee: Portee,
-        etiquette: NomRange,
-    ) -> Result<(), Faute> {
-        let clef_autorisation = clef(quelle);
-        let ecriture = self.base.begin_write()?;
-        let journalisee;
-        {
-            let mut table = ecriture.open_table(AUTORISATIONS)?;
-            if table.get(clef_autorisation.as_slice())?.is_some() {
-                return Err(Faute::Existe);
-            }
-            let estampille = estampiller(&ecriture, self.racine)?;
-            let autorisation = Autorisation {
-                provenance,
-                estampille,
-                par,
-                a,
-                portee,
-                revoquee: false,
-                etiquette,
-            };
-            let mut octets = [0_u8; AUTORISATION_OCTETS];
-            autorisation.ecrire(&mut octets);
-            table.insert(clef_autorisation.as_slice(), &octets)?;
-            // **NI LE BÉNÉFICIAIRE NI LE DONNEUR NE CHANGENT JAMAIS** : une
-            // autorisation qu'on réécrirait pour d'autres comptes serait une
-            // autre autorisation. Il n'y a donc jamais d'ancienne entrée d'index
-            // à retirer.
-            let mut recues = ecriture.open_table(AUTORISATIONS_RECUES)?;
-            recues.insert(paire(a, quelle).as_slice(), clef_autorisation.as_slice())?;
-            let mut accordees = ecriture.open_table(AUTORISATIONS_ACCORDEES)?;
-            accordees.insert(paire(par, quelle).as_slice(), clef_autorisation.as_slice())?;
-            journalisee = journaliser_l_operation(
-                &ecriture,
-                estampille,
-                provenance,
-                &Operation::Autorisation {
-                    autorisation: quelle,
-                    enregistrement: autorisation,
-                },
-            )?;
-        }
-        self.commettre_une_operation(ecriture, journalisee)?;
-        Ok(())
-    }
-
-    /// Cette autorisation, si elle existe.
-    ///
-    /// # Errors
-    ///
-    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
-    pub fn autorisation(&self, quelle: Identifiant) -> Result<Option<Autorisation>, Faute> {
-        let lecture = self.base.begin_read()?;
-        let table = lecture.open_table(AUTORISATIONS)?;
-        match table.get(clef(quelle).as_slice())? {
-            Some(brut) => Ok(Some(Autorisation::lire(brut.value())?)),
-            None => Ok(None),
-        }
-    }
-
-    /// Marque cette autorisation révoquée, et rend ce qu'elle était.
-    ///
-    /// # ELLE RESTE, ET NE VAUT PLUS
-    ///
-    /// La supprimer marcherait — `couvre` ne la trouverait plus. **Mais
-    /// l'utilisateur doit pouvoir voir ce qu'il a retiré** : `GET
-    /// /v1/autorisations` rend les deux sens, et une ligne disparue ne dit pas
-    /// qu'on a repris un droit. C'est `asl_auth::Autorisation::couvre` qui
-    /// l'écarte, et à un seul endroit. **Les index ne bougent pas**, pour la
-    /// même raison.
-    ///
-    /// Rend `None` si aucune autorisation ne répond à cet identifiant.
-    ///
-    /// # Errors
-    ///
-    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
-    pub fn revoquer_autorisation(
-        &self,
-        quelle: Identifiant,
-    ) -> Result<Option<Autorisation>, Faute> {
-        let clef_autorisation = clef(quelle);
-        let ecriture = self.base.begin_write()?;
-        let journalisee;
-        let avant;
-        {
-            let mut table = ecriture.open_table(AUTORISATIONS)?;
-            avant = match table.get(clef_autorisation.as_slice())? {
-                Some(brut) => Autorisation::lire(brut.value())?,
-                None => return Ok(None),
-            };
-            let estampille = estampiller(&ecriture, self.racine)?;
-            let mut octets = [0_u8; AUTORISATION_OCTETS];
-            Autorisation {
-                estampille,
-                revoquee: true,
-                ..avant
-            }
-            .ecrire(&mut octets);
-            table.insert(clef_autorisation.as_slice(), &octets)?;
-            journalisee = journaliser_l_operation(
-                &ecriture,
-                estampille,
-                avant.provenance,
-                &Operation::AutorisationRevoquee {
-                    autorisation: quelle,
-                },
-            )?;
-        }
-        self.commettre_une_operation(ecriture, journalisee)?;
-        Ok(Some(avant))
-    }
-
-    /// Toutes les autorisations reçues par ce compte.
-    ///
-    /// **RÉVOQUÉES COMPRISES** : c'est `asl_auth::Autorisation::couvre` qui les
-    /// écarte, et le faire ici cacherait à l'utilisateur ce qu'il a retiré.
-    ///
-    /// # Errors
-    ///
-    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
-    pub fn autorisations_recues(&self, par: Identifiant) -> Result<Vec<Autorisation>, Faute> {
-        Ok(self
-            .autorisations_par(AUTORISATIONS_RECUES, par)?
-            .into_iter()
-            .map(|(_, autorisation)| autorisation)
-            .collect())
-    }
-
-    /// Les autorisations qu'un compte a REÇUES, avec leur identifiant.
-    ///
-    /// **Une liste doit pouvoir se désigner** — c'est l'identifiant qu'on passe
-    /// à `DELETE /v1/autorisations/{g}`.
-    ///
-    /// # Errors
-    ///
-    /// [`Faute::Base`], [`Faute::Enregistrement`].
-    pub fn autorisations_recues_nommees(
-        &self,
-        a: Identifiant,
-    ) -> Result<Vec<(Identifiant, Autorisation)>, Faute> {
-        self.autorisations_par(AUTORISATIONS_RECUES, a)
-    }
-
-    /// Les autorisations qu'un compte a ACCORDÉES, avec leur identifiant.
-    ///
-    /// **RÉVOQUÉES COMPRISES** : `protocole.md` §2.2 veut que l'écran montre ce
-    /// qu'on a retiré.
-    ///
-    /// # Errors
-    ///
-    /// [`Faute::Base`], [`Faute::Enregistrement`].
-    pub fn autorisations_accordees(
-        &self,
-        par: Identifiant,
-    ) -> Result<Vec<(Identifiant, Autorisation)>, Faute> {
-        self.autorisations_par(AUTORISATIONS_ACCORDEES, par)
-    }
-
-    /// Le corps commun des deux sens.
-    ///
-    /// **ÉCRIT UNE FOIS, EMPLOYÉ DEUX** : deux copies de ce parcours finiraient
-    /// par diverger, et c'est celle qu'on oublie de corriger qui rendrait un sens
-    /// faux.
-    fn autorisations_par(
-        &self,
-        index: TableDefinition<'_, &[u8], &[u8]>,
-        compte: Identifiant,
-    ) -> Result<Vec<(Identifiant, Autorisation)>, Faute> {
-        let lecture = self.base.begin_read()?;
-        let index = lecture.open_table(index)?;
-        let table = lecture.open_table(AUTORISATIONS)?;
-
-        let (debut, fin) = intervalle(compte);
-        let mut trouvees = Vec::new();
-        for entree in index.range(debut.as_slice()..fin.as_slice())? {
-            let (_, valeur) = entree?;
-            let quelle = depuis_clef(valeur.value())?;
-            if let Some(brute) = table.get(valeur.value())? {
-                trouvees.push((quelle, Autorisation::lire(brute.value())?));
-            }
-        }
-        Ok(trouvees)
-    }
-
     // ── Le journal (C18) ────────────────────────────────────────────────────
 
     /// Journalise cette requête.
@@ -3377,30 +3202,10 @@ impl Entrepot {
             );
         }
 
-        let autorisations = lecture.open_table(AUTORISATIONS)?;
-        for entree in autorisations.iter()? {
-            let (clef, valeur) = entree?;
-            let autorisation = Autorisation::lire(valeur.value())?;
-            if autorisation.provenance != Provenance::Ici {
-                continue;
-            }
-            let quelle = depuis_clef(clef.value())?;
-            suite.ajouter(
-                autorisation.estampille,
-                &Operation::Autorisation {
-                    autorisation: quelle,
-                    enregistrement: autorisation,
-                },
-            );
-            if autorisation.revoquee {
-                suite.ajouter(
-                    autorisation.estampille,
-                    &Operation::AutorisationRevoquee {
-                        autorisation: quelle,
-                    },
-                );
-            }
-        }
+        // **LES DROITS, APRÈS LES GROUPES, LES DOMAINES, LES MACHINES ET LES
+        // SERVICES** qu'ils visent : chez le lecteur, un droit exige son
+        // groupe et son élément.
+        droits::instantane_des_droits(&lecture, &mut suite)?;
 
         // **LES ALIAS ET LES RATTACHEMENTS EN DERNIER** : un rattachement
         // exige sa machine chez le lecteur, et un alias son domaine.
@@ -3754,28 +3559,9 @@ impl Entrepot {
             }
             combien = combien.saturating_add(condamnes_services.len());
 
-            let mut autorisations = ecriture.open_table(AUTORISATIONS)?;
-            let mut recues = ecriture.open_table(AUTORISATIONS_RECUES)?;
-            let mut accordees = ecriture.open_table(AUTORISATIONS_ACCORDEES)?;
-            let mut condamnees_aretes = Vec::new();
-            for entree in autorisations.iter()? {
-                let (clef_brute, valeur) = entree?;
-                let autorisation = Autorisation::lire(valeur.value())?;
-                if autorisation.provenance.vient_de(annuaire) {
-                    let quelle = depuis_clef(clef_brute.value())?;
-                    condamnees_aretes.push((
-                        clef_brute.value().to_vec(),
-                        paire(autorisation.a, quelle),
-                        paire(autorisation.par, quelle),
-                    ));
-                }
-            }
-            for (clef_autorisation, clef_recue, clef_accordee) in &condamnees_aretes {
-                autorisations.remove(clef_autorisation.as_slice())?;
-                recues.remove(clef_recue.as_slice())?;
-                accordees.remove(clef_accordee.as_slice())?;
-            }
-            combien = combien.saturating_add(condamnees_aretes.len());
+            // Les droits (décision 41) : ceux de cette provenance partent,
+            // avec leurs trois entrées d'index.
+            combien = combien.saturating_add(droits::oublier_ce_qui_vient_de(&ecriture, annuaire)?);
 
             // Un appareil ne vient jamais d'ailleurs aujourd'hui — il n'y a rien
             // à fédérer dans un téléphone. **Il porte sa provenance quand
@@ -3926,10 +3712,11 @@ fn effacer_dans(
     // ── LES DOMAINES : effacés, les machines d'AUTRES comptes détachées ─────
     // **LES GROUPES D'ABORD** : ils lisent la liste des domaines du compte,
     // que la ligne suivante efface.
-    let groupes = groupes::effacer_les_groupes(ecriture, qui)?;
+    let (groupes, droits_des_groupes) = groupes::effacer_les_groupes(ecriture, qui)?;
     let mut retrait = Retrait {
         domaines: domaines::effacer_les_domaines(ecriture, qui)?,
         groupes,
+        autorisations: droits_des_groupes,
         ..Retrait::default()
     };
 
@@ -3989,48 +3776,33 @@ fn effacer_dans(
             for (clef_nom, clef_service) in &siens {
                 par_nom.remove(clef_nom.as_slice())?;
                 services.remove(clef_service.as_slice())?;
+                // Ce qui visait ce service part avec lui (décision 44).
+                retrait.autorisations =
+                    retrait
+                        .autorisations
+                        .saturating_add(droits::oublier_ce_qui_vise(
+                            ecriture,
+                            depuis_clef(clef_service)?,
+                        )?);
             }
+            // Et ce qui visait la machine.
+            retrait.autorisations = retrait
+                .autorisations
+                .saturating_add(droits::oublier_ce_qui_vise(ecriture, quelle)?);
             retrait.services = retrait.services.saturating_add(siens.len());
             retrait.a_fermer.push(quelle);
         }
         retrait.machines = condamnees.len();
     }
 
-    // ── LES AUTORISATIONS, DANS LES DEUX SENS : retirées, non marquées ──────
-    {
-        let mut autorisations = ecriture.open_table(AUTORISATIONS)?;
-        let mut recues = ecriture.open_table(AUTORISATIONS_RECUES)?;
-        let mut accordees = ecriture.open_table(AUTORISATIONS_ACCORDEES)?;
-        let (debut, fin) = intervalle(qui);
-        let mut condamnees = Vec::new();
-        for entree in accordees.range(debut.as_slice()..fin.as_slice())? {
-            let (clef_index, clef_autorisation) = entree?;
-            condamnees.push((
-                clef_index.value().to_vec(),
-                clef_autorisation.value().to_vec(),
-            ));
-        }
-        for entree in recues.range(debut.as_slice()..fin.as_slice())? {
-            let (clef_index, clef_autorisation) = entree?;
-            condamnees.push((
-                clef_index.value().to_vec(),
-                clef_autorisation.value().to_vec(),
-            ));
-        }
-        for (_, clef_autorisation) in &condamnees {
-            // L'arête, puis ses deux entrées d'index — dont celle de l'AUTRE
-            // compte, qui ne doit plus rien voir. Une arête vue par les deux
-            // sens n'est retirée qu'une fois.
-            let Some(brut) = autorisations.remove(clef_autorisation.as_slice())? else {
-                continue;
-            };
-            let autorisation = Autorisation::lire(brut.value())?;
-            let quelle = depuis_clef(clef_autorisation)?;
-            recues.remove(paire(autorisation.a, quelle).as_slice())?;
-            accordees.remove(paire(autorisation.par, quelle).as_slice())?;
-            retrait.autorisations = retrait.autorisations.saturating_add(1);
-        }
-    }
+    // ── LES DROITS : accordés par lui, et ceux qui visent son compte ────────
+    //
+    // Ceux que ses groupes recevaient sont partis avec ses groupes, ceux qui
+    // visaient ses domaines avec ses domaines, ses machines et ses services
+    // ci-dessus : chacun là où ce qu'il visait s'efface.
+    retrait.autorisations = retrait
+        .autorisations
+        .saturating_add(droits::effacer_les_droits_du_compte(ecriture, qui)?);
 
     // ── LE COMPTE : sa réclamation retirée, sa marque posée ─────────────────
     {
@@ -4077,7 +3849,9 @@ fn provenance_de(operation: &Operation) -> Option<Provenance> {
         Operation::DomaineAlias { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::MachineDomaine { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Groupe { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::Droit { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::DomaineSupprime { .. }
+        | Operation::DroitRetire { .. }
         | Operation::GroupeEtiquette { .. }
         | Operation::GroupeMembre { .. }
         | Operation::GroupeMembreRetire { .. }
@@ -4172,12 +3946,21 @@ fn appliquer_dans(
             service,
             enregistrement,
         } => appliquer_service(ecriture, *service, enregistrement),
+        // **LUES ENCORE, CONVERTIES À L'APPLICATION** (décision 41) : une
+        // racine en retard tire peut-être un journal d'avant la conversion.
         Operation::Autorisation {
             autorisation,
             enregistrement,
-        } => appliquer_autorisation(ecriture, *autorisation, enregistrement),
+        } => droits::appliquer_autorisation(ecriture, *autorisation, enregistrement),
         Operation::AutorisationRevoquee { autorisation } => {
-            appliquer_autorisation_revoquee(ecriture, *autorisation, estampille)
+            droits::appliquer_droit_retire(ecriture, *autorisation, estampille)
+        }
+        Operation::Droit {
+            droit,
+            enregistrement,
+        } => droits::appliquer_droit(ecriture, *droit, enregistrement),
+        Operation::DroitRetire { droit } => {
+            droits::appliquer_droit_retire(ecriture, *droit, estampille)
         }
         Operation::CompteEfface {
             compte,
@@ -4926,67 +4709,6 @@ fn appliquer_service(
     Ok(())
 }
 
-/// `autorisation` — insérer si absent (`docs/replication.md` §5.2).
-fn appliquer_autorisation(
-    ecriture: &WriteTransaction,
-    quelle: Identifiant,
-    enregistrement: &Autorisation,
-) -> Result<(), Faute> {
-    // **UN COMPTE EFFACÉ N'ACCORDE NI NE REÇOIT PLUS RIEN** (§3.2) : l'autre
-    // partie ne doit jamais voir une arête vers un compte qui n'existe plus.
-    if compte_efface_dans(ecriture, enregistrement.par)?
-        || compte_efface_dans(ecriture, enregistrement.a)?
-    {
-        return Ok(());
-    }
-    let clef_autorisation = clef(quelle);
-    let mut table = ecriture.open_table(AUTORISATIONS)?;
-    if table.get(clef_autorisation.as_slice())?.is_some() {
-        return Ok(());
-    }
-    let autorisation = Autorisation {
-        provenance: Provenance::Ici,
-        ..*enregistrement
-    };
-    let mut octets = [0_u8; AUTORISATION_OCTETS];
-    autorisation.ecrire(&mut octets);
-    table.insert(clef_autorisation.as_slice(), &octets)?;
-    let mut recues = ecriture.open_table(AUTORISATIONS_RECUES)?;
-    recues.insert(
-        paire(autorisation.a, quelle).as_slice(),
-        clef_autorisation.as_slice(),
-    )?;
-    let mut accordees = ecriture.open_table(AUTORISATIONS_ACCORDEES)?;
-    accordees.insert(
-        paire(autorisation.par, quelle).as_slice(),
-        clef_autorisation.as_slice(),
-    )?;
-    Ok(())
-}
-
-/// `autorisation-revoquee` — marquer, TOUJOURS (`docs/replication.md` §5.2).
-fn appliquer_autorisation_revoquee(
-    ecriture: &WriteTransaction,
-    quelle: Identifiant,
-    estampille: Estampille,
-) -> Result<(), Faute> {
-    let clef_autorisation = clef(quelle);
-    let mut table = ecriture.open_table(AUTORISATIONS)?;
-    let avant = match table.get(clef_autorisation.as_slice())? {
-        Some(brut) => Autorisation::lire(brut.value())?,
-        None => return Ok(()),
-    };
-    let mut octets = [0_u8; AUTORISATION_OCTETS];
-    Autorisation {
-        estampille: avant.estampille.max(estampille),
-        revoquee: true,
-        ..avant
-    }
-    .ecrire(&mut octets);
-    table.insert(clef_autorisation.as_slice(), &octets)?;
-    Ok(())
-}
-
 /// Le titulaire de cet alias : la plus ancienne réclamation courante.
 fn titulaire(
     reclamations: &impl ReadableTable<&'static [u8], &'static [u8]>,
@@ -5495,6 +5217,12 @@ impl Reestampillable for Operation {
                 *ajout = apres;
                 bouge
             }
+            Self::Droit { enregistrement, .. } => {
+                let avant = *enregistrement;
+                enregistrement.estampille = sous(avant.estampille, de, vers);
+                enregistrement.retire = avant.retire.map(|quand| sous(quand, de, vers));
+                *enregistrement != avant
+            }
             Self::CleMachine { code, .. } => {
                 let apres = sous(*code, de, vers);
                 let bouge = apres != *code;
@@ -5512,6 +5240,7 @@ impl Reestampillable for Operation {
             | Self::GroupeEtiquette { .. }
             | Self::GroupeMembre { .. }
             | Self::GroupeSupprime { .. }
+            | Self::DroitRetire { .. }
             | Self::CompteEfface { .. } => false,
         }
     }
@@ -5704,6 +5433,8 @@ fn reestampiller(
     // L'estampille d'un ajout est dans la CLÉ de son adhésion : celles-là
     // changent de clé, comme une réclamation d'alias.
     combien = combien.saturating_add(groupes::reestampiller(ecriture, de, vers)?);
+    // ── LES DROITS ──────────────────────────────────────────────────────────
+    combien = combien.saturating_add(droits::reestampiller(ecriture, de, vers)?);
 
     // ── LE JOURNAL D'OPÉRATIONS ─────────────────────────────────────────────
     let mut journal = ecriture.open_table(OPERATIONS)?;
@@ -5740,7 +5471,7 @@ mod essais {
     //! base d'avant, et que cette clé est privée. L'exposer pour l'éprouver
     //! serait élargir la surface publique au bénéfice d'un seul essai.
 
-    use redb::Database;
+    use redb::{Database, ReadableDatabase, ReadableTableMetadata};
 
     use super::{CLEF_DE_L_ECRIT, CLEF_DES_RETIREES, Entrepot, Identifiant, Provenance, RACINE};
     use asl_id::Genre;
@@ -5895,6 +5626,143 @@ mod essais {
             let _ = std::fs::remove_file(&ou);
         }
         assert_eq!(enregistrements[0], enregistrements[1]);
+    }
+
+    #[test]
+    fn une_base_d_avant_les_droits_voit_ses_autorisations_converties_une_fois_au_meme_resultat() {
+        // **Décision 41** : deux bases, les mêmes autorisations d'hier — une
+        // vivante, une révoquée ; chacune convertit de son côté, et les deux
+        // arrivent aux mêmes droits, sous les mêmes `g-…`, octet pour octet.
+        // Les tables d'hier sont vidées, et la conversion ne se refait pas.
+        let par = Identifiant::depuis_entropie(Genre::Utilisateur, [0x51; 16]);
+        let a = Identifiant::depuis_entropie(Genre::Utilisateur, [0x52; 16]);
+        let machine = Identifiant::depuis_entropie(Genre::Machine, [0x53; 16]);
+        let vivante = Identifiant::depuis_entropie(Genre::Autorisation, [0x54; 16]);
+        let revoquee = Identifiant::depuis_entropie(Genre::Autorisation, [0x55; 16]);
+        let etiquette = asl_registre::NomRange::nouveau("le grenier").expect("il tient");
+        let hier = |portee, revoquee, compteur| asl_registre::Autorisation {
+            provenance: Provenance::Ici,
+            estampille: asl_registre::Estampille {
+                compteur,
+                racine: racine(),
+            },
+            par,
+            a,
+            portee,
+            revoquee,
+            etiquette,
+        };
+        let mut lus = Vec::new();
+        for quoi in ["droits-reprise-a", "droits-reprise-b"] {
+            let ou = chemin(quoi);
+            {
+                let base = Entrepot::ouvrir(&ou, racine()).expect("neuve");
+                base.creer_compte(par, Provenance::Ici, None)
+                    .expect("écrit");
+                base.creer_compte(a, Provenance::Ici, None).expect("écrit");
+                assert_eq!(
+                    base.autorisations_converties(),
+                    0,
+                    "une base neuve n'a rien à convertir"
+                );
+            }
+            {
+                // Une base d'hier : des autorisations dans leurs tables, et
+                // pas de marque de conversion.
+                let base = Database::open(&ou).expect("ouvrable");
+                let ecriture = base.begin_write().expect("écrivable");
+                {
+                    let mut table = ecriture.open_table(super::AUTORISATIONS).expect("la table");
+                    let mut recues = ecriture
+                        .open_table(super::AUTORISATIONS_RECUES)
+                        .expect("l'index");
+                    let mut accordees = ecriture
+                        .open_table(super::AUTORISATIONS_ACCORDEES)
+                        .expect("l'index");
+                    for (quelle, autorisation) in [
+                        (vivante, hier(asl_registre::Portee::ToutLeCompte, false, 3)),
+                        (
+                            revoquee,
+                            hier(asl_registre::Portee::UneMachine(machine), true, 4),
+                        ),
+                    ] {
+                        let mut octets = [0_u8; asl_registre::AUTORISATION_OCTETS];
+                        autorisation.ecrire(&mut octets);
+                        table
+                            .insert(super::clef(quelle).as_slice(), &octets)
+                            .expect("écrite");
+                        recues
+                            .insert(
+                                super::paire(a, quelle).as_slice(),
+                                super::clef(quelle).as_slice(),
+                            )
+                            .expect("indexée");
+                        accordees
+                            .insert(
+                                super::paire(par, quelle).as_slice(),
+                                super::clef(quelle).as_slice(),
+                            )
+                            .expect("indexée");
+                    }
+                    let mut racine_table = ecriture.open_table(RACINE).expect("la table racine");
+                    racine_table
+                        .remove(super::droits::CLEF_DES_DROITS)
+                        .expect("retirée");
+                }
+                ecriture.commit().expect("commis");
+            }
+            let reprise = Entrepot::ouvrir(&ou, racine()).expect("rouvrable");
+            assert_eq!(reprise.autorisations_converties(), 2);
+            let droit = reprise.droit(vivante).expect("lisible").expect("converti");
+            assert_eq!(droit.groupe, asl_registre::groupe_personnel(a));
+            assert_eq!(droit.element, par, "« tout mon compte » : le compte");
+            assert_eq!(droit.droits, asl_registre::Droits::D_UNE_AUTORISATION);
+            // Dans la forme d'hier, à l'identique.
+            assert_eq!(
+                reprise.autorisation(vivante).expect("lisible"),
+                Some(hier(asl_registre::Portee::ToutLeCompte, false, 3))
+            );
+            assert_eq!(
+                reprise.autorisation(revoquee).expect("lisible"),
+                Some(hier(asl_registre::Portee::UneMachine(machine), true, 4))
+            );
+            assert_eq!(reprise.autorisations_recues(a).expect("lisible").len(), 2);
+            assert_eq!(
+                reprise.autorisations_accordees(par).expect("lisible").len(),
+                2
+            );
+            // Et `a` voit tout ce que `par` possède, par le droit vivant.
+            assert_eq!(
+                reprise.acces(a, super::Voulu::Localiser).expect("lisible"),
+                vec![super::Acces {
+                    proprietaire: par,
+                    portee: asl_registre::Portee::ToutLeCompte,
+                }]
+            );
+            lus.push((
+                droit,
+                reprise.droit(revoquee).expect("lisible").expect("converti"),
+            ));
+            drop(reprise);
+            {
+                let base = Database::open(&ou).expect("ouvrable");
+                let lecture = base.begin_read().expect("lisible");
+                assert_eq!(
+                    lecture
+                        .open_table(super::AUTORISATIONS)
+                        .expect("la table")
+                        .len()
+                        .expect("comptable"),
+                    0,
+                    "les tables d'hier sont vidées"
+                );
+            }
+            let encore = Entrepot::ouvrir(&ou, racine()).expect("rouvrable");
+            assert_eq!(encore.autorisations_converties(), 0);
+            drop(encore);
+            let _ = std::fs::remove_file(&ou);
+        }
+        assert_eq!(lus[0], lus[1]);
     }
 
     #[test]

@@ -786,6 +786,12 @@ async fn avec_l_autorisation_le_meme_service_cesse_d_etre_introuvable() {
     .expect("le service est écrit");
 
     // **L'ARÊTE ENTRE LES DEUX COMPTES** : A autorise B, sur tout son compte.
+    // Les deux comptes existent : l'autorisation d'hier est un droit au groupe
+    // personnel de B, qui naît avec lui (décision 41).
+    for compte in [compte_a, compte_b] {
+        base.creer_compte(compte, Provenance::Ici, None)
+            .expect("le compte est écrit");
+    }
     base.accorder_autorisation(
         Identifiant::depuis_entropie(Genre::Autorisation, [0x01; 16]),
         Provenance::Ici,
@@ -1003,6 +1009,10 @@ async fn un_service_annonce_par_a_se_retrouve_chez_b_qui_y_a_droit() {
             secrete.publique().octets(),
             TOUT,
         );
+    }
+    for compte in [compte_a, compte_b] {
+        base.creer_compte(compte, Provenance::Ici, None)
+            .expect("le compte est écrit");
     }
     base.accorder_autorisation(
         Identifiant::depuis_entropie(Genre::Autorisation, [0x01; 16]),
@@ -5751,7 +5761,7 @@ async fn les_groupes_administrent_un_domaine_et_les_racines_se_nomment_sous_la_c
             "\"domaine\":\"{}\",\"proprietaire\":\"{}\"",
             domaine_a.texte().as_str(),
             compte_a.texte().as_str()
-        )) && liste.contains("\"droits\":[\"administrer\",\"rattacher\"]"),
+        )) && liste.contains("\"droits\":[\"administrer\",\"rattacher\",\"voir\"]"),
         "{liste}"
     );
     let alias_a = format!("/v1/domaines/{}/alias", domaine_a.texte().as_str());
@@ -5970,6 +5980,394 @@ async fn sans_cle_d_exploitant_les_administrateurs_n_existent_pas() {
     )
     .await;
     assert_eq!(statut, b"404");
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+// ── Les droits (`protocole.md` §2.2, `docs/modele.md` §2.13, 2026-09-27) ─────
+
+/// Le texte d'un identifiant.
+fn t(quoi: Identifiant) -> String {
+    quoi.texte().as_str().to_owned()
+}
+
+#[tokio::test]
+async fn les_droits_s_accordent_par_l_api_et_la_forme_d_hier_reste_a_l_octet() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // 1. **Un droit sur un domaine descend aux machines qui y sont rangées** :
+    //    A range sa machine dans son premier domaine, accorde `localiser` sur
+    //    le DOMAINE au groupe personnel de B, et la machine de B trouve le
+    //    port. Rien n'a été accordé sur la machine elle-même.
+    // 2. **Les verbes d'hier rendent exactement ce qu'ils rendaient** : le
+    //    corps que l'application Android envoie (clés dans l'ordre où elle
+    //    les pose), celui de l'application iOS (clés triées), et les octets
+    //    que les deux relisent — `{"autorisation":"g-…"}`, puis le tableau
+    //    de `GET /v1/autorisations`, champ pour champ, dans l'ordre d'hier.
+    // 3. **Un droit sur un domaine n'a pas de forme d'hier** : il ne paraît
+    //    pas dans `GET /v1/autorisations`, et paraît dans `GET /v1/droits`.
+    let (autorite, racine, chaine, cle) = materiel("droits-api");
+    let (base, fichier) = entrepot("droits-api");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    // ── A : COMPTE, MACHINE ENRÔLÉE ET RANGÉE, SERVICE ANNONCÉ ──────────────
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA1).await;
+    let maison = asl_registre::premier_domaine(compte_a);
+    let (statut, rendu) = poster(
+        &mut alice,
+        8,
+        b"/v1/machines",
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let machine_a = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let code_a = valeur_json(&rendu, "code");
+    let mut daemon = connecter(&racine, adresse).await;
+    let secrete_a = asl_cle::CleSecrete::depuis_entropie([0xD1; 32]);
+    assert_eq!(
+        enroler(&mut daemon, 0, &code_a, &secrete_a).await,
+        machine_a
+    );
+    let rangement = format!(r#"{{"domaine":"{}"}}"#, t(maison));
+    let chemin_rangement = format!("/v1/machines/{}/domaine", t(machine_a));
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            12,
+            chemin_rangement.as_bytes(),
+            rangement.as_bytes()
+        )
+        .await,
+        b"204"
+    );
+    authentifier(&mut daemon, machine_a, &secrete_a, 12, 16).await;
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}]}}"#,
+        t(machine_a)
+    );
+    let (statut, _) = poster(
+        &mut daemon,
+        20,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"200");
+
+    // ── B : COMPTE ET MACHINE DE LECTURE ────────────────────────────────────
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, _, _) = creer_un_compte(&mut bob, 0, 0xB1).await;
+    let (statut, rendu) = poster(
+        &mut bob,
+        8,
+        b"/v1/machines",
+        br#"{"nom":"portable","capacites":["lecture"]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    let machine_b = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let code_b = valeur_json(&rendu, "code");
+    let mut chercheur = connecter(&racine, adresse).await;
+    let secrete_b = asl_cle::CleSecrete::depuis_entropie([0xD2; 32]);
+    assert_eq!(
+        enroler(&mut chercheur, 0, &code_b, &secrete_b).await,
+        machine_b
+    );
+    authentifier(&mut chercheur, machine_b, &secrete_b, 12, 16).await;
+    let cible = format!("/v1/ou/{}/depot", t(machine_a));
+    let mut chercher = async |flux: u64| -> Vec<u8> {
+        ams_quic_client::envoyer_une_requete(&mut chercheur, flux, 17, cible.as_bytes(), None, b"")
+            .await;
+        let _ = ams_quic_client::attendre_la_reponse(&mut chercheur, flux).await;
+        champ(&champs(chercheur.recu(flux)), b":status")
+            .expect("un statut")
+            .to_vec()
+    };
+    assert_eq!(chercher(20).await, b"404", "rien n'est accordé");
+
+    // ── A ACCORDE `localiser` SUR SON DOMAINE AU GROUPE PERSONNEL DE B ─────
+    let demande = format!(
+        r#"{{"groupe":"{}","element":"{}","droits":["localiser"],"etiquette":"maison"}}"#,
+        t(asl_registre::groupe_personnel(compte_b)),
+        t(maison)
+    );
+    let (statut, rendu) = poster(
+        &mut alice,
+        16,
+        b"/v1/droits",
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let sur_le_domaine = Identifiant::analyser(&valeur_json(&rendu, "droit")).expect("un droit");
+    assert_eq!(
+        String::from_utf8_lossy(&rendu),
+        format!(r#"{{"droit":"{}"}}"#, t(sur_le_domaine))
+    );
+    assert_eq!(
+        chercher(24).await,
+        b"200",
+        "le droit sur le domaine descend à la machine"
+    );
+
+    // B le voit dans ses droits ; aucun des deux ne le voit dans la forme
+    // d'hier.
+    let rendu_droit = format!(
+        r#"{{"droit":"{}","groupe":"{}","element":"{}","droits":["localiser"],"etiquette":"maison","par":"{}","retire":false}}"#,
+        t(sur_le_domaine),
+        t(asl_registre::groupe_personnel(compte_b)),
+        t(maison),
+        t(compte_a)
+    );
+    let (statut, liste) = lire_json(&mut bob, 12, b"/v1/droits").await;
+    assert_eq!(
+        (statut.as_slice(), liste.as_str()),
+        (&b"200"[..], format!("[{rendu_droit}]").as_str())
+    );
+    let (statut, liste) = lire_json(&mut alice, 20, b"/v1/autorisations").await;
+    assert_eq!((statut.as_slice(), liste.as_str()), (&b"200"[..], "[]"));
+
+    // ── LA FORME D'HIER, À L'OCTET ──────────────────────────────────────────
+    //
+    // Le corps d'Android, clés dans l'ordre où `JSONObject` les pose.
+    let android = format!(
+        r#"{{"a":"{}","portee":"tout","etiquette":"banc d'essai"}}"#,
+        t(compte_b)
+    );
+    let (statut, rendu) = poster(
+        &mut alice,
+        24,
+        b"/v1/autorisations",
+        android.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    let tout = Identifiant::analyser(&valeur_json(&rendu, "autorisation")).expect("un g-…");
+    assert_eq!(
+        String::from_utf8_lossy(&rendu),
+        format!(r#"{{"autorisation":"{}"}}"#, t(tout)),
+        "la réponse d'hier, à l'octet"
+    );
+    let hier_tout = |revoquee: bool| {
+        format!(
+            r#"{{"autorisation":"{}","par":"{}","a":"{}","portee":"tout","revoquee":{revoquee},"etiquette":"banc d'essai"}}"#,
+            t(tout),
+            t(compte_a),
+            t(compte_b)
+        )
+    };
+    let (_, liste) = lire_json(&mut alice, 28, b"/v1/autorisations").await;
+    assert_eq!(liste, format!("[{}]", hier_tout(false)), "A, à l'octet");
+    let (_, liste) = lire_json(&mut bob, 16, b"/v1/autorisations").await;
+    assert_eq!(liste, format!("[{}]", hier_tout(false)), "B, à l'octet");
+
+    // Le corps d'iOS, clés triées, sur une machine.
+    let ios = format!(
+        r#"{{"a":"{}","etiquette":"le grenier","portee":"{}"}}"#,
+        t(compte_b),
+        t(machine_a)
+    );
+    let (statut, rendu) = poster(
+        &mut alice,
+        32,
+        b"/v1/autorisations",
+        ios.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    let sur_la_machine =
+        Identifiant::analyser(&valeur_json(&rendu, "autorisation")).expect("un g-…");
+    let hier_machine = format!(
+        r#"{{"autorisation":"{}","par":"{}","a":"{}","portee":"{}","revoquee":false,"etiquette":"le grenier"}}"#,
+        t(sur_la_machine),
+        t(compte_a),
+        t(compte_b),
+        t(machine_a)
+    );
+    let (_, liste) = lire_json(&mut bob, 20, b"/v1/autorisations").await;
+    assert!(
+        liste.starts_with('[')
+            && liste.ends_with(']')
+            && liste.contains(&hier_tout(false))
+            && liste.contains(&hier_machine)
+            && liste.len() == hier_tout(false).len() + hier_machine.len() + 3,
+        "{liste}"
+    );
+
+    // ── RETIRER, PAR LES DEUX VOIES ─────────────────────────────────────────
+    assert_eq!(
+        retirer(
+            &mut bob,
+            24,
+            format!("/v1/droits/{}", t(sur_le_domaine)).as_bytes()
+        )
+        .await,
+        b"403",
+        "B voit le droit qu'il a reçu, et ne le retire pas"
+    );
+    assert_eq!(
+        retirer(
+            &mut alice,
+            36,
+            format!("/v1/droits/{}", t(sur_le_domaine)).as_bytes()
+        )
+        .await,
+        b"204"
+    );
+    assert_eq!(
+        chercher(28).await,
+        b"200",
+        "les autorisations d'hier tiennent encore"
+    );
+    for (flux, quelle) in [(40, tout), (44, sur_la_machine)] {
+        assert_eq!(
+            retirer(
+                &mut alice,
+                flux,
+                format!("/v1/autorisations/{}", t(quelle)).as_bytes()
+            )
+            .await,
+            b"204"
+        );
+    }
+    assert_eq!(chercher(32).await, b"404", "plus rien n'est accordé");
+    let (_, liste) = lire_json(&mut alice, 48, b"/v1/autorisations").await;
+    assert!(
+        liste.contains(&hier_tout(true)),
+        "retirée, et marquée : {liste}"
+    );
+    let (_, liste) = lire_json(&mut alice, 52, b"/v1/droits").await;
+    assert!(
+        liste.contains(&rendu_droit.replace("\"retire\":false", "\"retire\":true")),
+        "{liste}"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn un_droit_accorde_reveille_les_membres_du_groupe_et_un_ajout_aussi() {
+    // **`docs/modele.md` §2.13** : un droit accordé réveille les membres du
+    // groupe qui le reçoit ; ajouter un compte à un groupe qui porte des
+    // droits réveille ce compte. La ligne garde son genre — c'est sur elle
+    // que les applications déployées relisent.
+    let (autorite, racine, chaine, cle) = materiel("droits-reveil");
+    let (base, fichier) = entrepot("droits-reveil");
+    let (adresse, dire_stop, tache) = lever_avec_reveil(&chaine, &cle, Arc::new(base), None).await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA4).await;
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, _, _) = creer_un_compte(&mut bob, 0, 0xB4).await;
+    let mut carole = connecter(&racine, adresse).await;
+    let (compte_c, _, _) = creer_un_compte(&mut carole, 0, 0xC4).await;
+    let maison = asl_registre::premier_domaine(compte_a);
+
+    // Un groupe « Famille » dans le domaine d'Alice, Bob dedans.
+    let (statut, rendu) = poster(
+        &mut alice,
+        8,
+        format!("/v1/domaines/{}/groupes", t(maison)).as_bytes(),
+        br#"{"etiquette":"Famille"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let famille = Identifiant::analyser(&valeur_json(&rendu, "groupe")).expect("un groupe");
+    let membres = format!("/v1/groupes/{}/membres", t(famille));
+    let (statut, _) = poster(
+        &mut alice,
+        12,
+        membres.as_bytes(),
+        format!(r#"{{"compte":"{}"}}"#, t(compte_b)).as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+
+    // Bob et Carole écoutent leurs nouvelles.
+    for client in [&mut bob, &mut carole] {
+        ams_quic_client::envoyer_une_requete(client, 12, 17, b"/v1/nouvelles", None, b"").await;
+        let depart = std::time::Instant::now();
+        while client.recu(12).is_empty() && depart.elapsed() < std::time::Duration::from_secs(10) {
+            client.parler().await;
+            client.ecouter().await;
+        }
+        assert_eq!(
+            champ(&champs(client.recu(12)), b":status"),
+            Some(&b"200"[..])
+        );
+    }
+    let ligne_recue = |client: &ams_quic_client::Client| {
+        client
+            .recu(12)
+            .windows(12)
+            .any(|fenetre| fenetre == b"autorisation")
+    };
+
+    // Un droit au groupe : Bob est réveillé, Carole non.
+    let demande = format!(
+        r#"{{"groupe":"{}","element":"{}","droits":["voir"],"etiquette":"famille"}}"#,
+        t(famille),
+        t(maison)
+    );
+    let (statut, rendu) = poster(
+        &mut alice,
+        16,
+        b"/v1/droits",
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    acquitter_jusqu_au_silence(&mut alice).await;
+    assert!(
+        ecouter_sans_parler(&mut bob, std::time::Duration::from_secs(3), |bob| {
+            ligne_recue(bob)
+        })
+        .await
+        .is_some(),
+        "Bob, membre du groupe, est réveillé"
+    );
+
+    // Carole ajoutée au groupe, qui porte désormais un droit : réveillée.
+    let (statut, _) = poster(
+        &mut alice,
+        20,
+        membres.as_bytes(),
+        format!(r#"{{"compte":"{}"}}"#, t(compte_c)).as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+    assert!(
+        ecouter_sans_parler(&mut carole, std::time::Duration::from_secs(3), |carole| {
+            ligne_recue(carole)
+        })
+        .await
+        .is_some(),
+        "Carole, ajoutée à un groupe qui porte un droit, est réveillée"
+    );
+    // Et Carole voit maintenant le domaine d'Alice, avec `voir`.
+    let (_, liste) = lire_json(&mut carole, 16, b"/v1/domaines").await;
+    assert!(
+        liste.contains(&t(maison)) && liste.contains(r#""droits":["voir"]"#),
+        "{liste}"
+    );
+
     let _ = dire_stop.send(());
     let _ = tache.await;
     let _ = std::fs::remove_dir_all(&autorite);

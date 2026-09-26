@@ -492,6 +492,8 @@ pub(crate) fn effacer_les_domaines(
     let siens = domaines_du_compte_dans(ecriture, compte)?;
     for (domaine, _) in &siens {
         effacer_l_alias(ecriture, *domaine)?;
+        // Ce qui visait ce domaine part avec lui (décision 44).
+        crate::droits::oublier_ce_qui_vise(ecriture, *domaine)?;
         ecriture
             .open_table(DOMAINES)?
             .remove(clef(*domaine).as_slice())?;
@@ -951,15 +953,14 @@ impl Entrepot {
     }
 
     /// Cette machine vaut-elle rangée dans ce domaine ? Le domaine vivant, et
-    /// son propriétaire à elle qui l'administre.
+    /// son propriétaire à elle qui peut y ranger — il l'administre, ou l'un de
+    /// ses groupes a reçu `rattacher` sur lui (décision 43, étendue par la
+    /// 44).
     fn rangee_la(&self, machine: Identifiant, domaine: Identifiant) -> Result<bool, Faute> {
-        if self.domaine(domaine)?.is_none() {
-            return Ok(false);
-        }
         let Some(rangee) = self.machine(machine)? else {
             return Ok(false);
         };
-        self.administre(rangee.proprietaire, domaine)
+        self.peut_ranger(rangee.proprietaire, domaine)
     }
 
     /// Les machines rangées dans ce domaine, s'il est vivant — celles dont le

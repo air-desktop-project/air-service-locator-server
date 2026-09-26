@@ -45,6 +45,7 @@
 
 pub mod corps;
 pub mod domaine;
+pub mod droit;
 pub mod groupe;
 pub mod point;
 
@@ -532,6 +533,15 @@ pub enum Ressource<'a> {
         /// Le compte à retirer.
         compte: Identifiant,
     },
+    /// `/v1/droits` — **les droits que j'ai accordés, et ceux que mes groupes
+    /// ont reçus** (`GET`), ou en accorder un (`POST`) (`protocole.md` §2.2,
+    /// 2026-09-27).
+    Droits,
+    /// `/v1/droits/{g}` — le retirer.
+    Droit {
+        /// Le droit visé.
+        droit: Identifiant,
+    },
     /// `/v1/replication` — **l'état de la voie entre racines, vu d'ici**
     /// (`replication.md` §8) : le pair, la voie ouverte ou coupée, notre
     /// compteur, et jusqu'où l'on a appliqué ce que le pair a écrit — ou
@@ -587,6 +597,7 @@ impl Ressource<'_> {
             | Self::Autorisation { .. }
             | Self::Exposition { .. }
             | Self::MembreGroupe { .. }
+            | Self::Droit { .. }
             | Self::Administrateur { .. } => &[Methode::Delete],
             Self::PousseeAppareil { .. } | Self::DescriptionAppareil { .. } => &[Methode::Put],
             Self::Domaine { .. } => &[Methode::Get, Methode::Delete],
@@ -598,9 +609,11 @@ impl Ressource<'_> {
             | Self::GroupesDomaine { .. }
             | Self::MembresGroupe { .. } => &[Methode::Post],
             Self::Groupe { .. } => &[Methode::Get, Methode::Patch, Methode::Delete],
-            Self::Appareils | Self::Machines | Self::Autorisations | Self::Domaines => {
-                &[Methode::Get, Methode::Post]
-            }
+            Self::Appareils
+            | Self::Machines
+            | Self::Autorisations
+            | Self::Domaines
+            | Self::Droits => &[Methode::Get, Methode::Post],
             Self::Alias => &[Methode::Put, Methode::Delete],
         }
     }
@@ -1007,6 +1020,10 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "groupes", groupe, "membres", compte] => Ok(Ressource::MembreGroupe {
             groupe: identifiant(groupe, Genre::Ensemble)?,
             compte: identifiant(compte, Genre::Utilisateur)?,
+        }),
+        ["v1", "droits"] => Ok(Ressource::Droits),
+        ["v1", "droits", droit] => Ok(Ressource::Droit {
+            droit: identifiant(droit, Genre::Autorisation)?,
         }),
         ["v1", "administrateurs"] => Ok(Ressource::Administrateurs),
         ["v1", "administrateurs", compte] => Ok(Ressource::Administrateur {

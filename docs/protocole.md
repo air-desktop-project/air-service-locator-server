@@ -756,13 +756,13 @@ l'empêcherait de comprendre.
 | `GET /v1/expositions` | **Ce qui est exposé de MOI**, relation par relation. Tout utilisateur, pas seulement l'administrateur. |
 | `DELETE /v1/expositions/{relation}` | **Retire mes enregistrements** de cette exposition. Portée : tout mon compte, ou telle machine. |
 | `POST /v1/domaines` | **Crée un domaine** à MON compte (2026-09-26, `modele.md` §2.11), alias facultatif : `{"alias":"Maison"}`. `201`, `{"domaine":"d-…"}`. Le premier est créé par `POST /v1/comptes`, dans sa transaction. |
-| `GET /v1/domaines` | **Les domaines que je possède et ceux où l'un de mes groupes tient un droit** (en 0.24.0 : ceux que je possède, puis ceux dont je suis membre du groupe d'administrateurs — `"droits":["administrer","rattacher"]` —, et le domaine racine pour ses administrateurs — `["administrer"]` ; les droits accordés à d'autres groupes viennent avec la PR suivante) : `[{"domaine":"d-…","proprietaire":"u-…","alias":"Maison","heberge_par":"racines"\|"n-…","droits":["administrer","voir",…]}]` — `droits` est l'union de ce que je peux sur ce domaine (`modele.md` §2.13). Le domaine racine n'y figure que pour ses administrateurs. |
+| `GET /v1/domaines` | **Les domaines que je possède et ceux où l'un de mes groupes tient un droit** (0.25.0 ; le propriétaire tient les quatre, le groupe d'administrateurs `["administrer","rattacher","voir"]`, le domaine racine `["administrer"]` à ses administrateurs) : `[{"domaine":"d-…","proprietaire":"u-…","alias":"Maison","heberge_par":"racines"\|"n-…","droits":["administrer","voir",…]}]` — `droits` est l'union de ce que je peux sur ce domaine (`modele.md` §2.13). Le domaine racine n'y figure que pour ses administrateurs. |
 | `GET /v1/domaines?alias=…` | **La recherche par alias** : correspondance exacte après NFC et pliage simple de casse ; `[{"domaine":"d-…","autorite":"racines"\|"n-…"}]`, **tous** ceux qui portent l'alias, et `[]` si aucun. Ni propriétaire, ni machine. Servie sur la voie appareil **et** sur la voie machine — tout compte authentifié —, jamais sans preuve. Voir ci-dessous. |
-| `GET /v1/domaines/{d}` | Le domaine, ses groupes, et les machines qui y sont rattachées — `m-…` et propriétaire ; le nom, pour mes machines **et** pour qui a `voir` sur le domaine. Ceux qui ont `voir` ou `administrer` ; les autres, `404`. **En 0.24.0** : ses administrateurs — propriétaire compris —, les champs de `GET /v1/domaines` suivis de `"groupes":[{"groupe","domaine","etiquette"?,"sorte"}]` et `"machines":[…]`. Une machine n'y figure que si son propriétaire administre encore le domaine (`modele.md` §2.11). Un domaine supprimé rend `404`. |
+| `GET /v1/domaines/{d}` | Le domaine, ses groupes, et les machines qui y sont rattachées — `m-…` et propriétaire ; le nom, pour mes machines **et** pour qui a `voir` sur le domaine. Qui tient un droit sur le domaine ; les autres, `404`. Les champs de `GET /v1/domaines` suivis de `"groupes":[{"groupe","domaine","etiquette"?,"sorte"}]` — **pour qui l'administre**, vide sinon — et `"machines":[…]` — **pour qui le voit** (`voir`, `localiser` ou `administrer`), vide sinon. Une machine n'y figure que si son propriétaire peut encore y ranger — il l'administre, ou tient `rattacher` (`modele.md` §2.11). Un domaine supprimé rend `404`. |
 | `PUT /v1/domaines/{d}/alias` | Pose ou change l'alias : `{"alias":"Maison"}`. `administrer`. **Jamais `409`** : l'alias de domaine n'est pas unique. `400` s'il n'est pas de l'UTF-8 admis (`modele.md` §2.11). |
 | `DELETE /v1/domaines/{d}/alias` | Le retire. |
 | ~~`PUT`/`DELETE /v1/domaines/{d}/delegues/{u}`~~ | **Retirés le 2026-09-26** : déléguer, c'est ajouter au groupe d'administrateurs (`POST /v1/groupes/{e}/membres`). |
-| `PUT /v1/machines/{m}/domaine` | **Rattache** MA machine : `{"domaine":"d-…"}` — un domaine où je tiens `rattacher` (ou que je possède ; en 0.24.0, un domaine que j'administre — propriétaire ou membre du groupe d'administrateurs). Une machine déjà rattachée est **déplacée**. `403` sans le droit ; `404` si la machine n'est pas à moi, ou si le domaine n'existe pas ou plus. |
+| `PUT /v1/machines/{m}/domaine` | **Rattache** MA machine : `{"domaine":"d-…"}` — un domaine où je tiens `rattacher` — reçu, ou emporté par `administrer` : propriétaire, groupe d'administrateurs, ou droit reçu. Une machine déjà rattachée est **déplacée**. `403` sans le droit ; `404` si la machine n'est pas à moi, ou si le domaine n'existe pas ou plus. |
 | `DELETE /v1/machines/{m}/domaine` | La détache : elle n'a plus de domaine. |
 | `DELETE /v1/domaines/{d}` | Supprime un domaine : ses machines détachées, son alias, ses groupes et les droits qui le visent retirés. **`409` si c'est mon dernier.** Propriétaire seulement ; le domaine racine ne se supprime pas. |
 | `POST /v1/annuaires` | **Déclare MON annuaire local** : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription — dix symboles, à usage unique, comme un code d'enrôlement. L'annuaire le présente aux racines avec sa clé d'identité (§3 ter) ; l'inscription est alors **en attente**. |
@@ -779,9 +779,9 @@ l'empêcherait de comprendre.
 | `POST /v1/groupes/{e}/membres` | **Ajoute un compte** : `{"compte":"u-…"}` ; `204` ; `404` si le compte n'existe pas, `409` s'il est déjà membre. `administrer` sur le domaine du groupe. **Réveille le compte ajouté si le groupe porte des droits** (`modele.md` §2.13). `403` sur un groupe personnel, et sur celui du domaine racine. |
 | `DELETE /v1/groupes/{e}/membres/{u}` | **Retire un membre**. Effet immédiat. `administrer`, ou le membre lui-même qui s'en va. `409` pour le propriétaire dans son groupe d'administrateurs. Retirer `rattacher` à quelqu'un détache ses machines du domaine. |
 | `DELETE /v1/groupes/{e}` | Supprime un groupe — ses membres et les droits qu'il reçoit partent avec. `administrer`. `409` pour un groupe d'administrateurs ou un groupe personnel. |
-| `POST /v1/droits` | **Accorde** : `{"groupe":"e-…","element":"d-…"\|"m-…"\|"s-…","droits":["localiser"],"etiquette":"…"}` ; `201`, `{"droit":"g-…"}`. `administrer` sur le domaine de l'élément, ou propriétaire de la machine visée. `400` pour un droit sans sens sur cet élément (`rattacher` sur une machine). **Réveille les membres du groupe.** |
-| `GET /v1/droits` | **Les droits que j'ai accordés, et ceux que mes groupes ont reçus** : `[{"droit":"g-…","groupe":"e-…","element":"…","droits":[…],"etiquette":"…","par":"u-…","retire":false}]`. Les retirés y restent, marqués. |
-| `DELETE /v1/droits/{g}` | **Retire** un droit. Effet immédiat. Celui qui l'a accordé, ou `administrer` sur le domaine de l'élément. |
+| `POST /v1/droits` | **Accorde** : `{"groupe":"e-…","element":"d-…"\|"m-…"\|"s-…","droits":["localiser"],"etiquette":"…"}` ; `201`, `{"droit":"g-…"}`. `administrer` sur le domaine de l'élément, ou propriétaire de la machine visée. `400` pour un droit sans sens sur cet élément (`rattacher` sur une machine) ; `404` pour un groupe inconnu ou supprimé, et pour un élément que je ne vois pas ; `403` pour un élément que je vois sans pouvoir y accorder. **Réveille les membres du groupe**, moi excepté (0.25.0). |
+| `GET /v1/droits` | **Les droits que j'ai accordés, ceux que mes groupes ont reçus, et ceux qui visent ce que je possède ou que j'administre** — un domaine, une machine, ses services —, pour voir et retirer ce qu'un administrateur a partagé de ma machine ; chacun une fois : `[{"droit":"g-…","groupe":"e-…","element":"…","droits":[…],"etiquette":"…","par":"u-…","retire":false}]`. Les retirés y restent, marqués. |
+| `DELETE /v1/droits/{g}` | **Retire** un droit. Effet immédiat. Celui qui l'a accordé, ou qui a aujourd'hui le pouvoir d'accorder sur l'élément. `204`, déjà retiré compris — le retrait garde sa première estampille ; `403` pour un membre du groupe qui l'a reçu ; `404` pour les autres. |
 
 ### `GET /v1/vu` — d'où l'annuaire voit cette connexion
 
@@ -1270,9 +1270,9 @@ et elle demande un compte pour être interrogée.
 
 ### Les autorisations d'hier — servies comme une vue des droits
 
-**Décidé le 2026-09-26 (Thierry) que les autorisations deviennent des droits ;
-proposé : que leurs verbes restent servis pendant la transition**
-(`modele.md` §2.13, `replication.md` décision 41). Les applications déployées —
+**Décidé le 2026-09-26 (Thierry) que les autorisations deviennent des droits,
+et que leurs verbes restent servis pendant la transition** (`modele.md` §2.13,
+`replication.md` décisions 41 et 44 ; codé en 0.25.0). Les applications déployées —
 Android 0.11, iOS/macOS 0.13 — accordent, listent et retirent par
 `/v1/autorisations`. Les casser le jour de la mise à jour des racines serait
 couper le partage à tous ceux qui ne mettent pas leur application à jour. Les
@@ -1281,7 +1281,7 @@ trois verbes restent donc, **comme une vue** :
 | Verbe | Ce qu'il fait désormais |
 |---|---|
 | `POST /v1/autorisations` `{"a":"u-…","portee":…,"etiquette":…}` | Écrit un droit `voir` + `localiser` **au groupe personnel** de `u-…`, sur l'élément que nomme la portée — le service, la machine, ou **le compte** pour « tout mon compte ». Rend `{"autorisation":"g-…"}`, l'identifiant du droit. Réveille, comme avant. |
-| `GET /v1/autorisations` | Rend, **sous la forme d'hier**, les droits qui s'y laissent dire : accordés par moi à un groupe personnel (`a` = son titulaire), et reçus par un de mes groupes (`a` = moi, et un champ **nouveau**, `groupe`, qu'une application d'hier ignore). Un droit sans `localiser` n'y figure pas : ce n'était pas une autorisation. |
+| `GET /v1/autorisations` | Rend, **sous la forme d'hier**, les droits qui s'y laissent dire : accordés par moi à un groupe personnel (`a` = son titulaire), et reçus par un de mes groupes (`a` = moi). **Octet pour octet la forme d'hier** — aucun champ nouveau : un droit converti se rend exactement comme l'autorisation qu'il était (décision 44). Un droit sans `localiser`, ou sur un domaine, n'y figure pas : ce n'était pas une autorisation. |
 | `DELETE /v1/autorisations/{g}` | Retire le droit `g-…`. |
 
 **La ligne du flux des nouvelles garde son genre**, `{"quoi":"autorisation"}` :

@@ -34,6 +34,10 @@
 //!    non vide, soixante-quatre octets au plus, rien de refusé ; un ajout
 //!    nomme un `u-…` ; la preuve d'un exploitant a sa longueur exacte, le
 //!    genre `o` en tête, et nomme un compte.
+//! 9. **UNE DEMANDE DE DROIT ACCEPTÉE A LA FORME QUE L'ÉTAGE 3 SUPPOSE**
+//!    (2026-09-27) : un groupe, un élément domaine, machine ou service, au
+//!    moins un droit connu, une étiquette aux règles d'un nom — et elle se
+//!    relit à l'identique une fois réécrite.
 //! 5. **UN ALIAS ACCEPTÉ RESTE DE L'ASCII GRAPHIQUE.** C'est la propriété qui
 //!    sépare une CLÉ d'un texte d'affichage : l'alias se cherche, se compare, et
 //!    repart dans un chemin — deux écritures d'une même valeur feraient croire à
@@ -119,6 +123,28 @@ const fn invisible(caractere: char) -> bool {
 }
 
 fuzz_target!(|octets: &[u8]| {
+    // ── 9. LES DROITS ───────────────────────────────────────────────────────
+    //
+    // Une demande acceptée porte un groupe, un élément d'un des trois genres
+    // admis, au moins un droit connu, une étiquette aux règles d'un nom ; et
+    // elle se réécrit en une demande que le décodeur relit à l'identique.
+    if let Ok(demande) = asl_api::droit::DemandeDeDroit::decoder(octets) {
+        assert_eq!(demande.groupe.genre(), asl_id::Genre::Ensemble);
+        assert!(matches!(
+            demande.element.genre(),
+            asl_id::Genre::Domaine | asl_id::Genre::Machine | asl_id::Genre::Service
+        ));
+        assert!(demande.droits != 0 && demande.droits & !0b1111 == 0);
+        assert!(!demande.etiquette.is_empty() && demande.etiquette.len() <= NOM_MACHINE_MAX);
+        let mut sortie = [0_u8; 1024];
+        let combien = demande.encoder(&mut sortie).expect("elle tient");
+        assert_eq!(
+            asl_api::droit::DemandeDeDroit::decoder(&sortie[..combien]),
+            Ok(demande),
+            "une demande réécrite ne se relit pas"
+        );
+    }
+
     // ── 8. LES GROUPES ──────────────────────────────────────────────────────
     if let Ok(etiquetage) = Etiquetage::decoder(octets) {
         let texte = etiquetage.etiquette;

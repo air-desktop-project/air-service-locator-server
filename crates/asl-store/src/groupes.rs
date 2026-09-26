@@ -34,7 +34,7 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
 use crate::{
     COMPTES, Entrepot, Faute, RACINE, Suite, clef, compte_efface_dans, depuis_clef, domaines,
-    estampiller, intervalle, journaliser_l_operation, paire,
+    droits, estampiller, intervalle, journaliser_l_operation, paire,
 };
 
 /// Les groupes, par leur identifiant — ceux qui se déduisent comme ceux qu'on
@@ -570,6 +570,8 @@ fn marquer(
         .open_table(MARQUES_DE_GROUPES)?
         .insert(clef(groupe).as_slice(), &octets)?;
     oublier_les_adhesions_du_groupe(ecriture, groupe)?;
+    // Et ce qu'il avait reçu : un droit à un groupe marqué ne revient pas.
+    droits::oublier_les_droits_du_groupe(ecriture, groupe)?;
     Ok(())
 }
 
@@ -786,13 +788,14 @@ pub(crate) fn appliquer_groupe_supprime(
 // ── L'effacement d'un compte ────────────────────────────────────────────────
 
 /// Retire ce groupe entièrement : l'enregistrement, son index, sa marque, ses
-/// adhésions.
+/// adhésions, et les droits qu'il avait reçus — dont il rend le nombre.
 fn effacer_le_groupe(
     ecriture: &WriteTransaction,
     groupe: Identifiant,
     rattache: Identifiant,
-) -> Result<(), Faute> {
+) -> Result<usize, Faute> {
     oublier_les_adhesions_du_groupe(ecriture, groupe)?;
+    let droits_partis = droits::oublier_les_droits_du_groupe(ecriture, groupe)?;
     ecriture
         .open_table(GROUPES)?
         .remove(clef(groupe).as_slice())?;
@@ -802,7 +805,7 @@ fn effacer_le_groupe(
     ecriture
         .open_table(MARQUES_DE_GROUPES)?
         .remove(clef(groupe).as_slice())?;
-    Ok(())
+    Ok(droits_partis)
 }
 
 /// Les groupes rangés sous ce rattaché.
@@ -828,12 +831,13 @@ fn groupes_rattaches(
 /// son groupe personnel part ; **chacune de ses adhésions** part, retraits
 /// compris. Ce qui arriverait ensuite pour lui est refusé, puisque le compte
 /// est effacé ; pour ses domaines, puisqu'ils sont inconnus. Rend combien de
-/// groupes sont partis.
+/// groupes sont partis, et combien de droits ils emportaient.
 pub(crate) fn effacer_les_groupes(
     ecriture: &WriteTransaction,
     compte: Identifiant,
-) -> Result<usize, Faute> {
+) -> Result<(usize, usize), Faute> {
     let mut partis = 0_usize;
+    let mut droits_partis = 0_usize;
     let mut siens = Vec::new();
     {
         let index = ecriture.open_table(domaines::DOMAINES_PAR_COMPTE)?;
@@ -846,7 +850,8 @@ pub(crate) fn effacer_les_groupes(
     siens.push(compte);
     for rattache in siens {
         for groupe in groupes_rattaches(ecriture, rattache)? {
-            effacer_le_groupe(ecriture, groupe, rattache)?;
+            droits_partis =
+                droits_partis.saturating_add(effacer_le_groupe(ecriture, groupe, rattache)?);
             partis = partis.saturating_add(1);
         }
     }
@@ -866,7 +871,7 @@ pub(crate) fn effacer_les_groupes(
         adhesions.remove(clef_d_adhesion(groupe, qui, ajout).as_slice())?;
         index.remove(clef_index.as_slice())?;
     }
-    Ok(partis)
+    Ok((partis, droits_partis))
 }
 
 // ── L'instantané ────────────────────────────────────────────────────────────
@@ -1132,9 +1137,59 @@ impl Entrepot {
     ///
     /// [`Faute::Base`] ou [`Faute::Enregistrement`].
     pub fn administre(&self, compte: Identifiant, domaine: Identifiant) -> Result<bool, Faute> {
+        let par_le_groupe = {
+            let lecture = self.base.begin_read()?;
+            vue!(lecture, vue);
+            vue.administre(compte, domaine)?
+        };
+        // **OU PAR UN DROIT `administrer` REÇU SUR LUI** (décision 40) — jamais
+        // sur le domaine racine, qui ne s'administre que par son groupe.
+        Ok(par_le_groupe
+            || (domaine != domaine_racine()
+                && self.domaine(domaine)?.is_some()
+                && self
+                    .droits_recus_sur(compte, domaine)?
+                    .croise(asl_registre::Droits::ADMINISTRER)))
+    }
+
+    /// Les groupes VIVANTS dont ce compte est membre : son groupe personnel,
+    /// ceux où un ajout le tient, les groupes d'administrateurs de ses
+    /// domaines — dont il est membre d'office. **Sans rien lire des droits** :
+    /// c'est d'ici que les droits partent, et ce qui en dépendrait tournerait
+    /// en rond.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn groupes_dont_membre(&self, compte: Identifiant) -> Result<Vec<Identifiant>, Faute> {
+        let siens: Vec<Identifiant> = self
+            .domaines_de_compte(compte)?
+            .into_iter()
+            .map(|(domaine, _)| groupe_d_administrateurs(domaine))
+            .collect();
         let lecture = self.base.begin_read()?;
         vue!(lecture, vue);
-        vue.administre(compte, domaine)
+        let mut candidats = vec![groupe_personnel(compte)];
+        candidats.extend(siens);
+        {
+            let index = lecture.open_table(ADHESIONS_PAR_COMPTE)?;
+            let (debut, fin) = intervalle(compte);
+            for entree in index.range(debut.as_slice()..fin.as_slice())? {
+                let (_, groupe) = entree?;
+                candidats.push(depuis_clef(groupe.value())?);
+            }
+        }
+        candidats.sort_by_key(|groupe| clef(*groupe));
+        candidats.dedup();
+        let mut rendus = Vec::new();
+        for groupe in candidats {
+            if let Some(lu) = vue.lire(groupe)?
+                && vue.membres(&lu)?.contains(&compte)
+            {
+                rendus.push(groupe);
+            }
+        }
+        Ok(rendus)
     }
 
     /// Les administrateurs des racines, et le propriétaire du domaine racine
@@ -1186,6 +1241,27 @@ impl Entrepot {
     ///
     /// [`Faute::Base`] ou [`Faute::Enregistrement`].
     pub fn domaines_administres(&self, compte: Identifiant) -> Result<Vec<Identifiant>, Faute> {
+        let mut rendus = self.administres_par_le_groupe(compte)?;
+        // **ET CEUX QU'UN DROIT `administrer` LUI DONNE** (décision 40).
+        for (_, droit) in self.droits_recus(compte)? {
+            if droit.retire.is_none()
+                && droit.droits.croise(asl_registre::Droits::ADMINISTRER)
+                && droit.element.genre() == asl_id::Genre::Domaine
+                && self
+                    .domaine(droit.element)?
+                    .is_some_and(|rangee| rangee.proprietaire != compte)
+            {
+                rendus.push(droit.element);
+            }
+        }
+        rendus.sort();
+        rendus.dedup();
+        Ok(rendus)
+    }
+
+    /// Les domaines que ce compte administre par leur groupe d'administrateurs
+    /// sans les posséder, le domaine racine compris.
+    fn administres_par_le_groupe(&self, compte: Identifiant) -> Result<Vec<Identifiant>, Faute> {
         let lecture = self.base.begin_read()?;
         vue!(lecture, vue);
         let index = lecture.open_table(ADHESIONS_PAR_COMPTE)?;
