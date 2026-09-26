@@ -260,6 +260,25 @@ struct Preparateur {
     /// voie la boucle servir PENDANT une préparation longue.
     #[cfg(feature = "porte-d-essai")]
     lenteur: Option<std::time::Duration>,
+    /// Ce que la porte d'essai substitue à la lecture, pour éprouver les deux
+    /// issues qu'un entrepôt sain ne donne pas.
+    #[cfg(feature = "porte-d-essai")]
+    panne: Option<PanneDInstantane>,
+}
+
+/// Ce que la porte d'essai fait arriver à une lecture d'instantané, à la place
+/// de la lecture.
+///
+/// **La porte d'essai, et rien d'autre** : ce type n'existe que sous la
+/// fonctionnalité `porte-d-essai`.
+#[cfg(feature = "porte-d-essai")]
+#[derive(Clone, Copy, Debug)]
+pub enum PanneDInstantane {
+    /// L'entrepôt rend une faute : le flux se ferme vide.
+    Faute,
+    /// L'entrepôt panique sur le fil qui lit : la panique remonte dans la
+    /// boucle, qui tombe comme elle tombait avant la décision 28.
+    Panique,
 }
 
 /// Une lecture d'instantané revenue du fil bloquant.
@@ -293,13 +312,21 @@ impl Preparateur {
         let dire = self.dire.clone();
         let reveil = Arc::clone(&self.reveil);
         #[cfg(feature = "porte-d-essai")]
-        let lenteur = self.lenteur;
+        let (lenteur, panne) = (self.lenteur, self.panne);
         tokio::task::spawn_blocking(move || {
             #[cfg(feature = "porte-d-essai")]
             if let Some(lenteur) = lenteur {
                 std::thread::sleep(lenteur);
             }
             let resultat = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                #[cfg(feature = "porte-d-essai")]
+                match panne {
+                    Some(PanneDInstantane::Faute) => return Err(asl_store::Faute::Existe),
+                    Some(PanneDInstantane::Panique) => {
+                        panic!("panique d'essai pendant la lecture de l'instantané")
+                    }
+                    None => {}
+                }
                 entrepot.instantane().map(|cadres| {
                     let octets = cadres.iter().map(Vec::len).sum();
                     (cadres, octets)
@@ -313,6 +340,39 @@ impl Preparateur {
             // Déposé AVANT de réveiller : la boucle qui se réveille le trouve.
             reveil.notify_one();
         });
+    }
+}
+
+/// Ce par quoi le tireur nomme ce qu'il faut fermer ici (`replication.md`
+/// §3.3), et qui réveille la boucle en le nommant.
+///
+/// # POURQUOI CE N'EST PLUS UN SIMPLE `UnboundedSender`
+///
+/// Jusqu'à la 0.20.0, le tireur déposait dans un canal que `au_tour` drainait
+/// — mais `au_tour` ne tourne que lorsque la boucle se réveille : sur une
+/// échéance QUIC ou un datagramme. Une connexion dont la clé venait d'être
+/// révoquée chez l'autre racine restait donc ouverte ici jusqu'au prochain
+/// paquet de n'importe qui — le keepalive du tireur d'en face, dix secondes
+/// par défaut. Le dépôt et le réveil sont désormais un seul geste, pour qu'on
+/// ne puisse pas faire l'un sans l'autre (décision 28).
+#[derive(Clone)]
+pub struct Fermetures {
+    /// Le canal que `au_tour` draine.
+    canal: tokio::sync::mpsc::UnboundedSender<Identifiant>,
+    /// Le réveil de la boucle ([`Application::reveil`]).
+    reveil: Arc<tokio::sync::Notify>,
+}
+
+impl Fermetures {
+    /// Demande que les connexions de `quoi` tombent ici, et réveille la
+    /// boucle pour qu'elle le fasse tout de suite.
+    ///
+    /// **Déposé AVANT de réveiller** : la boucle qui se réveille le trouve.
+    /// Quand le serveur s'éteint, le récepteur est fermé : il n'y a plus
+    /// personne pour fermer, et ce n'est pas une faute.
+    pub fn fermer(&self, quoi: Identifiant) {
+        let _ = self.canal.send(quoi);
+        self.reveil.notify_one();
     }
 }
 
@@ -552,6 +612,12 @@ struct Service<'a> {
     corps: Vec<u8>,
     /// Par où les sondes rapportent.
     rapports: tokio::sync::mpsc::UnboundedSender<Verdict>,
+    /// Ce qu'une sonde signale après avoir rapporté (décision 28) : sans lui,
+    /// le verdict attendrait la prochaine échéance pour être poussé.
+    reveil_de_la_boucle: Arc<tokio::sync::Notify>,
+    /// Ce que la porte d'essai ajoute avant chaque verdict.
+    #[cfg(feature = "porte-d-essai")]
+    lenteur_de_sonde: Option<std::time::Duration>,
     /// Combien de sondes sont en vol, pour ne pas en lancer sans fin.
     en_vol: &'a mut usize,
     /// D'où l'on VOIT ce pair.
@@ -2542,9 +2608,16 @@ impl Service<'_> {
 
             let (adresse, candidat) = ou;
             let rapports = self.rapports.clone();
+            let reveil = Arc::clone(&self.reveil_de_la_boucle);
+            #[cfg(feature = "porte-d-essai")]
+            let lenteur = self.lenteur_de_sonde;
             *self.en_vol = self.en_vol.saturating_add(1);
             tokio::spawn(async move {
                 let aboutie = sonde::aboutit(adresse).await.then_some(candidat);
+                #[cfg(feature = "porte-d-essai")]
+                if let Some(lenteur) = lenteur {
+                    tokio::time::sleep(lenteur).await;
+                }
                 // Le canal est fermé quand l'annuaire s'éteint : il n'y a alors
                 // plus personne pour le verdict, et ce n'est pas une faute.
                 let _ = rapports.send(Verdict {
@@ -2556,6 +2629,11 @@ impl Service<'_> {
                     ),
                     maintenant: instant(),
                 });
+                // **Déposé AVANT de réveiller** : sans ce signal, le verdict
+                // attendait le prochain paquet de n'importe qui — le
+                // keepalive du daemon, dix secondes par défaut —, et la
+                // poussée qui le porte au daemon avec lui.
+                reveil.notify_one();
             });
         }
     }
@@ -2764,6 +2842,12 @@ pub struct Annuaire<'a> {
     /// puis NOMME ce qu'il faut fermer ; `au_tour` le verse dans [`Self::revoques`],
     /// et la fermeture suit le même chemin qu'une révocation locale.
     fermetures: Option<tokio::sync::mpsc::UnboundedReceiver<Identifiant>>,
+    /// Le réveil de la boucle ([`Application::reveil`]) : tout ce qui arrive
+    /// par canal le signale en arrivant — instantanés lus (décision 28),
+    /// verdicts de sonde, fermetures demandées par le tireur. **Un seul pour
+    /// tous** : un réveil dit « regarde », et `au_tour` draine tous les canaux
+    /// à chaque tour ; plusieurs ne diraient rien de plus.
+    reveil_de_la_boucle: Arc<tokio::sync::Notify>,
     /// La voie entre racines : nos clés, et où dire ce qui s'y passe.
     voie: Voie<'a>,
     /// L'identifiant `n-…` que la clé du pair donne, calculé une fois.
@@ -2791,6 +2875,9 @@ pub struct Annuaire<'a> {
     preparateur: Preparateur,
     /// Par où les lectures reviennent, recueillies à chaque tour.
     preparations: tokio::sync::mpsc::UnboundedReceiver<Preparation>,
+    /// Ce que la porte d'essai ajoute avant chaque verdict de sonde.
+    #[cfg(feature = "porte-d-essai")]
+    lenteur_de_sonde: Option<std::time::Duration>,
 }
 
 impl<'a> Annuaire<'a> {
@@ -2825,6 +2912,7 @@ impl<'a> Annuaire<'a> {
         let (rapports, verdicts) = tokio::sync::mpsc::unbounded_channel();
         let (dire, preparations) = tokio::sync::mpsc::unbounded_channel();
         let pair_attendu = voie.pair.as_ref().map(asl_cle::identifiant_de_racine);
+        let reveil_de_la_boucle = Arc::new(tokio::sync::Notify::new());
         Self {
             connexions: HashMap::new(),
             entrepot: entrepot.as_ref(),
@@ -2848,16 +2936,21 @@ impl<'a> Annuaire<'a> {
             pair_attendu,
             suite: None,
             fermetures: None,
+            reveil_de_la_boucle: Arc::clone(&reveil_de_la_boucle),
             a_reveiller: Vec::new(),
             reveil: None,
             preparateur: Preparateur {
                 entrepot: Arc::clone(entrepot),
                 dire,
-                reveil: Arc::new(tokio::sync::Notify::new()),
+                reveil: reveil_de_la_boucle,
                 #[cfg(feature = "porte-d-essai")]
                 lenteur: None,
+                #[cfg(feature = "porte-d-essai")]
+                panne: None,
             },
             preparations,
+            #[cfg(feature = "porte-d-essai")]
+            lenteur_de_sonde: None,
         }
     }
 
@@ -2871,6 +2964,30 @@ impl<'a> Annuaire<'a> {
     #[cfg(feature = "porte-d-essai")]
     pub const fn ralentir_les_instantanes_pour_un_essai(&mut self, lenteur: std::time::Duration) {
         self.preparateur.lenteur = Some(lenteur);
+    }
+
+    /// Remplace chaque lecture d'instantané par cette panne.
+    ///
+    /// **La porte d'essai, et rien d'autre**, comme la méthode précédente :
+    /// une faute de redb et une panique de l'entrepôt ne se provoquent pas
+    /// sur un fichier sain, et ce sont les deux issues que la décision 28
+    /// promet de traiter.
+    #[cfg(feature = "porte-d-essai")]
+    pub const fn faire_tomber_les_instantanes_pour_un_essai(&mut self, panne: PanneDInstantane) {
+        self.preparateur.panne = Some(panne);
+    }
+
+    /// Retarde chaque verdict de sonde de ce délai avant qu'il soit déposé.
+    ///
+    /// **La porte d'essai, et rien d'autre.** Une sonde vers la boucle locale
+    /// aboutit en une milliseconde : son verdict arrive avant même que le
+    /// daemon ait acquitté la réponse `en_cours`, et le datagramme de cet
+    /// acquittement réveille la boucle — le défaut que le réveil corrige ne se
+    /// verrait pas. Retardé, le verdict arrive quand la connexion est
+    /// silencieuse, et seul le réveil peut le faire partir.
+    #[cfg(feature = "porte-d-essai")]
+    pub const fn retarder_les_verdicts_pour_un_essai(&mut self, lenteur: std::time::Duration) {
+        self.lenteur_de_sonde = Some(lenteur);
     }
 
     /// Recueille les instantanés lus hors de la boucle, et remplit leurs flux.
@@ -2955,7 +3072,7 @@ impl<'a> Annuaire<'a> {
     /// Règle le délai de la règle des orphelins, en millisecondes
     /// (`--orphans`, `docs/modele.md` §2.1).
     ///
-    /// **APPELÉ UNE FOIS, AU MONTAGE**, comme [`Annuaire::ecouter_les_fermetures`]
+    /// **APPELÉ UNE FOIS, AU MONTAGE**, comme [`Annuaire::fermetures`]
     /// — et pas du tout pour `--orphans 0` : sans délai, la racine n'efface
     /// jamais un compte d'elle-même. Le premier passage a lieu au premier
     /// tour, puis toutes les heures.
@@ -2963,18 +3080,21 @@ impl<'a> Annuaire<'a> {
         self.orphelins = Some(delai_ms);
     }
 
-    /// Écoute ce que le tireur demande de fermer ici (`docs/replication.md`
+    /// Ce par quoi le tireur demande de fermer ici (`docs/replication.md`
     /// §3.3).
     ///
     /// **APPELÉ UNE FOIS, AU MONTAGE** : le tireur applique les opérations de
-    /// l'autre racine à l'entrepôt, et pousse par ce canal les machines et
+    /// l'autre racine à l'entrepôt, et nomme par ceci les machines et
     /// appareils dont les connexions doivent tomber ici. `au_tour` les verse
     /// dans la file des révocations, et la boucle les ferme comme les siennes.
-    pub fn ecouter_les_fermetures(
-        &mut self,
-        fermetures: tokio::sync::mpsc::UnboundedReceiver<Identifiant>,
-    ) {
-        self.fermetures = Some(fermetures);
+    /// Un second appel remplace le canal du premier.
+    pub fn fermetures(&mut self) -> Fermetures {
+        let (canal, entendre) = tokio::sync::mpsc::unbounded_channel();
+        self.fermetures = Some(entendre);
+        Fermetures {
+            canal,
+            reveil: Arc::clone(&self.reveil_de_la_boucle),
+        }
     }
 
     /// Écrit ce qui attend sur le flux de la voie, cadre la suite dans la
@@ -3407,6 +3527,9 @@ impl Application for Annuaire<'_> {
             entrepot: self.entrepot,
             vivier: &mut self.vivier,
             rapports: self.rapports.clone(),
+            reveil_de_la_boucle: Arc::clone(&self.reveil_de_la_boucle),
+            #[cfg(feature = "porte-d-essai")]
+            lenteur_de_sonde: self.lenteur_de_sonde,
             en_vol: &mut self.en_vol,
             connexion: clef.clone(),
             tirer_un_identifiant: self.tirer_un_identifiant,
@@ -3498,10 +3621,10 @@ impl Application for Annuaire<'_> {
         ams_h3::NO_ERROR
     }
 
-    /// Les instantanés lus hors de la boucle la réveillent en revenant
-    /// (décision 28).
+    /// Ce qui arrive par canal réveille la boucle en arrivant : instantanés
+    /// lus, verdicts de sonde, fermetures du tireur (décision 28).
     fn reveil(&self) -> Option<Arc<tokio::sync::Notify>> {
-        Some(Arc::clone(&self.preparateur.reveil))
+        Some(Arc::clone(&self.reveil_de_la_boucle))
     }
 
     fn a_la_fermeture(&mut self, connexion: &Connection, _pair: SocketAddr) {

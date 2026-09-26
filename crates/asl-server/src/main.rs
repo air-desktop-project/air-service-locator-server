@@ -418,8 +418,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         // canal que la boucle draine (§3.3).
         let tireur = match (&reglages.pair, &identite) {
             (Some(pair), Some(_)) => {
-                let (fermetures, entendre_fermetures) = tokio::sync::mpsc::unbounded_channel();
-                application.ecouter_les_fermetures(entendre_fermetures);
+                let fermetures = application.fermetures();
                 // La tâche possède sa propre clé d'identité : on la relit du
                 // fichier plutôt que de la partager avec la voie servie.
                 let chemin_identite = reglages

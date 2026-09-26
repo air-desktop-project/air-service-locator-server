@@ -294,9 +294,11 @@ pub trait Application {
     /// dans un canal pendant ce sommeil attendait donc qu'un pair parle ou
     /// qu'un délai échoie — sur une connexion calme, jusqu'à l'inactivité.
     /// C'est ainsi qu'un instantané lu hors de la boucle (décision 28) restait
-    /// sans cadres sur macOS, où rien d'autre ne réveillait la boucle. Le
-    /// travail signale ce `Notify` après avoir déposé son résultat ; la boucle
-    /// se réveille, et [`Application::au_tour`] le recueille.
+    /// sans cadres sur macOS, où rien d'autre ne réveillait la boucle ; un
+    /// verdict de sonde et une fermeture demandée par le tireur attendaient
+    /// de même. Le travail signale ce `Notify` après avoir déposé son
+    /// résultat ; la boucle se réveille, et [`Application::au_tour`] le
+    /// recueille.
     ///
     /// **Appelé UNE fois, avant la boucle.** `notify_one` garde un permis quand
     /// personne n'attend : un signal donné pendant un tour n'est pas perdu.
