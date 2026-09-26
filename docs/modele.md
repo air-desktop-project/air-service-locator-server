@@ -419,7 +419,7 @@ compte. Elle le prouve avec un secret, comme celle qui annonce.
 | `propriétaire` | Un utilisateur. **La machine le sait** : l'annuaire le lui rend à l'enrôlement et sur demande (`protocole.md` §2.0, §3), parce qu'une machine qui agit au nom d'un compte doit pouvoir dire lequel — à son exploitant comme à ses journaux. Identifiant public, comme le sien. |
 | `capacités` | `annonce`, `lecture`, ou les deux. Choisies à la déclaration, modifiables. |
 | `clé publique` | Ed25519, **ou rien**. Une machine déclarée n'en a pas encore : elle arrive à l'enrôlement, et la partie privée est générée SUR la machine et n'en sort jamais. |
-| `domaine` | Un `d-…`, **ou rien** (§2.11, 2026-09-26). Une machine est rattachée à **un seul** domaine à la fois, et seulement par son propriétaire ; on la déplace d'un domaine à l'autre. Les machines d'avant le domaine n'en ont pas, et n'en ont pas besoin : **le domaine n'est pas obligatoire.** |
+| `domaine` | Un `d-…`, **ou rien** (§2.11, 2026-09-26). Une machine est rattachée à **un seul** domaine à la fois, et seulement par son propriétaire — qui doit détenir le droit `rattacher` sur ce domaine (§2.13) ; on la déplace d'un domaine à l'autre. Les machines d'avant le domaine n'en ont pas, et n'en ont pas besoin : **le domaine n'est pas obligatoire.** |
 
 #### Le nom est le premier TEXTE LIBRE du produit, et c'est une décision
 
@@ -581,6 +581,17 @@ l'un l'autre indéfiniment. C'est visible — la date d'annonce oscille — et
 l'application le signale.
 
 ### 2.5 Autorisation
+
+> **Renversé le 2026-09-26 (Thierry) — l'autorisation devient un DROIT accordé à
+> un GROUPE** (§2.12, §2.13, `replication.md` décision 41). Ce qui suit décrit le
+> modèle d'avant : une arête d'un compte vers un compte. Il reste vrai dans ce
+> qu'il protège — rien ne s'interroge anonymement, on sait à qui l'on a donné, et
+> retirer suffit —, et il reste la **forme des verbes de compatibilité** que les
+> applications déployées appellent (`protocole.md` §2.2, « Les autorisations
+> d'hier »). Ce qui change est le bénéficiaire : ce n'est plus un compte, c'est
+> un groupe — et partager avec un ami, c'est accorder un droit à **son groupe
+> personnel**, qui ne contient que lui. Les autorisations existantes sont
+> converties à la mise à jour, sans changer d'identifiant (§2.13).
 
 **Rien ne s'interroge anonymement.** Pour obtenir l'adresse d'un service, il
 faut prouver qu'on agit au nom d'un compte enregistré — et que ce compte a été
@@ -851,14 +862,33 @@ annuaire local tient à la place des racines (`annuaires.md` §2 bis).
 | `identifiant` | `d-` + 26 caractères. **Public**, comme les autres. La lettre `d` est libre dans `asl-id::Genre` (u, a, m, s, g, n sont pris). |
 | `propriétaire` | **Un** compte. **C'est le compte qui possède le domaine, pas le domaine qui contient le compte** : un compte possède **un ou plusieurs** domaines — **toujours au moins un** —, et un domaine n'appartient qu'à un compte. |
 | `alias` | **Facultatif, non unique**, public (ci-dessous). |
-| `délégués` | Des comptes existants à qui le propriétaire a délégué la gestion (ci-dessous). |
+| `administrateurs` | **Un groupe** (§2.12), créé avec le domaine, dont le propriétaire est membre d'office. Y ajouter un compte, c'est lui confier la gestion du domaine — ce que la spec du 2026-09-26 appelait « déléguer » (ci-dessous). |
+| `groupes` | Les autres groupes du domaine, que ses administrateurs créent (§2.12). |
+| `niveau` | `1`. **Le domaine racine est seul au niveau 0** (ci-dessous) ; il n'y a jamais de niveau 2. |
 | `hébergé par` | `racines`, ou le `n-…` d'un annuaire local inscrit et approuvé (§2.7). |
 | `machines` | Celles qui y sont rattachées — **une machine n'est que dans un domaine à la fois** (§2.3). |
 
-**Plat.** Il n'y a pas de sous-domaine : un domaine ne contient pas de
-domaine. Ce qu'une hiérarchie achèterait — déléguer une branche — la délégation
-par domaine le donne déjà, sans que l'autorité ait à se chercher le long d'un
-arbre.
+**Deux niveaux, et pas un de plus.** Le **domaine racine** est seul au niveau
+0 ; tous les domaines des utilisateurs sont au niveau 1, sous lui. Il n'y a pas
+de sous-domaine entre domaines d'utilisateurs : un domaine du niveau 1 ne
+contient pas de domaine. Ce qu'une hiérarchie plus profonde achèterait —
+confier une branche — un groupe d'administrateurs par domaine le donne déjà,
+sans que l'autorité ait à se chercher le long d'un arbre.
+
+#### Le domaine racine — niveau 0
+
+**Décidé le 2026-09-26 (Thierry).** Il y a **un** domaine racine, tenu par les
+deux racines, dont Thierry est propriétaire. **Son groupe d'administrateurs EST
+le groupe des administrateurs des racines** : ceux qui acceptent ou refusent
+l'inscription d'un annuaire local (§2.7, `replication.md` décisions 32 et 33).
+
+| Règle | Pourquoi |
+|---|---|
+| **Son identifiant se DÉDUIT d'une étiquette fixe** — les seize premiers octets d'un SHA-256 à domaine séparé de la chaîne `asl domaine racine` —, et non d'un tirage (proposé) | Les deux racines et tout annuaire local le calculent pareil, sans rien échanger ni rien amorcer : il n'y a pas de fenêtre où l'une le connaîtrait et l'autre non, et on peut l'écrire dans le code comme les clés des racines. |
+| **Il naît au premier démarrage d'une racine qui tient `--operator-key`**, vide ; **son propriétaire est le premier compte nommé administrateur sous la clé d'exploitant** (proposé) | La caution des invitations et du groupe des administrateurs est déjà cette clé ; il n'en faut pas une autre. |
+| **Il ne contient aucune machine en v1** (proposé) | Les racines ne sont pas des machines enrôlées : elles ne s'annoncent pas, et rien ne s'y résout. Le domaine racine est un point d'attache et le porteur d'un groupe, pas un lieu. |
+| **Il n'est PAS un ancêtre pour les droits** | Un droit posé sur le domaine racine ne descend pas dans les domaines du niveau 1 (§2.13). Sans cette règle, administrer les racines donnerait à voir les machines de tout le monde — exactement ce que la décision 33 promettait d'éviter : un administrateur des racines accepte ou refuse une inscription, **et rien d'autre**. |
+| **Son groupe d'administrateurs ne change que sous la clé d'exploitant** | Contrairement aux autres domaines, où un administrateur en nomme un autre : ici, nommer un administrateur, c'est donner le pouvoir de juger des annuaires qui parleront au nom des racines. La règle de la décision 33 tient. |
 
 #### Un domaine à la création du compte — et jamais moins d'un
 
@@ -871,14 +901,14 @@ il a déjà un endroit où ranger ses machines, et il ne coûte qu'un identifian
 **Supprimer son DERNIER domaine est refusé** — `409`, comme un alias pris : la
 demande est légitime, c'est l'état du compte qui s'y oppose (`protocole.md`
 §2.1 quinquies). **Seul l'effacement du compte les emporte tous**, et avec
-eux (proposé) :
+eux (décidé le 2026-09-26, Thierry) :
 
 | Ce que le domaine tenait | Ce qu'il en advient à l'effacement du compte |
 |---|---|
 | Les machines du compte effacé | Elles partent avec lui, comme aujourd'hui (§2.1). |
-| Les machines de ses **délégués** rattachées à ses domaines | **Détachées** : elles restent à leurs propriétaires, sans domaine. Effacer un compte ne doit rien retirer à un autre. |
-| Les délégations qu'il avait accordées | Retirées. |
-| Les délégations qu'il avait reçues ailleurs | Retirées ; ses machines, qu'il avait pu rattacher chez d'autres, partent avec lui. |
+| Les machines **d'autres comptes** rattachées à ses domaines | **Détachées** : elles restent à leurs propriétaires, sans domaine. Effacer un compte ne doit rien retirer à un autre. |
+| Les groupes de ses domaines, et les droits qu'ils portaient ou que ses domaines accordaient | Retirés. |
+| Son appartenance aux groupes d'autres domaines, et son groupe personnel | Retirés ; ses machines, qu'il avait pu rattacher chez d'autres, partent avec lui. |
 | L'alias de ses domaines | Retiré. |
 | Un annuaire local qui hébergeait ses domaines | Ne les héberge plus ; son inscription, si c'était le sien, est retirée (`annuaires.md` §4.1). |
 
@@ -890,7 +920,7 @@ lecture, en ferait deux — deux identifiants tirés au hasard pour le même
 compte, que rien ne départagerait.
 
 **Les comptes d'avant le 2026-09-26** reçoivent le leur **à la reprise de
-l'entrepôt, à la mise à jour** (proposé), avec un identifiant **déduit du
+l'entrepôt, à la mise à jour** (décidé le 2026-09-26, Thierry), avec un identifiant **déduit du
 `u-…`** — les seize premiers octets d'un SHA-256 à domaine séparé du compte,
 comme le `n-…` se déduit de sa clé (§2.7). **Déduit, et non tiré**, parce que
 les deux racines font la reprise chacune de son côté : un identifiant tiré en
@@ -906,29 +936,43 @@ s'y connectait, et deux applications sur deux racines pouvaient en créer deux.
 l'application, et en particulier pour son annuaire local : « chez moi, sur mon
 serveur asl, je peux créer autant de domaines que je veux ».
 
-#### La délégation — un niveau, et elle ne donne que ce qu'on possède déjà
+#### Gérer un domaine à plusieurs — le groupe d'administrateurs
 
-Le propriétaire délègue la gestion d'un domaine à des comptes **existants**.
+~~**La délégation** : le propriétaire délègue la gestion d'un domaine à des
+comptes existants ; un délégué voit le domaine, rattache et détache SES
+machines, pose l'alias ; un seul niveau ; seul le propriétaire délègue.~~
+
+**Renversé le 2026-09-26 (Thierry) : la délégation disparaît, le groupe la
+remplace** (`replication.md` décision 39). « Déléguer », c'est **ajouter un
+compte au groupe d'administrateurs du domaine** (§2.12). Une notion de moins,
+et la même que partout ailleurs : ce que la délégation faisait à part — un rôle
+propre, une liste propre, ses opérations propres — les groupes et les droits
+(§2.13) le font pour tout.
 
 | Qui | Ce qu'il peut |
 |---|---|
-| **Le propriétaire** | Tout : l'alias, les délégués, l'hébergement, rattacher et détacher ses machines, supprimer le domaine. |
-| **Un délégué** | Voir le domaine ; **rattacher et détacher SES PROPRES machines** ; poser ou retirer l'alias. Rien sur les délégations. |
+| **Le propriétaire** | Tout. **Membre d'office** du groupe d'administrateurs, et **il ne s'en retire pas** : un domaine sans personne pour le gérer ne se rattraperait pas. Lui seul supprime le domaine et le confie à un annuaire local. |
+| **Un membre du groupe d'administrateurs** | Le droit `administrer` sur le domaine (§2.13) : poser l'alias, créer et supprimer les groupes du domaine, en changer les membres — y compris celui des administrateurs —, accorder et retirer des droits sur le domaine, ses machines et ses services. |
+| **Un membre d'un groupe qui a `rattacher`** | Rattacher et détacher **SES PROPRES** machines. |
 
-**Un seul niveau** : un délégué ne délègue pas. **On ne rattache que des
-machines dont on est propriétaire**, délégué ou non — la délégation ouvre le
-domaine, jamais les machines d'un autre. Retirer une délégation détache du
-domaine les machines du délégué (proposé : sans quoi un ex-délégué garderait
-des machines dans un lieu qu'il ne gère plus).
+**On ne rattache que des machines dont on est propriétaire**, quel que soit le
+droit qu'on tient : `rattacher` ouvre le domaine, jamais les machines d'un
+autre. Retirer un compte du groupe qui lui donnait `rattacher` **détache ses
+machines du domaine** (décidé le 2026-09-26, Thierry : sans quoi il garderait
+des machines dans un lieu où il n'a plus sa place).
 
-**Rattacher ne donne AUCUN droit de lecture.** Le propriétaire d'un domaine voit
-quelles machines y sont rattachées — leur `m-…` et leur propriétaire —, pas
-leurs services : l'accès reste une arête entre comptes (§2.5, C10), et un
-domaine n'en est pas une. Accorder l'accès à un domaine entier est une suite
-nommée (§6), pas la v1.
+**Rattacher sa machine à un domaine, c'est confier à ses administrateurs le
+droit de la partager.** Un droit posé sur un domaine vaut pour ses machines
+(§2.13) : l'administrateur d'un domaine peut accorder `localiser` sur tout ce
+qui y est rangé, y compris ce qu'un autre y a rattaché. C'est la conséquence du
+choix de Thierry — « un droit posé sur un domaine vaut pour ses machines » — et
+l'application doit le dire au moment de rattacher : **« les administrateurs de
+ce domaine pourront la partager »**. Celui qui ne le veut pas garde sa machine
+hors du domaine, ou dans un des siens.
 
-C'est aussi une réponse partielle au premier point de §6 — les sous-comptes
-d'entreprise : une délégation par lieu plutôt que par compte.
+C'est aussi une réponse au premier point de §6 — les sous-comptes
+d'entreprise : un groupe d'administrateurs par lieu plutôt que des comptes
+subordonnés.
 
 #### L'alias de domaine — lisible, pas unique
 
@@ -957,35 +1001,153 @@ des tables Unicode, que l'étage 2 n'a pas aujourd'hui. Elles tiennent en Rust
 pur (C4) et sans entrée-sortie (C1) ; leur version doit être la même sur les
 deux racines et sur les annuaires locaux, sans quoi deux annuaires plieraient
 différemment un caractère récent. **La version d'Unicode est donc épinglée,
-comme la toolchain** (proposé).
+comme la toolchain** (décidé le 2026-09-26, Thierry ; la version se choisit à la
+PR de code, et chaque changement de version est une rupture qui se déploie sur
+les deux racines et les annuaires locaux ensemble).
 
-### 2.12 Groupe — v1 : les administrateurs des racines
+### 2.12 Groupe
 
-**Décidé le 2026-09-26 (Thierry).** Un groupe est un ensemble de comptes. **En
-v1, il n'y en a qu'un : les administrateurs des racines**, ceux qui acceptent ou
-refusent l'inscription d'un annuaire local (§2.7). La notion générale — des
-groupes que les utilisateurs créent, auxquels on accorde un accès — est une
-suite nommée (§6).
+**Décidé le 2026-09-26 (Thierry), amendé le même jour : les groupes sont une
+notion GÉNÉRALE dès la v1** (`replication.md` décision 38). La première
+rédaction n'en connaissait qu'un, celui des administrateurs des racines ; il
+devient le groupe d'administrateurs du domaine racine, un groupe parmi d'autres.
+
+Un groupe est **un ensemble de comptes**, et c'est **à lui, jamais à un compte
+seul, que les droits s'accordent** (§2.13).
+
+| Champ | Ce que c'est |
+|---|---|
+| `identifiant` | `e-` + 26 caractères (*ensemble* : `g` est pris par l'autorisation, devenue droit). **Public.** |
+| `domaine` | Le domaine auquel il **appartient** — ses administrateurs le créent et le gèrent —, **ou rien** pour un groupe personnel (ci-dessous). |
+| `étiquette` | Libre, 1 à 64 octets, aux règles du nom de machine : « Famille », « Bureau ». Pour l'humain ; visible des administrateurs du domaine et des membres, **jamais publique**, jamais cherchable. |
+| `membres` | Des comptes existants — **n'importe lesquels**, du même annuaire ou non. Un compte est membre d'un ou de plusieurs groupes. |
+
+**Trois sortes de groupes, et une seule mécanique :**
+
+| Groupe | Naît | Membres | Particularité |
+|---|---|---|---|
+| **Le groupe d'administrateurs d'un domaine** | Avec le domaine, dans sa transaction ; **identifiant déduit du `d-…`** (proposé), pour que les deux racines arrivent au même sans rien échanger | Le propriétaire, **d'office et non retirable** ; ceux que les administrateurs y ajoutent | Porte le droit `administrer` sur le domaine ; ne se supprime qu'avec lui. |
+| **Un groupe du domaine** | Créé par un administrateur | Ceux que les administrateurs y mettent | Ne porte que les droits qu'on lui accorde. |
+| **Le groupe personnel d'un compte** | Avec le compte ; **identifiant déduit du `u-…`** (proposé) | **Le compte seul**, et jamais personne d'autre | **N'appartient à aucun domaine** (proposé) : il ne dépend pas du premier domaine, qui peut être supprimé tant qu'il en reste un autre. Il ne se modifie pas et ne se supprime qu'avec le compte. C'est lui qu'on nomme pour partager avec une personne. |
+
+**Le groupe d'administrateurs du domaine racine est celui des administrateurs
+des racines** (§2.11). Ce qui le distingue des autres groupes d'administrateurs,
+et qui garde tout ce que la décision 33 promettait :
 
 | Règle | |
 |---|---|
 | **Un seul administrateur suffit** | pour accepter comme pour refuser une inscription. Pas de quorum : deux racines n'ont pas de majorité (`annuaires.md` §6), et un groupe de deux n'en aurait pas davantage. |
-| **Le premier membre** | est le compte de Thierry, posé **par la clé d'exploitant** (`--operator-key`, `protocole.md` §2.2) — la même caution que les invitations. |
-| **Ajouter, retirer un membre** | se fait **sous cette même clé**, et sous elle seule : un administrateur n'en nomme pas un autre. Retirer est une révocation, et gagne toujours (`replication.md` §3.2). |
-| **Identifiant** | Aucun en v1 : il n'y a qu'un groupe, et le nommer serait se répéter — l'argument même du genre `o` (`protocole.md` §2.2). Le jour où les groupes seront généraux, ils auront leur lettre. |
+| **Ses membres se nomment et se retirent sous la clé d'exploitant, et sous elle seule** | `--operator-key`, `protocole.md` §2.2 — la même caution que les invitations. Le premier est le compte de Thierry. Un administrateur des racines n'en nomme pas un autre, contrairement aux autres domaines. Retirer est une révocation, et gagne toujours (`replication.md` §3.2). |
+| **Ce qu'un administrateur des racines peut** | Accepter ou refuser une inscription — **rien d'autre** : le domaine racine n'est pas un ancêtre pour les droits (§2.11, §2.13), il ne lit aucun compte, n'en efface aucun, ne voit aucun service qui ne lui a pas été accordé comme à n'importe qui. |
 
 **CE QUE CELA RENVERSE, ET IL FAUT LE DIRE.** La posture `invitation` avait
 écarté « un compte d'exploitation » pour une raison écrite : il aurait mis dans
 le modèle **un `u-…` qui vaut plus que les autres** (`protocole.md` §2.2,
-`replication.md` décision 26). Ce groupe en fait exister. La raison de changer
-est que l'approbation d'une inscription est un **jugement** — regarder qui
-demande, et décider —, pas un geste d'exploitation qu'on scripte sur la machine
-qui tient la clé : il se fait depuis une application, sous biométrie, par
-quelqu'un qui peut n'être pas devant le serveur. **Ce que le renversement
-garde de l'ancienne raison** : la clé d'exploitant reste la seule à pouvoir
-nommer un administrateur, et un administrateur ne peut rien d'autre qu'accepter
-ou refuser une inscription — il ne lit aucun compte, n'en efface aucun, ne voit
-aucun service qui ne lui a pas été accordé.
+`replication.md` décision 26). Le groupe des administrateurs des racines en fait
+exister. La raison de changer est que l'approbation d'une inscription est un
+**jugement** — regarder qui demande, et décider —, pas un geste d'exploitation
+qu'on scripte sur la machine qui tient la clé : il se fait depuis une
+application, sous biométrie, par quelqu'un qui peut n'être pas devant le
+serveur. **Ce que le renversement garde de l'ancienne raison** : la clé
+d'exploitant reste la seule à pouvoir nommer un administrateur des racines, et
+ce qu'il peut se limite à l'inscription.
+
+**Ce que les groupes ne sont PAS en v1** (§6) : ils ne s'imbriquent pas — un
+groupe n'est pas membre d'un groupe —, ils n'ont pas de nombre maximal de
+membres écrit, et il n'existe aucun groupe « tout le monde » : un tel groupe
+serait le mode anonyme que C10 interdit.
+
+### 2.13 Droit
+
+**Décidé le 2026-09-26 (Thierry)** (`replication.md` décisions 40 et 41). Un
+droit est ce qui remplace l'autorisation (§2.5) : **un groupe reçoit des droits
+sur un élément**.
+
+| Champ | Ce que c'est |
+|---|---|
+| `identifiant` | `g-` + 26 caractères — **la lettre de l'autorisation, gardée** : une autorisation convertie garde son identifiant, et une application qui tient un `g-…` le retrouve. |
+| `groupe` | Le groupe bénéficiaire (§2.12). **Jamais un compte seul** : pour une personne, c'est son groupe personnel. |
+| `élément` | Un domaine `d-…`, une machine `m-…`, ou un service `s-…` ; et, pour les seules autorisations converties, **un compte `u-…`** — « tout ce que ce compte possède » (proposé, ci-dessous). |
+| `droits` | Un ou plusieurs de : **`administrer`**, **`rattacher`**, **`voir`**, **`localiser`** (ci-dessous). |
+| `étiquette` | Libre — pour savoir ce qu'on retire six mois plus tard, comme l'autorisation. |
+| `accordé par` / `accordé le` / `retiré le` | Le compte qui l'a accordé, et les dates. Un droit retiré reste, marqué — même raison qu'un appareil révoqué. |
+
+**Les quatre droits :**
+
+| Droit | Ce qu'il permet | Sur quoi il a un sens |
+|---|---|---|
+| `administrer` | Gérer le domaine : son alias, ses groupes et leurs membres, les droits accordés sur lui, ses machines et ses services. **Emporte `voir`.** | Un domaine. |
+| `rattacher` | Rattacher et détacher **ses propres** machines au domaine. | Un domaine. |
+| `voir` | Lister les machines et les services — identifiants, noms, état —, **pas leurs adresses**. | Domaine, machine, service. |
+| `localiser` | Obtenir l'adresse et le port d'un service : `GET /v1/ou` (`protocole.md` §3). **Emporte `voir`** sur ce qu'il couvre. | Domaine, machine, service. |
+
+**Qui accorde.** Sur un domaine, ses machines et ses services : un membre d'un
+groupe qui a `administrer` sur ce domaine. Sur **sa propre machine**, et ses
+services, quel que soit le domaine où elle est : **son propriétaire**, toujours
+— c'est le partage d'hier, « A accorde à B », et il ne dépend de personne.
+**Aucun droit ne se crée pour soi par un autre chemin** : on n'accorde que sur
+ce qu'on possède ou qu'on administre.
+
+**La règle de résolution : l'UNION, sans droit négatif** (proposé). Ce qu'un compte peut sur un élément est **la réunion** de
+tous les droits accordés, sur cet élément et sur ce qui le contient — le
+service, sa machine, le domaine de sa machine —, à **tous** les groupes dont il
+est membre. Le propriétaire d'une machine a tous les droits sur elle et ses
+services, sans qu'on les écrive.
+
+Pourquoi l'union, et pas « le plus précis l'emporte » :
+
+- **Elle ne dépend d'aucun ordre.** Une réunion est la même quel que soit
+  l'ordre dans lequel les droits arrivent — et deux racines qui les reçoivent
+  dans deux ordres différents (`replication.md` §3.1) doivent répondre pareil.
+  « Le plus précis l'emporte » n'a de sens qu'avec des droits qui en RETIRENT
+  d'autres, et c'est là que l'ordre commence à compter.
+- **Elle s'explique en une phrase** à celui qui se demande pourquoi quelqu'un
+  voit sa machine : « parce qu'un de ses groupes a reçu ce droit, ici ou plus
+  haut ». Un droit négatif demande de dérouler une précédence.
+- **Retirer reste le geste unique** : on retire un droit, ou un membre d'un
+  groupe. Il n'y a rien à « contrer ».
+
+Le coût, nommé : on ne peut pas dire « tout le domaine sauf cette machine ». On
+sort la machine du domaine, ou on accorde machine par machine. Les droits
+négatifs sont nommés au §6.
+
+**Le domaine racine ne transmet rien** (§2.11) : la chaîne « ce qui contient »
+s'arrête au domaine de la machine.
+
+#### Les autorisations d'hier — converties, et ce qu'elles deviennent
+
+**Chaque autorisation existante devient un droit, à la reprise de l'entrepôt**
+(décidé : Thierry ; le détail proposé), sur les deux racines, chacune de son
+côté et au même résultat — rien ne s'échange :
+
+| L'autorisation | Le droit |
+|---|---|
+| `g-…` | **Le même `g-…`.** |
+| `accordée par` A, `accordée à` B | Accordé par A, au **groupe personnel de B** (identifiant déduit de `u-…` de B, donc le même sur les deux racines). |
+| Portée « un service » / « une machine » | Élément : ce service / cette machine. |
+| Portée « tout mon compte » | Élément : **le compte d'A** (proposé). Hier, cette portée couvrait toutes les machines d'A, y compris celles déclarées après ; un droit par domaine ne couvrirait pas les machines d'A **sans domaine** — celles d'avant les domaines —, et un droit par machine ne couvrirait pas les suivantes. Le quatrième élément est la seule conversion qui ne change pas en silence ce qu'A avait accordé. Il ne s'accorde plus que par le verbe de compatibilité ; les applications nouvelles accordent sur un domaine. |
+| Les droits | **`voir` et `localiser`** : exactement ce qu'une autorisation donnait (§2.5, « Ce que le bénéficiaire voit »). |
+| `étiquette`, `révoquée le` | L'étiquette ; `retiré le`. |
+
+**Ce que deviennent les gestes d'hier** :
+
+- **Accorder à une personne** : un droit `voir` + `localiser` à son groupe
+  personnel. Les applications d'aujourd'hui continuent d'appeler
+  `POST /v1/autorisations`, qui fait exactement cela (`protocole.md` §2.2, « Les
+  autorisations d'hier »).
+- **Retirer** : retirer le droit — ou, pour un groupe, retirer le membre.
+  **Effet immédiat** dans les deux cas : la résolution se recalcule à chaque
+  requête depuis le demandeur (C10), et rien n'est mis en cache.
+- **L'étiquette** reste sur le droit.
+- **Le réveil** (§2.6) : **un droit accordé réveille les membres du groupe
+  bénéficiaire** ; **ajouter un compte à un groupe qui porte des droits réveille
+  ce compte**. Le reste — retirer un droit, retirer un membre, créer un groupe
+  vide — ne réveille personne, comme une révocation aujourd'hui (décision 27).
+  La ligne du flux des nouvelles garde son genre, `{"quoi":"autorisation"}` :
+  les applications déployées relisent sur elle, et c'est ce qu'on veut
+  (`protocole.md` §2.2).
+- **L'exposition** (§2.8) n'est pas touchée : elle concerne ce qu'un annuaire
+  réplique vers un pair, pas qui peut lire.
 
 ---
 
@@ -1209,9 +1371,11 @@ Un serveur qui croirait un booléen envoyé par le client ne vérifierait rien.
 Nommé ici plutôt que supposé ailleurs.
 
 1. **Les sous-comptes d'entreprise.** La v1 a un compte et plusieurs appareils
-   enrôlés. Un administrateur qui part emporte donc l'accès. Ce qu'il faut —
-   des comptes subordonnés, une délégation par machine, des rôles — dépend de la
-   taille des parcs réels, qu'on ne connaît pas encore.
+   enrôlés. Depuis le 2026-09-26, un domaine se gère à plusieurs par son groupe
+   d'administrateurs (§2.11, §2.12) : un administrateur qui part se retire du
+   groupe sans emporter le domaine. Ce qui manque encore — des comptes
+   subordonnés, des rôles plus fins que les quatre droits — dépend de la taille
+   des parcs réels, qu'on ne connaît pas encore.
 2. **Le transfert d'une machine.** Non couvert : on retire, on redéclare, on
    ré-enrôle la machine. Suffisant tant qu'une machine change rarement de
    mains.
@@ -1243,15 +1407,27 @@ Nommé ici plutôt que supposé ailleurs.
 7. **Ce que devient une autorisation quand une machine change de capacités.**
    Retirer `lecture` à une machine de B doit-il couper ses résolutions en cours,
    ou seulement les suivantes ?
-8. **Accorder l'accès à un domaine entier** (2026-09-26). Les autorisations
-   restent de compte à compte en v1 (§2.5) ; une arête dont la portée serait un
-   domaine — « tout ce qui est rangé à la maison » — est une suite nommée.
-9. **Les groupes généraux** (§2.12) : des groupes que les utilisateurs créent,
-   et une autorisation accordée à un groupe. La v1 n'a que celui des
-   administrateurs des racines.
-10. **Supprimer un domaine qui n'est pas le dernier** (§2.11) : proposé — ses
-    machines sont détachées, son alias et ses délégations retirés,
-    l'identifiant marqué supprimé comme un compte effacé. Le dernier, lui, ne
-    se supprime pas (tranché) : `409`.
-11. **Le premier domaine des comptes d'avant le 2026-09-26** : à la reprise de
-    l'entrepôt, identifiant déduit du `u-…` (§2.11) — proposé.
+8. ~~**Accorder l'accès à un domaine entier.**~~ **Décidé le 2026-09-26** : un
+   droit sur un domaine vaut pour ses machines et ses services (§2.13).
+9. ~~**Les groupes généraux.**~~ **Décidé le 2026-09-26** : dès la v1 (§2.12).
+10. ~~**Supprimer un domaine qui n'est pas le dernier.**~~ **Décidé le
+    2026-09-26 (Thierry)** : ses machines sont détachées, son alias, ses
+    groupes et les droits qui le visent retirés, l'identifiant marqué supprimé
+    comme un compte effacé. Le dernier ne se supprime pas : `409`.
+11. ~~**Le premier domaine des comptes d'avant le 2026-09-26.**~~ **Décidé
+    (Thierry)** : à la reprise de l'entrepôt, identifiant déduit du `u-…`
+    (§2.11) ; le groupe personnel et le groupe d'administrateurs de ce domaine
+    naissent de la même reprise, déduits eux aussi.
+12. **Les droits négatifs** (§2.13) : « tout le domaine sauf cette machine ».
+    Écartés en v1 parce qu'ils rendent la résolution dépendante d'une
+    précédence ; à rouvrir si les parcs réels le demandent.
+13. **Les groupes imbriqués** : un groupe membre d'un groupe. Écartés en v1 —
+    la résolution deviendrait un parcours de graphe, avec ses cycles.
+14. **Un nombre maximal de membres, de groupes, de droits.** Rien n'est écrit ;
+    il faudra une borne, au moins pour que la résolution reste en temps borné
+    (C9) et qu'un compte ne puisse pas gonfler l'entrepôt d'un autre.
+15. **Retirer l'élément « compte »** (§2.13) : il n'existe que pour les
+    autorisations converties. Le jour où les applications n'appelleront plus
+    les verbes de compatibilité, il pourra disparaître — en convertissant
+    chacun en droits par domaine, après avoir rattaché les machines sans
+    domaine.

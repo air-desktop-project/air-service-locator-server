@@ -92,12 +92,13 @@ les comptes, leurs appareils, leurs autorisations, et les domaines qu'aucun
 annuaire local n'héberge.
 
 **Ce que l'autorité se partage, à la ligne** — et le partage est ce qui la rend
-sûre (proposé dans son détail) :
+sûre (décidé le 2026-09-26, Thierry) :
 
 | Ce qui s'écrit | Où | Pourquoi là |
 |---|---|---|
 | Le compte, ses appareils, ses autorisations, son alias | **Racines** | Rien ne change : c'est le compte, et il n'est pas dans un domaine. |
-| Le domaine lui-même — propriétaire, alias, délégués, hébergeur | **Racines**, depuis les applications | Ce sont des décisions du **compte**, sous biométrie. Un annuaire local, qui n'est qu'une machine chez quelqu'un, ne doit pas pouvoir réécrire à qui appartient un domaine ni qui le gère. |
+| Le domaine lui-même — propriétaire, alias, hébergeur ; **ses groupes, leurs membres, les droits** | **Racines**, depuis les applications | Ce sont des décisions du **compte**, sous biométrie. Un annuaire local, qui n'est qu'une machine chez quelqu'un, ne doit pas pouvoir réécrire à qui appartient un domaine, qui le gère, ni qui peut y lire. |
+| **Le domaine racine** — niveau 0, son groupe d'administrateurs (`modele.md` §2.11) | **Racines**, sous la clé d'exploitant pour ses administrateurs | Il n'est hébergé par aucun annuaire local, et ne transmet aucun droit aux domaines du niveau 1. |
 | La machine — nom, capacités, clé, domaine de rattachement | **Racines**, depuis les applications | Même raison ; c'est aussi là que la clé s'enrôle. Les racines les **transmettent** à l'annuaire local qui héberge le domaine, pour qu'il authentifie les annonces (§5.4). |
 | **Les services** d'une machine rattachée à un domaine hébergé, et **leur état vivant** | **L'annuaire local** | C'est à lui que les daemons s'annoncent : il est le seul à les voir. Il en informe les racines (§5.4). |
 
@@ -203,8 +204,8 @@ sélective et relève du §5.
 | **Le bail — la connexion tenue, l'état `annoncé`** | **NON** |
 | **La joignabilité mesurée, les candidats d'adresse** | **NON** |
 | **Le journal** | **NON** |
-| **Domaines, leurs alias, leurs délégués, leur hébergeur ; le rattachement des machines** (2026-09-26) | Oui |
-| **Inscriptions d'annuaires locaux, leurs décisions ; le groupe des administrateurs** (2026-09-26) | Oui |
+| **Domaines, leurs alias, leur hébergeur ; le rattachement des machines ; les groupes, leurs membres, les droits** (2026-09-26) | Oui |
+| **Inscriptions d'annuaires locaux, leurs décisions** (2026-09-26) | Oui |
 | **L'état vivant des services fédérés** — adresse, port, vivant (§5.4) | **NON** entre racines : chaque racine le reçoit **de l'annuaire local**, qui les tient toutes les deux |
 
 **Le COMMENT a son propre document : [`replication.md`](replication.md)** — le
@@ -261,7 +262,7 @@ demande de **servir l'état de ses services** (§5.4). La marche devient :
 2. Depuis l'application, il **déclare** cet annuaire à son compte ; l'annuaire
    se présente aux racines avec sa clé et le code que l'application lui a
    donné — le geste de l'enrôlement d'une machine (`protocole.md` §2.2,
-   proposé).
+   décidé le 2026-09-26, Thierry).
 3. L'inscription est **en attente**. **Un administrateur des racines l'accepte
    ou la refuse** (`modele.md` §2.12), depuis son application ; un seul
    suffit.
@@ -551,7 +552,7 @@ connexion**, comme un daemon, et un NAT laisse sortir.
   adresse privée**, qui ne dit rien à qui est dehors : le problème de la
   traversée reste celui de `modele.md` §6.3, et il n'est pas résolu ici (§7).
 
-**Comment ça circule** (proposé dans le détail, `protocole.md` §3 ter) : la
+**Comment ça circule** (décidé le 2026-09-26, Thierry, `protocole.md` §3 ter) : la
 connexion de l'annuaire local vers **chaque** racine, authentifiée par sa clé
 d'identité comme entre racines ; dans un sens, les machines de ses domaines et
 leurs révocations ; dans l'autre, ses services et leur état. Chaque racine le
@@ -653,7 +654,14 @@ Rassemblé, plutôt que dispersé.
 10. **Le certificat de l'annuaire local.** Les daemons de la maison le
     joignent en TLS : sous quelle autorité, et comment ils l'épinglent — sans
     appeler de tiers (C19).
-11. **Les groupes généraux** (`modele.md` §2.12, §6).
+11. ~~**Les groupes généraux.**~~ **Décidé le 2026-09-26** : dès la v1, avec
+    les droits (`modele.md` §2.12, §2.13). Restent ouverts les droits
+    négatifs, l'imbrication des groupes et leurs bornes (`modele.md` §6).
+12. **Ce qu'un annuaire local sait des droits.** Il ne résout rien : c'est aux
+    racines que `GET /v1/ou` se pose, et ce sont elles qui tiennent les
+    groupes et les droits. S'il devait un jour répondre lui-même aux machines
+    de la maison — sans passer par les racines —, il lui faudrait les droits
+    qui visent ses domaines, et il ne les reçoit pas.
 
 ## 8. L'annuaire `ordinaire` et la confiance bilatérale — une suite nommée
 
