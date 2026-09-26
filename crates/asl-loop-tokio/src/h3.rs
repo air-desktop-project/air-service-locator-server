@@ -2848,6 +2848,19 @@ pub struct Annuaire<'a> {
     /// tous** : un réveil dit « regarde », et `au_tour` draine tous les canaux
     /// à chaque tour ; plusieurs ne diraient rien de plus.
     reveil_de_la_boucle: Arc<tokio::sync::Notify>,
+    /// La connexion dont le datagramme a été lu ce tour-ci, s'il y en a eu un
+    /// — posée par `a_la_lecture`, reprise par `apres_la_lecture`.
+    ///
+    /// **C'EST ELLE QU'ON NE FERME PAS DANS LE MÊME TOUR** : la réponse à la
+    /// requête qui l'a condamnée — le `204` d'« Effacer mon compte » — n'est
+    /// pas encore partie, et une connexion qu'on ferme n'émet plus un octet de
+    /// flux. Elle tombe au tour suivant, comme avant la décision 29.
+    lue_ce_tour: Option<Vec<u8>>,
+    /// La dernière opération du journal que `suivre_le_journal` a vue.
+    ///
+    /// Ce qui permet à `apres_la_lecture`, qui passe à CHAQUE datagramme, de
+    /// ne parcourir les flux de la voie que si le journal a bougé.
+    journal_suivi: u64,
     /// La voie entre racines : nos clés, et où dire ce qui s'y passe.
     voie: Voie<'a>,
     /// L'identifiant `n-…` que la clé du pair donne, calculé une fois.
@@ -2937,6 +2950,8 @@ impl<'a> Annuaire<'a> {
             suite: None,
             fermetures: None,
             reveil_de_la_boucle: Arc::clone(&reveil_de_la_boucle),
+            lue_ce_tour: None,
+            journal_suivi: 0,
             a_reveiller: Vec::new(),
             reveil: None,
             preparateur: Preparateur {
@@ -3150,6 +3165,7 @@ impl<'a> Annuaire<'a> {
     /// plus : c'est la contre-pression de `FluxPair`.
     fn suivre_le_journal(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
         let derniere = self.entrepot.derniere_operation();
+        self.journal_suivi = derniere;
         let mut a_pousser = Vec::new();
         for (clef, etat) in &mut self.connexions {
             let Some(flux) = &mut etat.flux_pair else {
@@ -3248,20 +3264,32 @@ impl<'a> Annuaire<'a> {
     }
 
     fn consignes_de_fermeture(&mut self) -> crate::quic::Consignes {
+        self.consignes_de_fermeture_sauf(None)
+    }
+
+    /// La même traduction, en épargnant une connexion pour ce tour-ci.
+    ///
+    /// Le pair révoqué de la connexion épargnée est remis dans
+    /// [`Self::revoques`] : elle tombera au tour suivant, et les autres
+    /// connexions du même pair tout de suite.
+    fn consignes_de_fermeture_sauf(&mut self, epargnee: Option<&[u8]>) -> crate::quic::Consignes {
         if self.revoques.is_empty() {
             return crate::quic::Consignes::default();
         }
         let revoques = core::mem::take(&mut self.revoques);
-        let a_fermer = self
-            .connexions
-            .iter()
-            .filter(|(_, etat)| {
-                etat.session
-                    .pair()
-                    .is_some_and(|pair| revoques.contains(&pair))
-            })
-            .map(|(clef, _)| clef.clone())
-            .collect();
+        let mut a_fermer = Vec::new();
+        for (clef, etat) in &self.connexions {
+            let Some(pair) = etat.session.pair().filter(|pair| revoques.contains(pair)) else {
+                continue;
+            };
+            if epargnee == Some(clef.as_slice()) {
+                if !self.revoques.contains(&pair) {
+                    self.revoques.push(pair);
+                }
+                continue;
+            }
+            a_fermer.push(clef.clone());
+        }
         crate::quic::Consignes {
             a_fermer,
             a_pousser: Vec::new(),
@@ -3421,6 +3449,28 @@ impl Application for Annuaire<'_> {
         consignes
     }
 
+    fn apres_la_lecture(&mut self, _maintenant: u64) -> crate::quic::Consignes {
+        // **CE QU'UNE REQUÊTE DÉPOSE, ET RIEN D'AUTRE** (décision 29) : une
+        // opération au journal (que le pair tient à suivre), un compte à
+        // réveiller (autorisation écrite ici), un pair révoqué (clé retirée,
+        // compte effacé, capacité retirée). Ni verdicts ni balayages : ceux-là
+        // arrivent par canal ou par l'horloge, et restent à `au_tour`.
+        let lue = self.lue_ce_tour.take();
+        let journal_a_bouge = self.entrepot.derniere_operation() != self.journal_suivi;
+        if !journal_a_bouge && self.a_reveiller.is_empty() && self.revoques.is_empty() {
+            return crate::quic::Consignes::default();
+        }
+        let mut a_pousser = if journal_a_bouge {
+            self.suivre_le_journal()
+        } else {
+            Vec::new()
+        };
+        a_pousser.extend(self.reveiller());
+        let mut consignes = self.consignes_de_fermeture_sauf(lue.as_deref());
+        consignes.a_pousser = a_pousser;
+        consignes
+    }
+
     fn a_pousser(&mut self, connexion: &mut Connection, octets: &[u8]) {
         // **SUR LES FLUX QUE LE CONDUCTEUR TIENT, ET NULLE PART AILLEURS.** Un
         // daemon en ouvre au plus un — `GET /v1/poussees` —, et celui qui n'en a
@@ -3503,6 +3553,7 @@ impl Application for Annuaire<'_> {
 
     fn a_la_lecture(&mut self, connexion: &mut Connection, flux: StreamId, pair: SocketAddr) {
         let clef = connexion.local_id().as_bytes().to_vec();
+        self.lue_ce_tour = Some(clef.clone());
         let Some(etat) = self.connexions.get_mut(&clef) else {
             return;
         };

@@ -5098,3 +5098,217 @@ async fn un_point_mort_et_une_adresse_de_bouclage_se_journalisent() {
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
+
+// ── Ce qu'une requête écrit part avec sa réponse (décision 29) ─────────────
+
+/// L'écart au-delà duquel ce qu'une écriture dépose n'est PAS parti dans le
+/// même lot d'émission que sa réponse.
+///
+/// # POURQUOI CE SEUIL SÉPARE LES DEUX CAS SANS DÉPENDRE DE LA MACHINE
+///
+/// Avant la décision 29, ce qu'une requête déposait attendait le tour suivant.
+/// Les essais ci-dessous font taire tout le monde : ce tour ne peut donc venir
+/// que d'une échéance, et la plus proche est la retransmission de la réponse,
+/// qui compte l'`max_ack_delay` que la pile annonce (25 ms,
+/// `ams_quic_tls::ACQUITTEMENT_MAX_MS`) — une borne BASSE, qu'aucune charge
+/// n'avance. Mesuré sur carbon le 2026-09-26, défaut réintroduit : 1,5 s pour
+/// les trois essais, l'estimation de départ du RTT pesant encore sur la
+/// retransmission. Dans le même lot, l'écart est celui de deux lectures de
+/// socket — 0,25 à 1,1 ms mesurés : l'essai tourne sur une seule tâche, et le
+/// serveur a tout émis avant qu'elle ne reprenne la main.
+const MEME_LOT: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Écoute sans rien dire jusqu'à la fin de la réponse sur ce flux.
+async fn la_reponse_sans_parler(client: &mut ams_quic_client::Client, flux: u64) {
+    let depart = std::time::Instant::now();
+    while !client.fin_recue(flux) {
+        assert!(
+            depart.elapsed() < std::time::Duration::from_secs(10),
+            "la réponse sur le flux {flux} n'est pas arrivée en 10 s"
+        );
+        client.ecouter().await;
+    }
+}
+
+#[tokio::test]
+async fn une_autorisation_ecrit_la_ligne_des_nouvelles_avec_sa_reponse() {
+    // Bob écoute ses nouvelles ; Alice l'autorise, puis tout le monde se tait.
+    // La ligne doit arriver avec le `201` d'Alice, et non à la première
+    // retransmission.
+    let (autorite, racine, chaine, cle) = materiel("ligne-meme-lot");
+    let (base, fichier) = entrepot("ligne-meme-lot");
+    let (adresse, dire_stop, tache) = lever_avec_reveil(&chaine, &cle, Arc::new(base), None).await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let _ = creer_un_compte(&mut alice, 0, 0xA3).await;
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, _, _) = creer_un_compte(&mut bob, 0, 0xB3).await;
+    ams_quic_client::envoyer_une_requete(&mut bob, 12, 17, b"/v1/nouvelles", None, b"").await;
+    let depart = std::time::Instant::now();
+    while bob.recu(12).is_empty() && depart.elapsed() < std::time::Duration::from_secs(10) {
+        bob.parler().await;
+        bob.ecouter().await;
+    }
+    assert_eq!(champ(&champs(bob.recu(12)), b":status"), Some(&b"200"[..]));
+    acquitter_jusqu_au_silence(&mut bob).await;
+    acquitter_jusqu_au_silence(&mut alice).await;
+
+    let demande = format!(
+        r#"{{"a":"{}","portee":"tout","etiquette":"meme-lot"}}"#,
+        compte_b.texte()
+    );
+    ams_quic_client::envoyer_avec_media(
+        &mut alice,
+        8,
+        20,
+        b"/v1/autorisations",
+        None,
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    la_reponse_sans_parler(&mut alice, 8).await;
+    assert_eq!(champ(&champs(alice.recu(8)), b":status"), Some(&b"201"[..]));
+    let ligne = ecouter_sans_parler(&mut bob, std::time::Duration::from_secs(3), |bob| {
+        bob.recu(12)
+            .windows(12)
+            .any(|fenetre| fenetre == b"autorisation")
+    })
+    .await
+    .expect("la ligne arrive");
+    journaliser(&format!(
+        "ligne des nouvelles, après la réponse : {ligne:?}"
+    ));
+    assert!(
+        ligne < MEME_LOT,
+        "la ligne est arrivée {ligne:?} après la réponse — elle a attendu le tour suivant"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn une_operation_ecrite_part_au_pair_avec_sa_reponse() {
+    // Le pair tient son flux des opérations ; Alice déclare une machine, puis
+    // tout le monde se tait. L'opération doit partir au pair avec le `201`.
+    let (autorite, racine, chaine, cle) = materiel("operation-meme-lot");
+    let (base, fichier) = entrepot("operation-meme-lot");
+    let tireur = asl_cle::CleSecrete::depuis_entropie([0xC5; 32]);
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            pair: Some(tireur.publique()),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let _ = creer_un_compte(&mut alice, 0, 0xA5).await;
+    let mut pair = connecter(&racine, adresse).await;
+    prouver_la_racine(&mut pair, &tireur, 0, 4).await;
+    ams_quic_client::envoyer_une_requete(
+        &mut pair,
+        8,
+        17,
+        b"/v1/pair/operations?apres=0",
+        None,
+        b"",
+    )
+    .await;
+    let depart = std::time::Instant::now();
+    while pair.recu(8).is_empty() && depart.elapsed() < std::time::Duration::from_secs(10) {
+        pair.parler().await;
+        pair.ecouter().await;
+    }
+    assert_eq!(champ(&champs(pair.recu(8)), b":status"), Some(&b"200"[..]));
+    acquitter_jusqu_au_silence(&mut pair).await;
+    acquitter_jusqu_au_silence(&mut alice).await;
+    assert!(!pair.fin_recue(8), "le flux des opérations reste tenu");
+    let avant = pair.recu(8).len();
+
+    ams_quic_client::envoyer_avec_media(
+        &mut alice,
+        8,
+        20,
+        b"/v1/machines",
+        None,
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        b"application/json",
+    )
+    .await;
+    la_reponse_sans_parler(&mut alice, 8).await;
+    assert_eq!(champ(&champs(alice.recu(8)), b":status"), Some(&b"201"[..]));
+    let poussee = ecouter_sans_parler(&mut pair, std::time::Duration::from_secs(3), |pair| {
+        pair.recu(8).len() > avant
+    })
+    .await
+    .expect("l'opération part au pair");
+    journaliser(&format!(
+        "opération chez le pair, après la réponse : {poussee:?}"
+    ));
+    assert!(
+        poussee < MEME_LOT,
+        "l'opération est partie {poussee:?} après la réponse — elle a attendu le tour suivant"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn une_cle_revoquee_ferme_la_connexion_du_daemon_avec_la_reponse() {
+    // Le daemon tient sa connexion ; son propriétaire révoque sa clé depuis
+    // une autre, puis tout le monde se tait. La connexion du daemon doit
+    // tomber avec le `204`, et celle qui a révoqué, elle, rester debout.
+    let (autorite, racine, chaine, cle) = materiel("fermeture-meme-lot");
+    let (base, fichier) = entrepot("fermeture-meme-lot");
+    let base = Arc::new(base);
+    let (adresse, dire_stop, tache) =
+        lever_avec_reveil(&chaine, &cle, Arc::clone(&base), None).await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA6).await;
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0xA6; 16]);
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xA6; 32]);
+    machine_enrolee(&base, machine, compte_a, secrete.publique().octets(), TOUT);
+    let mut daemon = connecter(&racine, adresse).await;
+    authentifier(&mut daemon, machine, &secrete, 0, 4).await;
+    acquitter_jusqu_au_silence(&mut daemon).await;
+    acquitter_jusqu_au_silence(&mut alice).await;
+
+    let cible = format!("/v1/machines/{}/cle", machine.texte());
+    // `16` est l'index QPACK de `:method: DELETE`.
+    ams_quic_client::envoyer_une_requete(&mut alice, 8, 16, cible.as_bytes(), None, b"").await;
+    la_reponse_sans_parler(&mut alice, 8).await;
+    assert_eq!(champ(&champs(alice.recu(8)), b":status"), Some(&b"204"[..]));
+    let fermee = ecouter_sans_parler(&mut daemon, std::time::Duration::from_secs(3), |daemon| {
+        daemon.ferme().is_some()
+    })
+    .await
+    .expect("la connexion du daemon tombe");
+    journaliser(&format!(
+        "fermeture du daemon, après la réponse : {fermee:?}"
+    ));
+    assert!(
+        fermee < MEME_LOT,
+        "la connexion est tombée {fermee:?} après la réponse — elle a attendu le tour suivant"
+    );
+    assert!(alice.ferme().is_none(), "celle qui a révoqué reste debout");
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
