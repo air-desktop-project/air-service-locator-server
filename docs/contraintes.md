@@ -306,6 +306,34 @@ cherchent pas.
 Un essai par chemin de lecture, avec un compte tiers non autorisé, est le seul
 contrôle qui vaille.
 
+### Des droits accordés à des groupes — amendé le 2026-09-26
+
+**L'arête change de bénéficiaire, pas de nature** (`modele.md` §2.12, §2.13,
+`replication.md` décisions 40 et 41). Ce qui ouvre la résolution n'est plus une
+arête d'un compte vers un compte, c'est **un droit accordé à un groupe** — et
+un groupe est une liste NOMINATIVE de comptes, que ses administrateurs
+tiennent et qui se lit. Rien de ce que C10 interdit ne revient :
+
+- **Pas de mode anonyme** : il n'existe aucun groupe « tout le monde », et un
+  groupe ne contient que des comptes nommés — jamais une machine, jamais un
+  jeton.
+- **Pas de jeton porteur** : un droit ne circule pas ; il vit à l'annuaire, sur
+  un groupe dont les membres se retirent.
+- **Toujours calculé depuis le demandeur** : la résolution part du compte
+  propriétaire de la machine qui demande, réunit les droits de TOUS ses
+  groupes sur la cible et sur ce qui la contient, et ne part jamais de ce que
+  la requête désigne. `decider_resolution` prend un ensemble de droits déjà
+  calculé pour le demandeur, comme elle prenait hier ses arêtes.
+- **Le domaine racine ne transmet rien** : un droit sur lui ne descend pas dans
+  les domaines des utilisateurs. Sans cette règle, administrer les racines
+  serait lire tout le monde.
+
+**Ce qui s'ajoute aux essais** : un compte tiers qui n'est membre d'aucun
+groupe ayant un droit ; un ancien membre retiré d'un groupe, dont la machine
+demande encore ; un administrateur des racines qui demande un service d'un
+domaine du niveau 1. Les trois reçoivent la même réponse, après le même délai,
+que pour un service inexistant (C9).
+
 **IL EXISTE.** `decider_resolution` prend la machine QUI DEMANDE et la cible
 **déjà résolue** ; elle ne prend jamais ce que la requête désigne. Sa forme rend
 donc la faute difficile à écrire, et un essai la cherche explicitement — un compte
@@ -404,7 +432,7 @@ décision explicite, toujours par une commodité.
 `annuaires.md` §5.4, `replication.md` décisions 34 et 35).
 
 **L'alias de domaine est une seconde exception choisie**, à côté de l'alias
-de compte : facultatif, posé par son propriétaire ou un délégué, public par
+de compte : facultatif, posé par un administrateur du domaine, public par
 construction — et l'application le dit au moment de le poser, « visible de
 tous les comptes ». Il est **moins** que l'alias de compte : il n'est pas
 unique, il ne se lit qu'authentifié, et il ne rend qu'un `d-…` — jamais le

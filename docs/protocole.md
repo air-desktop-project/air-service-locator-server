@@ -750,29 +750,38 @@ l'empêcherait de comprendre.
 | `GET /v1/utilisateurs/{u}` | **Confirme qu'un identifiant existe**, et rien d'autre : ni nom, ni machines, ni services. Sert à ce qu'une faute de frappe ne produise pas une autorisation muette. |
 | `GET /v1/moi/appareils` | **Les appareils du compte de la machine qui demande**, révoqués compris — lecture seule, voie machine. Voir §3. |
 | `GET /v1/utilisateurs/{u}/machines` | **Les machines de `u` que le demandeur a le droit de voir** — les siennes si `u` est lui, sinon celles que les autorisations de `u` envers lui couvrent (`modele.md` §2.5). Voir ci-dessous. Servi aussi sur la voie machine (§3). |
-| `POST /v1/autorisations` | Accorde. Bénéficiaire `u-…`, portée, étiquette. **Réveille les appareils du bénéficiaire** — voir « Les notifications ». |
-| `GET /v1/autorisations` | Les deux sens : ce que j'ai accordé, ce qu'on m'a accordé. |
-| `DELETE /v1/autorisations/{g}` | Révoque. Effet immédiat. |
+| `POST /v1/autorisations` | Accorde. Bénéficiaire `u-…`, portée, étiquette. **Réveille les appareils du bénéficiaire** — voir « Les notifications ». **Depuis le 2026-09-26, un verbe de compatibilité** : il écrit un droit `voir` + `localiser` au groupe personnel du bénéficiaire (voir « Les autorisations d'hier »). |
+| `GET /v1/autorisations` | Les deux sens : ce que j'ai accordé, ce qu'on m'a accordé. **Compatibilité** : une vue des droits, sous la forme d'hier. |
+| `DELETE /v1/autorisations/{g}` | Révoque. Effet immédiat. **Compatibilité** : retire le droit `g-…`. |
 | `GET /v1/expositions` | **Ce qui est exposé de MOI**, relation par relation. Tout utilisateur, pas seulement l'administrateur. |
 | `DELETE /v1/expositions/{relation}` | **Retire mes enregistrements** de cette exposition. Portée : tout mon compte, ou telle machine. |
 | `POST /v1/domaines` | **Crée un domaine** à MON compte (2026-09-26, `modele.md` §2.11), alias facultatif : `{"alias":"Maison"}`. `201`, `{"domaine":"d-…"}`. Le premier est créé par `POST /v1/comptes`, dans sa transaction. |
-| `GET /v1/domaines` | **Les domaines que je possède et ceux dont je suis délégué** : `[{"domaine":"d-…","proprietaire":"u-…","alias":"Maison","heberge_par":"racines"\|"n-…","role":"proprietaire"\|"delegue"}]`. |
+| `GET /v1/domaines` | **Les domaines que je possède et ceux où l'un de mes groupes tient un droit** : `[{"domaine":"d-…","proprietaire":"u-…","alias":"Maison","heberge_par":"racines"\|"n-…","droits":["administrer","voir",…]}]` — `droits` est l'union de ce que je peux sur ce domaine (`modele.md` §2.13). Le domaine racine n'y figure que pour ses administrateurs. |
 | `GET /v1/domaines?alias=…` | **La recherche par alias** : correspondance exacte après NFC et pliage simple de casse ; `[{"domaine":"d-…","autorite":"racines"\|"n-…"}]`, **tous** ceux qui portent l'alias, et `[]` si aucun. Ni propriétaire, ni machine. Servie sur la voie appareil **et** sur la voie machine — tout compte authentifié —, jamais sans preuve. Voir ci-dessous. |
-| `GET /v1/domaines/{d}` | Le domaine, ses délégués, et les machines qui y sont rattachées — `m-…` et propriétaire ; le nom, seulement pour mes machines. Propriétaire et délégués ; les autres, `404`. |
-| `PUT /v1/domaines/{d}/alias` | Pose ou change l'alias : `{"alias":"Maison"}`. Propriétaire ou délégué. **Jamais `409`** : l'alias de domaine n'est pas unique. `400` s'il n'est pas de l'UTF-8 admis (`modele.md` §2.11). |
+| `GET /v1/domaines/{d}` | Le domaine, ses groupes, et les machines qui y sont rattachées — `m-…` et propriétaire ; le nom, pour mes machines **et** pour qui a `voir` sur le domaine. Ceux qui ont `voir` ou `administrer` ; les autres, `404`. |
+| `PUT /v1/domaines/{d}/alias` | Pose ou change l'alias : `{"alias":"Maison"}`. `administrer`. **Jamais `409`** : l'alias de domaine n'est pas unique. `400` s'il n'est pas de l'UTF-8 admis (`modele.md` §2.11). |
 | `DELETE /v1/domaines/{d}/alias` | Le retire. |
-| `PUT /v1/domaines/{d}/delegues/{u}` | **Délègue** la gestion à un compte existant. Propriétaire seulement ; `404` si `u` n'existe pas. |
-| `DELETE /v1/domaines/{d}/delegues/{u}` | Retire la délégation — et détache du domaine les machines du délégué (proposé). Propriétaire seulement. |
-| `PUT /v1/machines/{m}/domaine` | **Rattache** MA machine : `{"domaine":"d-…"}` — un domaine que je possède ou dont je suis délégué. Une machine déjà rattachée est **déplacée**. |
+| ~~`PUT`/`DELETE /v1/domaines/{d}/delegues/{u}`~~ | **Retirés le 2026-09-26** : déléguer, c'est ajouter au groupe d'administrateurs (`POST /v1/groupes/{e}/membres`). |
+| `PUT /v1/machines/{m}/domaine` | **Rattache** MA machine : `{"domaine":"d-…"}` — un domaine où je tiens `rattacher` (ou que je possède). Une machine déjà rattachée est **déplacée**. `403` sans le droit. |
 | `DELETE /v1/machines/{m}/domaine` | La détache : elle n'a plus de domaine. |
-| `DELETE /v1/domaines/{d}` | Supprime un domaine (proposé) : ses machines détachées, son alias et ses délégations retirés. **`409` si c'est mon dernier.** Propriétaire seulement. |
-| `POST /v1/annuaires` | **Déclare MON annuaire local** (proposé) : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription — dix symboles, à usage unique, comme un code d'enrôlement. L'annuaire le présente aux racines avec sa clé d'identité (§3 ter) ; l'inscription est alors **en attente**. |
+| `DELETE /v1/domaines/{d}` | Supprime un domaine : ses machines détachées, son alias, ses groupes et les droits qui le visent retirés. **`409` si c'est mon dernier.** Propriétaire seulement ; le domaine racine ne se supprime pas. |
+| `POST /v1/annuaires` | **Déclare MON annuaire local** : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription — dix symboles, à usage unique, comme un code d'enrôlement. L'annuaire le présente aux racines avec sa clé d'identité (§3 ter) ; l'inscription est alors **en attente**. |
 | `GET /v1/annuaires` | Mes annuaires locaux et l'état de leur inscription : `attendue`, `en attente`, `acceptée`, `refusée`, `retirée`. |
 | `DELETE /v1/annuaires/{n}` | Retire l'inscription de mon annuaire local ; ses domaines reviennent aux racines. |
-| `PUT /v1/domaines/{d}/hebergeur` | **Confie** mon domaine à mon annuaire local accepté : `{"annuaire":"n-…"}` ; `DELETE` le rend aux racines. Propriétaire seulement (proposé). |
+| `PUT /v1/domaines/{d}/hebergeur` | **Confie** mon domaine à mon annuaire local accepté : `{"annuaire":"n-…"}` ; `DELETE` le rend aux racines. Propriétaire seulement. |
 | `GET /v1/inscriptions` | **Les inscriptions en attente**, pour un administrateur des racines (`modele.md` §2.12) : `n-…`, propriétaire, adresse, date. Aux autres, `404`. |
 | `POST /v1/inscriptions/{n}/decision` | **Accepte ou refuse** : `{"accepte":true}`. Un administrateur suffit. Accepter une inscription retirée ou refusée, `409`. |
-| `POST /v1/administrateurs` | **Nomme** un administrateur des racines, `u-…` dans le corps, **sous la clé d'exploitant** (genre `o`, comme `POST /v1/invitations`). `DELETE /v1/administrateurs/{u}` le retire, sous la même clé. Sans `--operator-key`, `404`. |
+| `POST /v1/administrateurs` | **Nomme** un administrateur des racines, `u-…` dans le corps, **sous la clé d'exploitant** (genre `o`, comme `POST /v1/invitations`). `DELETE /v1/administrateurs/{u}` le retire, sous la même clé. Sans `--operator-key`, `404`. **Depuis le 2026-09-26, c'est un membre du groupe d'administrateurs du domaine racine** : ces deux verbes, et eux seuls, changent ce groupe-là — `POST /v1/groupes/{e}/membres` y rend `403`. Le premier nommé devient propriétaire du domaine racine (proposé). |
+| `GET /v1/groupes` | **Mes groupes** — ceux dont je suis membre, mon groupe personnel compris, et ceux des domaines que j'administre : `[{"groupe":"e-…","domaine":"d-…"\|null,"etiquette":"Famille","sorte":"administrateurs"\|"domaine"\|"personnel","membre":true}]`. (2026-09-26, `modele.md` §2.12.) |
+| `POST /v1/domaines/{d}/groupes` | **Crée un groupe** dans le domaine : `{"etiquette":"Famille"}` ; `201`, `{"groupe":"e-…"}`. `administrer`. |
+| `GET /v1/groupes/{e}` | Le groupe et ses membres (`u-…`). Ses membres et les administrateurs de son domaine ; les autres, `404`. Un groupe personnel ne rend que son titulaire, à lui seul. |
+| `PATCH /v1/groupes/{e}` | Change l'étiquette. `administrer` sur son domaine. |
+| `POST /v1/groupes/{e}/membres` | **Ajoute un compte** : `{"compte":"u-…"}` ; `404` si le compte n'existe pas, `409` s'il est déjà membre. `administrer` sur le domaine du groupe. **Réveille le compte ajouté si le groupe porte des droits** (`modele.md` §2.13). `403` sur un groupe personnel, et sur celui du domaine racine. |
+| `DELETE /v1/groupes/{e}/membres/{u}` | **Retire un membre**. Effet immédiat. `administrer`, ou le membre lui-même qui s'en va. `409` pour le propriétaire dans son groupe d'administrateurs. Retirer `rattacher` à quelqu'un détache ses machines du domaine. |
+| `DELETE /v1/groupes/{e}` | Supprime un groupe — ses membres et les droits qu'il reçoit partent avec. `administrer`. `409` pour un groupe d'administrateurs ou un groupe personnel. |
+| `POST /v1/droits` | **Accorde** : `{"groupe":"e-…","element":"d-…"\|"m-…"\|"s-…","droits":["localiser"],"etiquette":"…"}` ; `201`, `{"droit":"g-…"}`. `administrer` sur le domaine de l'élément, ou propriétaire de la machine visée. `400` pour un droit sans sens sur cet élément (`rattacher` sur une machine). **Réveille les membres du groupe.** |
+| `GET /v1/droits` | **Les droits que j'ai accordés, et ceux que mes groupes ont reçus** : `[{"droit":"g-…","groupe":"e-…","element":"…","droits":[…],"etiquette":"…","par":"u-…","retire":false}]`. Les retirés y restent, marqués. |
+| `DELETE /v1/droits/{g}` | **Retire** un droit. Effet immédiat. Celui qui l'a accordé, ou `administrer` sur le domaine de l'élément. |
 
 ### `GET /v1/vu` — d'où l'annuaire voit cette connexion
 
@@ -908,7 +917,11 @@ choisi et ce que cela coûte.
 
 **Ce qui déclenche : un seul événement.** Une autorisation accordée à B
 (`POST /v1/autorisations`) réveille tous les appareils vivants de B. Rien
-d'autre ne notifie. **Elle part de la racine qui a écrit l'autorisation**, jamais
+d'autre ne notifie. **Depuis le 2026-09-26, l'événement a deux formes, et c'est
+le même** (`modele.md` §2.13) : **un droit accordé** à un groupe réveille ses
+membres, et **l'ajout d'un compte** à un groupe qui porte des droits réveille
+ce compte — dans les deux cas, quelqu'un vient de recevoir de quoi voir ou
+joindre. Retirer ne réveille personne. **Elle part de la racine qui a écrit l'autorisation**, jamais
 de celle qui l'applique (`replication.md`, décision 9) : un utilisateur ne doit
 pas être réveillé deux fois. **Et elle part hors de la boucle** : une tâche à
 part, après la validation de l'écriture ; la réponse à `POST /v1/autorisations`
@@ -1213,10 +1226,10 @@ compte ; ce qui change est qui l'a voulu, et c'est dit dans la cause.
 
 ### Les domaines — ce qu'une recherche par alias rend, et ce qu'elle tait
 
-**Décidé le 2026-09-26 (Thierry)** ; le modèle est dans `modele.md` §2.11 et
-§2.12, l'autorité dans `annuaires.md` §2 bis. Les verbes de la table sont
-**proposés** dans leur forme — chemins, corps, codes — ; ce qui est tranché est
-ce qu'ils font.
+**Décidé le 2026-09-26 (Thierry)** ; le modèle est dans `modele.md` §2.11 à
+§2.13, l'autorité dans `annuaires.md` §2 bis. **Les verbes de la table sont
+décidés dans leur forme** — chemins, corps, codes —, ceux des groupes et des
+droits compris ; la PR de code peut encore les ajuster, et le dira.
 
 ```
 GET /v1/domaines?alias=Maison
@@ -1233,7 +1246,7 @@ domaine : `racines`, ou l'annuaire local qui l'héberge.
 
 **Ce qu'elle tait** : le propriétaire, les machines, les services. Savoir
 qu'un domaine « Maison » existe n'ouvre rien — la résolution reste gardée par
-les autorisations entre comptes (§3, C10).
+les droits (§3, C10).
 
 **Ce qui la borne, et pourquoi c'est assez.** Correspondance **exacte**, après
 NFC et pliage simple de casse (`modele.md` §2.11) : pas de préfixe, pas de
@@ -1244,6 +1257,33 @@ deuxième surface énumérable de l'annuaire** (§3, « Ce qui rend l'annuaire n
 énumérable ») : on peut essayer des chaînes et apprendre lesquelles existent.
 Elle rend moins que l'alias de compte — un `d-…` dont on ne peut rien faire —
 et elle demande un compte pour être interrogée.
+
+### Les autorisations d'hier — servies comme une vue des droits
+
+**Décidé le 2026-09-26 (Thierry) que les autorisations deviennent des droits ;
+proposé : que leurs verbes restent servis pendant la transition**
+(`modele.md` §2.13, `replication.md` décision 41). Les applications déployées —
+Android 0.11, iOS/macOS 0.13 — accordent, listent et retirent par
+`/v1/autorisations`. Les casser le jour de la mise à jour des racines serait
+couper le partage à tous ceux qui ne mettent pas leur application à jour. Les
+trois verbes restent donc, **comme une vue** :
+
+| Verbe | Ce qu'il fait désormais |
+|---|---|
+| `POST /v1/autorisations` `{"a":"u-…","portee":…,"etiquette":…}` | Écrit un droit `voir` + `localiser` **au groupe personnel** de `u-…`, sur l'élément que nomme la portée — le service, la machine, ou **le compte** pour « tout mon compte ». Rend `{"autorisation":"g-…"}`, l'identifiant du droit. Réveille, comme avant. |
+| `GET /v1/autorisations` | Rend, **sous la forme d'hier**, les droits qui s'y laissent dire : accordés par moi à un groupe personnel (`a` = son titulaire), et reçus par un de mes groupes (`a` = moi, et un champ **nouveau**, `groupe`, qu'une application d'hier ignore). Un droit sans `localiser` n'y figure pas : ce n'était pas une autorisation. |
+| `DELETE /v1/autorisations/{g}` | Retire le droit `g-…`. |
+
+**La ligne du flux des nouvelles garde son genre**, `{"quoi":"autorisation"}` :
+c'est sur elle que les applications déployées relisent, et un droit accordé à
+un de mes groupes, ou mon ajout à un groupe qui porte des droits, est
+exactement ce qu'elles doivent relire.
+
+**La fin de la transition** : quand les applications appelleront
+`/v1/groupes` et `/v1/droits`, les trois verbes pourront être retirés — une
+rupture de protocole, donc un cran majeur, annoncée par `GET /v1/version`.
+Jusque-là, ils coûtent une traduction, et rien d'autre : il n'y a qu'un
+modèle, les droits, et deux façons d'en parler.
 
 ### Émettre une invitation — le seul secret que l'exploitant tient
 
@@ -1642,6 +1682,10 @@ GET /v1/utilisateurs/{u}/machines
 [{"machine": "m-…", "nom": "grenier"}, {"machine": "m-…", "nom": "nas"}]
 ```
 
+**Depuis le 2026-09-26, ce sont les droits `voir` (et `localiser`, qui
+l'emporte) qui décident de cette liste** (`modele.md` §2.13) ; ce qui suit le
+dit dans les mots d'hier, qui restent exacts pour une autorisation convertie.
+
 **Une autorisation de portée « tout le compte » donne la liste entière des
 machines de celui qui l'a accordée** — identifiant et nom, rien d'autre : ni
 capacités, ni clé, ni code, qui n'appartiennent qu'au propriétaire. Une portée
@@ -1831,8 +1875,8 @@ opération visible dans l'application plutôt qu'enfouie dans un menu.
 **Décidé le 2026-09-26** (`annuaires.md` §5.4). Quand la machine visée est
 rattachée à un domaine qu'un annuaire local héberge, `GET /v1/ou` répond **aux
 racines**, avec ce que l'annuaire local leur a transmis — l'adresse, le port,
-vivant ou non —, **et sous la même règle** : seulement si une autorisation
-couvre le demandeur (C10), et la même réponse, après le même délai, pour un
+vivant ou non —, **et sous la même règle** : seulement si le demandeur tient
+`localiser` sur ce service, par l'un de ses groupes (C10, `modele.md` §2.13), et la même réponse, après le même délai, pour un
 service hors de portée et pour un service inexistant (C9). Le client ne sait
 pas, et n'a pas à savoir, que le service vit derrière un annuaire local.
 
@@ -1937,11 +1981,11 @@ verra pareil, jusqu'à ce qu'un humain regarde.
 
 ---
 
-## 3 ter. La voie de l'annuaire local — proposée
+## 3 ter. La voie de l'annuaire local
 
-**Décidé le 2026-09-26 : qu'elle existe, et ce qu'elle porte** (`annuaires.md`
-§2 bis, §5.4). **Proposé : sa forme sur le fil**, qui reprend la voie entre
-racines (§3 bis) partout où elle convient.
+**Décidé le 2026-09-26 (Thierry) : qu'elle existe, ce qu'elle porte, et sa
+forme sur le fil** (`annuaires.md` §2 bis, §5.4, `replication.md` décision 36),
+qui reprend la voie entre racines (§3 bis) partout où elle convient.
 
 Le cinquième public : **un annuaire local inscrit**. Il n'est pas une racine —
 il ne fait autorité sur aucun compte —, et il n'est pas un daemon — il parle
