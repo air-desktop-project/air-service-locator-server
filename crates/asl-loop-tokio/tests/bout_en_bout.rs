@@ -200,6 +200,13 @@ struct ClesDeLExploitant {
     /// ne pose pas et que l'essai pose : la lenteur de chaque lecture
     /// d'instantané, par la porte d'essai (décision 28).
     lenteur_d_instantane: Option<std::time::Duration>,
+    /// Par la même porte : ce qui remplace chaque lecture d'instantané.
+    panne_d_instantane: Option<asl_loop_tokio::PanneDInstantane>,
+    /// Par la même porte : le retard de chaque verdict de sonde.
+    lenteur_de_sonde: Option<std::time::Duration>,
+    /// Où rendre à l'essai ce par quoi le tireur nomme ce qu'il faut fermer
+    /// — l'essai tient alors le rôle du tireur.
+    fermetures: Option<tokio::sync::oneshot::Sender<asl_loop_tokio::Fermetures>>,
 }
 
 #[allow(
@@ -263,6 +270,15 @@ async fn lever_complet(
         }
         if let Some(lenteur) = cles.lenteur_d_instantane {
             application.ralentir_les_instantanes_pour_un_essai(lenteur);
+        }
+        if let Some(panne) = cles.panne_d_instantane {
+            application.faire_tomber_les_instantanes_pour_un_essai(panne);
+        }
+        if let Some(lenteur) = cles.lenteur_de_sonde {
+            application.retarder_les_verdicts_pour_un_essai(lenteur);
+        }
+        if let Some(rendre) = cles.fermetures {
+            let _ = rendre.send(application.fermetures());
         }
         let arret = async {
             let _ = entendre_stop.await;
@@ -4278,6 +4294,336 @@ async fn la_boucle_sert_pendant_qu_un_instantane_se_prepare() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+// ── Ce qui arrive par canal réveille la boucle (décision 28) ────────────────
+//
+// # POURQUOI CES ESSAIS ÉCOUTENT SANS PARLER
+//
+// La boucle se réveille sur une échéance QUIC ou sur un datagramme. Un client
+// qui parle pendant qu'il attend lui fournit ce datagramme, et le défaut que
+// ces essais cherchent — un dépôt par canal qui ne réveille pas — ne se
+// verrait plus. Une fois tout acquitté, ils ne font donc qu'ÉCOUTER : la
+// connexion est silencieuse, aucune échéance n'est proche (trente secondes
+// d'inactivité), et seul le réveil peut faire partir ce qu'ils attendent.
+//
+// **« TOUT ACQUITTÉ » SE CONSTATE, IL NE SE SUPPOSE PAS.** Un seul `parler`
+// ne suffit pas : ce que le serveur a envoyé après lui reste sans
+// acquittement, et ses retransmissions (140 ms, 280, 560…) réveillent la
+// boucle — la première version de ces essais passait ainsi réveil retiré.
+// On parle et on écoute jusqu'à un demi-seconde de silence du serveur.
+
+/// Acquitte tout ce que le serveur a dit, jusqu'à ce qu'il se taise.
+async fn acquitter_jusqu_au_silence(client: &mut ams_quic_client::Client) {
+    for _ in 0..64_u32 {
+        client.parler().await;
+        if !client.ecouter().await {
+            return;
+        }
+    }
+    panic!("le serveur ne se tait pas : l'essai ne peut pas écouter en silence");
+}
+
+/// Écoute sans rien dire jusqu'à ce que la condition tienne, au plus `pendant`.
+async fn ecouter_sans_parler(
+    client: &mut ams_quic_client::Client,
+    pendant: std::time::Duration,
+    mut condition: impl FnMut(&ams_quic_client::Client) -> bool,
+) -> Option<std::time::Duration> {
+    let depart = std::time::Instant::now();
+    while depart.elapsed() < pendant {
+        if condition(client) {
+            return Some(depart.elapsed());
+        }
+        client.ecouter().await;
+    }
+    condition(client).then(|| depart.elapsed())
+}
+
+#[tokio::test]
+async fn un_verdict_de_sonde_part_sans_attendre_qu_un_paquet_arrive() {
+    // La sonde est une tâche à part ; son verdict revient par canal. Avant
+    // la 0.21.0, il attendait le prochain paquet de n'importe qui — sur une
+    // connexion de daemon calme, le keepalive, dix secondes — pour être
+    // recueilli et poussé. Retardé de trois secondes par la porte d'essai, il
+    // arrive quand la connexion est silencieuse : seul le réveil le fait
+    // partir.
+    const RETARD: std::time::Duration = std::time::Duration::from_secs(3);
+    let (autorite, racine, chaine, cle) = materiel("sonde-reveil");
+    let (base, fichier) = entrepot("sonde-reveil");
+    let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xE7; 16]);
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0xE7; 16]);
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xE7; 32]);
+    machine_enrolee(&base, machine, compte, secrete.publique().octets(), TOUT);
+
+    let service = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("un service d'essai");
+    let port = service.local_addr().expect("une adresse").port();
+    tokio::spawn(async move {
+        while let Ok((flux, _)) = service.accept().await {
+            drop(flux);
+        }
+    });
+
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            lenteur_de_sonde: Some(RETARD),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+    let mut client = connecter(&racine, adresse).await;
+    authentifier(&mut client, machine, &secrete, 0, 4).await;
+
+    // Le flux des poussées, ouvert d'abord : c'est par lui que le verdict
+    // arrivera.
+    ams_quic_client::envoyer_une_requete(&mut client, 8, 17, b"/v1/poussees", None, b"").await;
+    while client.recu(8).is_empty() {
+        client.ecouter().await;
+        client.parler().await;
+    }
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":{port}}}],"adresses_locales":[]}}"#,
+        machine.texte()
+    );
+    let depart = std::time::Instant::now();
+    ams_quic_client::envoyer_avec_media(
+        &mut client,
+        12,
+        20,
+        b"/v1/annonce",
+        None,
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    let rendu = ams_quic_client::attendre_la_reponse(&mut client, 12).await;
+    assert!(String::from_utf8_lossy(&rendu).contains("en_cours"));
+    // Tout est acquitté ; désormais on n'écoute plus qu'en silence.
+    acquitter_jusqu_au_silence(&mut client).await;
+    assert!(
+        depart.elapsed() < RETARD,
+        "l'essai n'a rien prouvé : le verdict était déjà là ({:?})",
+        depart.elapsed()
+    );
+
+    let joignable = |client: &ams_quic_client::Client| {
+        String::from_utf8_lossy(client.recu(8)).contains("joignable")
+    };
+    let vu = ecouter_sans_parler(&mut client, RETARD * 4, joignable).await;
+    let apres = depart.elapsed();
+    assert!(
+        vu.is_some(),
+        "aucune poussée en {apres:?} pour un verdict retardé de {RETARD:?} — le verdict \
+         attend qu'un paquet réveille la boucle"
+    );
+    assert!(
+        apres < RETARD + std::time::Duration::from_secs(1),
+        "la poussée est arrivée {apres:?} après l'annonce, pour un verdict retardé de \
+         {RETARD:?}"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn une_fermeture_demandee_par_le_tireur_ferme_sans_attendre() {
+    // Le tireur applique une révocation reçue de l'autre racine et nomme la
+    // machine dont la connexion doit tomber ici. Avant la 0.21.0, le nom
+    // attendait dans son canal le prochain paquet de n'importe qui — le
+    // keepalive du tireur d'en face, dix secondes par défaut. L'essai tient le
+    // rôle du tireur, et la machine n'écoute qu'en silence.
+    let (autorite, racine, chaine, cle) = materiel("fermeture-reveil");
+    let (base, fichier) = entrepot("fermeture-reveil");
+    let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xE8; 16]);
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0xE8; 16]);
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xE8; 32]);
+    machine_enrolee(&base, machine, compte, secrete.publique().octets(), TOUT);
+
+    let (rendre, recevoir) = tokio::sync::oneshot::channel();
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            fermetures: Some(rendre),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+    let fermetures = recevoir.await.expect("l'annuaire rend ses fermetures");
+    let mut client = connecter(&racine, adresse).await;
+    authentifier(&mut client, machine, &secrete, 0, 4).await;
+    acquitter_jusqu_au_silence(&mut client).await;
+    // Rien ne doit arriver avant la demande : la connexion est calme.
+    let calme = ecouter_sans_parler(&mut client, std::time::Duration::from_millis(600), |c| {
+        c.ferme().is_some()
+    })
+    .await;
+    assert!(calme.is_none(), "la connexion ne tombe pas d'elle-même");
+
+    fermetures.fermer(machine);
+    let fermee = ecouter_sans_parler(&mut client, std::time::Duration::from_secs(3), |c| {
+        c.ferme().is_some()
+    })
+    .await;
+    let Some(en) = fermee else {
+        panic!(
+            "la connexion n'est pas tombée en 3 s — la fermeture attend qu'un paquet réveille \
+             la boucle"
+        );
+    };
+    assert!(
+        en < std::time::Duration::from_secs(1),
+        "la connexion est tombée {en:?} après la demande"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+/// Lève une racine dont chaque lecture d'instantané tombe de cette façon,
+/// et y prouve un tireur.
+async fn lever_une_racine_en_panne(
+    quoi: &str,
+    panne: asl_loop_tokio::PanneDInstantane,
+) -> (
+    ams_quic_client::Client,
+    Vec<u8>,
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Comptes>,
+    PathBuf,
+    PathBuf,
+) {
+    let (autorite, racine_tls, chaine, cle) = materiel(quoi);
+    let (base, fichier) = entrepot(quoi);
+    base.creer_compte(
+        Identifiant::depuis_entropie(Genre::Utilisateur, [0x31; 16]),
+        Provenance::Ici,
+        None,
+    )
+    .expect("un compte");
+    let notre: &'static asl_cle::CleSecrete =
+        Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie([0xB5; 32])));
+    let tireur = asl_cle::CleSecrete::depuis_entropie([0xA6; 32]);
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            pair: Some(tireur.publique()),
+            identite: Some(notre),
+            panne_d_instantane: Some(panne),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+    let mut pair = connecter(&racine_tls, adresse).await;
+    prouver_la_racine(&mut pair, &tireur, 0, 4).await;
+    (
+        pair, racine_tls, adresse, dire_stop, tache, autorite, fichier,
+    )
+}
+
+#[tokio::test]
+async fn une_lecture_d_instantane_en_faute_ferme_le_flux_vide_et_le_tireur_reprend() {
+    // **CE QUE LA DÉCISION 28 PROMET D'UNE FAUTE DE REDB** : la réponse `200`
+    // est déjà partie, on ne peut plus dire `500`. Le flux se ferme donc vide,
+    // sans cadre de fin — le tireur y lit un instantané tronqué, et redemande.
+    // La connexion reste bonne, et le flux de la voie est rendu.
+    let (mut pair, racine_tls, adresse, dire_stop, tache, autorite, fichier) =
+        lever_une_racine_en_panne("instantane-faute", asl_loop_tokio::PanneDInstantane::Faute)
+            .await;
+
+    for flux in [8_u64, 12] {
+        ams_quic_client::envoyer_une_requete(
+            &mut pair,
+            flux,
+            17,
+            b"/v1/pair/instantane",
+            None,
+            b"",
+        )
+        .await;
+        let corps = ams_quic_client::attendre_la_reponse(&mut pair, flux).await;
+        assert_eq!(
+            champ(&champs(pair.recu(flux)), b":status"),
+            Some(&b"200"[..]),
+            "la réponse est partie avant la lecture"
+        );
+        assert!(
+            corps.is_empty(),
+            "le flux se ferme vide, sans cadre — donc sans cadre de fin : {corps:?}"
+        );
+        // Le second passage prouve que le flux de la voie a été RENDU : un
+        // flux tenu aurait valu `409` à la reprise du tireur.
+    }
+    assert_eq!(
+        statut_de(&racine_tls, adresse, "/v1/version").await,
+        b"200",
+        "et la racine sert toujours"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn une_panique_pendant_la_lecture_fait_tomber_la_boucle_comme_avant() {
+    // **LA PANIQUE N'EST PAS TUE** : rattrapée sur le fil qui lit, elle voyage
+    // avec le résultat et `au_tour` la relance (`resume_unwind`). La boucle
+    // tombe donc avec LA MÊME panique — c'est ce qu'elle faisait quand la
+    // lecture se faisait chez elle, avant la décision 28. Sans cela, le fil
+    // mourrait seul et le flux attendrait pour toujours.
+    let (mut pair, _racine_tls, _adresse, _dire_stop, tache, autorite, fichier) =
+        lever_une_racine_en_panne(
+            "instantane-panique",
+            asl_loop_tokio::PanneDInstantane::Panique,
+        )
+        .await;
+
+    ams_quic_client::envoyer_une_requete(&mut pair, 8, 17, b"/v1/pair/instantane", None, b"").await;
+    pair.parler().await;
+    let issue = tokio::time::timeout(std::time::Duration::from_secs(5), tache)
+        .await
+        .expect("la boucle tombe sans attendre qu'un paquet la réveille");
+    let Err(chute) = issue else {
+        panic!("la boucle a rendu ses comptes : la panique a été tue");
+    };
+    assert!(chute.is_panic(), "la tâche tombe par panique : {chute}");
+    let charge = chute.into_panic();
+    assert_eq!(
+        charge.downcast_ref::<&str>().copied(),
+        Some("panique d'essai pendant la lecture de l'instantané"),
+        "et c'est la panique du fil qui lit, relancée telle quelle"
+    );
+
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }

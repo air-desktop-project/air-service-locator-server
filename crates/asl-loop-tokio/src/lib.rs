@@ -57,7 +57,9 @@ pub mod sonde;
 pub mod tireur;
 pub mod vivier;
 
-pub use h3::Annuaire;
+#[cfg(feature = "porte-d-essai")]
+pub use h3::PanneDInstantane;
+pub use h3::{Annuaire, Fermetures};
 pub use pont::Pont;
 pub use privileges::{EstRoot, refuser_root};
 pub use quic::{

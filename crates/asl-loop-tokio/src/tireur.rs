@@ -176,7 +176,8 @@ pub struct Tireur {
     pub journal: Box<dyn Fn(String) + Send + Sync>,
     /// Ce que l'application ferme ici : la boucle qui sert les compare au pair
     /// de chaque connexion, comme pour une révocation locale (§3.3).
-    pub fermetures: tokio::sync::mpsc::UnboundedSender<Identifiant>,
+    /// ([`crate::h3::Fermetures`] : le dépôt réveille la boucle.)
+    pub fermetures: crate::h3::Fermetures,
     /// Le plafond du recul, en millisecondes — la cadence de maintien.
     pub plafond_recul_ms: u64,
     /// Où le tireur publie l'état de la voie, pour `GET /v1/replication`.
@@ -495,10 +496,7 @@ impl Tireur {
                         }
                     }
                     for quoi in effets.a_fermer {
-                        // Le récepteur est fermé quand le serveur s'éteint :
-                        // il n'y a alors plus personne pour fermer, et ce
-                        // n'est pas une faute.
-                        let _ = self.fermetures.send(quoi);
+                        self.fermetures.fermer(quoi);
                     }
                 }
                 Applique::Fin { curseur } => {
