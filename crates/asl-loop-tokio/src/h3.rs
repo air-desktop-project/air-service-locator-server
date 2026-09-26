@@ -252,6 +252,10 @@ struct Preparateur {
     entrepot: Arc<Entrepot>,
     /// Par où chaque lecture revient à la boucle.
     dire: tokio::sync::mpsc::UnboundedSender<Preparation>,
+    /// Ce qui réveille la boucle quand une lecture est revenue
+    /// ([`Application::reveil`]) — sans lui, les cadres attendraient qu'un
+    /// pair parle.
+    reveil: Arc<tokio::sync::Notify>,
     /// Ce que la porte d'essai ajoute à chaque lecture, pour qu'un essai
     /// voie la boucle servir PENDANT une préparation longue.
     #[cfg(feature = "porte-d-essai")]
@@ -287,6 +291,7 @@ impl Preparateur {
     fn lancer(&self, connexion: Vec<u8>) {
         let entrepot = Arc::clone(&self.entrepot);
         let dire = self.dire.clone();
+        let reveil = Arc::clone(&self.reveil);
         #[cfg(feature = "porte-d-essai")]
         let lenteur = self.lenteur;
         tokio::task::spawn_blocking(move || {
@@ -305,6 +310,8 @@ impl Preparateur {
                 connexion,
                 resultat,
             });
+            // Déposé AVANT de réveiller : la boucle qui se réveille le trouve.
+            reveil.notify_one();
         });
     }
 }
@@ -2846,6 +2853,7 @@ impl<'a> Annuaire<'a> {
             preparateur: Preparateur {
                 entrepot: Arc::clone(entrepot),
                 dire,
+                reveil: Arc::new(tokio::sync::Notify::new()),
                 #[cfg(feature = "porte-d-essai")]
                 lenteur: None,
             },
@@ -3488,6 +3496,12 @@ impl Application for Annuaire<'_> {
     /// avec autre chose ferait chercher au client une faute qui n'existe pas.
     fn code_de_fermeture(&self) -> u64 {
         ams_h3::NO_ERROR
+    }
+
+    /// Les instantanés lus hors de la boucle la réveillent en revenant
+    /// (décision 28).
+    fn reveil(&self) -> Option<Arc<tokio::sync::Notify>> {
+        Some(Arc::clone(&self.preparateur.reveil))
     }
 
     fn a_la_fermeture(&mut self, connexion: &Connection, _pair: SocketAddr) {

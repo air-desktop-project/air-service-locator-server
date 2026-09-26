@@ -4236,9 +4236,19 @@ async fn la_boucle_sert_pendant_qu_un_instantane_se_prepare() {
 
     // ── 4. Puis l'instantané arrive, entier, avec sa fin ────────────────────
     let corps = ams_quic_client::attendre_la_reponse(&mut pair, 8).await;
+    let arrive = depart.elapsed();
     assert!(
-        depart.elapsed() >= LENTEUR,
+        arrive >= LENTEUR,
         "les cadres ne peuvent pas précéder la lecture"
+    );
+    // **ET ILS SUIVENT LA LECTURE DE PRÈS** : la lecture revenue RÉVEILLE la
+    // boucle (`Application::reveil`). Sans ce réveil, les cadres attendaient
+    // qu'un pair parle ou qu'un délai échoie — des secondes sur une connexion
+    // calme, et c'est ce que la CI macOS a montré.
+    assert!(
+        arrive < LENTEUR + std::time::Duration::from_secs(1),
+        "l'instantané est arrivé {arrive:?} après la demande, pour une lecture de {LENTEUR:?} \
+         — la boucle ne s'est pas réveillée à son retour"
     );
     let mut reste = &corps[..];
     let mut derniere = None;

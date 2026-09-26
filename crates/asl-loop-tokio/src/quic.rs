@@ -283,6 +283,26 @@ pub trait Application {
     fn code_de_fermeture(&self) -> u64 {
         0
     }
+
+    /// Ce qui réveille la boucle quand un travail lancé AILLEURS a rendu son
+    /// résultat — `None` si l'application n'en lance aucun.
+    ///
+    /// # POURQUOI UN RÉVEIL, ET NON UNE PÉRIODE
+    ///
+    /// La boucle ne dort que jusqu'à la prochaine échéance QUIC ou le prochain
+    /// datagramme ([`dormir`] : pas de réveil périodique). Un résultat déposé
+    /// dans un canal pendant ce sommeil attendait donc qu'un pair parle ou
+    /// qu'un délai échoie — sur une connexion calme, jusqu'à l'inactivité.
+    /// C'est ainsi qu'un instantané lu hors de la boucle (décision 28) restait
+    /// sans cadres sur macOS, où rien d'autre ne réveillait la boucle. Le
+    /// travail signale ce `Notify` après avoir déposé son résultat ; la boucle
+    /// se réveille, et [`Application::au_tour`] le recueille.
+    ///
+    /// **Appelé UNE fois, avant la boucle.** `notify_one` garde un permis quand
+    /// personne n'attend : un signal donné pendant un tour n'est pas perdu.
+    fn reveil(&self) -> Option<Arc<tokio::sync::Notify>> {
+        None
+    }
 }
 
 /// Une application qui ne fait rien.
@@ -341,6 +361,7 @@ where
     let mut arret = core::pin::pin!(arret);
     let mut recu = vec![0_u8; RECEPTION_OCTETS_MAX];
     let mut place = vec![0_u8; RECEPTION_OCTETS_MAX];
+    let reveil = application.reveil();
 
     loop {
         // **DEUX LECTURES DE L'HORLOGE, ET C'EST VOULU** : la première dit
@@ -358,6 +379,7 @@ where
             // sans un mot.
             () = &mut arret => break,
             () = dormir(attente) => None,
+            () = attendre_le_reveil(reveil.as_deref()) => None,
             lu = ecoute.socket.recv_from(&mut recu) => Some(lu),
         };
 
@@ -852,6 +874,15 @@ async fn dormir(attente: Option<u64>) {
         // **PAS DE RÉVEIL PÉRIODIQUE.** Quand aucune connexion n'attend rien, il
         // n'y a rien à faire : se réveiller pour le constater coûterait un
         // changement de contexte par intervalle, pour toujours.
+        None => core::future::pending().await,
+    }
+}
+
+/// Attend le signal d'un travail fini ailleurs ([`Application::reveil`]), ou
+/// jamais si l'application n'en lance aucun.
+async fn attendre_le_reveil(reveil: Option<&tokio::sync::Notify>) {
+    match reveil {
+        Some(reveil) => reveil.notified().await,
         None => core::future::pending().await,
     }
 }
