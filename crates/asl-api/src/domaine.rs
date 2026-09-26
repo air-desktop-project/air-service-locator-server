@@ -43,6 +43,16 @@ pub const HEBERGE_PAR_LES_RACINES: &str = "racines";
 /// (`modele.md` §2.13), dans l'ordre où ils s'écrivent.
 pub const DROITS_DU_PROPRIETAIRE: [&str; 4] = ["administrer", "rattacher", "voir", "localiser"];
 
+/// Ce qu'un membre du groupe d'administrateurs peut sur un domaine qu'il ne
+/// possède pas (2026-09-27) : l'administrer, et y ranger SES machines. Les
+/// droits `voir` et `localiser`, accordés à des groupes, viennent avec la PR
+/// suivante.
+pub const DROITS_D_UN_ADMINISTRATEUR: [&str; 2] = ["administrer", "rattacher"];
+
+/// Ce qu'un administrateur des racines peut sur le domaine racine : juger des
+/// inscriptions, et rien d'autre (`modele.md` §2.12).
+pub const DROITS_SUR_LE_DOMAINE_RACINE: [&str; 1] = ["administrer"];
+
 /// Lit un alias de domaine brut : une chaîne libre, non vide, au plus
 /// [`ALIAS_BRUT_MAX`] octets.
 fn lire_un_alias<'a>(lecteur: &mut Lecteur<'a>) -> Result<&'a str, Erreur> {
@@ -284,18 +294,21 @@ impl MachineDeDomaine<'_> {
     }
 }
 
-/// Un domaine et ses machines, tels que `GET /v1/domaines/{d}` les rend.
+/// Un domaine, ses groupes et ses machines, tels que `GET /v1/domaines/{d}`
+/// les rend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DomaineDetaille<'a> {
     /// Le domaine.
     pub domaine: DomaineRendu<'a>,
+    /// Ses groupes, son groupe d'administrateurs compris (2026-09-27).
+    pub groupes: &'a [crate::groupe::GroupeRendu<'a>],
     /// Les machines qui y sont rattachées.
     pub machines: &'a [MachineDeDomaine<'a>],
 }
 
 impl DomaineDetaille<'_> {
-    /// Encode un domaine et ses machines : les champs de [`DomaineRendu`],
-    /// puis `"machines":[…]`.
+    /// Encode un domaine, ses groupes et ses machines : les champs de
+    /// [`DomaineRendu`], puis `"groupes":[…]` et `"machines":[…]`.
     ///
     /// # Erreurs
     ///
@@ -303,7 +316,14 @@ impl DomaineDetaille<'_> {
     pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
         let mut ecrivain = Ecrivain::nouveau(sortie);
         self.domaine.ecrire_les_champs(&mut ecrivain);
-        ecrivain.pousser(b",\"machines\":[");
+        ecrivain.pousser(b",\"groupes\":[");
+        for (rang, groupe) in self.groupes.iter().enumerate() {
+            if rang > 0 {
+                ecrivain.pousser(b",");
+            }
+            groupe.ecrire(&mut ecrivain);
+        }
+        ecrivain.pousser(b"],\"machines\":[");
         for (rang, machine) in self.machines.iter().enumerate() {
             if rang > 0 {
                 ecrivain.pousser(b",");

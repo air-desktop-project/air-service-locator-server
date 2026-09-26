@@ -2951,13 +2951,38 @@ mod domaines {
                 nom: None,
             },
         ];
+        let e = Identifiant::depuis_entropie(Genre::Ensemble, [5; 16]);
+        let groupes = [
+            asl_api::groupe::GroupeRendu {
+                groupe: e,
+                domaine: Some(d),
+                etiquette: None,
+                sorte: "administrateurs",
+            },
+            asl_api::groupe::GroupeRendu {
+                groupe: e,
+                domaine: Some(d),
+                etiquette: Some("Famille"),
+                sorte: "domaine",
+            },
+        ];
         let combien = DomaineDetaille {
             domaine: rendu,
+            groupes: &groupes,
             machines: &machines,
         }
         .encoder(&mut sortie)
         .unwrap();
         let texte = core::str::from_utf8(&sortie[..combien]).unwrap();
+        assert!(
+            texte.contains(&format!(
+                ",\"groupes\":[{{\"groupe\":\"{e}\",\"domaine\":\"{d}\",\"sorte\":\"administrateurs\"}},\
+                 {{\"groupe\":\"{e}\",\"domaine\":\"{d}\",\"etiquette\":\"Famille\",\"sorte\":\"domaine\"}}],",
+                e = e.texte().as_str(),
+                d = d.texte().as_str()
+            )),
+            "{texte}"
+        );
         assert!(
             texte.ends_with(&format!(
                 ",\"machines\":[{{\"machine\":\"{m}\",\"proprietaire\":\"{u}\",\"nom\":\"grenier\"}},\
@@ -2969,6 +2994,7 @@ mod domaines {
         );
         let combien = DomaineDetaille {
             domaine: rendu,
+            groupes: &[],
             machines: &[],
         }
         .encoder(&mut sortie)
@@ -2976,7 +3002,7 @@ mod domaines {
         assert!(
             core::str::from_utf8(&sortie[..combien])
                 .unwrap()
-                .ends_with(",\"machines\":[]}")
+                .ends_with(",\"groupes\":[],\"machines\":[]}")
         );
 
         let combien = DomaineTrouve { domaine: d }.encoder(&mut sortie).unwrap();
@@ -2994,6 +3020,7 @@ mod domaines {
         assert_eq!(
             DomaineDetaille {
                 domaine: rendu,
+                groupes: &groupes,
                 machines: &machines,
             }
             .encoder(&mut court),
@@ -3001,6 +3028,199 @@ mod domaines {
         );
         assert_eq!(
             DomaineTrouve { domaine: d }.encoder(&mut court),
+            Err(Erreur::TamponTropPetit)
+        );
+    }
+}
+
+// ── Les groupes (2026-09-27) ────────────────────────────────────────────────
+
+mod groupes {
+    use asl_api::groupe::{
+        Adhesion, Etiquetage, GroupeRendu, NOMINATION_CORPS_OCTETS, Nomination,
+        decoder_une_signature_d_exploitant,
+    };
+    use asl_id::{Genre, Identifiant};
+    use asl_proto::Erreur;
+
+    fn un(genre: Genre, graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(genre, [graine; 16])
+    }
+
+    #[test]
+    fn une_etiquette_se_lit_comme_un_nom_de_machine() {
+        assert_eq!(
+            Etiquetage::decoder("{\"etiquette\":\"Famille été\"}".as_bytes()),
+            Ok(Etiquetage {
+                etiquette: "Famille été"
+            })
+        );
+        assert_eq!(
+            Etiquetage::decoder(b"{\"etiquette\":\"\"}"),
+            Err(Erreur::NomVide)
+        );
+        let trop = format!("{{\"etiquette\":\"{}\"}}", "a".repeat(65));
+        assert_eq!(
+            Etiquetage::decoder(trop.as_bytes()),
+            Err(Erreur::NomTropLong { obtenue: 65 })
+        );
+        assert!(matches!(
+            Etiquetage::decoder(b"{\"nom\":\"a\"}"),
+            Err(Erreur::ChampInconnu { .. })
+        ));
+        assert!(Etiquetage::decoder(b"{\"etiquette\":\"a\",}").is_err());
+        // Chaque marche du cadrage refuse à son tour : pas d'objet, pas de
+        // clé, pas de deux-points, pas de texte.
+        for mal in [
+            &b"x"[..],
+            b"{1",
+            b"{\"etiquette\" \"a\"}",
+            b"{\"etiquette\":1}",
+        ] {
+            assert!(Etiquetage::decoder(mal).is_err(), "{mal:?}");
+        }
+        assert!(Etiquetage::decoder(b"{\"etiquette\":\"a\"} x").is_err());
+        let long = vec![b' '; 5_000];
+        assert!(matches!(
+            Etiquetage::decoder(&long),
+            Err(Erreur::MessageTropLong { .. })
+        ));
+    }
+
+    #[test]
+    fn un_ajout_nomme_un_compte_et_rien_d_autre() {
+        let u = un(Genre::Utilisateur, 3);
+        let corps = format!("{{\"compte\":\"{}\"}}", u.texte().as_str());
+        assert_eq!(
+            Adhesion::decoder(corps.as_bytes()),
+            Ok(Adhesion { compte: u })
+        );
+        let machine = format!(
+            "{{\"compte\":\"{}\"}}",
+            un(Genre::Machine, 3).texte().as_str()
+        );
+        assert!(matches!(
+            Adhesion::decoder(machine.as_bytes()),
+            Err(Erreur::IdentifiantInvalide { .. })
+        ));
+        assert!(Adhesion::decoder(b"{\"compte\":\"u-x\"").is_err());
+        let sans_fin = format!("{{\"compte\":\"{}\"", u.texte().as_str());
+        assert!(Adhesion::decoder(sans_fin.as_bytes()).is_err());
+        let avec_reste = format!("{{\"compte\":\"{}\"}} x", u.texte().as_str());
+        assert!(Adhesion::decoder(avec_reste.as_bytes()).is_err());
+        assert!(Adhesion::decoder(b"{\"compte\":1}").is_err());
+        assert!(matches!(
+            Adhesion::decoder(b"{\"groupe\":\"u\"}"),
+            Err(Erreur::ChampInconnu { .. })
+        ));
+    }
+
+    #[test]
+    fn la_preuve_de_l_exploitant_se_lit_a_la_longueur_exacte() {
+        let u = un(Genre::Utilisateur, 4);
+        let mut corps = vec![b'o'];
+        corps.extend_from_slice(&[0x5A; 64]);
+        corps.push(b'u');
+        corps.extend_from_slice(u.octets());
+        assert_eq!(corps.len(), NOMINATION_CORPS_OCTETS);
+        assert_eq!(
+            Nomination::decoder(&corps),
+            Ok(Nomination {
+                signature: [0x5A; 64],
+                compte: u,
+            })
+        );
+        // Un autre genre en tête, ou autre chose qu'un compte en queue.
+        let mut faux = corps.clone();
+        faux[0] = b'a';
+        assert_eq!(
+            Nomination::decoder(&faux),
+            Err(Erreur::IdentifiantInvalide { position: 0 })
+        );
+        let mut faux = corps.clone();
+        faux[65] = b'm';
+        assert_eq!(
+            Nomination::decoder(&faux),
+            Err(Erreur::IdentifiantInvalide { position: 65 })
+        );
+        // Trop court, trop long.
+        assert_eq!(
+            Nomination::decoder(&corps[..80]),
+            Err(Erreur::JsonInattendu { position: 80 })
+        );
+        let mut long = corps.clone();
+        long.push(0);
+        assert_eq!(
+            Nomination::decoder(&long),
+            Err(Erreur::MessageTropLong { obtenue: 83 })
+        );
+        // Le retrait : le genre et la signature, sans compte.
+        assert_eq!(
+            decoder_une_signature_d_exploitant(&corps[..65]),
+            Ok([0x5A; 64])
+        );
+        assert!(decoder_une_signature_d_exploitant(&corps).is_err());
+    }
+
+    #[test]
+    fn un_groupe_se_rend_avec_ou_sans_ses_membres() {
+        let e = un(Genre::Ensemble, 5);
+        let d = un(Genre::Domaine, 6);
+        let u = un(Genre::Utilisateur, 7);
+        let mut sortie = [0_u8; 512];
+        let rendu = GroupeRendu {
+            groupe: e,
+            domaine: Some(d),
+            etiquette: Some("Famille"),
+            sorte: "domaine",
+        };
+        let combien = rendu.encoder_dans_la_liste(true, &mut sortie).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&sortie[..combien]).unwrap(),
+            format!(
+                "{{\"groupe\":\"{}\",\"domaine\":\"{}\",\"etiquette\":\"Famille\",\"sorte\":\"domaine\",\"membre\":true}}",
+                e.texte().as_str(),
+                d.texte().as_str()
+            )
+        );
+        let personnel = GroupeRendu {
+            groupe: e,
+            domaine: None,
+            etiquette: None,
+            sorte: "personnel",
+        };
+        let combien = personnel.encoder_dans_la_liste(false, &mut sortie).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&sortie[..combien]).unwrap(),
+            format!(
+                "{{\"groupe\":\"{}\",\"domaine\":null,\"sorte\":\"personnel\",\"membre\":false}}",
+                e.texte().as_str()
+            )
+        );
+        let combien = rendu
+            .encoder_avec_ses_membres(&[u, u], &mut sortie)
+            .unwrap();
+        assert!(
+            core::str::from_utf8(&sortie[..combien])
+                .unwrap()
+                .ends_with(&format!(
+                    ",\"membres\":[\"{u}\",\"{u}\"]}}",
+                    u = u.texte().as_str()
+                ))
+        );
+        let combien = rendu.encoder_avec_ses_membres(&[], &mut sortie).unwrap();
+        assert!(
+            core::str::from_utf8(&sortie[..combien])
+                .unwrap()
+                .ends_with(",\"membres\":[]}")
+        );
+        let mut court = [0_u8; 8];
+        assert_eq!(
+            rendu.encoder_dans_la_liste(true, &mut court),
+            Err(Erreur::TamponTropPetit)
+        );
+        assert_eq!(
+            rendu.encoder_avec_ses_membres(&[u], &mut court),
             Err(Erreur::TamponTropPetit)
         );
     }

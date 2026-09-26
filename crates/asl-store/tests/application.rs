@@ -334,7 +334,72 @@ fn prelude() -> Vec<(Estampille, Operation)> {
                 enregistrement: rattachement(est(pair(), 63), Some(un(Genre::Domaine, 9))),
             },
         ),
+        // Les groupes (2026-09-27) : un groupe de c1 où c2 est entré, un de
+        // c2 que deux suppressions viseront, et un du domaine de c3 où c1 est
+        // entré — que l'effacement de c3 emportera.
+        (
+            est(pair(), 70),
+            Operation::Groupe {
+                groupe: un(Genre::Ensemble, 1),
+                enregistrement: groupe(
+                    est(pair(), 70),
+                    asl_registre::premier_domaine(c1),
+                    "Famille",
+                ),
+            },
+        ),
+        (
+            est(pair(), 71),
+            Operation::GroupeMembre {
+                groupe: un(Genre::Ensemble, 1),
+                compte: c2,
+            },
+        ),
+        (
+            est(pair(), 72),
+            Operation::Groupe {
+                groupe: un(Genre::Ensemble, 2),
+                enregistrement: groupe(
+                    est(pair(), 72),
+                    asl_registre::premier_domaine(c2),
+                    "Voisins",
+                ),
+            },
+        ),
+        (
+            est(pair(), 73),
+            Operation::Groupe {
+                groupe: un(Genre::Ensemble, 9),
+                enregistrement: groupe(est(pair(), 73), un(Genre::Domaine, 9), "Chez trois"),
+            },
+        ),
+        (
+            est(pair(), 74),
+            Operation::GroupeMembre {
+                groupe: un(Genre::Ensemble, 9),
+                compte: c1,
+            },
+        ),
+        (
+            est(pair(), 75),
+            Operation::GroupeMembre {
+                groupe: asl_registre::groupe_d_administrateurs(un(Genre::Domaine, 9)),
+                compte: c1,
+            },
+        ),
     ]
+}
+
+/// Un groupe créé dans ce domaine, sous cette estampille.
+fn groupe(estampille: Estampille, domaine: Identifiant, etiquette: &str) -> asl_registre::Groupe {
+    asl_registre::Groupe {
+        provenance: Provenance::Ici,
+        estampille,
+        sorte: asl_registre::SorteDeGroupe::Domaine,
+        rattache: domaine,
+        etiquette_estampille: estampille,
+        etiquette: nom(etiquette),
+    }
 }
 
 /// Un domaine né sous cette estampille, à ce propriétaire.
@@ -776,6 +841,96 @@ fn conflits() -> Vec<(Estampille, Operation)> {
             Operation::MachineDomaine {
                 machine: m3,
                 enregistrement: rattachement(est(autre(), 145), None),
+            },
+        ),
+        // ── Les groupes (2026-09-27) ────────────────────────────────────
+        //
+        // L'étiquette changée des deux côtés : la plus récente.
+        (
+            est(pair(), 160),
+            Operation::GroupeEtiquette {
+                groupe: un(Genre::Ensemble, 1),
+                etiquette: nom("Bureau"),
+            },
+        ),
+        (
+            est(autre(), 161),
+            Operation::GroupeEtiquette {
+                groupe: un(Genre::Ensemble, 1),
+                etiquette: nom("Cave"),
+            },
+        ),
+        // c2 retiré d'un côté pendant qu'on l'y rajoute de l'autre : le
+        // retrait ne vise que l'ajout qu'il nomme, et c2 reste membre.
+        (
+            est(autre(), 162),
+            Operation::GroupeMembreRetire {
+                groupe: un(Genre::Ensemble, 1),
+                compte: c2,
+                ajout: est(pair(), 71),
+            },
+        ),
+        (
+            est(pair(), 163),
+            Operation::GroupeMembre {
+                groupe: un(Genre::Ensemble, 1),
+                compte: c2,
+            },
+        ),
+        // Un ajout et son retrait, dans les deux ordres : le retrait arrivé
+        // AVANT l'ajout le condamne quand même.
+        (
+            est(pair(), 164),
+            Operation::GroupeMembre {
+                groupe: asl_registre::groupe_d_administrateurs(asl_registre::premier_domaine(c2)),
+                compte: c1,
+            },
+        ),
+        (
+            est(autre(), 165),
+            Operation::GroupeMembreRetire {
+                groupe: asl_registre::groupe_d_administrateurs(asl_registre::premier_domaine(c2)),
+                compte: c1,
+                ajout: est(pair(), 164),
+            },
+        ),
+        // Un groupe supprimé des deux côtés pendant qu'on y ajoute : la
+        // suppression l'emporte, et garde la plus petite marque.
+        (
+            est(autre(), 166),
+            Operation::GroupeSupprime {
+                groupe: un(Genre::Ensemble, 2),
+            },
+        ),
+        (
+            est(pair(), 167),
+            Operation::GroupeMembre {
+                groupe: un(Genre::Ensemble, 2),
+                compte: c1,
+            },
+        ),
+        (
+            est(pair(), 168),
+            Operation::GroupeSupprime {
+                groupe: un(Genre::Ensemble, 2),
+            },
+        ),
+        // Un administrateur des racines nommé.
+        (
+            est(pair(), 169),
+            Operation::GroupeMembre {
+                groupe: asl_registre::groupe_d_administrateurs(asl_registre::domaine_racine()),
+                compte: c4,
+            },
+        ),
+        // Le propriétaire qu'on voudrait retirer de son groupe
+        // d'administrateurs : refusé, dans tous les ordres.
+        (
+            est(autre(), 170),
+            Operation::GroupeMembreRetire {
+                groupe: asl_registre::groupe_d_administrateurs(asl_registre::premier_domaine(c1)),
+                compte: c1,
+                ajout: est(pair(), 1),
             },
         ),
     ]
@@ -1759,6 +1914,109 @@ fn les_domaines_convergent_vers_ce_que_les_regles_annoncent() {
         base.domaine_de_machine(un(Genre::Machine, 2))
             .expect("lisible"),
         None
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn les_groupes_convergent_vers_ce_que_les_regles_annoncent() {
+    let (base, chemin) = entrepot("groupes-verifie");
+    for (estampille, operation) in prelude() {
+        appliquer(&base, estampille, operation);
+    }
+    for (estampille, operation) in conflits() {
+        appliquer(&base, estampille, operation);
+    }
+    let c1 = un(Genre::Utilisateur, 1);
+    let c2 = un(Genre::Utilisateur, 2);
+    let c4 = un(Genre::Utilisateur, 4);
+    let e1 = un(Genre::Ensemble, 1);
+
+    // L'étiquette la plus récente ; c2 toujours membre, par son second ajout.
+    let (lu, membres) = base
+        .groupe_et_membres(e1)
+        .expect("lisible")
+        .expect("vivant : son domaine a survécu aux suppressions concurrentes");
+    assert_eq!(
+        lu.etiquette.map(|e| e.octets().to_vec()),
+        Some(b"Cave".to_vec())
+    );
+    assert_eq!(membres, vec![c2]);
+
+    // L'ajout de c1 chez c2, retiré : c2 seul administre son domaine.
+    let p2 = asl_registre::premier_domaine(c2);
+    let (_, admins) = base
+        .groupe_et_membres(asl_registre::groupe_d_administrateurs(p2))
+        .expect("lisible")
+        .expect("vivant");
+    assert_eq!(admins, vec![c2]);
+    assert!(!base.administre(c1, p2).expect("lisible"));
+
+    // Le propriétaire est resté dans son groupe d'administrateurs.
+    let p1 = asl_registre::premier_domaine(c1);
+    assert!(base.administre(c1, p1).expect("lisible"));
+
+    // Le groupe supprimé n'existe plus, n'a rien gardé, et sa marque est la
+    // plus ancienne des deux.
+    assert!(
+        base.groupe(un(Genre::Ensemble, 2))
+            .expect("lisible")
+            .is_none()
+    );
+    let instantane = base.instantane().expect("l'instantané se lit");
+    let lus: Vec<(Estampille, Operation)> = instantane
+        .iter()
+        .filter_map(|octets| match Cadre::lire(octets) {
+            Ok((
+                Cadre::Operation {
+                    estampille,
+                    operation,
+                },
+                _,
+            )) => Some((estampille, operation)),
+            _ => None,
+        })
+        .collect();
+    let marques: Vec<Estampille> = lus
+        .iter()
+        .filter_map(|(estampille, operation)| match operation {
+            Operation::GroupeSupprime { groupe } if *groupe == un(Genre::Ensemble, 2) => {
+                Some(*estampille)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marques, vec![est(autre(), 166)]);
+    assert!(!lus.iter().any(|(_, operation)| matches!(
+        operation,
+        Operation::GroupeMembre { groupe, .. } if *groupe == un(Genre::Ensemble, 2)
+    )));
+
+    // c3 effacé : le groupe de son domaine, et l'adhésion de c1, partis — ni
+    // l'un ni l'autre ne se dit dans l'instantané.
+    assert!(
+        base.groupe(un(Genre::Ensemble, 9))
+            .expect("lisible")
+            .is_none()
+    );
+    assert!(!lus.iter().any(|(_, operation)| match operation {
+        Operation::Groupe { groupe, .. } | Operation::GroupeMembre { groupe, .. } =>
+            *groupe == un(Genre::Ensemble, 9)
+                || *groupe == asl_registre::groupe_d_administrateurs(un(Genre::Domaine, 9)),
+        _ => false,
+    }));
+
+    // Les groupes déduits ne voyagent pas : l'instantané ne les porte pas.
+    assert!(!lus.iter().any(|(_, operation)| matches!(
+        operation,
+        Operation::Groupe { enregistrement, .. }
+            if enregistrement.sorte != asl_registre::SorteDeGroupe::Domaine
+    )));
+
+    // c4 administrateur des racines, et propriétaire du domaine racine.
+    assert_eq!(
+        base.administrateurs_des_racines().expect("lisible"),
+        (vec![c4], Some(c4))
     );
     let _ = std::fs::remove_file(&chemin);
 }

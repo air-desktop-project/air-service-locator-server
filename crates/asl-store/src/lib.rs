@@ -70,8 +70,10 @@ use redb::{
 
 /// Les comptes, par identifiant.
 mod domaines;
+mod groupes;
 
 pub use domaines::SuppressionDeDomaine;
+pub use groupes::{EcritureDeGroupe, GroupeLu};
 
 const COMPTES: TableDefinition<'_, &[u8], &[u8; COMPTE_OCTETS]> = TableDefinition::new("comptes");
 
@@ -772,6 +774,9 @@ pub struct Retrait {
     /// Combien de domaines sont partis avec le compte, leur alias avec eux
     /// (`docs/modele.md` §2.11).
     pub domaines: usize,
+    /// Combien de groupes sont partis avec lui — ceux de ses domaines et son
+    /// groupe personnel (`docs/modele.md` §2.12).
+    pub groupes: usize,
     /// Les machines et appareils du compte : ce dont les connexions doivent
     /// tomber ici, comme après une révocation (`protocole.md` §2.1 quater).
     pub a_fermer: Vec<Identifiant>,
@@ -844,6 +849,9 @@ pub struct Entrepot {
     dates_de_reprise: usize,
     /// Combien de comptes ont reçu leur premier domaine à l'ouverture.
     premiers_domaines: usize,
+    /// Combien de groupes déduits — personnels, d'administrateurs — sont nés
+    /// à l'ouverture, pour les comptes et les domaines d'avant les groupes.
+    groupes_deduits: usize,
 }
 
 impl Entrepot {
@@ -928,6 +936,7 @@ impl Entrepot {
     fn amorcer(base: Database, racine: Identifiant) -> Result<Self, Faute> {
         let reestampilles;
         let premiers_domaines;
+        let groupes_deduits;
         let mut dates_de_reprise = 0_usize;
         {
             let ecriture = base.begin_write()?;
@@ -991,6 +1000,12 @@ impl Entrepot {
             ecriture.open_table(domaines::DOMAINES_PAR_ALIAS)?;
             ecriture.open_table(domaines::RATTACHEMENTS)?;
             ecriture.open_table(domaines::MACHINES_PAR_DOMAINE)?;
+            // Et les groupes (2026-09-27) : cinq tables neuves, de même.
+            ecriture.open_table(groupes::GROUPES)?;
+            ecriture.open_table(groupes::GROUPES_PAR_RATTACHE)?;
+            ecriture.open_table(groupes::MARQUES_DE_GROUPES)?;
+            ecriture.open_table(groupes::ADHESIONS)?;
+            ecriture.open_table(groupes::ADHESIONS_PAR_COMPTE)?;
             ecriture.open_table(JOURNAL)?;
             ecriture.open_table(RANG)?;
             ecriture.open_table(OPERATIONS)?;
@@ -1003,6 +1018,10 @@ impl Entrepot {
             // AVANT le ré-estampillage, qui le passe sous l'identité réelle
             // avec le reste s'il y a lieu.
             premiers_domaines = domaines::reprendre_les_premiers_domaines(&ecriture)?;
+            // **LES GROUPES DÉDUITS DES COMPTES ET DES DOMAINES D'HIER**
+            // (`docs/modele.md` §2.12) : de même, une fois, avant le
+            // ré-estampillage.
+            groupes_deduits = groupes::reprendre_les_groupes_deduits(&ecriture)?;
             reestampilles = if racine == RACINE_SANS_IDENTITE {
                 0
             } else {
@@ -1051,6 +1070,7 @@ impl Entrepot {
             reestampilles,
             dates_de_reprise,
             premiers_domaines,
+            groupes_deduits,
         })
     }
 
@@ -1060,6 +1080,14 @@ impl Entrepot {
     #[must_use]
     pub const fn premiers_domaines(&self) -> usize {
         self.premiers_domaines
+    }
+
+    /// Combien de groupes déduits sont nés à l'ouverture, pour les comptes et
+    /// les domaines d'avant les groupes (`docs/modele.md` §2.12) — une fois,
+    /// et zéro ensuite.
+    #[must_use]
+    pub const fn groupes_deduits(&self) -> usize {
+        self.groupes_deduits
     }
 
     /// Combien d'enregistrements et d'opérations l'ouverture a ré-estampillés
@@ -1230,6 +1258,8 @@ impl Entrepot {
             // **LE PREMIER DOMAINE, DANS LA MÊME TRANSACTION** : un compte a
             // toujours au moins un domaine, dès sa naissance.
             domaines::naitre_premier_domaine(&ecriture, qui, estampille)?;
+            // Et son groupe personnel, de même (`docs/modele.md` §2.12).
+            groupes::naitre_le_groupe_personnel(&ecriture, qui, estampille)?;
             journalisee = journaliser_l_operation(
                 &ecriture,
                 estampille,
@@ -2554,6 +2584,7 @@ impl Entrepot {
             comptes.insert(clef_compte.as_slice(), &octets)?;
             // Le premier domaine, comme pour tout compte : voir `creer_compte`.
             domaines::naitre_premier_domaine(&ecriture, compte, estampille_compte)?;
+            groupes::naitre_le_groupe_personnel(&ecriture, compte, estampille_compte)?;
             journaliser_l_operation(
                 &ecriture,
                 estampille_compte,
@@ -3134,6 +3165,9 @@ impl Entrepot {
         // propriétaire chez le lecteur, et ses suppressions exigent tous les
         // domaines du compte.
         domaines::instantane_des_domaines(&lecture, &mut suite)?;
+        // **LES GROUPES APRÈS LES DOMAINES** : un groupe créé exige son
+        // domaine chez le lecteur.
+        groupes::instantane_des_groupes(&lecture, &mut suite)?;
 
         let machines = lecture.open_table(MACHINES)?;
         for entree in machines.iter()? {
@@ -3802,6 +3836,7 @@ impl Entrepot {
             combien = combien.saturating_add(condamnes_codes.len());
         }
         combien = combien.saturating_add(domaines::oublier_ce_qui_vient_de(&ecriture, annuaire)?);
+        combien = combien.saturating_add(groupes::oublier_ce_qui_vient_de(&ecriture, annuaire)?);
         ecriture.commit()?;
         Ok(combien)
     }
@@ -3889,8 +3924,12 @@ fn effacer_dans(
 ) -> Result<Retrait, Faute> {
     let clef_compte = clef(qui);
     // ── LES DOMAINES : effacés, les machines d'AUTRES comptes détachées ─────
+    // **LES GROUPES D'ABORD** : ils lisent la liste des domaines du compte,
+    // que la ligne suivante efface.
+    let groupes = groupes::effacer_les_groupes(ecriture, qui)?;
     let mut retrait = Retrait {
         domaines: domaines::effacer_les_domaines(ecriture, qui)?,
+        groupes,
         ..Retrait::default()
     };
 
@@ -4037,7 +4076,12 @@ fn provenance_de(operation: &Operation) -> Option<Provenance> {
         Operation::Domaine { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::DomaineAlias { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::MachineDomaine { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::Groupe { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::DomaineSupprime { .. }
+        | Operation::GroupeEtiquette { .. }
+        | Operation::GroupeMembre { .. }
+        | Operation::GroupeMembreRetire { .. }
+        | Operation::GroupeSupprime { .. }
         | Operation::Alias { .. }
         | Operation::AppareilRevoque { .. }
         | Operation::AppareilAtteste { .. }
@@ -4164,6 +4208,26 @@ fn appliquer_dans(
             machine,
             enregistrement,
         } => domaines::appliquer_machine_domaine(ecriture, *machine, enregistrement),
+        Operation::Groupe {
+            groupe,
+            enregistrement,
+        } => groupes::appliquer_groupe(ecriture, *groupe, enregistrement),
+        Operation::GroupeEtiquette { groupe, etiquette } => {
+            groupes::appliquer_groupe_etiquette(ecriture, *groupe, *etiquette, estampille)
+        }
+        Operation::GroupeMembre { groupe, compte } => {
+            groupes::appliquer_groupe_membre(ecriture, *groupe, *compte, estampille)
+        }
+        Operation::GroupeMembreRetire {
+            groupe,
+            compte,
+            ajout,
+        } => {
+            groupes::appliquer_groupe_membre_retire(ecriture, *groupe, *compte, *ajout, estampille)
+        }
+        Operation::GroupeSupprime { groupe } => {
+            groupes::appliquer_groupe_supprime(ecriture, *groupe, estampille)
+        }
     }
 }
 
@@ -4240,6 +4304,7 @@ fn appliquer_compte(
     // déduit de lui, sous son estampille, et chaque racine le fait naître au
     // même enregistrement (`docs/modele.md` §2.11).
     domaines::naitre_premier_domaine(ecriture, qui, compte.estampille)?;
+    groupes::naitre_le_groupe_personnel(ecriture, qui, compte.estampille)?;
     Ok(())
 }
 
@@ -5418,6 +5483,18 @@ impl Reestampillable for Operation {
             Self::Domaine { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::DomaineAlias { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::MachineDomaine { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::Groupe { enregistrement, .. } => {
+                let avant = *enregistrement;
+                enregistrement.estampille = sous(avant.estampille, de, vers);
+                enregistrement.etiquette_estampille = sous(avant.etiquette_estampille, de, vers);
+                *enregistrement != avant
+            }
+            Self::GroupeMembreRetire { ajout, .. } => {
+                let apres = sous(*ajout, de, vers);
+                let bouge = apres != *ajout;
+                *ajout = apres;
+                bouge
+            }
             Self::CleMachine { code, .. } => {
                 let apres = sous(*code, de, vers);
                 let bouge = apres != *code;
@@ -5432,6 +5509,9 @@ impl Reestampillable for Operation {
             | Self::AutorisationRevoquee { .. }
             | Self::InvitationConsommee { .. }
             | Self::DomaineSupprime { .. }
+            | Self::GroupeEtiquette { .. }
+            | Self::GroupeMembre { .. }
+            | Self::GroupeSupprime { .. }
             | Self::CompteEfface { .. } => false,
         }
     }
@@ -5618,6 +5698,12 @@ fn reestampiller(
         )?
         .len(),
     );
+
+    // ── LES GROUPES, LEURS MARQUES, LES ADHÉSIONS ───────────────────────────
+    //
+    // L'estampille d'un ajout est dans la CLÉ de son adhésion : celles-là
+    // changent de clé, comme une réclamation d'alias.
+    combien = combien.saturating_add(groupes::reestampiller(ecriture, de, vers)?);
 
     // ── LE JOURNAL D'OPÉRATIONS ─────────────────────────────────────────────
     let mut journal = ecriture.open_table(OPERATIONS)?;
@@ -5809,5 +5895,68 @@ mod essais {
             let _ = std::fs::remove_file(&ou);
         }
         assert_eq!(enregistrements[0], enregistrements[1]);
+    }
+
+    #[test]
+    fn une_base_d_avant_les_groupes_recoit_ses_groupes_deduits_une_fois_au_meme_resultat() {
+        // Deux bases, le même compte : chacune fait la reprise de son côté, et
+        // les deux arrivent aux mêmes groupes — tout y est déduit.
+        let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0x43; 16]);
+        let premier = asl_registre::premier_domaine(compte);
+        let personnel = asl_registre::groupe_personnel(compte);
+        let admins = asl_registre::groupe_d_administrateurs(premier);
+        let mut lus = Vec::new();
+        for quoi in ["groupes-reprise-a", "groupes-reprise-b"] {
+            let ou = chemin(quoi);
+            {
+                let base = Entrepot::ouvrir(&ou, racine()).expect("neuve");
+                base.creer_compte(compte, Provenance::Ici, None)
+                    .expect("écrit");
+                assert_eq!(
+                    base.groupes_deduits(),
+                    0,
+                    "une base neuve n'a rien à reprendre"
+                );
+            }
+            {
+                let base = Database::open(&ou).expect("ouvrable");
+                let ecriture = base.begin_write().expect("écrivable");
+                {
+                    let mut groupes = ecriture
+                        .open_table(super::groupes::GROUPES)
+                        .expect("la table");
+                    let mut index = ecriture
+                        .open_table(super::groupes::GROUPES_PAR_RATTACHE)
+                        .expect("l'index");
+                    for (groupe, rattache) in [(personnel, compte), (admins, premier)] {
+                        groupes
+                            .remove(super::clef(groupe).as_slice())
+                            .expect("retiré");
+                        index
+                            .remove(super::paire(rattache, groupe).as_slice())
+                            .expect("retiré");
+                    }
+                    let mut table = ecriture.open_table(RACINE).expect("la table racine");
+                    table
+                        .remove(super::groupes::CLEF_DES_GROUPES_DEDUITS)
+                        .expect("retirée");
+                }
+                ecriture.commit().expect("commis");
+            }
+            let reprise = Entrepot::ouvrir(&ou, racine()).expect("rouvrable");
+            assert_eq!(reprise.groupes_deduits(), 2);
+            let lu_personnel = reprise.groupe(personnel).expect("lisible").expect("repris");
+            let lu_admins = reprise.groupe(admins).expect("lisible").expect("repris");
+            assert_eq!(lu_personnel.titulaire, Some(compte));
+            assert_eq!(lu_admins.domaine, Some(premier));
+            assert!(reprise.administre(compte, premier).expect("lisible"));
+            lus.push((lu_personnel, lu_admins));
+            drop(reprise);
+            let encore = Entrepot::ouvrir(&ou, racine()).expect("rouvrable");
+            assert_eq!(encore.groupes_deduits(), 0);
+            drop(encore);
+            let _ = std::fs::remove_file(&ou);
+        }
+        assert_eq!(lus[0], lus[1]);
     }
 }

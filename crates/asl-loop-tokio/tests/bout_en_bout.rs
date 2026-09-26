@@ -5596,3 +5596,382 @@ async fn les_domaines_se_creent_se_cherchent_rangent_des_machines_et_gardent_le_
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
+
+// ── Les groupes (`protocole.md` §2.2, 2026-09-27) ───────────────────────────
+
+/// Le corps d'un exploitant : `o ‖ signature`, et le compte s'il le nomme.
+fn corps_d_exploitant(
+    secrete: &asl_cle::CleSecrete,
+    defi: &asl_cle::Defi,
+    liaison: &asl_cle::LiaisonDeCanal,
+    compte: Option<Identifiant>,
+) -> Vec<u8> {
+    let mut corps = vec![b'o'];
+    corps.extend_from_slice(secrete.signer_l_exploitant(defi, liaison).octets());
+    if let Some(compte) = compte {
+        corps.push(b'u');
+        corps.extend_from_slice(compte.octets());
+    }
+    corps
+}
+
+#[tokio::test]
+async fn les_groupes_administrent_un_domaine_et_les_racines_se_nomment_sous_la_cle() {
+    let (autorite, racine, chaine, cle) = materiel("groupes-api");
+    let (base, fichier) = entrepot("groupes-api");
+    let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        bail,
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            exploitant: Some(secrete.publique()),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA1).await;
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, _, _) = creer_un_compte(&mut bob, 0, 0xB1).await;
+    let mut carole = connecter(&racine, adresse).await;
+    let (_compte_c, _, _) = creer_un_compte(&mut carole, 0, 0xC1).await;
+
+    let domaine_a = asl_registre::premier_domaine(compte_a);
+    let admins_a = asl_registre::groupe_d_administrateurs(domaine_a);
+    let personnel_b = asl_registre::groupe_personnel(compte_b);
+
+    // ── SES GROUPES DÉDUITS, NÉS AVEC LE COMPTE ET LE DOMAINE ───────────────
+    let (statut, liste) = lire_json(&mut alice, 8, b"/v1/groupes").await;
+    assert_eq!(statut, b"200", "{liste}");
+    assert!(
+        liste.contains(&format!(
+            "\"groupe\":\"{}\",\"domaine\":\"{}\",\"sorte\":\"administrateurs\",\"membre\":true",
+            admins_a.texte().as_str(),
+            domaine_a.texte().as_str()
+        )),
+        "{liste}"
+    );
+    assert!(
+        liste.contains(&format!(
+            "\"groupe\":\"{}\",\"domaine\":null,\"sorte\":\"personnel\",\"membre\":true",
+            asl_registre::groupe_personnel(compte_a).texte().as_str()
+        )),
+        "{liste}"
+    );
+
+    // ── UN GROUPE CRÉÉ, QUE BOB NE VOIT PAS ─────────────────────────────────
+    let cible_groupes = format!("/v1/domaines/{}/groupes", domaine_a.texte().as_str());
+    let (statut, rendu) = poster(
+        &mut alice,
+        12,
+        cible_groupes.as_bytes(),
+        br#"{"etiquette":"Famille"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let famille = Identifiant::analyser(&valeur_json(&rendu, "groupe")).expect("un groupe");
+    assert_eq!(famille.genre(), Genre::Ensemble);
+    let cible_famille = format!("/v1/groupes/{}", famille.texte().as_str());
+    let (statut, _) = lire_json(&mut bob, 8, cible_famille.as_bytes()).await;
+    assert_eq!(
+        statut, b"404",
+        "ni membre ni administrateur : il n'existe pas"
+    );
+    // Bob ne crée rien dans le domaine d'Alice.
+    let (statut, _) = poster(
+        &mut bob,
+        12,
+        cible_groupes.as_bytes(),
+        br#"{"etiquette":"Intrus"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"404");
+
+    // ── BOB ENTRE AU GROUPE D'ADMINISTRATEURS ───────────────────────────────
+    let cible_admins = format!("/v1/groupes/{}/membres", admins_a.texte().as_str());
+    let bob_en_json = format!("{{\"compte\":\"{}\"}}", compte_b.texte().as_str());
+    let (statut, _) = poster(
+        &mut alice,
+        16,
+        cible_admins.as_bytes(),
+        bob_en_json.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+    let (statut, _) = poster(
+        &mut alice,
+        20,
+        cible_admins.as_bytes(),
+        bob_en_json.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"409", "déjà membre");
+    // Un compte qui n'existe pas : `404`. Un groupe personnel : `403`.
+    let inconnu = format!(
+        "{{\"compte\":\"{}\"}}",
+        Identifiant::depuis_entropie(Genre::Utilisateur, [0x77; 16])
+            .texte()
+            .as_str()
+    );
+    let (statut, _) = poster(
+        &mut alice,
+        24,
+        cible_admins.as_bytes(),
+        inconnu.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"404");
+    let cible_personnel = format!("/v1/groupes/{}/membres", personnel_b.texte().as_str());
+    let (statut, _) = poster(
+        &mut bob,
+        16,
+        cible_personnel.as_bytes(),
+        bob_en_json.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"403", "un groupe personnel ne se modifie pas");
+
+    // Bob voit désormais le domaine d'Alice, et l'administre.
+    let (_, liste) = lire_json(&mut bob, 20, b"/v1/domaines").await;
+    assert!(
+        liste.contains(&format!(
+            "\"domaine\":\"{}\",\"proprietaire\":\"{}\"",
+            domaine_a.texte().as_str(),
+            compte_a.texte().as_str()
+        )) && liste.contains("\"droits\":[\"administrer\",\"rattacher\"]"),
+        "{liste}"
+    );
+    let alias_a = format!("/v1/domaines/{}/alias", domaine_a.texte().as_str());
+    assert_eq!(
+        poser_json(
+            &mut bob,
+            24,
+            alias_a.as_bytes(),
+            br#"{"alias":"Chez Alice"}"#
+        )
+        .await,
+        b"204",
+        "un membre du groupe d'administrateurs pose l'alias"
+    );
+    assert_eq!(
+        poser_json(&mut carole, 8, alias_a.as_bytes(), br#"{"alias":"x"}"#).await,
+        b"404",
+        "qui n'en est pas ne le voit pas"
+    );
+    // Mais il ne le supprime pas : le propriétaire seul.
+    let cible_domaine_a = format!("/v1/domaines/{}", domaine_a.texte().as_str());
+    assert_eq!(
+        retirer(&mut bob, 28, cible_domaine_a.as_bytes()).await,
+        b"404"
+    );
+    // Il voit le groupe créé, et ses groupes.
+    let (statut, detail) = lire_json(&mut bob, 32, cible_famille.as_bytes()).await;
+    assert_eq!(statut, b"200", "{detail}");
+    assert!(
+        detail.contains("\"etiquette\":\"Famille\"") && detail.contains("\"membres\":[]"),
+        "{detail}"
+    );
+
+    // Le propriétaire ne se retire pas de son groupe d'administrateurs.
+    let alice_hors = format!("{cible_admins}/{}", compte_a.texte().as_str());
+    assert_eq!(retirer(&mut bob, 36, alice_hors.as_bytes()).await, b"409");
+
+    // ── BOB RANGE SA MACHINE CHEZ ALICE, PUIS PERD SA PLACE ─────────────────
+    let (statut, rendu) = poster(
+        &mut bob,
+        40,
+        b"/v1/machines",
+        br#"{"nom":"atelier","capacites":["annonce"]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    let machine_b = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let cible_machine_b = format!("/v1/machines/{}/domaine", machine_b.texte().as_str());
+    let vers_a = format!("{{\"domaine\":\"{}\"}}", domaine_a.texte().as_str());
+    assert_eq!(
+        poser_json(&mut bob, 44, cible_machine_b.as_bytes(), vers_a.as_bytes()).await,
+        b"204"
+    );
+    let (_, detail) = lire_json(&mut alice, 28, cible_domaine_a.as_bytes()).await;
+    assert!(
+        detail.contains(machine_b.texte().as_str())
+            && detail.contains(&format!("\"groupe\":\"{}\"", famille.texte().as_str())),
+        "{detail}"
+    );
+    // Alice retire Bob : sa machine n'est plus rangée chez elle — sans
+    // qu'aucune écriture l'ait détachée.
+    let bob_hors = format!("{cible_admins}/{}", compte_b.texte().as_str());
+    assert_eq!(retirer(&mut alice, 32, bob_hors.as_bytes()).await, b"204");
+    let (_, detail) = lire_json(&mut alice, 36, cible_domaine_a.as_bytes()).await;
+    assert!(!detail.contains(machine_b.texte().as_str()), "{detail}");
+    let (_, liste) = lire_json(&mut bob, 48, b"/v1/domaines").await;
+    assert!(!liste.contains(domaine_a.texte().as_str()), "{liste}");
+    assert_eq!(retirer(&mut alice, 40, bob_hors.as_bytes()).await, b"404");
+
+    // ── L'ÉTIQUETTE, PUIS LA SUPPRESSION ────────────────────────────────────
+    assert_eq!(
+        patcher(
+            &mut alice,
+            44,
+            cible_famille.as_bytes(),
+            br#"{"etiquette":"Proches"}"#
+        )
+        .await,
+        b"204"
+    );
+    let cible_admins_seul = format!("/v1/groupes/{}", admins_a.texte().as_str());
+    assert_eq!(
+        patcher(
+            &mut alice,
+            48,
+            cible_admins_seul.as_bytes(),
+            br#"{"etiquette":"x"}"#
+        )
+        .await,
+        b"409",
+        "un groupe déduit ne s'étiquette pas"
+    );
+    assert_eq!(
+        retirer(&mut alice, 52, cible_admins_seul.as_bytes()).await,
+        b"409",
+        "ni ne se supprime"
+    );
+    assert_eq!(
+        retirer(&mut alice, 56, cible_famille.as_bytes()).await,
+        b"204"
+    );
+    let (statut, _) = lire_json(&mut alice, 60, cible_famille.as_bytes()).await;
+    assert_eq!(statut, b"404");
+
+    // ── LES ADMINISTRATEURS DES RACINES, SOUS LA CLÉ D'EXPLOITANT ───────────
+    let mut exploitant = connecter(&racine, adresse).await;
+    let liaison = liaison_du_client(&exploitant);
+    let defi = tirer_le_defi(&mut exploitant, 0).await;
+    let imposteur = asl_cle::CleSecrete::depuis_entropie([0x11; 32]);
+    let (statut, _) = poster(
+        &mut exploitant,
+        4,
+        b"/v1/administrateurs",
+        &corps_d_exploitant(&imposteur, &defi, &liaison, Some(compte_a)),
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"401", "une autre clé ne nomme personne");
+    let defi = tirer_le_defi(&mut exploitant, 8).await;
+    let (statut, _) = poster(
+        &mut exploitant,
+        12,
+        b"/v1/administrateurs",
+        &corps_d_exploitant(&secrete, &defi, &liaison, Some(compte_a)),
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+    let defi = tirer_le_defi(&mut exploitant, 16).await;
+    let (statut, _) = poster(
+        &mut exploitant,
+        20,
+        b"/v1/administrateurs",
+        &corps_d_exploitant(&secrete, &defi, &liaison, Some(compte_a)),
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"409", "déjà administrateur");
+
+    // Alice voit le domaine racine, et en est la propriétaire : la première
+    // nommée.
+    let racine_d = asl_registre::domaine_racine();
+    let (_, liste) = lire_json(&mut alice, 64, b"/v1/domaines").await;
+    assert!(
+        liste.contains(&format!(
+            "\"domaine\":\"{}\",\"proprietaire\":\"{}\"",
+            racine_d.texte().as_str(),
+            compte_a.texte().as_str()
+        )),
+        "{liste}"
+    );
+    // Mais elle ne nomme personne par la voie des groupes.
+    let admins_racine = asl_registre::groupe_d_administrateurs(racine_d);
+    let par_les_groupes = format!("/v1/groupes/{}/membres", admins_racine.texte().as_str());
+    let (statut, _) = poster(
+        &mut alice,
+        68,
+        par_les_groupes.as_bytes(),
+        bob_en_json.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(
+        statut, b"403",
+        "sous la clé d'exploitant, et sous elle seule"
+    );
+
+    // Le retrait, sous la clé.
+    let cible_retrait = format!("/v1/administrateurs/{}", compte_a.texte().as_str());
+    let defi = tirer_le_defi(&mut exploitant, 24).await;
+    ams_quic_client::envoyer_avec_media(
+        &mut exploitant,
+        28,
+        16,
+        cible_retrait.as_bytes(),
+        None,
+        &corps_d_exploitant(&secrete, &defi, &liaison, None),
+        b"application/octet-stream",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut exploitant, 28).await;
+    assert_eq!(
+        champ(&champs(exploitant.recu(28)), b":status").expect("un statut"),
+        b"204"
+    );
+    let (_, liste) = lire_json(&mut alice, 72, b"/v1/domaines").await;
+    assert!(!liste.contains(racine_d.texte().as_str()), "{liste}");
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[tokio::test]
+async fn sans_cle_d_exploitant_les_administrateurs_n_existent_pas() {
+    let (autorite, racine, chaine, cle) = materiel("groupes-sans-cle");
+    let (base, fichier) = entrepot("groupes-sans-cle");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let mut client = connecter(&racine, adresse).await;
+    let liaison = liaison_du_client(&client);
+    let defi = tirer_le_defi(&mut client, 0).await;
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
+    let (statut, _) = poster(
+        &mut client,
+        4,
+        b"/v1/administrateurs",
+        &corps_d_exploitant(
+            &secrete,
+            &defi,
+            &liaison,
+            Some(Identifiant::depuis_entropie(Genre::Utilisateur, [1; 16])),
+        ),
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"404");
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}

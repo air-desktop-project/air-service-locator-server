@@ -88,7 +88,7 @@ use asl_api::{Exigence, Ressource};
 use asl_cle::{CleAppareil, ClePublique, Defi, LiaisonDeCanal, Signature, SignatureAppareil};
 use asl_cle::{CodeEnrolement, TexteCode};
 use asl_id::{Genre, Identifiant};
-use asl_registre::{AliasDeDomaine, AliasRange, ClefDeRecherche};
+use asl_registre::{AliasDeDomaine, AliasRange, ClefDeRecherche, NomRange};
 
 /// **CE QU'UNE GRAMMAIRE ACCEPTE, L'AUTRE DOIT POUVOIR LE RANGER.**
 ///
@@ -680,6 +680,63 @@ pub enum Besoin<'a> {
         /// Le domaine, ou rien.
         domaine: Option<Identifiant>,
     },
+
+    // ── Les groupes (`modele.md` §2.12, 2026-09-27) ──────────────────────────
+    /// Les groupes du compte de cette connexion : ceux dont il est membre, et
+    /// ceux des domaines qu'il administre.
+    MesGroupes,
+    /// Créer un groupe dans un domaine.
+    CreerGroupe {
+        /// Le domaine.
+        domaine: Identifiant,
+        /// L'étiquette.
+        etiquette: NomRange,
+    },
+    /// Lire un groupe et ses membres.
+    LireGroupe {
+        /// Le groupe.
+        groupe: Identifiant,
+    },
+    /// Changer l'étiquette d'un groupe.
+    EtiqueterGroupe {
+        /// Le groupe.
+        groupe: Identifiant,
+        /// L'étiquette.
+        etiquette: NomRange,
+    },
+    /// Supprimer un groupe.
+    SupprimerGroupe {
+        /// Le groupe.
+        groupe: Identifiant,
+    },
+    /// Ajouter un compte à un groupe.
+    AjouterMembre {
+        /// Le groupe.
+        groupe: Identifiant,
+        /// Le compte.
+        compte: Identifiant,
+    },
+    /// Retirer un compte d'un groupe — ou s'en aller soi-même.
+    RetirerMembre {
+        /// Le groupe.
+        groupe: Identifiant,
+        /// Le compte.
+        compte: Identifiant,
+    },
+    /// **L'exploitant nomme un administrateur des racines** (`protocole.md`
+    /// §2.2) — ou, `nomme` faux, en retire un. La preuve est celle de
+    /// [`Besoin::EmettreInvitation`] : le défi de cette connexion, signé par la
+    /// clé d'exploitant, que l'étage 3 vérifie.
+    ChangerLesAdministrateurs {
+        /// Le défi de cette connexion, celui que la signature couvre.
+        defi: Defi,
+        /// Ce que l'exploitant a signé.
+        signature: Signature,
+        /// Le compte nommé ou retiré.
+        compte: Identifiant,
+        /// Nommer, ou retirer.
+        nomme: bool,
+    },
 }
 
 /// La voie vers l'autre racine, telle que le tireur la voit en ce moment.
@@ -997,6 +1054,12 @@ pub enum Trouvaille {
     DomaineLu(alloc::vec::Vec<u8>),
     /// Un domaine a été créé.
     DomaineCree(Identifiant),
+    /// Des groupes, **chacun déjà encodé**.
+    Groupes(alloc::vec::Vec<alloc::vec::Vec<u8>>),
+    /// Un groupe et ses membres, **déjà encodé**.
+    GroupeLu(alloc::vec::Vec<u8>),
+    /// Un groupe a été créé.
+    GroupeCree(Identifiant),
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -1455,6 +1518,40 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
                 Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
         },
+        // ── LES GROUPES ─────────────────────────────────────────────────
+        Ressource::Groupes => Besoin::MesGroupes,
+        Ressource::GroupesDomaine { domaine } => match lire_une_etiquette(corps) {
+            Some(etiquette) => Besoin::CreerGroupe { domaine, etiquette },
+            None => Besoin::Deja(StatusCode::BAD_REQUEST),
+        },
+        Ressource::Groupe { groupe } => match methode {
+            asl_api::Methode::Get => Besoin::LireGroupe { groupe },
+            asl_api::Methode::Delete => Besoin::SupprimerGroupe { groupe },
+            _ => match lire_une_etiquette(corps) {
+                Some(etiquette) => Besoin::EtiqueterGroupe { groupe, etiquette },
+                None => Besoin::Deja(StatusCode::BAD_REQUEST),
+            },
+        },
+        Ressource::MembresGroupe { groupe } => match asl_api::groupe::Adhesion::decoder(corps) {
+            Ok(demande) => Besoin::AjouterMembre {
+                groupe,
+                compte: demande.compte,
+            },
+            Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+        },
+        Ressource::MembreGroupe { groupe, compte } => Besoin::RetirerMembre { groupe, compte },
+        Ressource::Administrateurs => match asl_api::groupe::Nomination::decoder(corps) {
+            Ok(demande) => {
+                lire_une_preuve_d_exploitant(session, demande.signature, demande.compte, true)
+            }
+            Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+        },
+        Ressource::Administrateur { compte } => {
+            match asl_api::groupe::decoder_une_signature_d_exploitant(corps) {
+                Ok(signature) => lire_une_preuve_d_exploitant(session, signature, compte, false),
+                Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+            }
+        }
         // ── LA VOIE ENTRE RACINES ───────────────────────────────────────
         Ressource::PairPreuve => lire_un_defi(corps),
         Ressource::PairOperations { apres } => Besoin::LireLesOperations { apres },
@@ -1562,6 +1659,33 @@ fn lire_une_demande_d_invitation<'a>(session: &Session, corps: &[u8]) -> Besoin<
     Besoin::EmettreInvitation {
         defi,
         signature: Signature::depuis_octets(brute),
+    }
+}
+
+/// Lit l'étiquette d'un groupe : `{"etiquette": "…"}`, rangée comme un nom de
+/// machine.
+fn lire_une_etiquette(corps: &[u8]) -> Option<NomRange> {
+    let demande = asl_api::groupe::Etiquetage::decoder(corps).ok()?;
+    NomRange::nouveau(demande.etiquette).ok()
+}
+
+/// Construit la demande d'un exploitant qui change les administrateurs des
+/// racines : **sans défi sur la connexion, c'est [`Besoin::PreuveRefusee`]**,
+/// la règle de [`lire_une_demande_d_invitation`].
+fn lire_une_preuve_d_exploitant<'a>(
+    session: &Session,
+    signature: [u8; asl_cle::SIGNATURE_OCTETS],
+    compte: Identifiant,
+    nomme: bool,
+) -> Besoin<'a> {
+    let Some(defi) = session.defi else {
+        return Besoin::PreuveRefusee;
+    };
+    Besoin::ChangerLesAdministrateurs {
+        defi,
+        signature: Signature::depuis_octets(signature),
+        compte,
+        nomme,
     }
 }
 
@@ -1943,6 +2067,54 @@ pub fn repondre<'o>(
                 sortie,
             ),
         },
+        Besoin::MesGroupes => match trouvaille {
+            Trouvaille::Groupes(quoi) => composer_une_liste(quoi, sortie),
+            _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
+        },
+        // **`404` POUR L'ABSENT COMME POUR L'INTERDIT** (C10), comme un domaine.
+        Besoin::LireGroupe { .. } => match trouvaille {
+            Trouvaille::GroupeLu(corps) => composer(StatusCode::OK, JSON_MEDIA, corps, sortie),
+            _ => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+        },
+        Besoin::CreerGroupe { .. } => match trouvaille {
+            Trouvaille::GroupeCree(groupe) => {
+                let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
+                corps.pousser(br#"{"groupe":""#);
+                corps.pousser(groupe.texte().as_str().as_bytes());
+                corps.pousser(br#""}"#);
+                composer(StatusCode::CREATED, JSON_MEDIA, corps.rendu(), sortie)
+            }
+            Trouvaille::Rien => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+            autre => rendre_l_echec(autre, sortie),
+        },
+        // **LE DÉFI EST DÉPENSÉ, QUE LA SIGNATURE TIENNE OU NON** — la règle de
+        // `EmettreInvitation`. `404` sans `--operator-key`, ou pour retirer qui
+        // n'est pas administrateur ; `401` quand la signature ne tient pas ;
+        // `409` pour nommer qui l'est déjà.
+        Besoin::ChangerLesAdministrateurs { .. } => {
+            session.consommer_le_defi();
+            let statut = match trouvaille {
+                Trouvaille::Fait => StatusCode::NO_CONTENT,
+                Trouvaille::Conflit => StatusCode::CONFLICT,
+                Trouvaille::Refus => StatusCode::UNAUTHORIZED,
+                _ => StatusCode::NOT_FOUND,
+            };
+            if statut == StatusCode::NO_CONTENT {
+                composer(statut, JSON_MEDIA, &[], sortie)
+            } else {
+                composer(statut, PROBLEME_MEDIA, probleme(statut), sortie)
+            }
+        }
         Besoin::CreerDomaine { .. } => match trouvaille {
             Trouvaille::DomaineCree(domaine) => {
                 let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
@@ -2219,7 +2391,11 @@ pub fn repondre<'o>(
         | Besoin::RetirerAlias
         | Besoin::SupprimerDomaine { .. }
         | Besoin::PoserAliasDeDomaine { .. }
-        | Besoin::RattacherMachine { .. } => match trouvaille {
+        | Besoin::RattacherMachine { .. }
+        | Besoin::EtiqueterGroupe { .. }
+        | Besoin::SupprimerGroupe { .. }
+        | Besoin::AjouterMembre { .. }
+        | Besoin::RetirerMembre { .. } => match trouvaille {
             Trouvaille::Fait => composer(StatusCode::NO_CONTENT, JSON_MEDIA, &[], sortie),
             Trouvaille::Conflit => composer(
                 StatusCode::CONFLICT,
@@ -7662,6 +7838,310 @@ mod domaines {
             assert_eq!(rendre(&quoi, &Trouvaille::Conflit).0, StatusCode::CONFLICT);
             assert_eq!(rendre(&quoi, &Trouvaille::Refus).0, StatusCode::FORBIDDEN);
             assert_eq!(rendre(&quoi, &Trouvaille::Rien).0, StatusCode::NOT_FOUND);
+        }
+    }
+}
+
+#[cfg(test)]
+mod groupes {
+    //! Les groupes (`protocole.md` §2.2, 2026-09-27) : ce que la session lit
+    //! d'une requête, et ce qu'elle répond de ce que l'étage 3 a trouvé.
+
+    extern crate alloc;
+
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
+    use asl_cle::{Defi, LiaisonDeCanal, Signature};
+    use asl_id::{Genre, Identifiant};
+    use asl_registre::NomRange;
+
+    use super::{Besoin, Session, Trouvaille, besoin, repondre};
+
+    fn un(genre: Genre, graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(genre, [graine; 16])
+    }
+
+    fn session_de(pair: Option<Identifiant>) -> Session {
+        let mut session = Session::new(LiaisonDeCanal::depuis_octets(
+            [0x11; asl_cle::LIAISON_OCTETS],
+        ));
+        session.pair = pair;
+        session
+    }
+
+    fn tete<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
+        let limites = Limits::default();
+        let mut constructeur = HeadBuilder::new(&limites);
+        constructeur.field(b":method", verbe).expect("le verbe");
+        constructeur.field(b":scheme", b"https").expect("le schéma");
+        constructeur
+            .field(b":authority", b"annuaire.example")
+            .expect("l'autorité");
+        constructeur.field(b":path", cible).expect("la cible");
+        constructeur.finish().expect("une tête close")
+    }
+
+    fn lire<'a>(
+        session: &Session,
+        verbe: &'a [u8],
+        cible: &'a [u8],
+        corps: &'a [u8],
+    ) -> Besoin<'a> {
+        besoin(session, &tete(verbe, cible), corps)
+    }
+
+    fn rendre(
+        session: &mut Session,
+        quoi: &Besoin<'_>,
+        trouvaille: &Trouvaille,
+    ) -> (StatusCode, Vec<u8>) {
+        let mut sortie = [0_u8; 1024];
+        let reponse = repondre(session, quoi, trouvaille, None, &mut sortie);
+        (reponse.status(), reponse.body().to_vec())
+    }
+
+    fn etiquette(texte: &str) -> NomRange {
+        NomRange::nouveau(texte).unwrap()
+    }
+
+    #[test]
+    fn la_session_lit_chaque_verbe_des_groupes() {
+        let appareil = session_de(Some(un(Genre::Appareil, 9)));
+        let d = un(Genre::Domaine, 4);
+        let e = un(Genre::Ensemble, 5);
+        let u = un(Genre::Utilisateur, 6);
+        let chemin_d = alloc::format!("/v1/domaines/{}/groupes", d.texte().as_str());
+        let chemin_e = alloc::format!("/v1/groupes/{}", e.texte().as_str());
+        let chemin_membres = alloc::format!("/v1/groupes/{}/membres", e.texte().as_str());
+        let chemin_membre = alloc::format!(
+            "/v1/groupes/{}/membres/{}",
+            e.texte().as_str(),
+            u.texte().as_str()
+        );
+        let ajout = alloc::format!("{{\"compte\":\"{}\"}}", u.texte().as_str());
+
+        assert_eq!(
+            lire(&appareil, b"GET", b"/v1/groupes", b""),
+            Besoin::MesGroupes
+        );
+        assert_eq!(
+            lire(
+                &appareil,
+                b"POST",
+                chemin_d.as_bytes(),
+                b"{\"etiquette\":\"Famille\"}"
+            ),
+            Besoin::CreerGroupe {
+                domaine: d,
+                etiquette: etiquette("Famille")
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"GET", chemin_e.as_bytes(), b""),
+            Besoin::LireGroupe { groupe: e }
+        );
+        assert_eq!(
+            lire(
+                &appareil,
+                b"PATCH",
+                chemin_e.as_bytes(),
+                b"{\"etiquette\":\"Bureau\"}"
+            ),
+            Besoin::EtiqueterGroupe {
+                groupe: e,
+                etiquette: etiquette("Bureau")
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"DELETE", chemin_e.as_bytes(), b""),
+            Besoin::SupprimerGroupe { groupe: e }
+        );
+        assert_eq!(
+            lire(
+                &appareil,
+                b"POST",
+                chemin_membres.as_bytes(),
+                ajout.as_bytes()
+            ),
+            Besoin::AjouterMembre {
+                groupe: e,
+                compte: u
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"DELETE", chemin_membre.as_bytes(), b""),
+            Besoin::RetirerMembre {
+                groupe: e,
+                compte: u
+            }
+        );
+        // Ce qu'on ne pourrait pas ranger : 400.
+        for (verbe, cible, corps) in [
+            (&b"POST"[..], chemin_d.as_bytes(), &b"{}"[..]),
+            (b"PATCH", chemin_e.as_bytes(), b"{\"etiquette\":\"\"}"),
+            (b"POST", chemin_membres.as_bytes(), b"{\"compte\":\"x\"}"),
+        ] {
+            assert_eq!(
+                lire(&appareil, verbe, cible, corps),
+                Besoin::Deja(StatusCode::BAD_REQUEST),
+                "{cible:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn l_exploitant_prouve_sur_le_defi_de_la_connexion() {
+        let u = un(Genre::Utilisateur, 6);
+        let mut nomination = vec![b'o'];
+        nomination.extend_from_slice(&[0x5A; 64]);
+        nomination.push(b'u');
+        nomination.extend_from_slice(u.octets());
+        let retrait = &nomination[..65];
+        let chemin = alloc::format!("/v1/administrateurs/{}", u.texte().as_str());
+
+        // Sans défi sur la connexion : la preuve est refusée, pas le corps.
+        let nue = session_de(None);
+        assert_eq!(
+            lire(&nue, b"POST", b"/v1/administrateurs", &nomination),
+            Besoin::PreuveRefusee
+        );
+        assert_eq!(
+            lire(&nue, b"DELETE", chemin.as_bytes(), retrait),
+            Besoin::PreuveRefusee
+        );
+
+        let mut session = session_de(None);
+        let defi = Defi::depuis_octets([7; 32]);
+        session.poser_le_defi(defi);
+        assert_eq!(
+            lire(&session, b"POST", b"/v1/administrateurs", &nomination),
+            Besoin::ChangerLesAdministrateurs {
+                defi,
+                signature: Signature::depuis_octets([0x5A; 64]),
+                compte: u,
+                nomme: true,
+            }
+        );
+        assert_eq!(
+            lire(&session, b"DELETE", chemin.as_bytes(), retrait),
+            Besoin::ChangerLesAdministrateurs {
+                defi,
+                signature: Signature::depuis_octets([0x5A; 64]),
+                compte: u,
+                nomme: false,
+            }
+        );
+        // Un corps mal formé : 400, le défi n'est pas regardé.
+        assert_eq!(
+            lire(&session, b"POST", b"/v1/administrateurs", retrait),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            lire(&session, b"DELETE", chemin.as_bytes(), &nomination),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn chaque_trouvaille_rend_son_statut() {
+        let mut session = session_de(Some(un(Genre::Appareil, 9)));
+        let d = un(Genre::Domaine, 4);
+        let e = un(Genre::Ensemble, 5);
+        let u = un(Genre::Utilisateur, 6);
+
+        let (statut, corps) = rendre(
+            &mut session,
+            &Besoin::MesGroupes,
+            &Trouvaille::Groupes(vec![b"{}".to_vec()]),
+        );
+        assert_eq!((statut, corps.as_slice()), (StatusCode::OK, &b"[{}]"[..]));
+        let (statut, corps) = rendre(&mut session, &Besoin::MesGroupes, &Trouvaille::Rien);
+        assert_eq!((statut, corps.as_slice()), (StatusCode::OK, &b"[]"[..]));
+
+        let lire_e = Besoin::LireGroupe { groupe: e };
+        let (statut, corps) = rendre(
+            &mut session,
+            &lire_e,
+            &Trouvaille::GroupeLu(b"{\"x\":1}".to_vec()),
+        );
+        assert_eq!(
+            (statut, corps.as_slice()),
+            (StatusCode::OK, &b"{\"x\":1}"[..])
+        );
+        assert_eq!(
+            rendre(&mut session, &lire_e, &Trouvaille::Rien).0,
+            StatusCode::NOT_FOUND
+        );
+
+        let creer = Besoin::CreerGroupe {
+            domaine: d,
+            etiquette: etiquette("Famille"),
+        };
+        let (statut, corps) = rendre(&mut session, &creer, &Trouvaille::GroupeCree(e));
+        assert_eq!(statut, StatusCode::CREATED);
+        assert_eq!(
+            corps,
+            alloc::format!("{{\"groupe\":\"{}\"}}", e.texte().as_str()).into_bytes()
+        );
+        assert_eq!(
+            rendre(&mut session, &creer, &Trouvaille::Rien).0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            rendre(&mut session, &creer, &Trouvaille::Refus).0,
+            StatusCode::FORBIDDEN
+        );
+
+        for quoi in [
+            Besoin::EtiqueterGroupe {
+                groupe: e,
+                etiquette: etiquette("Bureau"),
+            },
+            Besoin::SupprimerGroupe { groupe: e },
+            Besoin::AjouterMembre {
+                groupe: e,
+                compte: u,
+            },
+            Besoin::RetirerMembre {
+                groupe: e,
+                compte: u,
+            },
+        ] {
+            assert_eq!(
+                rendre(&mut session, &quoi, &Trouvaille::Fait).0,
+                StatusCode::NO_CONTENT
+            );
+            assert_eq!(
+                rendre(&mut session, &quoi, &Trouvaille::Conflit).0,
+                StatusCode::CONFLICT
+            );
+            assert_eq!(
+                rendre(&mut session, &quoi, &Trouvaille::Refus).0,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(
+                rendre(&mut session, &quoi, &Trouvaille::Rien).0,
+                StatusCode::NOT_FOUND
+            );
+        }
+
+        // L'exploitant : le défi est dépensé, quoi qu'il arrive.
+        let changer = Besoin::ChangerLesAdministrateurs {
+            defi: Defi::depuis_octets([7; 32]),
+            signature: Signature::depuis_octets([0x5A; 64]),
+            compte: u,
+            nomme: true,
+        };
+        for (trouvaille, attendu) in [
+            (Trouvaille::Fait, StatusCode::NO_CONTENT),
+            (Trouvaille::Conflit, StatusCode::CONFLICT),
+            (Trouvaille::Refus, StatusCode::UNAUTHORIZED),
+            (Trouvaille::Rien, StatusCode::NOT_FOUND),
+        ] {
+            session.poser_le_defi(Defi::depuis_octets([7; 32]));
+            assert_eq!(rendre(&mut session, &changer, &trouvaille).0, attendu);
+            assert!(session.defi.is_none(), "le défi est dépensé");
         }
     }
 }

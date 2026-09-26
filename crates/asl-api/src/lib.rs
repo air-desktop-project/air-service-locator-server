@@ -45,6 +45,7 @@
 
 pub mod corps;
 pub mod domaine;
+pub mod groupe;
 pub mod point;
 
 use asl_id::{Genre, Identifiant};
@@ -493,6 +494,44 @@ pub enum Ressource<'a> {
         /// La machine visée.
         machine: Identifiant,
     },
+    /// `/v1/groupes` — **mes groupes** (`protocole.md` §2.2, 2026-09-27) :
+    /// ceux dont je suis membre, et ceux des domaines que j'administre.
+    Groupes,
+    /// `/v1/domaines/{d}/groupes` — créer un groupe dans un domaine.
+    GroupesDomaine {
+        /// Le domaine visé.
+        domaine: Identifiant,
+    },
+    /// `/v1/groupes/{e}` — le lire, changer son étiquette, le supprimer.
+    Groupe {
+        /// Le groupe visé.
+        groupe: Identifiant,
+    },
+    /// `/v1/groupes/{e}/membres` — y ajouter un compte.
+    MembresGroupe {
+        /// Le groupe visé.
+        groupe: Identifiant,
+    },
+    /// `/v1/groupes/{e}/membres/{u}` — en retirer un compte.
+    MembreGroupe {
+        /// Le groupe visé.
+        groupe: Identifiant,
+        /// Le compte à retirer.
+        compte: Identifiant,
+    },
+    /// `/v1/administrateurs` — **l'exploitant nomme un administrateur des
+    /// racines** (`protocole.md` §2.2, 2026-09-27).
+    ///
+    /// Comme [`Ressource::Invitations`], elle n'exige rien : la preuve est
+    /// dans le corps, `genre o ‖ signature ‖ u-…`, et se vérifie contre la clé
+    /// de `--operator-key`. Sans le réglage, l'étage 3 rend `404`.
+    Administrateurs,
+    /// `/v1/administrateurs/{u}` — **l'exploitant en retire un**, sous la même
+    /// clé : corps `genre o ‖ signature`.
+    Administrateur {
+        /// Le compte à retirer.
+        compte: Identifiant,
+    },
     /// `/v1/replication` — **l'état de la voie entre racines, vu d'ici**
     /// (`replication.md` §8) : le pair, la voie ouverte ou coupée, notre
     /// compteur, et jusqu'où l'on a appliqué ce que le pair a écrit — ou
@@ -518,9 +557,11 @@ impl Ressource<'_> {
         match self {
             Self::Annonce => &[Methode::Post],
             Self::Defi => &[Methode::Get, Methode::Post],
-            Self::Comptes | Self::Attestation | Self::Enrolement | Self::Invitations => {
-                &[Methode::Post]
-            }
+            Self::Comptes
+            | Self::Attestation
+            | Self::Enrolement
+            | Self::Invitations
+            | Self::Administrateurs => &[Methode::Post],
             Self::Utilisateur { .. }
             | Self::MachinesUtilisateur { .. }
             | Self::Moi
@@ -537,20 +578,26 @@ impl Ressource<'_> {
             | Self::PairOperations { .. }
             | Self::PairInstantane
             | Self::RechercheDomaines { .. }
+            | Self::Groupes
             | Self::Replication => &[Methode::Get],
             Self::PairPreuve => &[Methode::Post],
             Self::Appareil { .. }
             | Self::Compte
             | Self::CleMachine { .. }
             | Self::Autorisation { .. }
-            | Self::Exposition { .. } => &[Methode::Delete],
+            | Self::Exposition { .. }
+            | Self::MembreGroupe { .. }
+            | Self::Administrateur { .. } => &[Methode::Delete],
             Self::PousseeAppareil { .. } | Self::DescriptionAppareil { .. } => &[Methode::Put],
             Self::Domaine { .. } => &[Methode::Get, Methode::Delete],
             Self::AliasDomaine { .. } | Self::DomaineMachine { .. } => {
                 &[Methode::Put, Methode::Delete]
             }
             Self::Machine { .. } => &[Methode::Patch],
-            Self::EnrolementMachine { .. } => &[Methode::Post],
+            Self::EnrolementMachine { .. }
+            | Self::GroupesDomaine { .. }
+            | Self::MembresGroupe { .. } => &[Methode::Post],
+            Self::Groupe { .. } => &[Methode::Get, Methode::Patch, Methode::Delete],
             Self::Appareils | Self::Machines | Self::Autorisations | Self::Domaines => {
                 &[Methode::Get, Methode::Post]
             }
@@ -573,6 +620,9 @@ impl Ressource<'_> {
     /// - **`/v1/attestation`** : c'est une PREUVE, comme `/v1/defi` — la
     ///   signature d'un appareil qui rejoint, avec sa chaîne. Voir
     ///   [`Ressource::Attestation`].
+    /// - **`/v1/administrateurs`** (2026-09-27) : comme `/v1/invitations`, la
+    ///   preuve de l'exploitant est dans le corps. Voir
+    ///   [`Ressource::Administrateurs`].
     /// - **`/v1/enrolement`** : la machine n'a pas encore de clé — c'est
     ///   justement ce qu'elle vient poser. **Le code d'enrôlement EST le
     ///   justificatif**, et il est nommé comme tel (C14) : à usage unique,
@@ -595,6 +645,8 @@ impl Ressource<'_> {
             | Self::Comptes
             | Self::Attestation
             | Self::Invitations
+            | Self::Administrateurs
+            | Self::Administrateur { .. }
             | Self::Enrolement
             | Self::AliasResolu { .. }
             | Self::Vu
@@ -941,6 +993,24 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         }),
         ["v1", "domaines", domaine, "alias"] => Ok(Ressource::AliasDomaine {
             domaine: identifiant(domaine, Genre::Domaine)?,
+        }),
+        ["v1", "domaines", domaine, "groupes"] => Ok(Ressource::GroupesDomaine {
+            domaine: identifiant(domaine, Genre::Domaine)?,
+        }),
+        ["v1", "groupes"] => Ok(Ressource::Groupes),
+        ["v1", "groupes", groupe] => Ok(Ressource::Groupe {
+            groupe: identifiant(groupe, Genre::Ensemble)?,
+        }),
+        ["v1", "groupes", groupe, "membres"] => Ok(Ressource::MembresGroupe {
+            groupe: identifiant(groupe, Genre::Ensemble)?,
+        }),
+        ["v1", "groupes", groupe, "membres", compte] => Ok(Ressource::MembreGroupe {
+            groupe: identifiant(groupe, Genre::Ensemble)?,
+            compte: identifiant(compte, Genre::Utilisateur)?,
+        }),
+        ["v1", "administrateurs"] => Ok(Ressource::Administrateurs),
+        ["v1", "administrateurs", compte] => Ok(Ressource::Administrateur {
+            compte: identifiant(compte, Genre::Utilisateur)?,
         }),
         ["v1", "poussees"] => Ok(Ressource::Poussees),
         ["v1", "nouvelles"] => Ok(Ressource::Nouvelles),

@@ -334,7 +334,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.23.0_amd64.deb
+sudo dpkg -i asl-server_0.24.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
@@ -508,6 +508,12 @@ asl-server --invite \
 - `--ca` est l'autorité qui valide le certificat TLS de la racine : le
   `racine.crt` de la cérémonie (`scripts/ca.sh`), celui-là même qu'un client
   épingle.
+- **Nommer un administrateur des racines** (depuis 0.24.0, `docs/modele.md`
+  §2.12) est le même geste, un compte de plus : `asl-server --add-admin
+  <u-…> --directory … --ca … --operator-secret …`, et `--remove-admin
+  <u-…>` pour le retirer. Il faut `--operator-key` sur la racine, quelle
+  que soit sa posture. Le premier nommé encore administrateur est le
+  propriétaire du domaine racine ; aucun compte n'est écrit dans le code.
 
 - **L'usage unique tient par racine, et à la seconde près entre les deux.**
   Un même code présenté des deux côtés de la fenêtre de réplication ouvre

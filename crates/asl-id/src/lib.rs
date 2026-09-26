@@ -88,6 +88,9 @@ pub enum Genre {
     /// Un domaine — un lieu où l'on range des machines (`modele.md` §2.11,
     /// 2026-09-26). `d` : la lettre était libre.
     Domaine,
+    /// Un groupe de comptes (`modele.md` §2.12, 2026-09-26). `e` pour
+    /// *ensemble* : `g` est pris par l'autorisation.
+    Ensemble,
 }
 
 impl Genre {
@@ -102,6 +105,7 @@ impl Genre {
             Self::Autorisation => b'g',
             Self::Annuaire => b'n',
             Self::Domaine => b'd',
+            Self::Ensemble => b'e',
         }
     }
 
@@ -119,6 +123,7 @@ impl Genre {
             b'g' | b'G' => Some(Self::Autorisation),
             b'n' | b'N' => Some(Self::Annuaire),
             b'd' | b'D' => Some(Self::Domaine),
+            b'e' | b'E' => Some(Self::Ensemble),
             _ => None,
         }
     }
