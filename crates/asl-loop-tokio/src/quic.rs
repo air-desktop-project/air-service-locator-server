@@ -206,6 +206,26 @@ pub trait Application {
         Consignes::default()
     }
 
+    /// Le datagramme du tour vient d'être lu, et rien n'est encore parti.
+    ///
+    /// # POURQUOI UN SECOND RENDEZ-VOUS DANS LE MÊME TOUR
+    ///
+    /// Une requête lue pendant ce tour a pu ÉCRIRE : une autorisation qui doit
+    /// réveiller son bénéficiaire, une opération que le pair tient à suivre,
+    /// une clé révoquée dont la connexion doit tomber. [`Application::au_tour`]
+    /// passe AVANT la lecture ; ce qu'elle a déposé attendait donc le tour
+    /// suivant — le prochain datagramme (souvent l'acquittement de celui qui a
+    /// écrit) ou la prochaine échéance, une retransmission au plus tôt, soit
+    /// au moins vingt-cinq millisecondes quand tout se tait. Ce rendez-vous le
+    /// fait partir dans le MÊME lot d'émission que la réponse (décision 29).
+    ///
+    /// **Il ne recueille que ce qu'une requête dépose**, et rend vite quand
+    /// elle n'a rien déposé : il passe à chaque datagramme. Les balayages et
+    /// les canaux restent à `au_tour`.
+    fn apres_la_lecture(&mut self, _maintenant: u64) -> Consignes {
+        Consignes::default()
+    }
+
     /// Une connexion vient de s'établir.
     ///
     /// **C'EST LE PREMIER INSTANT OÙ L'ON PEUT OUVRIR UN FLUX** : avant, les
@@ -389,6 +409,9 @@ where
         let consignes = application.au_tour(maintenant);
         ecoute.executer(&consignes, application, maintenant);
         ecoute.un_tour(arrivee, &mut recu, application, maintenant);
+        // **CE QUE LA LECTURE A ÉCRIT PART AVEC ELLE** (décision 29).
+        let consignes = application.apres_la_lecture(maintenant);
+        ecoute.executer(&consignes, application, maintenant);
         ecoute.emettre(&mut place, maintenant).await;
         ecoute.oublier_les_eteintes(application);
     }
@@ -418,6 +441,9 @@ where
         let consignes = application.au_tour(maintenant);
         ecoute.executer(&consignes, application, maintenant);
         ecoute.un_tour(arrivee, &mut recu, application, maintenant);
+        // **CE QUE LA LECTURE A ÉCRIT PART AVEC ELLE** (décision 29).
+        let consignes = application.apres_la_lecture(maintenant);
+        ecoute.executer(&consignes, application, maintenant);
         ecoute.emettre(&mut place, maintenant).await;
         ecoute.oublier_les_eteintes(application);
     }
