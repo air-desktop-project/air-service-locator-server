@@ -19,7 +19,7 @@ encore ».
 | C10 | Rien ne se lit sans autorisation nominative | `asl-auth` : la forme de la fonction, un essai et une cible de fuzz |
 | C11 | Un annuaire n'accepte d'un pair que ce dont ce pair est l'autorité | Essai — **à écrire** |
 | C12 | La surface publique d'`asl-client` traverse une ABI C, et elle est stable | `check-abi.sh` (dépôt client) |
-| C13 | Aucune donnée personnelle hébergée, hors l'alias public choisi | Revue, et **le schéma d'`asl-registre`** — une colonne qui n'existe pas ne se remplit pas |
+| C13 | Aucune donnée personnelle hébergée, hors les alias publics choisis (compte, domaine) ; l'état vivant des services fédérés en mémoire seulement | Revue, et **le schéma d'`asl-registre`** — une colonne qui n'existe pas ne se remplit pas |
 | C14 | Aucune authentification par secret partagé — des clés, et rien d'autre | `asl-cle`, `asl-session` (défi + liaison), une cible de fuzz, et un essai de bout en bout |
 | C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` : aucune pile tierce, et la greffe épinglée sur UN commit |
 | C16 | Une seule toolchain, celle d'Air, datée | `check-toolchain.sh` |
@@ -334,6 +334,14 @@ test qui affirme être l'autorité d'un compte qui ne lui appartient pas. Sans c
 essai, la contrainte n'est qu'une intention, et elle tombera le jour où quelqu'un
 optimisera le chemin de vérification.
 
+**Pour un annuaire local, l'autorité est celle d'un DOMAINE** (2026-09-26,
+`annuaires.md` §2 bis) : il n'est cru que sur les services des machines
+rattachées aux domaines qu'il héberge — celles que les racines lui ont
+transmises. Une affirmation sur une autre machine, fût-elle signée par une clé
+d'annuaire inscrit et accepté, est **refusée, journalisée**, et ferme sa voie
+(`protocole.md` §3 ter). L'essai qui compte est le même : un annuaire local de
+test qui affirme l'état d'une machine d'un domaine qu'il n'héberge pas.
+
 **Entre les deux racines, l'autorité est la même, et la contrainte se réduit à
 une vérification** (`replication.md` §7) : la voie ne transporte que des
 enregistrements de provenance `locale`. Ce qu'une racine aura reçu d'un
@@ -389,6 +397,36 @@ identifiant — jamais une machine, jamais un service, jamais un état.
 « pour la récupération de compte » ou un nom « pour l'affichage » violerait cette
 contrainte, et c'est par là qu'elle tombera si elle tombe — jamais par une
 décision explicite, toujours par une commodité.
+
+### Ce que les domaines ajoutent, et pourquoi c'est encore compatible — amendé le 2026-09-26
+
+**Deux choses entrent, et chacune est dite** (`modele.md` §2.11,
+`annuaires.md` §5.4, `replication.md` décisions 34 et 35).
+
+**L'alias de domaine est une seconde exception choisie**, à côté de l'alias
+de compte : facultatif, posé par son propriétaire ou un délégué, public par
+construction — et l'application le dit au moment de le poser, « visible de
+tous les comptes ». Il est **moins** que l'alias de compte : il n'est pas
+unique, il ne se lit qu'authentifié, et il ne rend qu'un `d-…` — jamais le
+propriétaire. Comme lui, c'est un texte que quelqu'un choisit ; « Maison
+Dupont » y serait un nom, et la phrase de l'application est ce qui le rappelle.
+
+**Les racines apprennent l'adresse IP, le port et l'état des services
+fédérés** — ce que l'hybride de `annuaires.md` §5.3 leur épargnait. Une adresse
+IP est une donnée qui peut désigner un foyer ; c'est le coût du renversement,
+et la contrainte le borne ainsi :
+
+- **En mémoire seulement, comme un bail.** Jamais dans l'entrepôt : le schéma
+  d'`asl-registre` n'a pas de colonne pour elle, et c'est le contrôle de cette
+  contrainte. Elle tombe quand la voie de l'annuaire local tombe.
+- **Pas répliquée entre racines** : chacune la reçoit de l'annuaire local
+  (`replication.md` §1).
+- **Servie aux seuls comptes autorisés** (C10), et journalisée comme toute
+  résolution — agrégée puis jetée (C18).
+
+C'est exactement ce que les racines savent déjà des daemons qui s'annoncent
+chez elles ; la différence est que ceux-ci s'annoncent ailleurs, et qu'on le
+leur transmet.
 
 ### Un compte effacé laisse un identifiant et une date — et ce n'est pas une donnée personnelle
 
