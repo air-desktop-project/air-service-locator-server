@@ -196,6 +196,10 @@ struct ClesDeLExploitant {
     pair: Option<asl_cle::ClePublique>,
     /// `--identity-key`, la nôtre.
     identite: Option<&'static asl_cle::CleSecrete>,
+    /// Pas une clé, mais un réglage de la même famille — ce que l'exploitant
+    /// ne pose pas et que l'essai pose : la lenteur de chaque lecture
+    /// d'instantané, par la porte d'essai (décision 28).
+    lenteur_d_instantane: Option<std::time::Duration>,
 }
 
 #[allow(
@@ -238,6 +242,7 @@ async fn lever_complet(
             let rang = compteur.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some([rang; 16])
         };
+        let entrepot = Arc::new(entrepot);
         let mut application = Annuaire::new(
             &entrepot,
             &tirer,
@@ -255,6 +260,9 @@ async fn lever_complet(
         );
         if let Some(delai) = orphelins {
             application.effacer_les_orphelins_apres(delai);
+        }
+        if let Some(lenteur) = cles.lenteur_d_instantane {
+            application.ralentir_les_instantanes_pour_un_essai(lenteur);
         }
         let arret = async {
             let _ = entendre_stop.await;
@@ -4100,6 +4108,163 @@ async fn la_racine_tiree_prouve_son_identite_sur_le_defi_du_tireur() {
     )
     .await;
     assert_eq!(statut, b"400", "trente-deux octets, et rien d'autre");
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+// ── L'instantané se lit hors de la boucle (décision 28) ────────────────────
+
+/// Prouve la clé de racine du tireur sur cette connexion (genre `n`).
+async fn prouver_la_racine(
+    client: &mut ams_quic_client::Client,
+    tireur: &asl_cle::CleSecrete,
+    flux_defi: u64,
+    flux_preuve: u64,
+) {
+    let defi = tirer_le_defi(client, flux_defi).await;
+    let liaison = liaison_du_client(client);
+    let moi = asl_cle::identifiant_de_racine(&tireur.publique());
+    let signature = tireur
+        .signer(moi, &defi, &liaison)
+        .expect("la racine signe");
+    let mut corps = Vec::new();
+    corps.push(moi.genre().prefixe());
+    corps.extend_from_slice(moi.octets());
+    corps.extend_from_slice(signature.octets());
+    let (statut, _) = poster(
+        client,
+        flux_preuve,
+        b"/v1/defi",
+        &corps,
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"204", "le tireur prouve sa clé");
+}
+
+#[tokio::test]
+async fn la_boucle_sert_pendant_qu_un_instantane_se_prepare() {
+    // **LA DÉCISION 28, ÉPROUVÉE PAR CE QU'ELLE PROMET** : pendant qu'un
+    // instantané se lit — ici ralenti à trois secondes par la porte d'essai,
+    // ce qu'une base d'un million d'enregistrements coûterait —, une autre
+    // connexion est servie aussitôt. Avant, la lecture se faisait dans la
+    // boucle, et cette requête attendait qu'elle finisse.
+    let (autorite, racine_tls, chaine, cle) = materiel("instantane-hors-boucle");
+    let (base, fichier) = entrepot("instantane-hors-boucle");
+    for rang in 0..3_u8 {
+        base.creer_compte(
+            Identifiant::depuis_entropie(Genre::Utilisateur, [rang; 16]),
+            Provenance::Ici,
+            None,
+        )
+        .expect("un compte");
+    }
+    let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
+    let notre: &'static asl_cle::CleSecrete =
+        Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie([0xB3; 32])));
+    let tireur = asl_cle::CleSecrete::depuis_entropie([0xA4; 32]);
+    const LENTEUR: std::time::Duration = std::time::Duration::from_secs(3);
+
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        bail,
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            pair: Some(tireur.publique()),
+            identite: Some(notre),
+            lenteur_d_instantane: Some(LENTEUR),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+
+    // ── 1. Le tireur prouve sa clé, et demande l'instantané ────────────────
+    let mut pair = connecter(&racine_tls, adresse).await;
+    prouver_la_racine(&mut pair, &tireur, 0, 4).await;
+    let depart = std::time::Instant::now();
+    ams_quic_client::envoyer_une_requete(&mut pair, 8, 17, b"/v1/pair/instantane", None, b"").await;
+    // La réponse part tout de suite : `200`, flux ouvert, encore vide.
+    while pair.recu(8).is_empty() && depart.elapsed() < LENTEUR {
+        pair.parler().await;
+        pair.ecouter().await;
+    }
+    assert!(
+        !pair.recu(8).is_empty(),
+        "rien reçu en {:?} — la réponse a attendu la lecture, la boucle était tenue",
+        depart.elapsed()
+    );
+    assert_eq!(
+        champ(&champs(pair.recu(8)), b":status"),
+        Some(&b"200"[..]),
+        "la réponse n'attend pas la lecture"
+    );
+    assert!(
+        !pair.fin_recue(8),
+        "le flux attend ses cadres sans se clore"
+    );
+
+    // ── 2. Un second instantané sur la même connexion : le flux est tenu ──
+    ams_quic_client::envoyer_une_requete(&mut pair, 12, 17, b"/v1/pair/instantane", None, b"")
+        .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut pair, 12).await;
+    assert_eq!(
+        champ(&champs(pair.recu(12)), b":status"),
+        Some(&b"409"[..]),
+        "un flux de la voie par connexion, préparation comprise"
+    );
+
+    // ── 3. Une autre connexion est servie PENDANT la lecture ───────────────
+    let avant = std::time::Instant::now();
+    assert_eq!(statut_de(&racine_tls, adresse, "/v1/version").await, b"200");
+    let servie_en = avant.elapsed();
+    assert!(
+        depart.elapsed() < LENTEUR,
+        "l'essai n'a rien prouvé : la lecture était déjà finie ({:?})",
+        depart.elapsed()
+    );
+    assert!(
+        servie_en < std::time::Duration::from_secs(1),
+        "une autre connexion a attendu {servie_en:?} — la boucle était tenue par la lecture"
+    );
+
+    // ── 4. Puis l'instantané arrive, entier, avec sa fin ────────────────────
+    let corps = ams_quic_client::attendre_la_reponse(&mut pair, 8).await;
+    assert!(
+        depart.elapsed() >= LENTEUR,
+        "les cadres ne peuvent pas précéder la lecture"
+    );
+    let mut reste = &corps[..];
+    let mut derniere = None;
+    while !reste.is_empty() {
+        let (cadre, combien) = asl_registre::Cadre::lire(reste).expect("un cadre lisible");
+        reste = &reste[combien..];
+        derniere = Some(cadre);
+    }
+    assert!(
+        matches!(derniere, Some(asl_registre::Cadre::Fin { .. })),
+        "l'instantané se termine par son cadre de fin"
+    );
+
+    // ── 5. Une connexion qui tombe pendant la lecture : rien ne casse ──────
+    let mut partant = connecter(&racine_tls, adresse).await;
+    prouver_la_racine(&mut partant, &tireur, 0, 4).await;
+    ams_quic_client::envoyer_une_requete(&mut partant, 8, 17, b"/v1/pair/instantane", None, b"")
+        .await;
+    partant.parler().await;
+    drop(partant);
+    tokio::time::sleep(LENTEUR + std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        statut_de(&racine_tls, adresse, "/v1/version").await,
+        b"200",
+        "la lecture revenue pour une connexion tombée est jetée, et la boucle sert"
+    );
 
     let _ = dire_stop.send(());
     let _ = tache.await;

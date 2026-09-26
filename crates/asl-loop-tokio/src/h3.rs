@@ -31,6 +31,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use ams_h3::{Http3, Reponse};
 use ams_proto_http::RequestHead;
@@ -159,6 +160,10 @@ struct FluxPair {
     /// l'instantané est entièrement cadré, ou le journal s'est expiré sous le
     /// lecteur.
     a_clore: bool,
+    /// L'instantané de ce flux se lit encore hors de la boucle : rien à
+    /// cadrer, et surtout rien à clore — un flux vide qui se fermerait
+    /// dirait au tireur « instantané tronqué ».
+    en_preparation: bool,
 }
 
 impl FluxPair {
@@ -169,7 +174,7 @@ impl FluxPair {
     /// serait illisible des deux côtés, et le tireur repart à neuf sur chaque
     /// flux.
     fn cadrer_une_trame(&mut self) {
-        if !self.en_attente.is_empty() {
+        if !self.en_attente.is_empty() || self.en_preparation {
             return;
         }
         let budget = PART_OCTETS_MAX.saturating_sub(self.portes);
@@ -200,7 +205,8 @@ impl FluxPair {
 
     /// Y a-t-il encore quelque chose à faire sur ce flux, ce tour-ci ?
     fn a_pousser(&self) -> bool {
-        !self.en_attente.is_empty() || !self.a_venir.is_empty() || self.a_clore
+        !self.en_preparation
+            && (!self.en_attente.is_empty() || !self.a_venir.is_empty() || self.a_clore)
     }
 }
 
@@ -218,6 +224,89 @@ struct SuiteAuPair {
     curseur: Option<u64>,
     /// Ce que le journal portait quand les cadres ont été lus.
     vu_jusqu_a: u64,
+    /// Les cadres ne sont pas encore lus : un instantané se prépare hors de
+    /// la boucle (voir [`Preparateur`]), et le flux attend sans se clore.
+    en_preparation: bool,
+}
+
+/// Ce qui prépare un instantané HORS de la boucle, et par où il revient.
+///
+/// # POURQUOI L'INSTANTANÉ NE SE LIT PLUS DANS LA BOUCLE (décision 28)
+///
+/// `Entrepot::instantane` lit tout l'état en une transaction : une dizaine de
+/// microsecondes par enregistrement, 29 ms pour six mille cadres mesurées le
+/// 2026-09-25, donc des secondes vers le million. Lue ici même, cette lecture
+/// tenait la boucle — UNE tâche pour toutes les connexions — et plus personne
+/// n'était servi pendant qu'une racine s'amorçait : ni les keepalives, ni les
+/// annonces, ni le flux des nouvelles. C'est le défaut que la 0.18.0 a corrigé
+/// côté tireur (`crate::tireur`, l'application des lots) ; ceci est l'autre
+/// moitié, côté fournisseur.
+///
+/// La lecture part donc sur un fil bloquant (`spawn_blocking`) avec un clone
+/// de l'`Arc<Entrepot>` ; la réponse `200` part tout de suite, le flux reste
+/// ouvert et vide, et `Annuaire::au_tour` le remplit quand le résultat
+/// revient. **C'est toujours UNE transaction** : la cohérence de §5.4 ne
+/// dépend pas du fil qui lit.
+struct Preparateur {
+    /// L'entrepôt, partagé avec le fil qui lira.
+    entrepot: Arc<Entrepot>,
+    /// Par où chaque lecture revient à la boucle.
+    dire: tokio::sync::mpsc::UnboundedSender<Preparation>,
+    /// Ce que la porte d'essai ajoute à chaque lecture, pour qu'un essai
+    /// voie la boucle servir PENDANT une préparation longue.
+    #[cfg(feature = "porte-d-essai")]
+    lenteur: Option<std::time::Duration>,
+}
+
+/// Une lecture d'instantané revenue du fil bloquant.
+struct Preparation {
+    /// La connexion qui l'a demandée — elle a pu tomber depuis.
+    connexion: Vec<u8>,
+    /// Les cadres et ce qu'ils pèsent, la faute de l'entrepôt, ou la panique
+    /// du fil — qui remonte telle quelle dans la boucle, comme avant (voir
+    /// `au_tour`).
+    ///
+    /// **Le poids est compté sur le fil qui lit**, pas dans la boucle : pour
+    /// un million de cadres, cette seule somme coûtait quelques millisecondes
+    /// à toutes les connexions.
+    resultat: std::thread::Result<Result<Lu, asl_store::Faute>>,
+}
+
+/// Un instantané lu : ses cadres, tels que le fil les porte, et leur poids
+/// total en octets.
+type Lu = (Vec<Vec<u8>>, usize);
+
+impl Preparateur {
+    /// Lance la lecture d'un instantané pour cette connexion, hors de la
+    /// boucle.
+    ///
+    /// **LA PANIQUE EST RATTRAPÉE POUR ÊTRE RENDUE**, pas pour être tue : elle
+    /// voyage avec le résultat, et `au_tour` la relance (`resume_unwind`). Une
+    /// panique de l'entrepôt arrête donc la boucle comme avant ; sans cela elle
+    /// mourrait avec le fil, et le flux attendrait pour toujours.
+    fn lancer(&self, connexion: Vec<u8>) {
+        let entrepot = Arc::clone(&self.entrepot);
+        let dire = self.dire.clone();
+        #[cfg(feature = "porte-d-essai")]
+        let lenteur = self.lenteur;
+        tokio::task::spawn_blocking(move || {
+            #[cfg(feature = "porte-d-essai")]
+            if let Some(lenteur) = lenteur {
+                std::thread::sleep(lenteur);
+            }
+            let resultat = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                entrepot.instantane().map(|cadres| {
+                    let octets = cadres.iter().map(Vec::len).sum();
+                    (cadres, octets)
+                })
+            }));
+            // La boucle a pu s'arrêter entre-temps : personne n'attend plus.
+            let _ = dire.send(Preparation {
+                connexion,
+                resultat,
+            });
+        });
+    }
 }
 
 /// La voie entre racines, telle que l'exploitant l'a réglée.
@@ -485,6 +574,8 @@ struct Service<'a> {
     suite: &'a mut Option<SuiteAuPair>,
     /// Ce qu'il reste d'un instantané que cette connexion tire par parts.
     reste_d_instantane: &'a mut Option<VecDeque<Vec<u8>>>,
+    /// Ce qui lit un instantané hors de la boucle.
+    preparateur: &'a Preparateur,
     /// Le compte dont cette connexion écoute les nouvelles, s'il y en a un.
     nouvelles_de: &'a mut Option<Identifiant>,
     /// Les comptes qu'une autorisation écrite sur CETTE requête doit
@@ -1890,6 +1981,17 @@ impl Service<'_> {
     /// `apres`, ou non. Ce qu'il porte après est déposé dans `suite`, et la
     /// boucle l'écrit sur le flux de cette requête dès que la réponse tenue
     /// est partie — puis chaque opération nouvelle, à mesure (`au_tour`).
+    ///
+    /// # ET ELLE RESTE DANS LA BOUCLE, CONTRAIREMENT À L'INSTANTANÉ
+    ///
+    /// Deux raisons (décision 28). **Le statut dépend de la lecture** : `410`
+    /// ou `200` se décide sur ce qu'elle trouve, et la réponse ne peut pas
+    /// partir avant — la différer demanderait de tenir une requête sans
+    /// réponse, ce que `ams_h3::Service::serve` ne sait pas faire. **Et elle
+    /// est bornée par la coupure, pas par la base** : elle ne porte que ce qui
+    /// a été écrit depuis le curseur du tireur, c'est-à-dire pendant que la
+    /// voie était fermée ; un journal expiré sous ce curseur rend `410`, et
+    /// c'est l'instantané — lu hors de la boucle — qui prend le relais.
     fn ouvrir_les_operations(&mut self, apres: u64) -> Trouvaille {
         if self.flux_pair_tenu {
             return Trouvaille::Conflit;
@@ -1925,6 +2027,7 @@ impl Service<'_> {
                     cadres: cadres.into(),
                     curseur: Some(curseur),
                     vu_jusqu_a,
+                    en_preparation: false,
                 });
                 Trouvaille::FluxOuvert
             }
@@ -1946,6 +2049,12 @@ impl Service<'_> {
     /// **Une connexion qui tient le reste d'un instantané le CONTINUE** : la
     /// demande suivante rend la part suivante de la même lecture, et non un
     /// instantané neuf (voir `ParConnexion::reste_d_instantane`).
+    ///
+    /// **Un instantané neuf se lit HORS de la boucle** (décision 28, voir
+    /// [`Preparateur`]) : la réponse part tout de suite, le flux reste ouvert
+    /// et vide, et `Annuaire::au_tour` le remplit. Un second `GET` sur la
+    /// même connexion pendant la préparation trouve le flux tenu, et c'est le
+    /// `409` de toujours.
     fn ouvrir_l_instantane(&mut self) -> Trouvaille {
         if self.flux_pair_tenu {
             return Trouvaille::Conflit;
@@ -1955,29 +2064,18 @@ impl Service<'_> {
                 cadres: reste,
                 curseur: None,
                 vu_jusqu_a: 0,
+                en_preparation: false,
             });
             return Trouvaille::FluxOuvert;
         }
-        match self.entrepot.instantane() {
-            Ok(cadres) => {
-                let octets: usize = cadres.iter().map(Vec::len).sum();
-                (self.voie.journal)(&format!(
-                    "{} s'amorce par instantané : {} cadres, {octets} octets, par parts de \
-                     {PART_OCTETS_MAX} au plus",
-                    self.session
-                        .racine()
-                        .map_or_else(String::new, |qui| qui.texte().as_str().to_owned()),
-                    cadres.len()
-                ));
-                *self.suite = Some(SuiteAuPair {
-                    cadres: cadres.into(),
-                    curseur: None,
-                    vu_jusqu_a: 0,
-                });
-                Trouvaille::FluxOuvert
-            }
-            Err(_) => Trouvaille::Rien,
-        }
+        self.preparateur.lancer(self.connexion.clone());
+        *self.suite = Some(SuiteAuPair {
+            cadres: VecDeque::new(),
+            curseur: None,
+            vu_jusqu_a: 0,
+            en_preparation: true,
+        });
+        Trouvaille::FluxOuvert
     }
 
     /// Prend une annonce, ouvre sa session vivante, et compose la réponse.
@@ -2682,6 +2780,10 @@ pub struct Annuaire<'a> {
     /// qui résout, se connecte et attend. Sans réveilleur, rien ne part, et
     /// le flux des nouvelles est servi quand même.
     reveil: Option<tokio::sync::mpsc::UnboundedSender<Identifiant>>,
+    /// Ce qui lit les instantanés hors de la boucle (décision 28).
+    preparateur: Preparateur,
+    /// Par où les lectures reviennent, recueillies à chaque tour.
+    preparations: tokio::sync::mpsc::UnboundedReceiver<Preparation>,
 }
 
 impl<'a> Annuaire<'a> {
@@ -2699,9 +2801,13 @@ impl<'a> Annuaire<'a> {
     /// **La règle des orphelins ne passe pas tant qu'on ne l'a pas réglée**
     /// ([`Annuaire::effacer_les_orphelins_apres`]) : une application montée
     /// sans délai n'efface jamais un compte d'elle-même.
+    ///
+    /// **L'entrepôt arrive dans son `Arc`** (0.20.0) : la boucle le lit par
+    /// référence, mais un instantané se lit sur un fil à part, qui doit en
+    /// tenir un clone (décision 28).
     #[must_use]
     pub fn new(
-        entrepot: &'a Entrepot,
+        entrepot: &'a Arc<Entrepot>,
         tirer_un_defi: &'a (dyn Fn() -> Option<Defi> + Send + Sync),
         tirer_un_identifiant: &'a (dyn Fn() -> Option<[u8; 16]> + Send + Sync),
         politique: asl_auth::Politique,
@@ -2710,10 +2816,11 @@ impl<'a> Annuaire<'a> {
         voie: Voie<'a>,
     ) -> Self {
         let (rapports, verdicts) = tokio::sync::mpsc::unbounded_channel();
+        let (dire, preparations) = tokio::sync::mpsc::unbounded_channel();
         let pair_attendu = voie.pair.as_ref().map(asl_cle::identifiant_de_racine);
         Self {
             connexions: HashMap::new(),
-            entrepot,
+            entrepot: entrepot.as_ref(),
             vivier: Vivier::nouveau(),
             rapports,
             verdicts,
@@ -2736,7 +2843,87 @@ impl<'a> Annuaire<'a> {
             fermetures: None,
             a_reveiller: Vec::new(),
             reveil: None,
+            preparateur: Preparateur {
+                entrepot: Arc::clone(entrepot),
+                dire,
+                #[cfg(feature = "porte-d-essai")]
+                lenteur: None,
+            },
+            preparations,
         }
+    }
+
+    /// Ralentit chaque lecture d'instantané de ce délai, sur son fil.
+    ///
+    /// **La porte d'essai, et rien d'autre** : cette méthode n'existe que sous
+    /// la fonctionnalité `porte-d-essai`, que seules les dépendances de
+    /// développement de cette crate activent. Elle permet à un essai de
+    /// montrer que la boucle sert PENDANT une préparation, sans garnir un
+    /// entrepôt d'un million d'enregistrements.
+    #[cfg(feature = "porte-d-essai")]
+    pub const fn ralentir_les_instantanes_pour_un_essai(&mut self, lenteur: std::time::Duration) {
+        self.preparateur.lenteur = Some(lenteur);
+    }
+
+    /// Recueille les instantanés lus hors de la boucle, et remplit leurs flux.
+    ///
+    /// # CE QUI REVIENT, ET CE QU'ON EN FAIT
+    ///
+    /// - **La connexion est tombée** entre-temps, ou son flux n'attend plus :
+    ///   la lecture est jetée. Le tireur redemandera un instantané entier, qui
+    ///   fusionne sans dommage.
+    /// - **Les cadres** : le flux les porte, part après part, comme avant.
+    ///   L'amorçage se dit ICI, avec sa taille (§8) — c'est maintenant qu'on
+    ///   la connaît.
+    /// - **Une faute de l'entrepôt** : la réponse `200` est déjà partie, donc
+    ///   le flux se ferme VIDE. Le tireur lit une part sans cadre ni fin,
+    ///   `InstantaneTronque`, et sa reprise joue — avec son recul, pas en
+    ///   boucle serrée. Avant, la même faute rendait un statut d'erreur :
+    ///   l'effet chez le tireur est le même, une reprise.
+    /// - **Une panique** : relancée ici, dans la boucle, comme si la lecture
+    ///   y avait eu lieu — ce qui était le cas avant.
+    fn recueillir_les_instantanes(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut a_pousser = Vec::new();
+        while let Ok(Preparation {
+            connexion,
+            resultat,
+        }) = self.preparations.try_recv()
+        {
+            let lu = match resultat {
+                Ok(lu) => lu,
+                Err(panique) => std::panic::resume_unwind(panique),
+            };
+            let Some(etat) = self.connexions.get_mut(&connexion) else {
+                continue;
+            };
+            let racine = etat
+                .session
+                .racine()
+                .map_or_else(String::new, |qui| qui.texte().as_str().to_owned());
+            let Some(flux) = etat.flux_pair.as_mut().filter(|flux| flux.en_preparation) else {
+                continue;
+            };
+            flux.en_preparation = false;
+            match lu {
+                Ok((cadres, octets)) => {
+                    (self.voie.journal)(&format!(
+                        "{racine} s'amorce par instantané : {} cadres, {octets} octets, par \
+                         parts de {PART_OCTETS_MAX} au plus",
+                        cadres.len()
+                    ));
+                    flux.a_venir = cadres.into();
+                }
+                Err(quoi) => {
+                    (self.voie.journal)(&format!(
+                        "l'instantané demandé par {racine} ne se lit pas ({quoi}) : le flux se \
+                         ferme vide, le tireur reprendra"
+                    ));
+                    flux.a_clore = true;
+                }
+            }
+            a_pousser.push((connexion, Vec::new()));
+        }
+        a_pousser
     }
 
     /// Branche le réveilleur : chaque autorisation écrite ici lui passera le
@@ -3098,6 +3285,9 @@ impl Application for Annuaire<'_> {
             }
         }
         a_pousser.extend(self.reveiller());
+        // **LES INSTANTANÉS LUS HORS DE LA BOUCLE REVIENNENT ICI** (décision
+        // 28) : c'est le rendez-vous des travaux lancés ailleurs.
+        a_pousser.extend(self.recueillir_les_instantanes());
         let mut consignes = self.consignes_de_fermeture();
         consignes.a_pousser = a_pousser;
         consignes
@@ -3226,6 +3416,7 @@ impl Application for Annuaire<'_> {
             flux_pair_tenu: flux_pair.is_some(),
             suite: &mut self.suite,
             reste_d_instantane,
+            preparateur: &self.preparateur,
             nouvelles_de,
             a_reveiller: &mut self.a_reveiller,
         };
@@ -3256,6 +3447,7 @@ impl Application for Annuaire<'_> {
                 curseur: suite.curseur,
                 vu_jusqu_a: suite.vu_jusqu_a,
                 a_clore: false,
+                en_preparation: suite.en_preparation,
             };
             if Self::vidanger(conducteur, connexion, &mut neuf) {
                 if neuf.curseur.is_none() && !neuf.a_venir.is_empty() {

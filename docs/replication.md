@@ -445,6 +445,13 @@ Le tireur applique chaque part par LOT, dans une transaction, et non une
 opération à la fois : un amorçage de plusieurs milliers d'enregistrements est
 alors une affaire de secondes.
 
+**La racine tirée le lit HORS de sa boucle (décision 28).** La lecture reste
+une seule transaction, mais elle se fait sur un fil à part : la réponse `200`
+part aussitôt, le flux reste ouvert et vide le temps de la lecture, puis porte
+ses parts comme ci-dessus. Pendant ce temps, la boucle continue de servir
+toutes les autres connexions. Une lecture qui échoue ferme le flux vide, et le
+tireur reprend ; une connexion tombée entre-temps voit sa lecture jetée.
+
 **Parce qu'il s'applique avec les mêmes règles, un instantané FUSIONNE au lieu
 d'écraser.** Une racine qui a continué d'écrire pendant quarante jours de
 coupure applique l'instantané de l'autre comme un flux : ce qu'elle a de plus
@@ -743,6 +750,7 @@ d'exploitation dit la même chose, à qui sait lire la machine.
 | 25 | **L'attestation d'un appareil qui rejoint se réplique comme un fait sur la clé** : l'opération `appareil-atteste` (identifiant, attestation) ne va que d'`aucune` ou `attendue` vers une valeur prouvée, s'applique toujours — révoqué ou non, pour converger quel que soit l'ordre —, et rend vivant chez l'autre racine un appareil qu'elle tenait `attendue`. `attendue` est une valeur d'`attestation` portée par l'opération `appareil` (format, cran mineur à la PR de code) ; elle ne s'expire pas. Le défi de la chaîne n'est pas répliqué : il vit dans la connexion du nouvel appareil, et la preuve se fait là. | **Décidé** (2026-09-21) |
 | 26 | **La posture `invitation` est servie, et son code se réplique comme celui d'un enrôlement** : opérations `invitation` (empreinte, expiration) et `invitation-consommee` (empreinte, toujours appliquée). L'émission passe par `POST /v1/invitations`, sur l'annuaire EN MARCHE, sous la clé de `--operator-key` (genre `o`, preuve dans le corps, sans identifiant) — un outil hors ligne aurait exigé d'arrêter le service à chaque arrivant, l'entrepôt n'ayant qu'un écrivain. **Un même code consommé des deux côtés de la fenêtre donne deux comptes, et on ne les départage pas** : deux comptes ne se disputent rien, et un effacement automatique sur une course serait une arme. Le journal le dit ; l'exploitant tranche. | **Décidé** (2026-09-24) |
 | 27 | **Les notifications sans Apple ni Google** (`protocole.md` §2.2, « Les notifications ») : un point de poussée UnifiedPush remplace le jeton APNs/FCM, qui n'est plus accepté ; il se réplique par l'opération `point-de-poussee` (genre 20 ; table à part, pas de reprise de format), le plus récent gagne, refusée pour un appareil révoqué. **Seule une autorisation accordée réveille**, depuis la racine qui l'a écrite (décision 9), d'un message **vide**. Ce que l'envoi apprend — point mort sur `404`/`410`, limites de débit — reste en mémoire, par racine : ce sont des freins, et chaque racine voit son propre réseau. **Les deux racines se déploient avant qu'un appareil dépose un point** : une racine d'avant refuserait l'opération inconnue. | **Décidé** (2026-09-25) |
+| 28 | **L'instantané se lit hors de la boucle qui sert** (§5.4) : `GET /v1/pair/instantane` lance la lecture — toujours UNE transaction — sur un fil bloquant, répond `200` sans l'attendre, tient le flux ouvert et vide, et le remplit quand la lecture revient. La lecture dans la boucle coûtait une dizaine de microsecondes par enregistrement (29 ms pour six mille cadres, mesuré le 2026-09-25), donc des secondes vers le million, pendant lesquelles plus aucune connexion n'était servie — le défaut que la 0.18.0 a corrigé côté tireur. Un second `GET` pendant la lecture rend `409` (le flux est tenu) ; une lecture qui échoue ferme le flux VIDE — la réponse est déjà partie —, ce que le tireur lit comme un instantané tronqué, avec sa reprise ; une connexion tombée entre-temps voit sa lecture jetée ; une panique de l'entrepôt remonte dans la boucle, comme avant. **Le rattrapage `operations?apres=` reste lu dans la boucle** : son statut (`200` ou `410`) dépend de la lecture, et il ne porte que ce qui a été écrit pendant la coupure. | **Décidé** (2026-09-26) |
 
 ---
 
