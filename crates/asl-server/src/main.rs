@@ -262,6 +262,16 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                 entrepot.dates_de_reprise(),
             );
         }
+        // **ET LE PREMIER DOMAINE DES COMPTES D'HIER** (`modele.md` §2.11) :
+        // une fois, à la première ouverture par un binaire qui connaît les
+        // domaines — déduit, donc le même sur l'autre racine.
+        if entrepot.premiers_domaines() > 0 {
+            eprintln!(
+                "asl-server : domaines — {} compte(s) d'avant les domaines ont reçu leur premier \
+                 domaine, déduit de leur identifiant.",
+                entrepot.premiers_domaines(),
+            );
+        }
         // **LA RÈGLE DES ORPHELINS SE DIT AU DÉMARRAGE**, et « jamais » aussi
         // (`replication.md` §8) : c'est là qu'on relit ce qu'on croyait avoir
         // réglé.

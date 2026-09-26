@@ -987,3 +987,135 @@ fn attester_est_un_post_sur_v1_attestation_sans_exigence() {
         Err(Erreur::RessourceInconnue)
     );
 }
+
+// ── Les domaines (2026-09-26) ───────────────────────────────────────────────
+
+#[test]
+fn les_chemins_des_domaines_designent_leurs_ressources() {
+    let d = ident(Genre::Domaine);
+    let m = ident(Genre::Machine);
+
+    let domaines = resoudre(Methode::Get, b"/v1/domaines").unwrap();
+    assert_eq!(domaines.ressource, Ressource::Domaines);
+    assert_eq!(domaines.exigence, Exigence::Appareil);
+    assert!(domaines.sert);
+    assert!(
+        resoudre(Methode::Post, b"/v1/domaines").unwrap().sert,
+        "POST crée"
+    );
+    assert!(!resoudre(Methode::Delete, b"/v1/domaines").unwrap().sert);
+
+    let chemin = format!("/v1/domaines/{d}");
+    let un = resoudre(Methode::Get, chemin.as_bytes()).unwrap();
+    assert!(
+        matches!(un.ressource, Ressource::Domaine { domaine } if domaine.genre() == Genre::Domaine)
+    );
+    assert!(un.sert);
+    assert!(
+        resoudre(Methode::Delete, format!("/v1/domaines/{d}").as_bytes())
+            .unwrap()
+            .sert
+    );
+    assert!(
+        !resoudre(Methode::Post, format!("/v1/domaines/{d}").as_bytes())
+            .unwrap()
+            .sert
+    );
+
+    for methode in [Methode::Put, Methode::Delete] {
+        let chemin_alias = format!("/v1/domaines/{d}/alias");
+        let alias = resoudre(methode, chemin_alias.as_bytes()).unwrap();
+        assert!(matches!(alias.ressource, Ressource::AliasDomaine { .. }));
+        assert!(alias.sert);
+        let chemin_machine = format!("/v1/machines/{m}/domaine");
+        let rangee = resoudre(methode, chemin_machine.as_bytes()).unwrap();
+        assert!(matches!(rangee.ressource, Ressource::DomaineMachine { .. }));
+        assert!(rangee.sert);
+        assert_eq!(rangee.exigence, Exigence::Appareil);
+    }
+    assert!(
+        !resoudre(Methode::Get, format!("/v1/machines/{m}/domaine").as_bytes())
+            .unwrap()
+            .sert
+    );
+
+    // Un identifiant d'un autre genre n'est pas un domaine.
+    assert_eq!(
+        resoudre_get(&format!("/v1/domaines/{m}/alias")),
+        Err(Erreur::IdentifiantInvalide {
+            attendu: Genre::Domaine
+        })
+    );
+    assert_eq!(
+        resoudre_get(&format!("/v1/machines/{d}/domaine")),
+        Err(Erreur::IdentifiantInvalide {
+            attendu: Genre::Machine
+        })
+    );
+    assert_eq!(
+        resoudre_get(&format!("/v1/domaines/{m}")),
+        Err(Erreur::IdentifiantInvalide {
+            attendu: Genre::Domaine
+        })
+    );
+}
+
+#[test]
+fn la_recherche_par_alias_decode_les_pourcents_et_rien_d_autre() {
+    let cherche = resoudre(Methode::Get, b"/v1/domaines?alias=Maison%20%C3%A9t%C3%A9").unwrap();
+    assert_eq!(cherche.exigence, Exigence::AppareilOuMachine);
+    assert!(cherche.sert);
+    assert!(
+        !resoudre(Methode::Post, b"/v1/domaines?alias=a")
+            .unwrap()
+            .sert
+    );
+    let Ressource::RechercheDomaines { alias } = cherche.ressource else {
+        panic!("une recherche : {:?}", cherche.ressource);
+    };
+    let mut tampon: asl_api::domaine::TamponDAlias = [0; asl_api::domaine::ALIAS_BRUT_MAX];
+    assert_eq!(alias.decoder(&mut tampon), "Maison été");
+    // Les deux casses de l'hexadécimal.
+    let Ressource::RechercheDomaines { alias } =
+        resoudre_get("/v1/domaines?alias=%c3%a9%C3%A9x").unwrap()
+    else {
+        panic!("une recherche");
+    };
+    assert_eq!(alias.decoder(&mut tampon), "ééx");
+
+    for refusee in [
+        "/v1/domaines?alias=",
+        "/v1/domaines?nom=Maison",
+        "/v1/domaines?alias=a+b",
+        "/v1/domaines?alias=a&b",
+        "/v1/domaines?alias=a=b",
+        "/v1/domaines?alias=a#b",
+        "/v1/domaines?alias=%2",
+        "/v1/domaines?alias=%zz",
+        "/v1/domaines?alias=%C3",
+        "/v1/domaines?alias=a%",
+    ] {
+        assert_eq!(
+            resoudre_get(refusee),
+            Err(Erreur::RequeteInvalide),
+            "{refusee}"
+        );
+    }
+    // Un octet brut non ASCII, ou une espace brute, dans la valeur.
+    assert_eq!(
+        resoudre(Methode::Get, "/v1/domaines?alias=é".as_bytes()),
+        Err(Erreur::RequeteInvalide)
+    );
+    assert_eq!(
+        resoudre(Methode::Get, b"/v1/domaines?alias=a b"),
+        Err(Erreur::RequeteInvalide)
+    );
+    // Au-delà de deux cent cinquante-cinq octets décodés.
+    let long = format!("/v1/domaines?alias={}", "a".repeat(256));
+    assert_eq!(resoudre_get(&long), Err(Erreur::RequeteInvalide));
+    let juste = format!("/v1/domaines?alias={}", "a".repeat(255));
+    assert!(matches!(
+        resoudre_get(&juste).unwrap(),
+        Ressource::RechercheDomaines { .. }
+    ));
+}

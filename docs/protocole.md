@@ -756,13 +756,13 @@ l'empêcherait de comprendre.
 | `GET /v1/expositions` | **Ce qui est exposé de MOI**, relation par relation. Tout utilisateur, pas seulement l'administrateur. |
 | `DELETE /v1/expositions/{relation}` | **Retire mes enregistrements** de cette exposition. Portée : tout mon compte, ou telle machine. |
 | `POST /v1/domaines` | **Crée un domaine** à MON compte (2026-09-26, `modele.md` §2.11), alias facultatif : `{"alias":"Maison"}`. `201`, `{"domaine":"d-…"}`. Le premier est créé par `POST /v1/comptes`, dans sa transaction. |
-| `GET /v1/domaines` | **Les domaines que je possède et ceux où l'un de mes groupes tient un droit** : `[{"domaine":"d-…","proprietaire":"u-…","alias":"Maison","heberge_par":"racines"\|"n-…","droits":["administrer","voir",…]}]` — `droits` est l'union de ce que je peux sur ce domaine (`modele.md` §2.13). Le domaine racine n'y figure que pour ses administrateurs. |
+| `GET /v1/domaines` | **Les domaines que je possède et ceux où l'un de mes groupes tient un droit** (en 0.23.0 : ceux que je possède, les groupes et les droits viennent avec la PR suivante) : `[{"domaine":"d-…","proprietaire":"u-…","alias":"Maison","heberge_par":"racines"\|"n-…","droits":["administrer","voir",…]}]` — `droits` est l'union de ce que je peux sur ce domaine (`modele.md` §2.13). Le domaine racine n'y figure que pour ses administrateurs. |
 | `GET /v1/domaines?alias=…` | **La recherche par alias** : correspondance exacte après NFC et pliage simple de casse ; `[{"domaine":"d-…","autorite":"racines"\|"n-…"}]`, **tous** ceux qui portent l'alias, et `[]` si aucun. Ni propriétaire, ni machine. Servie sur la voie appareil **et** sur la voie machine — tout compte authentifié —, jamais sans preuve. Voir ci-dessous. |
-| `GET /v1/domaines/{d}` | Le domaine, ses groupes, et les machines qui y sont rattachées — `m-…` et propriétaire ; le nom, pour mes machines **et** pour qui a `voir` sur le domaine. Ceux qui ont `voir` ou `administrer` ; les autres, `404`. |
+| `GET /v1/domaines/{d}` | Le domaine, ses groupes, et les machines qui y sont rattachées — `m-…` et propriétaire ; le nom, pour mes machines **et** pour qui a `voir` sur le domaine. Ceux qui ont `voir` ou `administrer` ; les autres, `404`. **En 0.23.0** : le propriétaire seul, les champs de `GET /v1/domaines` suivis de `"machines":[…]` ; `groupes` viendra avec eux. Un domaine supprimé rend `404`. |
 | `PUT /v1/domaines/{d}/alias` | Pose ou change l'alias : `{"alias":"Maison"}`. `administrer`. **Jamais `409`** : l'alias de domaine n'est pas unique. `400` s'il n'est pas de l'UTF-8 admis (`modele.md` §2.11). |
 | `DELETE /v1/domaines/{d}/alias` | Le retire. |
 | ~~`PUT`/`DELETE /v1/domaines/{d}/delegues/{u}`~~ | **Retirés le 2026-09-26** : déléguer, c'est ajouter au groupe d'administrateurs (`POST /v1/groupes/{e}/membres`). |
-| `PUT /v1/machines/{m}/domaine` | **Rattache** MA machine : `{"domaine":"d-…"}` — un domaine où je tiens `rattacher` (ou que je possède). Une machine déjà rattachée est **déplacée**. `403` sans le droit. |
+| `PUT /v1/machines/{m}/domaine` | **Rattache** MA machine : `{"domaine":"d-…"}` — un domaine où je tiens `rattacher` (ou que je possède ; en 0.23.0, seulement celui-là). Une machine déjà rattachée est **déplacée**. `403` sans le droit ; `404` si la machine n'est pas à moi, ou si le domaine n'existe pas ou plus. |
 | `DELETE /v1/machines/{m}/domaine` | La détache : elle n'a plus de domaine. |
 | `DELETE /v1/domaines/{d}` | Supprime un domaine : ses machines détachées, son alias, ses groupes et les droits qui le visent retirés. **`409` si c'est mon dernier.** Propriétaire seulement ; le domaine racine ne se supprime pas. |
 | `POST /v1/annuaires` | **Déclare MON annuaire local** : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription — dix symboles, à usage unique, comme un code d'enrôlement. L'annuaire le présente aux racines avec sa clé d'identité (§3 ter) ; l'inscription est alors **en attente**. |
@@ -1238,6 +1238,16 @@ GET /v1/domaines?alias=Maison
 [{"domaine": "d-7Q2H…", "autorite": "racines"},
  {"domaine": "d-4K9M…", "autorite": "n-3P8X…"}]
 ```
+
+**L'alias voyage pourcent-encodé** (PR du socle, 0.23.0) : c'est de l'UTF-8
+libre, et une URL ne porte que de l'ASCII — `?alias=Maison%20%C3%A9t%C3%A9`.
+Chaque octet est `%HH` (l'une ou l'autre casse) ou un caractère ASCII
+graphique autre que `%`, `&`, `+`, `=` et `#` ; **`+` n'est pas une espace**
+— ce n'est pas un formulaire. C'est la seule chaîne de requête de l'API qui
+décode un pourcent : le chemin, lui, les refuse tous. Deux écritures du même
+alias cherchent la même clé, parce que ce qui est décodé est ensuite normalisé
+en NFC et plié. Un alias qu'on n'aurait pas pu poser rend `400`, et
+`?alias=` seul aussi.
 
 **Une liste, toujours.** L'alias de domaine n'est pas unique : deux domaines
 « Maison » sont deux réponses, et aucune n'est la bonne — c'est celui qui

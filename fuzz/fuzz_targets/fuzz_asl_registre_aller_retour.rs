@@ -53,6 +53,14 @@
 //!    qui se relit se réécrit dans la forme d'aujourd'hui, puis se relit
 //!    identique. C'est la reprise des bancs (`docs/modele.md` §2.2), et un
 //!    appareil révoqué y reçoit la date qu'on lui donne, jamais une autre.
+//! 8. **UN ALIAS DE DOMAINE RELU EST SA PROPRE FORME CANONIQUE**
+//!    (`docs/modele.md` §2.11, 2026-09-26). Le domaine, l'alias posé et le
+//!    rattachement se relisent depuis des octets quelconques ou refusent par
+//!    une faute nommée — `NonNormalise` pour un alias qui n'est pas son NFC ;
+//!    ce qui se relit se réécrit à l'identique. Et un texte quelconque, s'il
+//!    devient un alias, est son NFC, tient dans soixante-quatre octets, ne
+//!    porte aucun caractère refusé, et sa clé de recherche est celle du même
+//!    texte en capitales pliées — la normalisation est idempotente.
 
 #![no_main]
 
@@ -61,12 +69,14 @@ use libfuzzer_sys::fuzz_target;
 
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
-    ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
-    Autorisation, CADRE_DE_FIN_OCTETS, COMPTE_OCTETS, Cadre, Capacites, Cause, CleLiee, Compte,
-    DESCRIPTION_OCTETS, Description, ENROLEMENT_OCTETS, ENTREE_OCTETS, ETIQUETTE_DE_FIN,
-    Effacement, Enrolement, EntreeJournal, Estampille, Faute, MACHINE_OCTETS, Machine,
-    NOM_OCTETS_MAX, NomRange, OPERATION_OCTETS_MAX, Operation, Portee, Provenance, SERVICE_OCTETS,
-    Service, Systeme, Verdict, sans_dates,
+    ALIAS_DE_DOMAINE_OCTETS_MAX, ALIAS_DE_DOMAINE_RANGE_OCTETS, ALIAS_OCTETS_MAX, APPAREIL_OCTETS,
+    AUTORISATION_OCTETS, AliasDeDomaine, AliasDeDomaineRange, AliasRange, Appareil, Attestation,
+    Autorisation, CADRE_DE_FIN_OCTETS, COMPTE_OCTETS, Cadre, Capacites, Cause, CleLiee,
+    ClefDeRecherche, Compte, DESCRIPTION_OCTETS, DOMAINE_OCTETS, Description, Domaine,
+    ENROLEMENT_OCTETS, ENTREE_OCTETS, ETIQUETTE_DE_FIN, Effacement, Enrolement, EntreeJournal,
+    Estampille, Faute, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, OPERATION_OCTETS_MAX,
+    Operation, Portee, Provenance, RATTACHEMENT_OCTETS, Rattachement, SERVICE_OCTETS, Service,
+    Systeme, Verdict, sans_dates,
 };
 
 /// Ce qu'on soumet.
@@ -118,6 +128,14 @@ struct Entree {
     appareil_sans_dates: [u8; sans_dates::APPAREIL_OCTETS],
     /// Une date — de révocation, d'effacement, de reprise.
     date: u64,
+    /// Les octets d'un domaine.
+    domaine: [u8; DOMAINE_OCTETS],
+    /// Les octets d'un alias de domaine posé.
+    alias_de_domaine: [u8; ALIAS_DE_DOMAINE_RANGE_OCTETS],
+    /// Les octets d'un rattachement.
+    rattachement: [u8; RATTACHEMENT_OCTETS],
+    /// Un texte quelconque, pour un alias de domaine.
+    texte_de_domaine: String,
 }
 
 /// Une faute d'enregistrement est toujours l'une des cinq, et jamais une
@@ -131,6 +149,7 @@ fn nommee(faute: Faute) {
             | Faute::Longueur { .. }
             | Faute::Bourrage
             | Faute::NonImprimable { .. }
+            | Faute::NonNormalise
     ));
 }
 
@@ -477,6 +496,64 @@ fuzz_target!(|entree: Entree| {
         let mut octets = [0_u8; DESCRIPTION_OCTETS];
         description.ecrire(&mut octets);
         assert_eq!(Description::lire(&octets), Ok(description));
+    }
+
+    // ── PROPRIÉTÉ 8 : les domaines ──────────────────────────────────────────
+    match Domaine::lire(&entree.domaine) {
+        Ok(domaine) => {
+            let mut refait = [0_u8; DOMAINE_OCTETS];
+            domaine.ecrire(&mut refait);
+            assert_eq!(refait, entree.domaine, "un domaine relu ne se réécrit pas");
+        }
+        Err(faute) => nommee(faute),
+    }
+    match AliasDeDomaineRange::lire(&entree.alias_de_domaine) {
+        Ok(pose) => {
+            let mut refait = [0_u8; ALIAS_DE_DOMAINE_RANGE_OCTETS];
+            pose.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.alias_de_domaine,
+                "un alias de domaine relu ne se réécrit pas"
+            );
+        }
+        Err(faute) => nommee(faute),
+    }
+    match Rattachement::lire(&entree.rattachement) {
+        Ok(rattachement) => {
+            let mut refait = [0_u8; RATTACHEMENT_OCTETS];
+            rattachement.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.rattachement,
+                "un rattachement relu ne se réécrit pas"
+            );
+        }
+        Err(faute) => nommee(faute),
+    }
+    if let Ok(alias) = AliasDeDomaine::nouveau(&entree.texte_de_domaine) {
+        let texte = alias.texte();
+        assert!(!texte.is_empty() && texte.len() <= ALIAS_DE_DOMAINE_OCTETS_MAX);
+        assert!(
+            texte
+                .chars()
+                .all(|c| !c.is_control() && c != '"' && c != '\\'),
+            "un alias de domaine porte un caractère refusé : {texte:?}"
+        );
+        // Idempotente : l'alias rangé, repassé, rend le même.
+        assert_eq!(AliasDeDomaine::nouveau(texte), Ok(alias));
+        // Et il se relit tel qu'il s'est écrit.
+        let pose = AliasDeDomaineRange {
+            provenance: Provenance::Ici,
+            estampille,
+            alias: Some(alias),
+        };
+        let mut octets = [0_u8; ALIAS_DE_DOMAINE_RANGE_OCTETS];
+        pose.ecrire(&mut octets);
+        assert_eq!(AliasDeDomaineRange::lire(&octets), Ok(pose));
+        // La clé du texte est celle de l'alias.
+        assert_eq!(
+            ClefDeRecherche::de(&entree.texte_de_domaine),
+            Ok(alias.clef())
+        );
     }
 
     // ── PROPRIÉTÉ 5 : une opération est un cadre, et le cadre se relit ─────

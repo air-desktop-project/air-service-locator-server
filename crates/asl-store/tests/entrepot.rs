@@ -681,6 +681,30 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
         })
         .collect();
 
+    // **LES PREMIERS DOMAINES** (2026-09-26) : un par compte, entre les comptes
+    // et les machines, chacun sous l'estampille de son compte et à
+    // l'identifiant qui s'en déduit. Ils se vérifient à part, pour que la
+    // suite garde ses rangs.
+    let (domaines, operations): (Vec<_>, Vec<_>) = operations
+        .into_iter()
+        .partition(|(_, operation)| matches!(operation, Operation::Domaine { .. }));
+    assert!(!domaines.is_empty());
+    for (estampille, operation) in &domaines {
+        let Operation::Domaine {
+            domaine,
+            enregistrement,
+        } = operation
+        else {
+            unreachable!("la partition ne garde que des domaines");
+        };
+        assert_eq!(
+            *domaine,
+            asl_registre::premier_domaine(enregistrement.proprietaire)
+        );
+        assert_eq!(enregistrement.estampille, *estampille);
+        assert_eq!(enregistrement.supprime, None);
+    }
+
     // Le compte : l'enregistrement, puis sa réclamation courante.
     let compte = base.compte(thierry).expect("lisible").expect("il est là");
     assert_eq!(
@@ -1306,11 +1330,14 @@ fn une_base_reprise_sans_identite_est_reestampillee_au_premier_demarrage_avec_un
     // ── 2. PREMIER DÉMARRAGE AVEC UNE CLÉ : TOUT PASSE SOUS L'IDENTITÉ ──────
     let base = Entrepot::ouvrir(&chemin, racine()).expect("rouverte avec une identité");
     // Quatorze enregistrements repris, un compte réécrit par la réclamation
-    // (le même enregistrement — il ne compte qu'une fois), une opération.
+    // (le même enregistrement — il ne compte qu'une fois), une opération —
+    // et, depuis les domaines (2026-09-26), le premier domaine de chacun des
+    // trois comptes, né sous l'estampille de son compte, donc sans identité
+    // lui aussi.
     assert_eq!(
         base.reestampilles(),
-        15,
-        "quatorze enregistrements et une opération"
+        18,
+        "quatorze enregistrements, trois premiers domaines et une opération"
     );
     let racines = racines_de_l_instantane(&base);
     assert!(
@@ -3187,6 +3214,8 @@ fn effacer_un_compte_retire_tout_dans_une_transaction_et_laisse_la_marque() {
             services: 2,
             autorisations: 2,
             alias: true,
+            // Le premier domaine, né avec le compte (2026-09-26).
+            domaines: 1,
             a_fermer: retrait.a_fermer.clone(),
         }
     );
@@ -3661,4 +3690,441 @@ fn l_ecrit_ne_compte_que_nos_ecritures_et_survit_au_redemarrage() {
     );
     drop(rouverte);
     let _ = std::fs::remove_file(&chemin);
+}
+
+// ── Les domaines (2026-09-26) ───────────────────────────────────────────────
+
+mod domaines {
+    use asl_id::{Genre, Identifiant};
+    use asl_registre::{
+        AliasDeDomaine, Cadre, ClefDeRecherche, Operation, Provenance, premier_domaine,
+    };
+    use asl_store::{Entrepot, Faute, SuppressionDeDomaine};
+
+    use super::{TOUT, entrepot, nom, operations, un};
+
+    fn alias(texte: &str) -> AliasDeDomaine {
+        AliasDeDomaine::nouveau(texte).expect("un alias")
+    }
+
+    fn clef(texte: &str) -> ClefDeRecherche {
+        ClefDeRecherche::de(texte).expect("une clé")
+    }
+
+    fn vivants(base: &Entrepot, compte: Identifiant) -> Vec<Identifiant> {
+        base.domaines_de_compte(compte)
+            .expect("lisible")
+            .into_iter()
+            .map(|(quel, _)| quel)
+            .collect()
+    }
+
+    #[test]
+    fn un_compte_nait_avec_son_premier_domaine_et_n_en_perd_jamais_le_dernier() {
+        let (base, chemin) = entrepot("domaines-premier");
+        let c = un(Genre::Utilisateur, 1);
+        base.creer_compte(c, Provenance::Ici, None).expect("créé");
+        let premier = premier_domaine(c);
+        assert_eq!(vivants(&base, c), vec![premier]);
+        let rangee = base.domaine(premier).expect("lisible").expect("vivant");
+        assert_eq!(rangee.proprietaire, c);
+        // **Sous l'estampille du compte** : la même que l'opération `compte`.
+        let journal = operations(&base, 0);
+        let Some((estampille_du_compte, Operation::Compte { .. })) = journal.first() else {
+            panic!("le compte d'abord : {journal:?}");
+        };
+        assert_eq!(rangee.estampille, *estampille_du_compte);
+        // Et aucune opération `domaine` ne l'accompagne : il se déduit.
+        assert!(
+            !journal
+                .iter()
+                .any(|(_, operation)| matches!(operation, Operation::Domaine { .. })),
+            "{journal:?}"
+        );
+
+        // Le dernier ne se supprime pas.
+        assert_eq!(
+            base.supprimer_domaine(premier).expect("lisible"),
+            SuppressionDeDomaine::Derniere
+        );
+        // Un second, puis le premier se supprime, puis le second ne se
+        // supprime plus.
+        let second = un(Genre::Domaine, 2);
+        assert!(base.creer_domaine(second, c, None).expect("créé"));
+        assert_eq!(
+            base.creer_domaine(second, c, None)
+                .map_err(|faute| matches!(faute, Faute::Existe)),
+            Err(true)
+        );
+        assert_eq!(
+            base.supprimer_domaine(premier).expect("lisible"),
+            SuppressionDeDomaine::Faite
+        );
+        assert_eq!(vivants(&base, c), vec![second]);
+        assert!(base.domaine(premier).expect("lisible").is_none());
+        assert_eq!(
+            base.supprimer_domaine(premier).expect("lisible"),
+            SuppressionDeDomaine::Absent
+        );
+        assert_eq!(
+            base.supprimer_domaine(un(Genre::Domaine, 99))
+                .expect("lisible"),
+            SuppressionDeDomaine::Absent
+        );
+        assert_eq!(
+            base.supprimer_domaine(second).expect("lisible"),
+            SuppressionDeDomaine::Derniere
+        );
+        // Un compte inconnu n'a pas de domaine à recevoir.
+        assert!(
+            !base
+                .creer_domaine(un(Genre::Domaine, 3), un(Genre::Utilisateur, 9), None)
+                .expect("lisible")
+        );
+        let _ = std::fs::remove_file(&chemin);
+    }
+
+    #[test]
+    fn l_alias_se_pose_se_cherche_se_remplace_et_part_avec_son_domaine() {
+        let (base, chemin) = entrepot("domaines-alias");
+        let c = un(Genre::Utilisateur, 1);
+        let autre = un(Genre::Utilisateur, 2);
+        base.creer_compte(c, Provenance::Ici, None).expect("créé");
+        base.creer_compte(autre, Provenance::Ici, None)
+            .expect("créé");
+        let maison = un(Genre::Domaine, 2);
+        assert!(
+            base.creer_domaine(maison, c, Some(alias("Maison")))
+                .expect("créé")
+        );
+        // Un autre compte peut s'appeler pareil : l'alias n'est pas unique.
+        let chez_l_autre = premier_domaine(autre);
+        assert!(
+            base.poser_alias_de_domaine(chez_l_autre, Some(alias("MAISON")))
+                .expect("posé")
+        );
+        let mut trouves = base.domaines_par_alias(&clef("maison")).expect("lisible");
+        trouves.sort();
+        let mut attendus = vec![maison, chez_l_autre];
+        attendus.sort();
+        assert_eq!(trouves, attendus);
+        // « maisons » ne trouve pas « maison » : la recherche est exacte.
+        assert!(
+            base.domaines_par_alias(&clef("maisons"))
+                .expect("lisible")
+                .is_empty()
+        );
+
+        // Changer l'alias retire l'ancienne entrée de l'index.
+        assert!(
+            base.poser_alias_de_domaine(maison, Some(alias("Été")))
+                .expect("posé")
+        );
+        assert_eq!(
+            base.domaines_par_alias(&clef("maison")).expect("lisible"),
+            vec![chez_l_autre]
+        );
+        assert_eq!(
+            base.domaines_par_alias(&clef("ÉTÉ")).expect("lisible"),
+            vec![maison]
+        );
+        assert_eq!(
+            base.alias_de_domaine(maison)
+                .expect("lisible")
+                .map(|quoi| quoi.texte().to_owned()),
+            Some("Été".to_owned())
+        );
+        // Le retirer.
+        assert!(
+            base.poser_alias_de_domaine(chez_l_autre, None)
+                .expect("retiré")
+        );
+        assert!(
+            base.alias_de_domaine(chez_l_autre)
+                .expect("lisible")
+                .is_none()
+        );
+        assert!(
+            base.domaines_par_alias(&clef("maison"))
+                .expect("lisible")
+                .is_empty()
+        );
+
+        // Un domaine supprimé ne se trouve plus par son alias — l'alias reste
+        // rangé, et c'est le lecteur qui écarte un domaine mort.
+        assert_eq!(
+            base.supprimer_domaine(maison).expect("lisible"),
+            SuppressionDeDomaine::Faite
+        );
+        assert!(
+            base.domaines_par_alias(&clef("été"))
+                .expect("lisible")
+                .is_empty()
+        );
+        // Et un domaine supprimé ne reçoit plus d'alias.
+        assert!(
+            !base
+                .poser_alias_de_domaine(maison, Some(alias("x")))
+                .expect("lisible")
+        );
+
+        // Les écritures sont journalisées, chacune sous son estampille.
+        let genres: Vec<_> = operations(&base, 0)
+            .into_iter()
+            .map(|(_, operation)| operation.genre())
+            .collect();
+        assert_eq!(
+            genres
+                .iter()
+                .filter(|genre| **genre == asl_registre::GenreOperation::DomaineAlias)
+                .count(),
+            4
+        );
+        let _ = std::fs::remove_file(&chemin);
+    }
+
+    #[test]
+    fn une_machine_se_range_se_deplace_et_sort_quand_son_domaine_part() {
+        let (base, chemin) = entrepot("domaines-machines");
+        let c = un(Genre::Utilisateur, 1);
+        base.creer_compte(c, Provenance::Ici, None).expect("créé");
+        let m = un(Genre::Machine, 1);
+        base.creer_machine(m, Provenance::Ici, c, nom("grenier"), TOUT)
+            .expect("créée");
+        let premier = premier_domaine(c);
+        let second = un(Genre::Domaine, 2);
+        assert!(base.creer_domaine(second, c, None).expect("créé"));
+
+        assert_eq!(base.domaine_de_machine(m).expect("lisible"), None);
+        assert!(base.rattacher_machine(m, Some(premier)).expect("rangée"));
+        assert_eq!(base.domaine_de_machine(m).expect("lisible"), Some(premier));
+        assert_eq!(base.machines_du_domaine(premier).expect("lisible"), vec![m]);
+        // Déplacée : un seul domaine à la fois.
+        assert!(base.rattacher_machine(m, Some(second)).expect("déplacée"));
+        assert!(
+            base.machines_du_domaine(premier)
+                .expect("lisible")
+                .is_empty()
+        );
+        assert_eq!(base.machines_du_domaine(second).expect("lisible"), vec![m]);
+        // Sortie.
+        assert!(base.rattacher_machine(m, None).expect("sortie"));
+        assert_eq!(base.domaine_de_machine(m).expect("lisible"), None);
+        // Une machine inconnue, un domaine inconnu : rien.
+        assert!(
+            !base
+                .rattacher_machine(un(Genre::Machine, 9), None)
+                .expect("lisible")
+        );
+        assert!(
+            !base
+                .rattacher_machine(m, Some(un(Genre::Domaine, 99)))
+                .expect("lisible")
+        );
+        // Supprimer le domaine la sort.
+        assert!(base.rattacher_machine(m, Some(second)).expect("rangée"));
+        assert_eq!(
+            base.supprimer_domaine(second).expect("lisible"),
+            SuppressionDeDomaine::Faite
+        );
+        assert_eq!(base.domaine_de_machine(m).expect("lisible"), None);
+        assert!(
+            base.machines_du_domaine(second)
+                .expect("lisible")
+                .is_empty()
+        );
+        let _ = std::fs::remove_file(&chemin);
+    }
+
+    #[test]
+    fn un_instantane_rend_les_domaines_tels_qu_ils_sont() {
+        let (source, chemin_source) = entrepot("domaines-source");
+        let c = un(Genre::Utilisateur, 1);
+        source.creer_compte(c, Provenance::Ici, None).expect("créé");
+        let m = un(Genre::Machine, 1);
+        source
+            .creer_machine(m, Provenance::Ici, c, nom("grenier"), TOUT)
+            .expect("créée");
+        let second = un(Genre::Domaine, 2);
+        assert!(
+            source
+                .creer_domaine(second, c, Some(alias("Bureau")))
+                .expect("créé")
+        );
+        assert!(source.rattacher_machine(m, Some(second)).expect("rangée"));
+        // Le premier supprimé : l'instantané doit le rejouer supprimé, bien
+        // que l'opération `compte` le fasse renaître chez le lecteur.
+        assert_eq!(
+            source
+                .supprimer_domaine(premier_domaine(c))
+                .expect("lisible"),
+            SuppressionDeDomaine::Faite
+        );
+
+        let pair = Identifiant::depuis_entropie(Genre::Annuaire, [0xAB; 16]);
+        let chemin_lecteur = std::env::temp_dir().join(format!(
+            "asl-entrepot-{}-domaines-lecteur.redb",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&chemin_lecteur);
+        let lecteur = Entrepot::ouvrir(&chemin_lecteur, pair).expect("un entrepôt neuf");
+        let cadres: Vec<Cadre> = source
+            .instantane()
+            .expect("lisible")
+            .iter()
+            .map(|octets| Cadre::lire(octets).expect("un cadre").0)
+            .collect();
+        lecteur
+            .appliquer_la_suite(super::racine(), &cadres, true)
+            .expect("appliqué");
+
+        assert_eq!(vivants(&lecteur, c), vec![second]);
+        assert!(
+            lecteur
+                .domaine(premier_domaine(c))
+                .expect("lisible")
+                .is_none()
+        );
+        assert_eq!(
+            lecteur.domaine_de_machine(m).expect("lisible"),
+            Some(second)
+        );
+        assert_eq!(
+            lecteur
+                .domaines_par_alias(&clef("bureau"))
+                .expect("lisible"),
+            vec![second]
+        );
+        // Et ce que le lecteur rend est ce que la source rendait.
+        assert_eq!(
+            lecteur.instantane().expect("lisible").len(),
+            source.instantane().expect("lisible").len()
+        );
+        let _ = std::fs::remove_file(&chemin_source);
+        let _ = std::fs::remove_file(&chemin_lecteur);
+    }
+
+    #[test]
+    fn effacer_un_compte_emporte_ses_domaines_et_sort_les_machines_des_autres() {
+        let (base, chemin) = entrepot("domaines-effacement");
+        let c = un(Genre::Utilisateur, 1);
+        let voisin = un(Genre::Utilisateur, 2);
+        base.creer_compte(c, Provenance::Ici, None).expect("créé");
+        base.creer_compte(voisin, Provenance::Ici, None)
+            .expect("créé");
+        let m = un(Genre::Machine, 1);
+        let mienne = un(Genre::Machine, 2);
+        base.creer_machine(m, Provenance::Ici, voisin, nom("chez-c"), TOUT)
+            .expect("créée");
+        base.creer_machine(mienne, Provenance::Ici, c, nom("à-c"), TOUT)
+            .expect("créée");
+        let chez_c = premier_domaine(c);
+        assert!(
+            base.poser_alias_de_domaine(chez_c, Some(alias("Atelier")))
+                .expect("posé")
+        );
+        assert!(base.rattacher_machine(m, Some(chez_c)).expect("rangée"));
+        assert!(
+            base.rattacher_machine(mienne, Some(chez_c))
+                .expect("rangée")
+        );
+
+        let efface = base
+            .effacer_compte(c, asl_registre::Cause::Titulaire, 1_790_000_000_000)
+            .expect("lisible")
+            .expect("le compte existe");
+        let asl_store::Efface::Fait(retrait) = efface else {
+            panic!("un effacement fait : {efface:?}");
+        };
+        assert_eq!(retrait.domaines, 1);
+        assert!(base.domaines_de_compte(c).expect("lisible").is_empty());
+        assert!(base.domaine(chez_c).expect("lisible").is_none());
+        assert!(
+            base.domaines_par_alias(&clef("atelier"))
+                .expect("lisible")
+                .is_empty()
+        );
+        // La machine du voisin reste au voisin, sortie du domaine.
+        assert!(base.machine(m).expect("lisible").is_some());
+        assert_eq!(base.domaine_de_machine(m).expect("lisible"), None);
+        // Celle de c est partie avec lui.
+        assert!(base.machine(mienne).expect("lisible").is_none());
+        // Et le voisin garde son domaine.
+        assert_eq!(vivants(&base, voisin), vec![premier_domaine(voisin)]);
+        let _ = std::fs::remove_file(&chemin);
+    }
+
+    #[test]
+    fn chaque_ecriture_d_un_domaine_voyage_par_le_journal() {
+        // Le flux, et non l'instantané : chaque opération du journal,
+        // appliquée dans l'ordre chez un pair, comme la voie le fait.
+        let (source, chemin_source) = entrepot("domaines-journal-source");
+        let c = un(Genre::Utilisateur, 1);
+        source.creer_compte(c, Provenance::Ici, None).expect("créé");
+        let m = un(Genre::Machine, 1);
+        source
+            .creer_machine(m, Provenance::Ici, c, nom("grenier"), TOUT)
+            .expect("créée");
+        let second = un(Genre::Domaine, 2);
+        assert!(
+            source
+                .creer_domaine(second, c, Some(alias("Bureau")))
+                .expect("créé")
+        );
+        assert!(source.rattacher_machine(m, Some(second)).expect("rangée"));
+        assert!(
+            source
+                .poser_alias_de_domaine(second, Some(alias("Atelier")))
+                .expect("posé")
+        );
+        assert_eq!(
+            source
+                .supprimer_domaine(premier_domaine(c))
+                .expect("lisible"),
+            SuppressionDeDomaine::Faite
+        );
+
+        let pair = Identifiant::depuis_entropie(Genre::Annuaire, [0xAC; 16]);
+        let chemin_lecteur = std::env::temp_dir().join(format!(
+            "asl-entrepot-{}-domaines-journal-lecteur.redb",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&chemin_lecteur);
+        let lecteur = Entrepot::ouvrir(&chemin_lecteur, pair).expect("un entrepôt neuf");
+        let cadres: Vec<Cadre> = operations(&source, 0)
+            .into_iter()
+            .map(|(estampille, operation)| Cadre::Operation {
+                estampille,
+                operation,
+            })
+            .collect();
+        let faites = lecteur
+            .appliquer_la_suite(super::racine(), &cadres, false)
+            .expect("appliqué");
+        assert!(
+            faites
+                .iter()
+                .all(|quoi| matches!(quoi, asl_store::Applique::Faite { .. })),
+            "{faites:?}"
+        );
+        assert_eq!(vivants(&lecteur, c), vec![second]);
+        assert_eq!(
+            lecteur.domaine_de_machine(m).expect("lisible"),
+            Some(second)
+        );
+        assert_eq!(
+            lecteur
+                .domaines_par_alias(&clef("atelier"))
+                .expect("lisible"),
+            vec![second]
+        );
+        assert!(
+            lecteur
+                .domaines_par_alias(&clef("bureau"))
+                .expect("lisible")
+                .is_empty()
+        );
+        let _ = std::fs::remove_file(&chemin_source);
+        let _ = std::fs::remove_file(&chemin_lecteur);
+    }
 }

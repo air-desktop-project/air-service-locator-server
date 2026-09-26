@@ -9,6 +9,12 @@ repository.workspace = true
 
 [dependencies]
 asl-id.workspace = true
+# Le premier domaine d'un compte se DÉDUIT de son identifiant (`docs/modele.md`
+# §2.11) : un SHA-256 à domaine séparé, comme le `n-…` d'une racine. Déjà dans
+# le graphe, en Rust pur.
+sha2.workspace = true
+# Le NFC de l'alias de domaine, épinglé avec Unicode : voir `Cargo.toml`.
+unicode-normalization.workspace = true
 
 [lints]
 workspace = true

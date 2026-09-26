@@ -38,6 +38,16 @@
 
 use asl_id::{Genre, Identifiant};
 
+mod domaine;
+mod plis;
+
+pub use domaine::{
+    ALIAS_DE_DOMAINE_BRUT_MAX, ALIAS_DE_DOMAINE_OCTETS_MAX, ALIAS_DE_DOMAINE_RANGE_OCTETS,
+    AliasDeDomaine, AliasDeDomaineRange, CLEF_DE_RECHERCHE_OCTETS_MAX, ClefDeRecherche,
+    DOMAINE_OCTETS, Domaine, RATTACHEMENT_OCTETS, Rattachement, SEPARATEUR_PREMIER_DOMAINE,
+    UNICODE, premier_domaine,
+};
+
 // ── Les tailles ─────────────────────────────────────────────────────────────
 
 /// Ce qu'un identifiant occupe : son genre, puis ses seize octets.
@@ -152,6 +162,18 @@ pub enum Faute {
         /// Ce qu'il y avait.
         obtenus: usize,
     },
+    /// Un texte qui ne porte rien, là où il en faut.
+    ///
+    /// **L'alias de domaine est le premier texte que ce module vérifie**
+    /// (voir `domaine.rs`) : les autres n'ont qu'une longueur, et une longueur
+    /// nulle y est permise ou refusée par la grammaire qui les admet.
+    Vide,
+    /// Un alias de domaine rangé qui n'est pas sa propre forme canonique —
+    /// NFC, caractères admis, UTF-8.
+    ///
+    /// Relu du disque ou reçu d'un pair, il ne se range pas : deux formes
+    /// d'une même chaîne ne se trouveraient pas l'une l'autre.
+    NonNormalise,
 }
 
 // ── Écrire sans ouvrir de branche ───────────────────────────────────────────
@@ -2943,6 +2965,38 @@ pub enum Operation {
         /// L'empreinte du code consommé.
         empreinte: [u8; EMPREINTE_OCTETS],
     },
+    /// Un domaine créé (`docs/replication.md` §5.2, 2026-09-26). **Insérer
+    /// si absent.** Le premier domaine d'un compte ne voyage PAS par elle : il
+    /// se déduit du compte, et chaque racine le fait naître en appliquant
+    /// l'opération `compte` — voir [`premier_domaine`].
+    Domaine {
+        /// Son identifiant.
+        domaine: Identifiant,
+        /// L'enregistrement.
+        enregistrement: Domaine,
+    },
+    /// Un domaine supprimé. Marquer ; détacher ses machines, retirer son
+    /// alias. **Puis la règle de l'ensemble** : si le compte n'a plus aucun
+    /// domaine vivant, celui des domaines supprimés dont la naissance est la
+    /// plus ancienne reste vivant (`docs/replication.md` §3.2).
+    DomaineSupprime {
+        /// Lequel.
+        domaine: Identifiant,
+    },
+    /// L'alias d'un domaine posé ou retiré. Le plus récent.
+    DomaineAlias {
+        /// Le domaine.
+        domaine: Identifiant,
+        /// L'enregistrement.
+        enregistrement: AliasDeDomaineRange,
+    },
+    /// Une machine rattachée à un domaine, ou détachée. Le plus récent.
+    MachineDomaine {
+        /// La machine.
+        machine: Identifiant,
+        /// L'enregistrement.
+        enregistrement: Rattachement,
+    },
 }
 
 /// Le genre d'une opération, tel qu'il s'écrit en tête du cadre.
@@ -2955,7 +3009,8 @@ pub enum Operation {
 /// plutôt que de déplacer un cadre que les deux racines savaient déjà lire ;
 /// le seizième, `appareil-atteste`, dix-sept ; puis `invitation` dix-huit et
 /// `invitation-consommee` dix-neuf (2026-09-24) ; `point-de-poussee` vingt
-/// (2026-09-25).
+/// (2026-09-25) ; `domaine`, `domaine-supprime`, `domaine-alias` et
+/// `machine-domaine` de vingt et un à vingt-quatre (2026-09-26).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenreOperation {
     /// `compte`.
@@ -2996,12 +3051,20 @@ pub enum GenreOperation {
     InvitationConsommee,
     /// `point-de-poussee`.
     PointDePoussee,
+    /// `domaine`.
+    Domaine,
+    /// `domaine-supprime`.
+    DomaineSupprime,
+    /// `domaine-alias`.
+    DomaineAlias,
+    /// `machine-domaine`.
+    MachineDomaine,
 }
 
 impl GenreOperation {
-    /// Les dix-neuf, dans l'ordre de `replication.md` §5.2 — et l'ordre de
-    /// leurs étiquettes, de 1 à 14, puis 16 à 20 (voir l'en-tête du type).
-    pub const TOUS: [Self; 19] = [
+    /// Les vingt-trois, dans l'ordre de `replication.md` §5.2 — et l'ordre de
+    /// leurs étiquettes, de 1 à 14, puis 16 à 24 (voir l'en-tête du type).
+    pub const TOUS: [Self; 23] = [
         Self::Compte,
         Self::Alias,
         Self::Appareil,
@@ -3021,6 +3084,10 @@ impl GenreOperation {
         Self::Invitation,
         Self::InvitationConsommee,
         Self::PointDePoussee,
+        Self::Domaine,
+        Self::DomaineSupprime,
+        Self::DomaineAlias,
+        Self::MachineDomaine,
     ];
 
     /// Son étiquette, en tête du cadre.
@@ -3046,6 +3113,10 @@ impl GenreOperation {
             Self::Invitation => 18,
             Self::InvitationConsommee => 19,
             Self::PointDePoussee => 20,
+            Self::Domaine => 21,
+            Self::DomaineSupprime => 22,
+            Self::DomaineAlias => 23,
+            Self::MachineDomaine => 24,
         }
     }
 
@@ -3076,6 +3147,10 @@ impl GenreOperation {
             18 => Self::Invitation,
             19 => Self::InvitationConsommee,
             20 => Self::PointDePoussee,
+            21 => Self::Domaine,
+            22 => Self::DomaineSupprime,
+            23 => Self::DomaineAlias,
+            24 => Self::MachineDomaine,
             lue => return Err(Faute::Etiquette { lue }),
         })
     }
@@ -3107,6 +3182,10 @@ impl GenreOperation {
             Self::Invitation => EMPREINTE_OCTETS + INVITATION_OCTETS,
             Self::InvitationConsommee => EMPREINTE_OCTETS,
             Self::PointDePoussee => IDENTIFIANT_OCTETS + POINT_DE_POUSSEE_OCTETS,
+            Self::Domaine => IDENTIFIANT_OCTETS + DOMAINE_OCTETS,
+            Self::DomaineSupprime => IDENTIFIANT_OCTETS,
+            Self::DomaineAlias => IDENTIFIANT_OCTETS + ALIAS_DE_DOMAINE_RANGE_OCTETS,
+            Self::MachineDomaine => IDENTIFIANT_OCTETS + RATTACHEMENT_OCTETS,
         }
     }
 
@@ -3146,6 +3225,10 @@ impl Operation {
             Self::Invitation { .. } => GenreOperation::Invitation,
             Self::InvitationConsommee { .. } => GenreOperation::InvitationConsommee,
             Self::PointDePoussee { .. } => GenreOperation::PointDePoussee,
+            Self::Domaine { .. } => GenreOperation::Domaine,
+            Self::DomaineSupprime { .. } => GenreOperation::DomaineSupprime,
+            Self::DomaineAlias { .. } => GenreOperation::DomaineAlias,
+            Self::MachineDomaine { .. } => GenreOperation::MachineDomaine,
         }
     }
 
@@ -3378,6 +3461,45 @@ impl Operation {
                     charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
                 );
             }
+            Self::Domaine {
+                domaine,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*domaine, charge);
+                let mut octets = [0_u8; DOMAINE_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::DomaineSupprime { domaine } => {
+                ecrire_identifiant(*domaine, charge);
+            }
+            Self::DomaineAlias {
+                domaine,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*domaine, charge);
+                let mut octets = [0_u8; ALIAS_DE_DOMAINE_RANGE_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::MachineDomaine {
+                machine,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*machine, charge);
+                let mut octets = [0_u8; RATTACHEMENT_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
         }
         genre.octets()
     }
@@ -3581,6 +3703,21 @@ impl Operation {
                     cause: marque.cause,
                 }
             }
+            GenreOperation::Domaine => Self::Domaine {
+                domaine: lire_identifiant(charge, Genre::Domaine)?,
+                enregistrement: Domaine::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::DomaineSupprime => Self::DomaineSupprime {
+                domaine: lire_identifiant(charge, Genre::Domaine)?,
+            },
+            GenreOperation::DomaineAlias => Self::DomaineAlias {
+                domaine: lire_identifiant(charge, Genre::Domaine)?,
+                enregistrement: AliasDeDomaineRange::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::MachineDomaine => Self::MachineDomaine {
+                machine: lire_identifiant(charge, Genre::Machine)?,
+                enregistrement: Rattachement::lire(&copie(apres_identifiant))?,
+            },
         };
         Ok((estampille, operation, attendus))
     }
@@ -5845,7 +5982,7 @@ mod tests {
     // ── Les opérations ──────────────────────────────────────────────────────
 
     /// Une opération de chaque genre, dans l'ordre de `replication.md` §5.2.
-    fn une_de_chaque() -> [Operation; 19] {
+    fn une_de_chaque() -> [Operation; 23] {
         [
             Operation::Compte {
                 compte: un(Genre::Utilisateur, 1),
@@ -5932,6 +6069,34 @@ mod tests {
                 appareil: un(Genre::Appareil, 2),
                 enregistrement: un_point(Some([0x04; 65]), Some([0x5E; 16])),
             },
+            Operation::Domaine {
+                domaine: un(Genre::Domaine, 6),
+                enregistrement: super::Domaine {
+                    provenance: Provenance::Ici,
+                    estampille: e(12),
+                    proprietaire: un(Genre::Utilisateur, 1),
+                    supprime: None,
+                },
+            },
+            Operation::DomaineSupprime {
+                domaine: un(Genre::Domaine, 6),
+            },
+            Operation::DomaineAlias {
+                domaine: un(Genre::Domaine, 6),
+                enregistrement: super::AliasDeDomaineRange {
+                    provenance: Provenance::Ici,
+                    estampille: e(13),
+                    alias: Some(super::AliasDeDomaine::nouveau("Maison").unwrap()),
+                },
+            },
+            Operation::MachineDomaine {
+                machine: un(Genre::Machine, 3),
+                enregistrement: super::Rattachement {
+                    provenance: Provenance::Ici,
+                    estampille: e(14),
+                    domaine: Some(un(Genre::Domaine, 6)),
+                },
+            },
         ]
     }
 
@@ -5948,6 +6113,10 @@ mod tests {
                 GenreOperation::Invitation => 18,
                 GenreOperation::InvitationConsommee => 19,
                 GenreOperation::PointDePoussee => 20,
+                GenreOperation::Domaine => 21,
+                GenreOperation::DomaineSupprime => 22,
+                GenreOperation::DomaineAlias => 23,
+                GenreOperation::MachineDomaine => 24,
                 _ => rang + 1,
             };
             assert_eq!(
@@ -6041,10 +6210,10 @@ mod tests {
 
     #[test]
     fn un_genre_inconnu_est_refuse_zero_compris() {
-        // Quinze est le cadre de fin, vingt et un le premier au-delà du
-        // dernier genre (`point-de-poussee` tient vingt) : aucun des deux
-        // n'est une opération.
-        for lue in [0_u8, 15, 21, 200] {
+        // Quinze est le cadre de fin, vingt-cinq le premier au-delà du
+        // dernier genre (`machine-domaine` tient vingt-quatre) : aucun des
+        // deux n'est une opération.
+        for lue in [0_u8, 15, 25, 200] {
             let mut octets = [0_u8; OPERATION_OCTETS_MAX];
             octets[0] = lue;
             assert_eq!(Operation::lire(&octets), Err(Faute::Etiquette { lue }));
@@ -6213,6 +6382,22 @@ mod tests {
                 "{operation:?}"
             );
         }
+        // Et les genres venus après : chacun exige le sien.
+        for (operation, attendu) in une_de_chaque().into_iter().skip(19).zip([
+            Genre::Domaine,
+            Genre::Domaine,
+            Genre::Domaine,
+            Genre::Machine,
+        ]) {
+            let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+            operation.ecrire(e(1), &mut sortie);
+            sortie[OPERATION_ENTETE_OCTETS] = b'z';
+            assert_eq!(
+                Operation::lire(&sortie),
+                Err(Faute::Genre { attendu }),
+                "{operation:?}"
+            );
+        }
         // Et le point de poussée, venu après : un appareil, rien d'autre.
         let point = une_de_chaque()[18];
         assert_eq!(point.genre(), GenreOperation::PointDePoussee);
@@ -6240,7 +6425,10 @@ mod tests {
                 | Operation::PointDePoussee { .. }
                 | Operation::Machine { .. }
                 | Operation::Service { .. }
-                | Operation::Autorisation { .. } => OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS,
+                | Operation::Autorisation { .. }
+                | Operation::Domaine { .. }
+                | Operation::DomaineAlias { .. }
+                | Operation::MachineDomaine { .. } => OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS,
                 Operation::Enrolement { .. } => OPERATION_ENTETE_OCTETS + EMPREINTE_OCTETS,
                 _ => continue,
             };

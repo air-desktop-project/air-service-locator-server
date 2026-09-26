@@ -85,6 +85,9 @@ pub enum Genre {
     Autorisation,
     /// Un annuaire.
     Annuaire,
+    /// Un domaine — un lieu où l'on range des machines (`modele.md` §2.11,
+    /// 2026-09-26). `d` : la lettre était libre.
+    Domaine,
 }
 
 impl Genre {
@@ -98,6 +101,7 @@ impl Genre {
             Self::Service => b's',
             Self::Autorisation => b'g',
             Self::Annuaire => b'n',
+            Self::Domaine => b'd',
         }
     }
 
@@ -114,6 +118,7 @@ impl Genre {
             b's' | b'S' => Some(Self::Service),
             b'g' | b'G' => Some(Self::Autorisation),
             b'n' | b'N' => Some(Self::Annuaire),
+            b'd' | b'D' => Some(Self::Domaine),
             _ => None,
         }
     }

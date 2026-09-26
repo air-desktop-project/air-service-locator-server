@@ -88,7 +88,7 @@ use asl_api::{Exigence, Ressource};
 use asl_cle::{CleAppareil, ClePublique, Defi, LiaisonDeCanal, Signature, SignatureAppareil};
 use asl_cle::{CodeEnrolement, TexteCode};
 use asl_id::{Genre, Identifiant};
-use asl_registre::AliasRange;
+use asl_registre::{AliasDeDomaine, AliasRange, ClefDeRecherche};
 
 /// **CE QU'UNE GRAMMAIRE ACCEPTE, L'AUTRE DOIT POUVOIR LE RANGER.**
 ///
@@ -109,6 +109,14 @@ const _: () = assert!(
         && asl_api::point::CLE_RECEPTEUR_OCTETS == asl_registre::CLE_RECEPTEUR_OCTETS
         && asl_api::point::SECRET_RECEPTEUR_OCTETS == asl_registre::SECRET_RECEPTEUR_OCTETS,
     "le point de poussée ne se range pas : les bornes ont divergé"
+);
+
+/// **L'ALIAS DE DOMAINE BRUT ACCEPTÉ SE NORMALISE** (`modele.md` §2.11) :
+/// `asl-api` borne le texte brut, `asl-registre` le normalise et borne la forme
+/// rangée. Les deux bornes brutes doivent être la même.
+const _: () = assert!(
+    asl_api::domaine::ALIAS_BRUT_MAX == asl_registre::ALIAS_DE_DOMAINE_BRUT_MAX,
+    "l'alias de domaine brut ne se normalise pas : les bornes ont divergé"
 );
 
 /// Ce qu'un corps de requête peut faire, en octets.
@@ -624,6 +632,54 @@ pub enum Besoin<'a> {
     /// le pair, ouverte ou coupée, jusqu'où l'on a appliqué — ou rien, pour
     /// une racine seule.
     EtatDeLaReplication,
+
+    // ── Les domaines (`modele.md` §2.11, 2026-09-26) ─────────────────────────
+    /// Les domaines du compte de cette connexion.
+    ///
+    /// **Ceux qu'il possède**, dans cette tranche : ceux où l'un de ses
+    /// groupes tient un droit viendront avec les groupes et les droits
+    /// (`protocole.md` §2.2).
+    MesDomaines,
+    /// Créer un domaine au compte de cette connexion, avec un alias ou sans.
+    ///
+    /// **L'alias est déjà normalisé** : un alias qu'on ne pourrait pas poser
+    /// rend `400` ici, avant que l'étage 3 n'écrive quoi que ce soit.
+    CreerDomaine {
+        /// L'alias, en NFC, ou rien.
+        alias: Option<AliasDeDomaine>,
+    },
+    /// Chercher les domaines qui portent cet alias.
+    ChercherDomaines {
+        /// La clé : l'alias cherché, normalisé et plié.
+        clef: ClefDeRecherche,
+    },
+    /// Lire un domaine et ce qui y est rangé.
+    LireDomaine {
+        /// Le domaine visé.
+        domaine: Identifiant,
+    },
+    /// Supprimer un domaine du compte de cette connexion.
+    ///
+    /// **`409` pour le dernier** : un compte a toujours au moins un domaine
+    /// (`modele.md` §2.11).
+    SupprimerDomaine {
+        /// Le domaine visé.
+        domaine: Identifiant,
+    },
+    /// Poser — ou retirer, avec `None` — l'alias d'un domaine.
+    PoserAliasDeDomaine {
+        /// Le domaine visé.
+        domaine: Identifiant,
+        /// L'alias, en NFC, ou rien pour le retirer.
+        alias: Option<AliasDeDomaine>,
+    },
+    /// Ranger une machine dans un domaine — ou l'en sortir, avec `None`.
+    RattacherMachine {
+        /// La machine visée, qui doit être au compte de cette connexion.
+        machine: Identifiant,
+        /// Le domaine, ou rien.
+        domaine: Option<Identifiant>,
+    },
 }
 
 /// La voie vers l'autre racine, telle que le tireur la voit en ce moment.
@@ -934,6 +990,13 @@ pub enum Trouvaille {
     HorsJournal,
     /// Où en est la voie entre racines, vue d'ici.
     Replication(EtatDeLaReplication),
+    /// Des domaines, **chacun déjà encodé** : les miens, ou ceux qu'une
+    /// recherche a trouvés.
+    Domaines(alloc::vec::Vec<alloc::vec::Vec<u8>>),
+    /// Un domaine et ses machines, **déjà encodé**.
+    DomaineLu(alloc::vec::Vec<u8>),
+    /// Un domaine a été créé.
+    DomaineCree(Identifiant),
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -1212,7 +1275,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         // **L'UNE OU L'AUTRE VOIE**, et rien d'autre : la capacité de lecture
         // d'une machine se lit à l'étage 3, et la décision l'exige
         // (`asl_auth::decider_machine_visible`).
-        Exigence::AppareilOuMachineLecture => {
+        Exigence::AppareilOuMachineLecture | Exigence::AppareilOuMachine => {
             if session.appareil().is_none() && session.machine().is_none() {
                 return Besoin::Deja(StatusCode::UNAUTHORIZED);
             }
@@ -1337,6 +1400,61 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
             },
         },
         Ressource::Compte => Besoin::EffacerMonCompte,
+        // ── LES DOMAINES ────────────────────────────────────────────────
+        //
+        // **L'ALIAS SE NORMALISE ICI**, avant que l'étage 3 ne l'écrive :
+        // `asl-registre` tient la règle, et un alias qu'on ne pourrait pas
+        // ranger rend `400` — la faute est dans la requête.
+        Ressource::Domaines => match methode {
+            asl_api::Methode::Get => Besoin::MesDomaines,
+            _ => match asl_api::domaine::CreationDeDomaine::decoder(corps) {
+                Ok(demande) => match demande.alias.map(AliasDeDomaine::nouveau).transpose() {
+                    Ok(alias) => Besoin::CreerDomaine { alias },
+                    Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+                },
+                Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+            },
+        },
+        Ressource::RechercheDomaines { alias } => {
+            let mut tampon = [0_u8; asl_api::domaine::ALIAS_BRUT_MAX];
+            match ClefDeRecherche::de(alias.decoder(&mut tampon)) {
+                Ok(clef) => Besoin::ChercherDomaines { clef },
+                Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+            }
+        }
+        Ressource::Domaine { domaine } => match methode {
+            asl_api::Methode::Get => Besoin::LireDomaine { domaine },
+            _ => Besoin::SupprimerDomaine { domaine },
+        },
+        Ressource::AliasDomaine { domaine } => match methode {
+            asl_api::Methode::Delete => Besoin::PoserAliasDeDomaine {
+                domaine,
+                alias: None,
+            },
+            _ => match asl_api::domaine::PoseDAlias::decoder(corps)
+                .ok()
+                .and_then(|demande| AliasDeDomaine::nouveau(demande.alias).ok())
+            {
+                Some(alias) => Besoin::PoserAliasDeDomaine {
+                    domaine,
+                    alias: Some(alias),
+                },
+                None => Besoin::Deja(StatusCode::BAD_REQUEST),
+            },
+        },
+        Ressource::DomaineMachine { machine } => match methode {
+            asl_api::Methode::Delete => Besoin::RattacherMachine {
+                machine,
+                domaine: None,
+            },
+            _ => match asl_api::domaine::Rattachement::decoder(corps) {
+                Ok(demande) => Besoin::RattacherMachine {
+                    machine,
+                    domaine: Some(demande.domaine),
+                },
+                Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+            },
+        },
         // ── LA VOIE ENTRE RACINES ───────────────────────────────────────
         Ressource::PairPreuve => lire_un_defi(corps),
         Ressource::PairOperations { apres } => Besoin::LireLesOperations { apres },
@@ -1807,6 +1925,34 @@ pub fn repondre<'o>(
             Trouvaille::Autorisations(quoi) => composer_une_liste(quoi, sortie),
             _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
         },
+        // **UNE LISTE, VIDE SI RIEN** : « aucun domaine ne porte cet alias »
+        // est une réponse, pas une faute — et elle ne dit rien de plus que
+        // celle d'un alias qu'un domaine porterait sans qu'on le voie.
+        Besoin::MesDomaines | Besoin::ChercherDomaines { .. } => match trouvaille {
+            Trouvaille::Domaines(quoi) => composer_une_liste(quoi, sortie),
+            _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
+        },
+        // **`404` POUR L'ABSENT COMME POUR L'INTERDIT** (C10) : un domaine
+        // qu'on ne peut pas voir n'existe pas pour qui le demande.
+        Besoin::LireDomaine { .. } => match trouvaille {
+            Trouvaille::DomaineLu(corps) => composer(StatusCode::OK, JSON_MEDIA, corps, sortie),
+            _ => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+        },
+        Besoin::CreerDomaine { .. } => match trouvaille {
+            Trouvaille::DomaineCree(domaine) => {
+                let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
+                corps.pousser(br#"{"domaine":""#);
+                corps.pousser(domaine.texte().as_str().as_bytes());
+                corps.pousser(br#""}"#);
+                composer(StatusCode::CREATED, JSON_MEDIA, corps.rendu(), sortie)
+            }
+            autre => rendre_l_echec(autre, sortie),
+        },
         // **ON RASSEMBLE TOUT, ET C'EST ICI QU'ON ÉCARTE**, machine par
         // machine. Ce qui reste est une liste — vide si rien ne passe, et
         // vide aussi si rien n'a été trouvé : les deux se ressemblent parce
@@ -2070,7 +2216,10 @@ pub fn repondre<'o>(
         | Besoin::RevoquerCleMachine { .. }
         | Besoin::RevoquerAutorisation { .. }
         | Besoin::PoserAlias { .. }
-        | Besoin::RetirerAlias => match trouvaille {
+        | Besoin::RetirerAlias
+        | Besoin::SupprimerDomaine { .. }
+        | Besoin::PoserAliasDeDomaine { .. }
+        | Besoin::RattacherMachine { .. } => match trouvaille {
             Trouvaille::Fait => composer(StatusCode::NO_CONTENT, JSON_MEDIA, &[], sortie),
             Trouvaille::Conflit => composer(
                 StatusCode::CONFLICT,
@@ -7275,5 +7424,244 @@ mod attestation_d_un_appareil_qui_rejoint {
         // **ET LE DÉFI EST DÉPENSÉ QUAND MÊME** : une tentative coûte un
         // aller-retour complet, qu'elle aboutisse ou non.
         assert!(session.defi.is_none());
+    }
+}
+
+#[cfg(test)]
+mod domaines {
+    //! Les domaines (`protocole.md` §2.2, 2026-09-26) : ce que la session lit
+    //! d'une requête, et ce qu'elle répond de ce que l'étage 3 a trouvé.
+
+    extern crate alloc;
+
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
+    use asl_cle::LiaisonDeCanal;
+    use asl_id::{Genre, Identifiant};
+    use asl_registre::{AliasDeDomaine, ClefDeRecherche};
+
+    use super::{Besoin, Session, Trouvaille, besoin, repondre};
+
+    fn un(genre: Genre, graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(genre, [graine; 16])
+    }
+
+    fn session_de(pair: Option<Identifiant>) -> Session {
+        let mut session = Session::new(LiaisonDeCanal::depuis_octets(
+            [0x11; asl_cle::LIAISON_OCTETS],
+        ));
+        session.pair = pair;
+        session
+    }
+
+    fn tete<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
+        let limites = Limits::default();
+        let mut constructeur = HeadBuilder::new(&limites);
+        constructeur.field(b":method", verbe).expect("le verbe");
+        constructeur.field(b":scheme", b"https").expect("le schéma");
+        constructeur
+            .field(b":authority", b"annuaire.example")
+            .expect("l'autorité");
+        constructeur.field(b":path", cible).expect("la cible");
+        constructeur.finish().expect("une tête close")
+    }
+
+    fn lire<'a>(
+        session: &Session,
+        verbe: &'a [u8],
+        cible: &'a [u8],
+        corps: &'a [u8],
+    ) -> Besoin<'a> {
+        besoin(session, &tete(verbe, cible), corps)
+    }
+
+    fn rendre(quoi: &Besoin<'_>, trouvaille: &Trouvaille) -> (StatusCode, Vec<u8>) {
+        let mut session = session_de(Some(un(Genre::Appareil, 9)));
+        let mut sortie = [0_u8; 1024];
+        let reponse = repondre(&mut session, quoi, trouvaille, None, &mut sortie);
+        (reponse.status(), reponse.body().to_vec())
+    }
+
+    #[test]
+    fn la_session_lit_chaque_verbe_des_domaines() {
+        let appareil = session_de(Some(un(Genre::Appareil, 9)));
+        let d = un(Genre::Domaine, 4);
+        let m = un(Genre::Machine, 5);
+        let chemin_d = alloc::format!("/v1/domaines/{}", d.texte().as_str());
+        let chemin_alias = alloc::format!("/v1/domaines/{}/alias", d.texte().as_str());
+        let chemin_m = alloc::format!("/v1/machines/{}/domaine", m.texte().as_str());
+        let rattacher = alloc::format!("{{\"domaine\":\"{}\"}}", d.texte().as_str());
+
+        assert_eq!(
+            lire(&appareil, b"GET", b"/v1/domaines", b""),
+            Besoin::MesDomaines
+        );
+        assert_eq!(
+            lire(&appareil, b"POST", b"/v1/domaines", b""),
+            Besoin::CreerDomaine { alias: None }
+        );
+        assert_eq!(
+            lire(
+                &appareil,
+                b"POST",
+                b"/v1/domaines",
+                "{\"alias\":\"Mai\u{0073}on\"}".as_bytes()
+            ),
+            Besoin::CreerDomaine {
+                alias: Some(AliasDeDomaine::nouveau("Maison").unwrap())
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"GET", b"/v1/domaines?alias=MAISON", b""),
+            Besoin::ChercherDomaines {
+                clef: ClefDeRecherche::de("maison").unwrap()
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"GET", chemin_d.as_bytes(), b""),
+            Besoin::LireDomaine { domaine: d }
+        );
+        assert_eq!(
+            lire(&appareil, b"DELETE", chemin_d.as_bytes(), b""),
+            Besoin::SupprimerDomaine { domaine: d }
+        );
+        assert_eq!(
+            lire(
+                &appareil,
+                b"PUT",
+                chemin_alias.as_bytes(),
+                b"{\"alias\":\"Maison\"}"
+            ),
+            Besoin::PoserAliasDeDomaine {
+                domaine: d,
+                alias: Some(AliasDeDomaine::nouveau("Maison").unwrap())
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"DELETE", chemin_alias.as_bytes(), b""),
+            Besoin::PoserAliasDeDomaine {
+                domaine: d,
+                alias: None
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"PUT", chemin_m.as_bytes(), rattacher.as_bytes()),
+            Besoin::RattacherMachine {
+                machine: m,
+                domaine: Some(d)
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"DELETE", chemin_m.as_bytes(), b""),
+            Besoin::RattacherMachine {
+                machine: m,
+                domaine: None
+            }
+        );
+    }
+
+    #[test]
+    fn un_alias_qu_on_ne_pourrait_pas_ranger_rend_400() {
+        let appareil = session_de(Some(un(Genre::Appareil, 9)));
+        let d = un(Genre::Domaine, 4);
+        let chemin_alias = alloc::format!("/v1/domaines/{}/alias", d.texte().as_str());
+        let chemin_m = alloc::format!(
+            "/v1/machines/{}/domaine",
+            un(Genre::Machine, 5).texte().as_str()
+        );
+        // Soixante-cinq octets après NFC : le texte brut passe l'API, la forme
+        // rangée ne passe pas le registre.
+        let trop = alloc::format!("{{\"alias\":\"{}\"}}", "a".repeat(65));
+        for (verbe, cible, corps) in [
+            (&b"POST"[..], &b"/v1/domaines"[..], trop.as_bytes()),
+            (b"POST", b"/v1/domaines", b"[]"),
+            (b"PUT", chemin_alias.as_bytes(), trop.as_bytes()),
+            (b"PUT", chemin_alias.as_bytes(), b"{}"),
+            (b"PUT", chemin_m.as_bytes(), b"{\"domaine\":\"x\"}"),
+            // `"` décodé : l'URL le porte, le registre le refuse.
+            (b"GET", b"/v1/domaines?alias=%22", b""),
+        ] {
+            assert_eq!(
+                lire(&appareil, verbe, cible, corps),
+                Besoin::Deja(StatusCode::BAD_REQUEST),
+                "{cible:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn la_recherche_exige_un_appareil_ou_une_machine_et_rien_de_moins() {
+        let personne = session_de(None);
+        assert_eq!(
+            lire(&personne, b"GET", b"/v1/domaines?alias=Maison", b""),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+        let machine = session_de(Some(un(Genre::Machine, 3)));
+        assert_eq!(
+            lire(&machine, b"GET", b"/v1/domaines?alias=Maison", b""),
+            Besoin::ChercherDomaines {
+                clef: ClefDeRecherche::de("maison").unwrap()
+            }
+        );
+        // Mais mes domaines, eux, sont l'affaire d'un appareil.
+        assert_eq!(
+            lire(&machine, b"GET", b"/v1/domaines", b""),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn chaque_trouvaille_rend_son_statut() {
+        let d = un(Genre::Domaine, 4);
+        // Les listes : ce qui a été trouvé, ou vide.
+        for quoi in [
+            Besoin::MesDomaines,
+            Besoin::ChercherDomaines {
+                clef: ClefDeRecherche::de("maison").unwrap(),
+            },
+        ] {
+            let (statut, corps) = rendre(&quoi, &Trouvaille::Domaines(vec![b"{}".to_vec()]));
+            assert_eq!((statut, corps.as_slice()), (StatusCode::OK, &b"[{}]"[..]));
+            let (statut, corps) = rendre(&quoi, &Trouvaille::Rien);
+            assert_eq!((statut, corps.as_slice()), (StatusCode::OK, &b"[]"[..]));
+        }
+        // Lire : l'objet, ou 404 pour l'absent comme pour l'interdit.
+        let lire_d = Besoin::LireDomaine { domaine: d };
+        let (statut, corps) = rendre(&lire_d, &Trouvaille::DomaineLu(b"{\"x\":1}".to_vec()));
+        assert_eq!(
+            (statut, corps.as_slice()),
+            (StatusCode::OK, &b"{\"x\":1}"[..])
+        );
+        assert_eq!(rendre(&lire_d, &Trouvaille::Rien).0, StatusCode::NOT_FOUND);
+        // Créer : 201 et l'identifiant ; une panne de notre côté, 500.
+        let creer = Besoin::CreerDomaine { alias: None };
+        let (statut, corps) = rendre(&creer, &Trouvaille::DomaineCree(d));
+        assert_eq!(statut, StatusCode::CREATED);
+        assert_eq!(
+            corps,
+            alloc::format!("{{\"domaine\":\"{}\"}}", d.texte().as_str()).into_bytes()
+        );
+        assert_eq!(
+            rendre(&creer, &Trouvaille::Rien).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        // Ce qui modifie : 204, 409 pour le dernier domaine, 403, 404.
+        for quoi in [
+            Besoin::SupprimerDomaine { domaine: d },
+            Besoin::PoserAliasDeDomaine {
+                domaine: d,
+                alias: None,
+            },
+            Besoin::RattacherMachine {
+                machine: un(Genre::Machine, 5),
+                domaine: Some(d),
+            },
+        ] {
+            assert_eq!(rendre(&quoi, &Trouvaille::Fait).0, StatusCode::NO_CONTENT);
+            assert_eq!(rendre(&quoi, &Trouvaille::Conflit).0, StatusCode::CONFLICT);
+            assert_eq!(rendre(&quoi, &Trouvaille::Refus).0, StatusCode::FORBIDDEN);
+            assert_eq!(rendre(&quoi, &Trouvaille::Rien).0, StatusCode::NOT_FOUND);
+        }
     }
 }

@@ -101,6 +101,38 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::PairOperations { apres } => format!("/v1/pair/operations?apres={apres}"),
         Ressource::PairInstantane => "/v1/pair/instantane".to_owned(),
         Ressource::Replication => "/v1/replication".to_owned(),
+        Ressource::Domaines => "/v1/domaines".to_owned(),
+        Ressource::RechercheDomaines { alias } => {
+            // Réencodé depuis le DÉCODÉ : `%HH` pour tout ce qui n'est pas
+            // ASCII graphique permis tel quel.
+            let mut tampon = [0_u8; asl_api::domaine::ALIAS_BRUT_MAX];
+            let mut chemin = "/v1/domaines?alias=".to_owned();
+            for octet in alias.decoder(&mut tampon).bytes() {
+                if octet.is_ascii_graphic() && !b"%&+=#".contains(&octet) {
+                    chemin.push(char::from(octet));
+                } else {
+                    chemin.push_str(&format!("%{octet:02X}"));
+                }
+            }
+            chemin
+        }
+        Ressource::Domaine { domaine } => format!("/v1/domaines/{domaine}"),
+        Ressource::AliasDomaine { domaine } => format!("/v1/domaines/{domaine}/alias"),
+        Ressource::DomaineMachine { machine } => format!("/v1/machines/{machine}/domaine"),
+    }
+}
+
+/// Deux ressources désignent la même chose. L'alias cherché garde sa forme
+/// encodée, et deux écritures du même texte (`%41` et `A`) cherchent la même
+/// chose : on les compare décodées.
+fn meme(une: &Ressource<'_>, autre: &Ressource<'_>) -> bool {
+    match (une, autre) {
+        (Ressource::RechercheDomaines { alias: a }, Ressource::RechercheDomaines { alias: b }) => {
+            let mut ta = [0_u8; asl_api::domaine::ALIAS_BRUT_MAX];
+            let mut tb = [0_u8; asl_api::domaine::ALIAS_BRUT_MAX];
+            a.decoder(&mut ta) == b.decoder(&mut tb)
+        }
+        _ => une == autre,
     }
 }
 
@@ -169,8 +201,8 @@ fuzz_target!(|entree: Entree| {
     let refait = chemin_de(&ressource);
     let relu = resoudre(methode, refait.as_bytes())
         .expect("un chemin reconstruit depuis sa ressource se relit");
-    assert_eq!(
-        relu.ressource, ressource,
+    assert!(
+        meme(&relu.ressource, &ressource),
         "l'aller-retour a changé la ressource : {refait}"
     );
     assert_eq!(relu.exigence, resolu.exigence);

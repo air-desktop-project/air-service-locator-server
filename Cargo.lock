@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "asl-annuaire"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "asl-id",
  "asl-proto",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "asl-api"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "asl-id",
  "asl-proto",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "asl-apple"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "asl-attest",
  "p256",
@@ -176,18 +176,18 @@ dependencies = [
 
 [[package]]
 name = "asl-attest"
-version = "0.22.2"
+version = "0.23.0"
 
 [[package]]
 name = "asl-auth"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "asl-id",
 ]
 
 [[package]]
 name = "asl-cle"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "asl-id",
  "ed25519-dalek",
@@ -197,11 +197,11 @@ dependencies = [
 
 [[package]]
 name = "asl-id"
-version = "0.22.2"
+version = "0.23.0"
 
 [[package]]
 name = "asl-keystore"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "p256",
  "p384",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "asl-loop-tokio"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "ams-h3",
  "ams-proto-h3",
@@ -245,21 +245,23 @@ dependencies = [
 
 [[package]]
 name = "asl-proto"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "asl-id",
 ]
 
 [[package]]
 name = "asl-registre"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "asl-id",
+ "sha2",
+ "unicode-normalization",
 ]
 
 [[package]]
 name = "asl-reveil"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "asl-api",
  "asl-id",
@@ -267,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "asl-server"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "ams-proto-h3",
  "ams-quic-client",
@@ -286,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "asl-session"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "ams-h3",
  "ams-proto-http",
@@ -300,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "asl-store"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "asl-cle",
  "asl-id",
@@ -1234,6 +1236,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
 name = "tokio"
 version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1271,6 +1279,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "universal-hash"

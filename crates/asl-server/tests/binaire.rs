@@ -695,6 +695,10 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
         [
             "Compte",
             "Alias",
+            // Le premier domaine du compte (2026-09-26) : il se déduit, mais
+            // l'instantané rend l'état — et un domaine supprimé depuis devrait
+            // y figurer avec sa suppression.
+            "Domaine",
             "Machine",
             "MachineModifiee",
             "CleMachine",

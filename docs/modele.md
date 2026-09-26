@@ -913,11 +913,14 @@ eux (décidé le 2026-09-26, Thierry) :
 | Un annuaire local qui hébergeait ses domaines | Ne les héberge plus ; son inscription, si c'était le sien, est retirée (`annuaires.md` §4.1). |
 
 **À la création, et non à la demande**, et pour une raison de réplication en
-plus de celle de Thierry : un domaine créé en même temps que le compte l'est
-sur UNE racine, une fois, et voyage avec lui (`replication.md` §5.2). Un domaine
-« par défaut » que chaque racine fabriquerait de son côté, à la première
-lecture, en ferait deux — deux identifiants tirés au hasard pour le même
-compte, que rien ne départagerait.
+plus de celle de Thierry : un domaine « par défaut » que chaque racine
+fabriquerait de son côté, à la première lecture, en ferait deux — deux
+identifiants tirés au hasard pour le même compte, que rien ne départagerait.
+**Son identifiant se DÉDUIT du compte, pour tous les comptes** (PR du socle,
+0.23.0, `replication.md` décision 42) — ceux d'avant comme ceux d'après — et il
+naît **sous l'estampille du compte** : chaque racine le fait naître en
+appliquant l'opération `compte`, au même enregistrement octet pour octet, et
+aucune opération de plus ne voyage.
 
 **Les comptes d'avant le 2026-09-26** reçoivent le leur **à la reprise de
 l'entrepôt, à la mise à jour** (décidé le 2026-09-26, Thierry), avec un identifiant **déduit du
@@ -931,6 +934,15 @@ rien qu'il ne sache — un domaine ne rend ni machine ni service à qui n'y a pa
 droit, et le `u-…` est déjà public. L'autre voie, « à la première connexion
 d'une application », laissait des comptes sans domaine tant que personne ne
 s'y connectait, et deux applications sur deux racines pouvaient en créer deux.
+
+**Supprimer un domaine, et ce que la suppression ne fait PAS** (décision 42).
+Un domaine supprimé est marqué, et la marque ne s'efface jamais ; il cesse
+d'exister pour qui le demande — `404` —, ne se trouve plus par son alias, et
+n'abrite plus rien : ses machines sont vues sans domaine. **Rien ne s'écrit
+sur elles ni sur l'alias** : c'est le lecteur qui écarte ce qui vise un domaine
+mort. Le jour où la règle des suppressions concurrentes garde un domaine en
+vie (`replication.md` §3.2), il retrouve donc ses machines et son alias sans
+qu'aucune écriture ait eu à les lui rendre.
 
 **Autant de domaines qu'on veut.** Un utilisateur en crée d'autres, depuis
 l'application, et en particulier pour son annuaire local : « chez moi, sur mon
@@ -1001,9 +1013,12 @@ des tables Unicode, que l'étage 2 n'a pas aujourd'hui. Elles tiennent en Rust
 pur (C4) et sans entrée-sortie (C1) ; leur version doit être la même sur les
 deux racines et sur les annuaires locaux, sans quoi deux annuaires plieraient
 différemment un caractère récent. **La version d'Unicode est donc épinglée,
-comme la toolchain** (décidé le 2026-09-26, Thierry ; la version se choisit à la
-PR de code, et chaque changement de version est une rupture qui se déploie sur
-les deux racines et les annuaires locaux ensemble).
+comme la toolchain** (décidé le 2026-09-26, Thierry) : **Unicode 17.0.0**, fixée
+par la PR du socle (0.23.0) — le NFC d'`unicode-normalization`, épinglée à
+`=0.1.25`, et le pliage simple de `CaseFolding-17.0.0.txt`, en table engendrée
+par `scripts/plis-unicode.sh` et vérifiée à la même version par un essai.
+Chaque changement de version est une rupture qui se déploie sur les deux
+racines et les annuaires locaux ensemble.
 
 ### 2.12 Groupe
 
