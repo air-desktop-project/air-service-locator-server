@@ -1333,11 +1333,13 @@ fn une_base_reprise_sans_identite_est_reestampillee_au_premier_demarrage_avec_un
     // (le même enregistrement — il ne compte qu'une fois), une opération —
     // et, depuis les domaines (2026-09-26), le premier domaine de chacun des
     // trois comptes, né sous l'estampille de son compte, donc sans identité
-    // lui aussi.
+    // lui aussi ; et depuis les groupes (2026-09-27), le groupe personnel de
+    // chaque compte et le groupe d'administrateurs de chaque premier domaine,
+    // nés de même.
     assert_eq!(
         base.reestampilles(),
-        18,
-        "quatorze enregistrements, trois premiers domaines et une opération"
+        24,
+        "quatorze enregistrements, trois premiers domaines, six groupes déduits et une opération"
     );
     let racines = racines_de_l_instantane(&base);
     assert!(
@@ -3216,6 +3218,9 @@ fn effacer_un_compte_retire_tout_dans_une_transaction_et_laisse_la_marque() {
             alias: true,
             // Le premier domaine, né avec le compte (2026-09-26).
             domaines: 1,
+            // Son groupe d'administrateurs, et le groupe personnel du compte
+            // (2026-09-27).
+            groupes: 2,
             a_fermer: retrait.a_fermer.clone(),
         }
     );

@@ -194,6 +194,25 @@ pub struct Invite {
     pub secrete: PathBuf,
 }
 
+/// Le geste `--add-admin` / `--remove-admin` : nommer ou retirer un
+/// administrateur des racines, et s'arrêter (`docs/modele.md` §2.12,
+/// 2026-09-27).
+///
+/// **Le même geste que `--invite`** — un annuaire EN MARCHE, la clé privée de
+/// l'exploitant, jamais sur le banc —, et un compte de plus : celui qu'on
+/// nomme ou qu'on retire. Les deux racines se répliquent : en nommer un chez
+/// l'une suffit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Administration {
+    /// Où joindre l'annuaire, de quoi valider son certificat, et la clé qui
+    /// signe — ceux de `--invite`.
+    pub joindre: Invite,
+    /// Le compte nommé ou retiré.
+    pub compte: asl_id::Identifiant,
+    /// Nommer (`--add-admin`), ou retirer (`--remove-admin`).
+    pub nomme: bool,
+}
+
 /// L'autre racine, telle qu'on la joint et telle qu'on la reconnaît.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReglagePair {
@@ -403,7 +422,8 @@ asl-server — an air-service-locator service directory.
   --peer-key     <path>     the other root's public identity key, 32 raw bytes
   --peer-ca      <path>     the CA that validates the peer's TLS cert, PEM
   --operator-key <path>     the operator's public Ed25519 key, 32 raw bytes;
-                            its signature opens POST /v1/invitations
+                            its signature opens POST /v1/invitations and
+                            POST/DELETE /v1/administrateurs
                             (REQUIRED with `--attestation invitation`)
   --invitation-ttl <seconds> how long an invitation code lives
                             (default: 86400, one day; one week at most)
@@ -419,6 +439,11 @@ asl-server — an air-service-locator service directory.
   --invite --directory <host:port> --ca <path> --operator-secret <path>
                             ask that RUNNING directory for an invitation code,
                             print it on stdout — once —, then exit
+  --add-admin <u-…> --directory <host:port> --ca <path> --operator-secret <path>
+                            name that account an administrator of the roots on
+                            that RUNNING directory, then exit
+  --remove-admin <u-…> --directory <host:port> --ca <path> --operator-secret <path>
+                            remove it, then exit
   --forget <u-…> --store <path> [--identity-key <path>]
                             erase THAT account offline — the store must not be
                             held by a running directory —, log what was
@@ -760,6 +785,63 @@ impl Reglages {
         }))
     }
 
+    /// Le geste `--add-admin` ou `--remove-admin`, s'il est demandé dans ces
+    /// arguments — lu à part des réglages, comme `--invite`, dont il reprend
+    /// les trois chemins.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::SansValeur`] si un drapeau n'a pas sa valeur,
+    /// [`Faute::CompteInvalide`] si ce n'est pas un `u-…`, [`Faute::Manque`]
+    /// si `--directory`, `--ca` ou `--operator-secret` manque.
+    pub fn geste_d_administration<S: AsRef<str>>(
+        arguments: &[S],
+    ) -> Result<Option<Administration>, Faute> {
+        let trouve = ["--add-admin", "--remove-admin"]
+            .into_iter()
+            .find_map(|drapeau| {
+                arguments
+                    .iter()
+                    .position(|quoi| quoi.as_ref() == drapeau)
+                    .map(|rang| (drapeau, rang))
+            });
+        let Some((drapeau, rang)) = trouve else {
+            return Ok(None);
+        };
+        let donnee = arguments
+            .get(rang.saturating_add(1))
+            .map(AsRef::as_ref)
+            .ok_or_else(|| Faute::SansValeur(drapeau.to_owned()))?;
+        let compte = asl_id::Identifiant::analyser(donnee)
+            .ok()
+            .filter(|quoi| quoi.genre() == asl_id::Genre::Utilisateur)
+            .ok_or_else(|| Faute::CompteInvalide(donnee.to_owned()))?;
+        let valeur_de = |nom: &str| {
+            arguments
+                .iter()
+                .position(|quoi| quoi.as_ref() == nom)
+                .map(|place| {
+                    arguments
+                        .get(place.saturating_add(1))
+                        .map(|quoi| quoi.as_ref().to_owned())
+                        .ok_or_else(|| Faute::SansValeur(nom.to_owned()))
+                })
+                .transpose()
+        };
+        let annuaire = valeur_de("--directory")?.ok_or(Faute::Manque("--directory"))?;
+        let ca = valeur_de("--ca")?.ok_or(Faute::Manque("--ca"))?;
+        let secrete = valeur_de("--operator-secret")?.ok_or(Faute::Manque("--operator-secret"))?;
+        Ok(Some(Administration {
+            joindre: Invite {
+                annuaire,
+                ca: PathBuf::from(ca),
+                secrete: PathBuf::from(secrete),
+            },
+            compte,
+            nomme: drapeau == "--add-admin",
+        }))
+    }
+
     /// L'inactivité en microsecondes, comme la boucle la veut.
     #[must_use]
     pub const fn inactivite_us(&self) -> u64 {
@@ -863,7 +945,9 @@ fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute
 
 #[cfg(test)]
 mod tests {
-    use super::{Faute, Invite, Oubli, ReglageAndroid, ReglageApple, ReglagePair, Reglages};
+    use super::{
+        Administration, Faute, Invite, Oubli, ReglageAndroid, ReglageApple, ReglagePair, Reglages,
+    };
 
     /// Les quatre réglages obligatoires, et rien d'autre.
     fn minimum() -> Vec<String> {
@@ -1430,6 +1514,61 @@ mod tests {
         assert_eq!(
             Reglages::depuis(avec(&["--orphans"])).map(|_| ()),
             Err(Faute::SansValeur("--orphans".to_owned()))
+        );
+    }
+
+    #[test]
+    fn le_geste_d_administration_se_lit_a_part_et_nomme_un_compte() {
+        assert_eq!(Reglages::geste_d_administration(&minimum()), Ok(None));
+        let compte = asl_id::Identifiant::depuis_entropie(asl_id::Genre::Utilisateur, [7; 16]);
+        let texte = compte.texte();
+        for (drapeau, nomme) in [("--add-admin", true), ("--remove-admin", false)] {
+            assert_eq!(
+                Reglages::geste_d_administration(&[
+                    drapeau,
+                    texte.as_str(),
+                    "--directory",
+                    "banc:6630",
+                    "--ca",
+                    "/c",
+                    "--operator-secret",
+                    "/k",
+                ]),
+                Ok(Some(Administration {
+                    joindre: Invite {
+                        annuaire: "banc:6630".to_owned(),
+                        ca: std::path::PathBuf::from("/c"),
+                        secrete: std::path::PathBuf::from("/k"),
+                    },
+                    compte,
+                    nomme,
+                }))
+            );
+        }
+        // Un compte, et rien d'autre.
+        assert_eq!(
+            Reglages::geste_d_administration(&["--add-admin", "m-0000000000000000000000000"]),
+            Err(Faute::CompteInvalide(
+                "m-0000000000000000000000000".to_owned()
+            ))
+        );
+        assert_eq!(
+            Reglages::geste_d_administration(&["--remove-admin"]),
+            Err(Faute::SansValeur("--remove-admin".to_owned()))
+        );
+        assert_eq!(
+            Reglages::geste_d_administration(&["--add-admin", texte.as_str(), "--ca", "/c"]),
+            Err(Faute::Manque("--directory"))
+        );
+        assert_eq!(
+            Reglages::geste_d_administration(&[
+                "--add-admin",
+                texte.as_str(),
+                "--directory",
+                "b:1",
+                "--ca"
+            ]),
+            Err(Faute::SansValeur("--ca".to_owned()))
         );
     }
 

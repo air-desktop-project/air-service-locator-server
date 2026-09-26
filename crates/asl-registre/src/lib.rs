@@ -39,6 +39,7 @@
 use asl_id::{Genre, Identifiant};
 
 mod domaine;
+mod groupe;
 mod plis;
 
 pub use domaine::{
@@ -46,6 +47,12 @@ pub use domaine::{
     AliasDeDomaine, AliasDeDomaineRange, CLEF_DE_RECHERCHE_OCTETS_MAX, ClefDeRecherche,
     DOMAINE_OCTETS, Domaine, RATTACHEMENT_OCTETS, Rattachement, SEPARATEUR_PREMIER_DOMAINE,
     UNICODE, premier_domaine,
+};
+pub use groupe::{
+    ADHESION_OCTETS, Adhesion, ETIQUETTE_DOMAINE_RACINE, GROUPE_OCTETS, Groupe,
+    MARQUE_DE_GROUPE_OCTETS, MarqueDeGroupe, SEPARATEUR_DOMAINE_RACINE,
+    SEPARATEUR_GROUPE_D_ADMINISTRATEURS, SEPARATEUR_GROUPE_PERSONNEL, SorteDeGroupe,
+    domaine_racine, groupe_d_administrateurs, groupe_personnel,
 };
 
 // ── Les tailles ─────────────────────────────────────────────────────────────
@@ -2997,6 +3004,49 @@ pub enum Operation {
         /// L'enregistrement.
         enregistrement: Rattachement,
     },
+    /// Un groupe créé dans un domaine (`docs/replication.md` §5.2,
+    /// 2026-09-26). **Insérer si absent**, l'étiquette au plus récent. Le
+    /// groupe d'administrateurs d'un domaine et le groupe personnel d'un
+    /// compte ne voyagent PAS par elle : ils se déduisent, et chaque racine
+    /// les fait naître avec le domaine ou le compte.
+    Groupe {
+        /// Son identifiant.
+        groupe: Identifiant,
+        /// L'enregistrement.
+        enregistrement: Groupe,
+    },
+    /// L'étiquette d'un groupe changée. Le plus récent — l'estampille de
+    /// l'opération est celle de la pose.
+    GroupeEtiquette {
+        /// Le groupe.
+        groupe: Identifiant,
+        /// L'étiquette.
+        etiquette: NomRange,
+    },
+    /// Un compte ajouté à un groupe — l'estampille de l'opération NOMME cet
+    /// ajout, et c'est elle qu'un retrait désigne.
+    GroupeMembre {
+        /// Le groupe.
+        groupe: Identifiant,
+        /// Le compte.
+        compte: Identifiant,
+    },
+    /// Un ajout retiré : **celui-là, et lui seul** (`docs/replication.md`
+    /// §3.2). Un ajout plus récent du même compte le garde membre.
+    GroupeMembreRetire {
+        /// Le groupe.
+        groupe: Identifiant,
+        /// Le compte.
+        compte: Identifiant,
+        /// L'estampille de l'ajout retiré.
+        ajout: Estampille,
+    },
+    /// Un groupe supprimé. **Toujours** : la marque, la plus petite, jamais
+    /// effacée ; ses adhésions partent.
+    GroupeSupprime {
+        /// Le groupe.
+        groupe: Identifiant,
+    },
 }
 
 /// Le genre d'une opération, tel qu'il s'écrit en tête du cadre.
@@ -3010,7 +3060,9 @@ pub enum Operation {
 /// le seizième, `appareil-atteste`, dix-sept ; puis `invitation` dix-huit et
 /// `invitation-consommee` dix-neuf (2026-09-24) ; `point-de-poussee` vingt
 /// (2026-09-25) ; `domaine`, `domaine-supprime`, `domaine-alias` et
-/// `machine-domaine` de vingt et un à vingt-quatre (2026-09-26).
+/// `machine-domaine` de vingt et un à vingt-quatre (2026-09-26) ; `groupe`,
+/// `groupe-etiquette`, `groupe-membre`, `groupe-membre-retire` et
+/// `groupe-supprime` de vingt-cinq à vingt-neuf (2026-09-27).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenreOperation {
     /// `compte`.
@@ -3059,12 +3111,22 @@ pub enum GenreOperation {
     DomaineAlias,
     /// `machine-domaine`.
     MachineDomaine,
+    /// `groupe`.
+    Groupe,
+    /// `groupe-etiquette`.
+    GroupeEtiquette,
+    /// `groupe-membre`.
+    GroupeMembre,
+    /// `groupe-membre-retire`.
+    GroupeMembreRetire,
+    /// `groupe-supprime`.
+    GroupeSupprime,
 }
 
 impl GenreOperation {
-    /// Les vingt-trois, dans l'ordre de `replication.md` §5.2 — et l'ordre de
-    /// leurs étiquettes, de 1 à 14, puis 16 à 24 (voir l'en-tête du type).
-    pub const TOUS: [Self; 23] = [
+    /// Les vingt-huit, dans l'ordre de `replication.md` §5.2 — et l'ordre de
+    /// leurs étiquettes, de 1 à 14, puis 16 à 29 (voir l'en-tête du type).
+    pub const TOUS: [Self; 28] = [
         Self::Compte,
         Self::Alias,
         Self::Appareil,
@@ -3088,6 +3150,11 @@ impl GenreOperation {
         Self::DomaineSupprime,
         Self::DomaineAlias,
         Self::MachineDomaine,
+        Self::Groupe,
+        Self::GroupeEtiquette,
+        Self::GroupeMembre,
+        Self::GroupeMembreRetire,
+        Self::GroupeSupprime,
     ];
 
     /// Son étiquette, en tête du cadre.
@@ -3117,6 +3184,11 @@ impl GenreOperation {
             Self::DomaineSupprime => 22,
             Self::DomaineAlias => 23,
             Self::MachineDomaine => 24,
+            Self::Groupe => 25,
+            Self::GroupeEtiquette => 26,
+            Self::GroupeMembre => 27,
+            Self::GroupeMembreRetire => 28,
+            Self::GroupeSupprime => 29,
         }
     }
 
@@ -3151,6 +3223,11 @@ impl GenreOperation {
             22 => Self::DomaineSupprime,
             23 => Self::DomaineAlias,
             24 => Self::MachineDomaine,
+            25 => Self::Groupe,
+            26 => Self::GroupeEtiquette,
+            27 => Self::GroupeMembre,
+            28 => Self::GroupeMembreRetire,
+            29 => Self::GroupeSupprime,
             lue => return Err(Faute::Etiquette { lue }),
         })
     }
@@ -3186,6 +3263,11 @@ impl GenreOperation {
             Self::DomaineSupprime => IDENTIFIANT_OCTETS,
             Self::DomaineAlias => IDENTIFIANT_OCTETS + ALIAS_DE_DOMAINE_RANGE_OCTETS,
             Self::MachineDomaine => IDENTIFIANT_OCTETS + RATTACHEMENT_OCTETS,
+            Self::Groupe => IDENTIFIANT_OCTETS + GROUPE_OCTETS,
+            Self::GroupeEtiquette => IDENTIFIANT_OCTETS + 1 + NOM_OCTETS_MAX,
+            Self::GroupeMembre => IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS,
+            Self::GroupeMembreRetire => IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS + ESTAMPILLE_OCTETS,
+            Self::GroupeSupprime => IDENTIFIANT_OCTETS,
         }
     }
 
@@ -3229,6 +3311,11 @@ impl Operation {
             Self::DomaineSupprime { .. } => GenreOperation::DomaineSupprime,
             Self::DomaineAlias { .. } => GenreOperation::DomaineAlias,
             Self::MachineDomaine { .. } => GenreOperation::MachineDomaine,
+            Self::Groupe { .. } => GenreOperation::Groupe,
+            Self::GroupeEtiquette { .. } => GenreOperation::GroupeEtiquette,
+            Self::GroupeMembre { .. } => GenreOperation::GroupeMembre,
+            Self::GroupeMembreRetire { .. } => GenreOperation::GroupeMembreRetire,
+            Self::GroupeSupprime { .. } => GenreOperation::GroupeSupprime,
         }
     }
 
@@ -3500,6 +3587,48 @@ impl Operation {
                     &octets,
                 );
             }
+            Self::Groupe {
+                groupe,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*groupe, charge);
+                let mut octets = [0_u8; GROUPE_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::GroupeEtiquette { groupe, etiquette } => {
+                ecrire_identifiant(*groupe, charge);
+                etiquette.ecrire(charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default());
+            }
+            Self::GroupeMembre { groupe, compte } => {
+                ecrire_identifiant(*groupe, charge);
+                ecrire_identifiant(
+                    *compte,
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                );
+            }
+            Self::GroupeMembreRetire {
+                groupe,
+                compte,
+                ajout,
+            } => {
+                ecrire_identifiant(*groupe, charge);
+                ecrire_identifiant(
+                    *compte,
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                );
+                ajout.ecrire(
+                    charge
+                        .get_mut(IDENTIFIANT_OCTETS.saturating_mul(2)..)
+                        .unwrap_or_default(),
+                );
+            }
+            Self::GroupeSupprime { groupe } => {
+                ecrire_identifiant(*groupe, charge);
+            }
         }
         genre.octets()
     }
@@ -3717,6 +3846,30 @@ impl Operation {
             GenreOperation::MachineDomaine => Self::MachineDomaine {
                 machine: lire_identifiant(charge, Genre::Machine)?,
                 enregistrement: Rattachement::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::Groupe => Self::Groupe {
+                groupe: lire_identifiant(charge, Genre::Ensemble)?,
+                enregistrement: Groupe::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::GroupeEtiquette => Self::GroupeEtiquette {
+                groupe: lire_identifiant(charge, Genre::Ensemble)?,
+                etiquette: NomRange::lire(apres_identifiant)?,
+            },
+            GenreOperation::GroupeMembre => Self::GroupeMembre {
+                groupe: lire_identifiant(charge, Genre::Ensemble)?,
+                compte: lire_identifiant(apres_identifiant, Genre::Utilisateur)?,
+            },
+            GenreOperation::GroupeMembreRetire => Self::GroupeMembreRetire {
+                groupe: lire_identifiant(charge, Genre::Ensemble)?,
+                compte: lire_identifiant(apres_identifiant, Genre::Utilisateur)?,
+                ajout: Estampille::lire(
+                    apres_identifiant
+                        .get(IDENTIFIANT_OCTETS..)
+                        .unwrap_or_default(),
+                )?,
+            },
+            GenreOperation::GroupeSupprime => Self::GroupeSupprime {
+                groupe: lire_identifiant(charge, Genre::Ensemble)?,
             },
         };
         Ok((estampille, operation, attendus))
@@ -5982,7 +6135,7 @@ mod tests {
     // ── Les opérations ──────────────────────────────────────────────────────
 
     /// Une opération de chaque genre, dans l'ordre de `replication.md` §5.2.
-    fn une_de_chaque() -> [Operation; 23] {
+    fn une_de_chaque() -> [Operation; 28] {
         [
             Operation::Compte {
                 compte: un(Genre::Utilisateur, 1),
@@ -6097,6 +6250,33 @@ mod tests {
                     domaine: Some(un(Genre::Domaine, 6)),
                 },
             },
+            Operation::Groupe {
+                groupe: un(Genre::Ensemble, 7),
+                enregistrement: super::Groupe {
+                    provenance: Provenance::Ici,
+                    estampille: e(15),
+                    sorte: super::SorteDeGroupe::Domaine,
+                    rattache: un(Genre::Domaine, 6),
+                    etiquette_estampille: e(15),
+                    etiquette: nom_de_machine("Famille"),
+                },
+            },
+            Operation::GroupeEtiquette {
+                groupe: un(Genre::Ensemble, 7),
+                etiquette: nom_de_machine("Bureau"),
+            },
+            Operation::GroupeMembre {
+                groupe: un(Genre::Ensemble, 7),
+                compte: un(Genre::Utilisateur, 1),
+            },
+            Operation::GroupeMembreRetire {
+                groupe: un(Genre::Ensemble, 7),
+                compte: un(Genre::Utilisateur, 1),
+                ajout: e(16),
+            },
+            Operation::GroupeSupprime {
+                groupe: un(Genre::Ensemble, 7),
+            },
         ]
     }
 
@@ -6117,6 +6297,11 @@ mod tests {
                 GenreOperation::DomaineSupprime => 22,
                 GenreOperation::DomaineAlias => 23,
                 GenreOperation::MachineDomaine => 24,
+                GenreOperation::Groupe => 25,
+                GenreOperation::GroupeEtiquette => 26,
+                GenreOperation::GroupeMembre => 27,
+                GenreOperation::GroupeMembreRetire => 28,
+                GenreOperation::GroupeSupprime => 29,
                 _ => rang + 1,
             };
             assert_eq!(
@@ -6210,10 +6395,10 @@ mod tests {
 
     #[test]
     fn un_genre_inconnu_est_refuse_zero_compris() {
-        // Quinze est le cadre de fin, vingt-cinq le premier au-delà du
-        // dernier genre (`machine-domaine` tient vingt-quatre) : aucun des
-        // deux n'est une opération.
-        for lue in [0_u8, 15, 25, 200] {
+        // Quinze est le cadre de fin, trente le premier au-delà du dernier
+        // genre (`groupe-supprime` tient vingt-neuf) : aucun des deux n'est
+        // une opération.
+        for lue in [0_u8, 15, 30, 200] {
             let mut octets = [0_u8; OPERATION_OCTETS_MAX];
             octets[0] = lue;
             assert_eq!(Operation::lire(&octets), Err(Faute::Etiquette { lue }));
@@ -6388,6 +6573,11 @@ mod tests {
             Genre::Domaine,
             Genre::Domaine,
             Genre::Machine,
+            Genre::Ensemble,
+            Genre::Ensemble,
+            Genre::Ensemble,
+            Genre::Ensemble,
+            Genre::Ensemble,
         ]) {
             let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
             operation.ecrire(e(1), &mut sortie);
@@ -6413,6 +6603,45 @@ mod tests {
     }
 
     #[test]
+    fn les_operations_des_groupes_verifient_ce_qui_suit_le_groupe() {
+        let [.., _, etiquette, membre, retire, _] = une_de_chaque();
+        // Le compte d'une adhésion est un compte, et rien d'autre.
+        for operation in [membre, retire] {
+            let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+            operation.ecrire(e(1), &mut sortie);
+            sortie[OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS] = b'm';
+            assert_eq!(
+                Operation::lire(&sortie),
+                Err(Faute::Genre {
+                    attendu: Genre::Utilisateur
+                }),
+                "{operation:?}"
+            );
+        }
+        // L'ajout qu'un retrait nomme est une estampille d'annuaire.
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        retire.ecrire(e(1), &mut sortie);
+        sortie[OPERATION_ENTETE_OCTETS + 2 * IDENTIFIANT_OCTETS + 8] = b'u';
+        assert_eq!(
+            Operation::lire(&sortie),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+        // Une étiquette qui annonce plus que sa place.
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        etiquette.ecrire(e(1), &mut sortie);
+        sortie[OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS] = 200;
+        assert_eq!(
+            Operation::lire(&sortie),
+            Err(Faute::Longueur {
+                annoncee: 200,
+                maximum: NOM_OCTETS_MAX,
+            })
+        );
+    }
+
+    #[test]
     fn un_enregistrement_corrompu_refuse_l_operation_qui_le_porte() {
         // La provenance de l'enregistrement porté, mise à une étiquette
         // inconnue : la faute de l'enregistrement est celle de l'opération.
@@ -6428,7 +6657,8 @@ mod tests {
                 | Operation::Autorisation { .. }
                 | Operation::Domaine { .. }
                 | Operation::DomaineAlias { .. }
-                | Operation::MachineDomaine { .. } => OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS,
+                | Operation::MachineDomaine { .. }
+                | Operation::Groupe { .. } => OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS,
                 Operation::Enrolement { .. } => OPERATION_ENTETE_OCTETS + EMPREINTE_OCTETS,
                 _ => continue,
             };

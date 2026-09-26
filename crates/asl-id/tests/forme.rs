@@ -7,8 +7,8 @@
 
 use asl_id::{Erreur, Genre, Identifiant, LONGUEUR, SYMBOLES};
 
-/// Les sept genres, avec leur lettre.
-const GENRES: [(Genre, char); 7] = [
+/// Les huit genres, avec leur lettre.
+const GENRES: [(Genre, char); 8] = [
     (Genre::Utilisateur, 'u'),
     (Genre::Appareil, 'a'),
     (Genre::Machine, 'm'),
@@ -16,6 +16,7 @@ const GENRES: [(Genre, char); 7] = [
     (Genre::Autorisation, 'g'),
     (Genre::Annuaire, 'n'),
     (Genre::Domaine, 'd'),
+    (Genre::Ensemble, 'e'),
 ];
 
 // ── La forme ────────────────────────────────────────────────────────────────

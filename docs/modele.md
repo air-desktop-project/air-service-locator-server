@@ -884,9 +884,9 @@ l'inscription d'un annuaire local (§2.7, `replication.md` décisions 32 et 33).
 
 | Règle | Pourquoi |
 |---|---|
-| **Son identifiant se DÉDUIT d'une étiquette fixe** — les seize premiers octets d'un SHA-256 à domaine séparé de la chaîne `asl domaine racine` —, et non d'un tirage (proposé) | Les deux racines et tout annuaire local le calculent pareil, sans rien échanger ni rien amorcer : il n'y a pas de fenêtre où l'une le connaîtrait et l'autre non, et on peut l'écrire dans le code comme les clés des racines. |
-| **Il naît au premier démarrage d'une racine qui tient `--operator-key`**, vide ; **son propriétaire est le premier compte nommé administrateur sous la clé d'exploitant** (proposé) | La caution des invitations et du groupe des administrateurs est déjà cette clé ; il n'en faut pas une autre. |
-| **Il ne contient aucune machine en v1** (proposé) | Les racines ne sont pas des machines enrôlées : elles ne s'annoncent pas, et rien ne s'y résout. Le domaine racine est un point d'attache et le porteur d'un groupe, pas un lieu. |
+| **Son identifiant se DÉDUIT d'une étiquette fixe** — les seize premiers octets d'un SHA-256 à domaine séparé de la chaîne `asl domaine racine` —, et non d'un tirage (décidé le 2026-09-26, codé en 0.24.0 : `asl_registre::domaine_racine`) | Les deux racines et tout annuaire local le calculent pareil, sans rien échanger ni rien amorcer : il n'y a pas de fenêtre où l'une le connaîtrait et l'autre non, et on peut l'écrire dans le code comme les clés des racines. |
+| ~~Il naît au premier démarrage d'une racine qui tient `--operator-key`~~ **Il n'est écrit nulle part : il se CALCULE** (0.24.0, `replication.md` décision 43), vide ; **son propriétaire est le premier compte nommé administrateur sous la clé d'exploitant** — celui dont l'ajout, encore vivant, est le plus ancien (décidé le 2026-09-26) | La caution des invitations et du groupe des administrateurs est déjà cette clé ; il n'en faut pas une autre. **Pourquoi ne pas l'écrire au démarrage** : son propriétaire est le premier nommé, et deux racines qui nommeraient chacune un premier administrateur dans la même fenêtre écriraient deux domaines racines de propriétaires différents — « insérer si absent » dépendrait de l'ordre d'arrivée. Calculé sur l'ensemble des nominations, il est le même des deux côtés. |
+| **Il ne contient aucune machine en v1** (décidé le 2026-09-26) — ni alias, ni autre groupe que son groupe d'administrateurs | Les racines ne sont pas des machines enrôlées : elles ne s'annoncent pas, et rien ne s'y résout. Le domaine racine est un point d'attache et le porteur d'un groupe, pas un lieu. |
 | **Il n'est PAS un ancêtre pour les droits** | Un droit posé sur le domaine racine ne descend pas dans les domaines du niveau 1 (§2.13). Sans cette règle, administrer les racines donnerait à voir les machines de tout le monde — exactement ce que la décision 33 promettait d'éviter : un administrateur des racines accepte ou refuse une inscription, **et rien d'autre**. |
 | **Son groupe d'administrateurs ne change que sous la clé d'exploitant** | Contrairement aux autres domaines, où un administrateur en nomme un autre : ici, nommer un administrateur, c'est donner le pouvoir de juger des annuaires qui parleront au nom des racines. La règle de la décision 33 tient. |
 
@@ -965,13 +965,16 @@ propre, une liste propre, ses opérations propres — les groupes et les droits
 |---|---|
 | **Le propriétaire** | Tout. **Membre d'office** du groupe d'administrateurs, et **il ne s'en retire pas** : un domaine sans personne pour le gérer ne se rattraperait pas. Lui seul supprime le domaine et le confie à un annuaire local. |
 | **Un membre du groupe d'administrateurs** | Le droit `administrer` sur le domaine (§2.13) : poser l'alias, créer et supprimer les groupes du domaine, en changer les membres — y compris celui des administrateurs —, accorder et retirer des droits sur le domaine, ses machines et ses services. |
-| **Un membre d'un groupe qui a `rattacher`** | Rattacher et détacher **SES PROPRES** machines. |
+| **Un membre d'un groupe qui a `rattacher`** | Rattacher et détacher **SES PROPRES** machines. **En 0.24.0, avant les droits** (PR 2), ranger dans un domaine, c'est l'administrer : le propriétaire ou un membre du groupe d'administrateurs. |
 
 **On ne rattache que des machines dont on est propriétaire**, quel que soit le
 droit qu'on tient : `rattacher` ouvre le domaine, jamais les machines d'un
 autre. Retirer un compte du groupe qui lui donnait `rattacher` **détache ses
 machines du domaine** (décidé le 2026-09-26, Thierry : sans quoi il garderait
-des machines dans un lieu où il n'a plus sa place).
+des machines dans un lieu où il n'a plus sa place). **Ce détachement se LIT, il
+ne s'écrit pas** (0.24.0, décision 43) : un rattachement ne vaut que tant que le
+propriétaire de la machine peut encore ranger dans le domaine ; rajouté au
+groupe, il retrouve sa machine sans qu'aucune écriture la lui ait rendue.
 
 **Rattacher sa machine à un domaine, c'est confier à ses administrateurs le
 droit de la partager.** Un droit posé sur un domaine vaut pour ses machines
@@ -1041,9 +1044,9 @@ seul, que les droits s'accordent** (§2.13).
 
 | Groupe | Naît | Membres | Particularité |
 |---|---|---|---|
-| **Le groupe d'administrateurs d'un domaine** | Avec le domaine, dans sa transaction ; **identifiant déduit du `d-…`** (proposé), pour que les deux racines arrivent au même sans rien échanger | Le propriétaire, **d'office et non retirable** ; ceux que les administrateurs y ajoutent | Porte le droit `administrer` sur le domaine ; ne se supprime qu'avec lui. |
+| **Le groupe d'administrateurs d'un domaine** | Avec le domaine, dans sa transaction ; **identifiant déduit du `d-…`** (décidé, codé en 0.24.0 : `asl_registre::groupe_d_administrateurs`), pour que les deux racines arrivent au même sans rien échanger | Le propriétaire, **d'office et non retirable** ; ceux que les administrateurs y ajoutent | Porte le droit `administrer` sur le domaine ; ne se supprime qu'avec lui. |
 | **Un groupe du domaine** | Créé par un administrateur | Ceux que les administrateurs y mettent | Ne porte que les droits qu'on lui accorde. |
-| **Le groupe personnel d'un compte** | Avec le compte ; **identifiant déduit du `u-…`** (proposé) | **Le compte seul**, et jamais personne d'autre | **N'appartient à aucun domaine** (proposé) : il ne dépend pas du premier domaine, qui peut être supprimé tant qu'il en reste un autre. Il ne se modifie pas et ne se supprime qu'avec le compte. C'est lui qu'on nomme pour partager avec une personne. |
+| **Le groupe personnel d'un compte** | Avec le compte ; **identifiant déduit du `u-…`** (décidé, codé en 0.24.0 : `asl_registre::groupe_personnel`) | **Le compte seul**, et jamais personne d'autre | **N'appartient à aucun domaine** (décidé le 2026-09-26) : il ne dépend pas du premier domaine, qui peut être supprimé tant qu'il en reste un autre. Il ne se modifie pas et ne se supprime qu'avec le compte. C'est lui qu'on nomme pour partager avec une personne. |
 
 **Le groupe d'administrateurs du domaine racine est celui des administrateurs
 des racines** (§2.11). Ce qui le distingue des autres groupes d'administrateurs,
@@ -1052,7 +1055,7 @@ et qui garde tout ce que la décision 33 promettait :
 | Règle | |
 |---|---|
 | **Un seul administrateur suffit** | pour accepter comme pour refuser une inscription. Pas de quorum : deux racines n'ont pas de majorité (`annuaires.md` §6), et un groupe de deux n'en aurait pas davantage. |
-| **Ses membres se nomment et se retirent sous la clé d'exploitant, et sous elle seule** | `--operator-key`, `protocole.md` §2.2 — la même caution que les invitations. Le premier est le compte de Thierry. Un administrateur des racines n'en nomme pas un autre, contrairement aux autres domaines. Retirer est une révocation, et gagne toujours (`replication.md` §3.2). |
+| **Ses membres se nomment et se retirent sous la clé d'exploitant, et sous elle seule** | `--operator-key`, `protocole.md` §2.2 — la même caution que les invitations ; l'outil est `asl-server --add-admin <u-…>` / `--remove-admin <u-…>`, sur un annuaire EN MARCHE, la clé privée restant chez l'exploitant (0.24.0). Le premier est le compte de Thierry — **aucun compte n'est écrit dans le code** : c'est l'exploitant qui le nomme. Un administrateur des racines n'en nomme pas un autre, contrairement aux autres domaines. Retirer est une révocation, et gagne toujours (`replication.md` §3.2). |
 | **Ce qu'un administrateur des racines peut** | Accepter ou refuser une inscription — **rien d'autre** : le domaine racine n'est pas un ancêtre pour les droits (§2.11, §2.13), il ne lit aucun compte, n'en efface aucun, ne voit aucun service qui ne lui a pas été accordé comme à n'importe qui. |
 
 **CE QUE CELA RENVERSE, ET IL FAUT LE DIRE.** La posture `invitation` avait

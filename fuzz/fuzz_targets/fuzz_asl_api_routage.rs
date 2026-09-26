@@ -119,6 +119,15 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Domaine { domaine } => format!("/v1/domaines/{domaine}"),
         Ressource::AliasDomaine { domaine } => format!("/v1/domaines/{domaine}/alias"),
         Ressource::DomaineMachine { machine } => format!("/v1/machines/{machine}/domaine"),
+        Ressource::Groupes => "/v1/groupes".to_owned(),
+        Ressource::GroupesDomaine { domaine } => format!("/v1/domaines/{domaine}/groupes"),
+        Ressource::Groupe { groupe } => format!("/v1/groupes/{groupe}"),
+        Ressource::MembresGroupe { groupe } => format!("/v1/groupes/{groupe}/membres"),
+        Ressource::MembreGroupe { groupe, compte } => {
+            format!("/v1/groupes/{groupe}/membres/{compte}")
+        }
+        Ressource::Administrateurs => "/v1/administrateurs".to_owned(),
+        Ressource::Administrateur { compte } => format!("/v1/administrateurs/{compte}"),
     }
 }
 
@@ -213,10 +222,11 @@ fuzz_target!(|entree: Entree| {
 
     // ── LA LISTE CLOSE DE CE QUI N'EXIGE RIEN ───────────────────────────────
     //
-    // Neuf ressources, et chacune a sa raison écrite sur `Ressource::exigence`.
-    // **CETTE ASSERTION A DÉJÀ SERVI TROIS FOIS** : elle a arrêté
+    // Onze ressources, et chacune a sa raison écrite sur `Ressource::exigence`.
+    // **CETTE ASSERTION A DÉJÀ SERVI QUATRE FOIS** : elle a arrêté
     // `/v1/enrolement` le jour de son ajout, puis `/v1/attestation` le sien,
-    // puis `/v1/invitations`. Le verbe était légitime et sa liberté délibérée
+    // puis `/v1/invitations`, puis `/v1/administrateurs` (2026-09-27) — la
+    // preuve de l'exploitant est dans le corps, comme pour les invitations. Le verbe était légitime et sa liberté délibérée
     // — mais c'est précisément le point : une ressource ne devient publique
     // que si quelqu'un l'écrit ICI, jamais parce qu'un `_ =>` l'a laissée
     // passer.
@@ -231,6 +241,8 @@ fuzz_target!(|entree: Entree| {
                     | Ressource::Enrolement
                     | Ressource::Attestation
                     | Ressource::Invitations
+                    | Ressource::Administrateurs
+                    | Ressource::Administrateur { .. }
                     | Ressource::AliasResolu { .. }
                     | Ressource::Utilisateur { .. }
             ),

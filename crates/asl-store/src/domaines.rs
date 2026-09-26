@@ -23,7 +23,7 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
 use crate::{
     COMPTES, Entrepot, Faute, MACHINES, RACINE, Suite, clef, compte_efface_dans, depuis_clef,
-    estampiller, intervalle, journaliser_l_operation, paire,
+    estampiller, groupes, intervalle, journaliser_l_operation, paire,
 };
 use asl_registre::Compte;
 
@@ -159,7 +159,7 @@ where
 }
 
 /// Ce domaine, s'il est VIVANT, lu dans ces deux tables.
-fn vivant_dans<I, D>(
+pub(crate) fn vivant_dans<I, D>(
     index: &I,
     domaines: &D,
     domaine: Identifiant,
@@ -192,7 +192,7 @@ fn domaine_dans(
 }
 
 /// Ce domaine, s'il est vivant, dans cette transaction.
-fn vivant_dans_l_ecriture(
+pub(crate) fn vivant_dans_l_ecriture(
     ecriture: &WriteTransaction,
     domaine: Identifiant,
 ) -> Result<Option<Domaine>, Faute> {
@@ -243,6 +243,9 @@ fn inserer_domaine(
         paire(enregistrement.proprietaire, domaine).as_slice(),
         clef(domaine).as_slice(),
     )?;
+    // **SON GROUPE D'ADMINISTRATEURS NAÎT AVEC LUI**, sous son estampille, à
+    // chaque naissance — locale, reçue, reprise (`docs/modele.md` §2.12).
+    groupes::naitre_le_groupe_d_administrateurs(ecriture, domaine, enregistrement.estampille)?;
     Ok(true)
 }
 
@@ -919,6 +922,15 @@ impl Entrepot {
 
     /// Le domaine VIVANT de cette machine, si elle en a un.
     ///
+    /// # UNE MACHINE N'EST RANGÉE QUE LÀ OÙ SON PROPRIÉTAIRE PEUT RANGER
+    ///
+    /// `docs/modele.md` §2.11 : retirer un compte du groupe qui lui donnait de
+    /// quoi ranger **détache ses machines**. Ce détachement ne s'écrit pas —
+    /// il dépendrait de laquelle des deux racines a vu le retrait la première
+    /// (décision 42) : il se LIT. Le rattachement reste rangé tel que sa règle
+    /// l'a laissé, et il ne vaut que tant que le propriétaire de la machine
+    /// administre le domaine ; rajouté au groupe, il retrouve sa machine.
+    ///
     /// # Errors
     ///
     /// [`Faute::Base`] ou [`Faute::Enregistrement`].
@@ -933,12 +945,25 @@ impl Entrepot {
             }
         };
         match rattache {
-            Some(domaine) if self.domaine(domaine)?.is_some() => Ok(Some(domaine)),
+            Some(domaine) if self.rangee_la(machine, domaine)? => Ok(Some(domaine)),
             _ => Ok(None),
         }
     }
 
-    /// Les machines rangées dans ce domaine, s'il est vivant.
+    /// Cette machine vaut-elle rangée dans ce domaine ? Le domaine vivant, et
+    /// son propriétaire à elle qui l'administre.
+    fn rangee_la(&self, machine: Identifiant, domaine: Identifiant) -> Result<bool, Faute> {
+        if self.domaine(domaine)?.is_none() {
+            return Ok(false);
+        }
+        let Some(rangee) = self.machine(machine)? else {
+            return Ok(false);
+        };
+        self.administre(rangee.proprietaire, domaine)
+    }
+
+    /// Les machines rangées dans ce domaine, s'il est vivant — celles dont le
+    /// propriétaire l'administre encore (voir [`Entrepot::domaine_de_machine`]).
     ///
     /// # Errors
     ///
@@ -947,13 +972,22 @@ impl Entrepot {
         if self.domaine(domaine)?.is_none() {
             return Ok(Vec::new());
         }
-        let lecture = self.base.begin_read()?;
-        let index = lecture.open_table(MACHINES_PAR_DOMAINE)?;
-        let (debut, fin) = intervalle(domaine);
+        let candidates = {
+            let lecture = self.base.begin_read()?;
+            let index = lecture.open_table(MACHINES_PAR_DOMAINE)?;
+            let (debut, fin) = intervalle(domaine);
+            let mut candidates = Vec::new();
+            for entree in index.range(debut.as_slice()..fin.as_slice())? {
+                let (_, machine) = entree?;
+                candidates.push(depuis_clef(machine.value())?);
+            }
+            candidates
+        };
         let mut machines = Vec::new();
-        for entree in index.range(debut.as_slice()..fin.as_slice())? {
-            let (_, machine) = entree?;
-            machines.push(depuis_clef(machine.value())?);
+        for machine in candidates {
+            if self.rangee_la(machine, domaine)? {
+                machines.push(machine);
+            }
         }
         Ok(machines)
     }

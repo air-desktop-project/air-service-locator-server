@@ -1119,3 +1119,108 @@ fn la_recherche_par_alias_decode_les_pourcents_et_rien_d_autre() {
         Ressource::RechercheDomaines { .. }
     ));
 }
+
+// ── Les groupes (2026-09-27) ────────────────────────────────────────────────
+
+#[test]
+fn les_chemins_des_groupes_designent_leurs_ressources() {
+    let d = ident(Genre::Domaine);
+    let e = ident(Genre::Ensemble);
+    let u = ident(Genre::Utilisateur);
+
+    let groupes = resoudre(Methode::Get, b"/v1/groupes").unwrap();
+    assert_eq!(groupes.ressource, Ressource::Groupes);
+    assert_eq!(groupes.exigence, Exigence::Appareil);
+    assert!(groupes.sert);
+    assert!(!resoudre(Methode::Post, b"/v1/groupes").unwrap().sert);
+
+    let chemin_creer = format!("/v1/domaines/{d}/groupes");
+    let creer = resoudre(Methode::Post, chemin_creer.as_bytes()).unwrap();
+    assert!(matches!(creer.ressource, Ressource::GroupesDomaine { .. }));
+    assert!(creer.sert);
+    assert!(
+        !resoudre(Methode::Get, chemin_creer.as_bytes())
+            .unwrap()
+            .sert
+    );
+
+    let chemin_un = format!("/v1/groupes/{e}");
+    for methode in [Methode::Get, Methode::Patch, Methode::Delete] {
+        let un = resoudre(methode, chemin_un.as_bytes()).unwrap();
+        assert!(
+            matches!(un.ressource, Ressource::Groupe { groupe } if groupe.genre() == Genre::Ensemble)
+        );
+        assert!(un.sert, "{methode:?}");
+    }
+    assert!(!resoudre(Methode::Put, chemin_un.as_bytes()).unwrap().sert);
+
+    let chemin_membres = format!("/v1/groupes/{e}/membres");
+    let ajouter = resoudre(Methode::Post, chemin_membres.as_bytes()).unwrap();
+    assert!(matches!(ajouter.ressource, Ressource::MembresGroupe { .. }));
+    assert!(ajouter.sert);
+    let chemin_membre = format!("/v1/groupes/{e}/membres/{u}");
+    let retirer = resoudre(Methode::Delete, chemin_membre.as_bytes()).unwrap();
+    assert!(matches!(
+        retirer.ressource,
+        Ressource::MembreGroupe { groupe, compte }
+            if groupe.genre() == Genre::Ensemble && compte.texte().as_str() == u
+    ));
+    assert!(retirer.sert);
+    assert_eq!(retirer.exigence, Exigence::Appareil);
+
+    // Un identifiant d'un autre genre n'est pas un groupe, ni un compte.
+    assert_eq!(
+        resoudre_get(&format!("/v1/groupes/{d}")),
+        Err(Erreur::IdentifiantInvalide {
+            attendu: Genre::Ensemble
+        })
+    );
+    assert_eq!(
+        resoudre_get(&format!("/v1/groupes/{e}/membres/{d}")),
+        Err(Erreur::IdentifiantInvalide {
+            attendu: Genre::Utilisateur
+        })
+    );
+    for chemin in [
+        format!("/v1/groupes/{d}/membres"),
+        format!("/v1/groupes/{d}/membres/{u}"),
+    ] {
+        assert_eq!(
+            resoudre_get(&chemin),
+            Err(Erreur::IdentifiantInvalide {
+                attendu: Genre::Ensemble
+            }),
+            "{chemin}"
+        );
+    }
+    assert_eq!(
+        resoudre_get(&format!("/v1/domaines/{e}/groupes")),
+        Err(Erreur::IdentifiantInvalide {
+            attendu: Genre::Domaine
+        })
+    );
+}
+
+#[test]
+fn les_administrateurs_se_nomment_sous_la_cle_d_exploitant_sans_autre_exigence() {
+    let u = ident(Genre::Utilisateur);
+    let nommer = resoudre(Methode::Post, b"/v1/administrateurs").unwrap();
+    assert_eq!(nommer.ressource, Ressource::Administrateurs);
+    assert_eq!(nommer.exigence, Exigence::Aucune);
+    assert!(nommer.sert);
+    assert!(!resoudre(Methode::Get, b"/v1/administrateurs").unwrap().sert);
+    let chemin = format!("/v1/administrateurs/{u}");
+    let retirer = resoudre(Methode::Delete, chemin.as_bytes()).unwrap();
+    assert!(matches!(
+        retirer.ressource,
+        Ressource::Administrateur { compte } if compte.texte().as_str() == u
+    ));
+    assert_eq!(retirer.exigence, Exigence::Aucune);
+    assert!(retirer.sert);
+    assert_eq!(
+        resoudre_get(&format!("/v1/administrateurs/{}", ident(Genre::Machine))),
+        Err(Erreur::IdentifiantInvalide {
+            attendu: Genre::Utilisateur
+        })
+    );
+}

@@ -30,6 +30,10 @@
 //!    octets bruts, et ne porte ni guillemet, ni barre oblique inverse, ni
 //!    contrôle, ni caractère qui change l'affichage de ce qui l'entoure — ce
 //!    que `asl-registre` normalisera ensuite. Un rattachement nomme un `d-…`.
+//! 8. **UNE ÉTIQUETTE DE GROUPE ACCEPTÉE EST UN NOM DE MACHINE** (2026-09-27) :
+//!    non vide, soixante-quatre octets au plus, rien de refusé ; un ajout
+//!    nomme un `u-…` ; la preuve d'un exploitant a sa longueur exacte, le
+//!    genre `o` en tête, et nomme un compte.
 //! 5. **UN ALIAS ACCEPTÉ RESTE DE L'ASCII GRAPHIQUE.** C'est la propriété qui
 //!    sépare une CLÉ d'un texte d'affichage : l'alias se cherche, se compare, et
 //!    repart dans un chemin — deux écritures d'une même valeur feraient croire à
@@ -46,6 +50,7 @@ use asl_api::corps::{
     NOM_MACHINE_MAX, POINT_CORPS_MAX, PREUVE_APPAREIL_OCTETS, PlateformeAttestation,
 };
 use asl_api::domaine::{ALIAS_BRUT_MAX, CreationDeDomaine, PoseDAlias, Rattachement};
+use asl_api::groupe::{Adhesion, Etiquetage, NOMINATION_CORPS_OCTETS, Nomination};
 use asl_api::point::{POINT_MAX, UrlDePoussee};
 
 /// Un alias de domaine accepté ne porte rien de ce qui est refusé.
@@ -114,6 +119,29 @@ const fn invisible(caractere: char) -> bool {
 }
 
 fuzz_target!(|octets: &[u8]| {
+    // ── 8. LES GROUPES ──────────────────────────────────────────────────────
+    if let Ok(etiquetage) = Etiquetage::decoder(octets) {
+        let texte = etiquetage.etiquette;
+        assert!(!texte.is_empty() && texte.len() <= NOM_MACHINE_MAX);
+        for caractere in texte.chars() {
+            assert!(
+                caractere != '"'
+                    && caractere != '\\'
+                    && !caractere.is_control()
+                    && !invisible(caractere),
+                "une étiquette acceptée porte {caractere:?}"
+            );
+        }
+    }
+    if let Ok(adhesion) = Adhesion::decoder(octets) {
+        assert_eq!(adhesion.compte.genre(), asl_id::Genre::Utilisateur);
+    }
+    if let Ok(nomination) = Nomination::decoder(octets) {
+        assert_eq!(octets.len(), NOMINATION_CORPS_OCTETS);
+        assert_eq!(octets.first(), Some(&b'o'));
+        assert_eq!(nomination.compte.genre(), asl_id::Genre::Utilisateur);
+    }
+
     // ── 7. LES DOMAINES ─────────────────────────────────────────────────────
     if let Ok(CreationDeDomaine { alias: Some(alias) }) = CreationDeDomaine::decoder(octets) {
         verifier_l_alias_de_domaine(alias);

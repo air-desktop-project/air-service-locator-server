@@ -30,6 +30,7 @@
 //! connexion, et les deux disparaissent ensemble.
 
 mod domaines;
+mod groupes;
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -890,6 +891,25 @@ impl Service<'_> {
             Besoin::RattacherMachine { machine, domaine } => {
                 self.rattacher_une_machine(*machine, *domaine)
             }
+
+            // ── LES GROUPES (`h3/groupes.rs`) ───────────────────────────
+            Besoin::MesGroupes => self.rassembler_mes_groupes(),
+            Besoin::CreerGroupe { domaine, etiquette } => {
+                self.creer_un_groupe(*domaine, *etiquette)
+            }
+            Besoin::LireGroupe { groupe } => self.lire_un_groupe(*groupe),
+            Besoin::EtiqueterGroupe { groupe, etiquette } => {
+                self.etiqueter_un_groupe(*groupe, *etiquette)
+            }
+            Besoin::SupprimerGroupe { groupe } => self.supprimer_un_groupe(*groupe),
+            Besoin::AjouterMembre { groupe, compte } => self.ajouter_un_membre(*groupe, *compte),
+            Besoin::RetirerMembre { groupe, compte } => self.retirer_un_membre(*groupe, *compte),
+            Besoin::ChangerLesAdministrateurs {
+                defi,
+                signature,
+                compte,
+                nomme,
+            } => self.changer_les_administrateurs(defi, signature, *compte, *nomme),
 
             // ── LA VOIE ENTRE RACINES ───────────────────────────────────
             //

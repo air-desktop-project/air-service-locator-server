@@ -61,6 +61,9 @@
 //!    devient un alias, est son NFC, tient dans soixante-quatre octets, ne
 //!    porte aucun caractère refusé, et sa clé de recherche est celle du même
 //!    texte en capitales pliées — la normalisation est idempotente.
+//! 9. **UN GROUPE, UNE MARQUE, UNE ADHÉSION SE RELISENT OU REFUSENT PAR UNE
+//!    FAUTE NOMMÉE** (`docs/modele.md` §2.12, 2026-09-27), et ce qui se relit
+//!    se réécrit à l'identique.
 
 #![no_main]
 
@@ -69,14 +72,15 @@ use libfuzzer_sys::fuzz_target;
 
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
-    ALIAS_DE_DOMAINE_OCTETS_MAX, ALIAS_DE_DOMAINE_RANGE_OCTETS, ALIAS_OCTETS_MAX, APPAREIL_OCTETS,
-    AUTORISATION_OCTETS, AliasDeDomaine, AliasDeDomaineRange, AliasRange, Appareil, Attestation,
-    Autorisation, CADRE_DE_FIN_OCTETS, COMPTE_OCTETS, Cadre, Capacites, Cause, CleLiee,
-    ClefDeRecherche, Compte, DESCRIPTION_OCTETS, DOMAINE_OCTETS, Description, Domaine,
-    ENROLEMENT_OCTETS, ENTREE_OCTETS, ETIQUETTE_DE_FIN, Effacement, Enrolement, EntreeJournal,
-    Estampille, Faute, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, OPERATION_OCTETS_MAX,
-    Operation, Portee, Provenance, RATTACHEMENT_OCTETS, Rattachement, SERVICE_OCTETS, Service,
-    Systeme, Verdict, sans_dates,
+    ADHESION_OCTETS, ALIAS_DE_DOMAINE_OCTETS_MAX, ALIAS_DE_DOMAINE_RANGE_OCTETS, ALIAS_OCTETS_MAX,
+    APPAREIL_OCTETS, AUTORISATION_OCTETS, Adhesion, AliasDeDomaine, AliasDeDomaineRange,
+    AliasRange, Appareil, Attestation, Autorisation, CADRE_DE_FIN_OCTETS, COMPTE_OCTETS, Cadre,
+    Capacites, Cause, CleLiee, ClefDeRecherche, Compte, DESCRIPTION_OCTETS, DOMAINE_OCTETS,
+    Description, Domaine, ENROLEMENT_OCTETS, ENTREE_OCTETS, ETIQUETTE_DE_FIN, Effacement,
+    Enrolement, EntreeJournal, Estampille, Faute, GROUPE_OCTETS, Groupe, MACHINE_OCTETS,
+    MARQUE_DE_GROUPE_OCTETS, Machine, MarqueDeGroupe, NOM_OCTETS_MAX, NomRange,
+    OPERATION_OCTETS_MAX, Operation, Portee, Provenance, RATTACHEMENT_OCTETS, Rattachement,
+    SERVICE_OCTETS, Service, Systeme, Verdict, sans_dates,
 };
 
 /// Ce qu'on soumet.
@@ -136,6 +140,12 @@ struct Entree {
     rattachement: [u8; RATTACHEMENT_OCTETS],
     /// Un texte quelconque, pour un alias de domaine.
     texte_de_domaine: String,
+    /// Les octets d'un groupe.
+    groupe: [u8; GROUPE_OCTETS],
+    /// Les octets d'une marque de groupe.
+    marque: [u8; MARQUE_DE_GROUPE_OCTETS],
+    /// Les octets d'une adhésion.
+    adhesion: [u8; ADHESION_OCTETS],
 }
 
 /// Une faute d'enregistrement est toujours l'une des cinq, et jamais une
@@ -514,6 +524,34 @@ fuzz_target!(|entree: Entree| {
             assert_eq!(
                 refait, entree.alias_de_domaine,
                 "un alias de domaine relu ne se réécrit pas"
+            );
+        }
+        Err(faute) => nommee(faute),
+    }
+    // ── PROPRIÉTÉ 9 : les groupes ───────────────────────────────────────────
+    match Groupe::lire(&entree.groupe) {
+        Ok(groupe) => {
+            let mut refait = [0_u8; GROUPE_OCTETS];
+            groupe.ecrire(&mut refait);
+            assert_eq!(refait, entree.groupe, "un groupe relu ne se réécrit pas");
+        }
+        Err(faute) => nommee(faute),
+    }
+    match MarqueDeGroupe::lire(&entree.marque) {
+        Ok(marque) => {
+            let mut refait = [0_u8; MARQUE_DE_GROUPE_OCTETS];
+            marque.ecrire(&mut refait);
+            assert_eq!(refait, entree.marque, "une marque relue ne se réécrit pas");
+        }
+        Err(faute) => nommee(faute),
+    }
+    match Adhesion::lire(&entree.adhesion) {
+        Ok(adhesion) => {
+            let mut refait = [0_u8; ADHESION_OCTETS];
+            adhesion.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.adhesion,
+                "une adhésion relue ne se réécrit pas"
             );
         }
         Err(faute) => nommee(faute),

@@ -44,7 +44,7 @@ use asl_loop_tokio::{
 };
 use asl_store::{Entrepot, RACINE_SANS_IDENTITE};
 
-use crate::reglages::{Invite, Oubli, Reglages, USAGE};
+use crate::reglages::{Administration, Invite, Oubli, Reglages, USAGE};
 
 /// Combien de temps entre deux passages d'expiration du journal.
 ///
@@ -131,6 +131,13 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         Reglages::geste_d_invitation(&arguments).inspect_err(|_| eprint!("{USAGE}"))?
     {
         return inviter(&invite);
+    }
+    // **NOMMER OU RETIRER UN ADMINISTRATEUR DES RACINES** (`modele.md`
+    // §2.12) : le même geste en ligne, la même clé, un compte de plus.
+    if let Some(administration) =
+        Reglages::geste_d_administration(&arguments).inspect_err(|_| eprint!("{USAGE}"))?
+    {
+        return administrer(&administration);
     }
     // **EFFACER UN COMPTE HORS LIGNE EST UN GESTE AUSSI** (`modele.md` §2.1,
     // `replication.md` §8) : l'entrepôt, l'identité si on l'a, et rien
@@ -265,6 +272,13 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         // **ET LE PREMIER DOMAINE DES COMPTES D'HIER** (`modele.md` §2.11) :
         // une fois, à la première ouverture par un binaire qui connaît les
         // domaines — déduit, donc le même sur l'autre racine.
+        if entrepot.groupes_deduits() > 0 {
+            eprintln!(
+                "asl-server : groupes — {} groupe(s) déduit(s) nés pour les comptes et les \
+                 domaines d'avant les groupes (personnels, d'administrateurs).",
+                entrepot.groupes_deduits(),
+            );
+        }
         if entrepot.premiers_domaines() > 0 {
             eprintln!(
                 "asl-server : domaines — {} compte(s) d'avant les domaines ont reçu leur premier \
@@ -587,6 +601,38 @@ fn inviter(invite: &Invite) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "asl-server : code émis, valable jusqu'à {} — il ne sera pas réaffiché.",
         invitation.expire_a
+    );
+    Ok(())
+}
+
+/// Nomme ou retire un administrateur des racines sur un annuaire EN MARCHE,
+/// le dit, et s'arrête — le geste d'[`inviter`], sans secret à imprimer.
+fn administrer(administration: &Administration) -> Result<(), Box<dyn std::error::Error>> {
+    let joindre = &administration.joindre;
+    let racines =
+        std::fs::read(&joindre.ca).map_err(|quoi| format!("{} : {quoi}", joindre.ca.display()))?;
+    let secrete = identite::lire_secrete(&joindre.secrete)?;
+    let execution = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    execution
+        .block_on(asl_loop_tokio::exploitant::changer_les_administrateurs(
+            &joindre.annuaire,
+            &racines,
+            &secrete,
+            administration.compte,
+            administration.nomme,
+        ))
+        .map_err(|quoi| format!("{} : {quoi}", joindre.annuaire))?;
+    eprintln!(
+        "asl-server : {} {} sur {} — l'autre racine l'apprendra par la réplication.",
+        administration.compte,
+        if administration.nomme {
+            "nommé administrateur des racines"
+        } else {
+            "retiré des administrateurs des racines"
+        },
+        joindre.annuaire,
     );
     Ok(())
 }
