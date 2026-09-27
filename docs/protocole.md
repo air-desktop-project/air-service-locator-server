@@ -771,7 +771,9 @@ l'empêcherait de comprendre.
 | `POST /v1/annuaires` | **Déclare MON annuaire local** : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription — dix symboles, à usage unique, comme un code d'enrôlement. L'annuaire le présente aux racines avec sa clé d'identité (§3 ter) ; l'inscription est alors **en attente**. |
 | `GET /v1/annuaires` | Mes annuaires locaux et l'état de leur inscription : `attendue`, `en attente`, `acceptée`, `refusée`, `retirée`. |
 | `DELETE /v1/annuaires/{n}` | Retire l'inscription de mon annuaire local ; ses domaines reviennent aux racines. |
-| `PUT /v1/domaines/{d}/hebergeur` | **Confie** mon domaine à mon annuaire local accepté : `{"annuaire":"n-…"}` ; `DELETE` le rend aux racines. Propriétaire seulement. |
+| `POST /v1/annuaires/{n}/membres` | **Déclare le second membre** de mon annuaire local accepté — sa paire de secours (2026-09-27, décision 49) : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription, que la seconde machine présente avec **sa** clé. `409` si l'annuaire a déjà deux membres ; `404` s'il n'est pas à moi ou pas accepté. |
+| `DELETE /v1/annuaires/{n}/membres/{n2}` | Retire le second membre ; le titulaire ne se retire pas ainsi — c'est l'annuaire entier qui se retire. |
+| `PUT /v1/domaines/{d}/hebergeur` | **Confie** mon domaine à mon annuaire local accepté : `{"annuaire":"n-…"}` ; `DELETE` le rend aux racines. Propriétaire seulement, et **vers un annuaire de son propre compte** : `404` pour l'annuaire d'un autre, même si j'administre le domaine (décision 48). |
 | `GET /v1/inscriptions` | **Les inscriptions en attente**, pour un administrateur des racines (`modele.md` §2.12) : `n-…`, propriétaire, adresse, date. Aux autres, `404`. |
 | `POST /v1/inscriptions/{n}/decision` | **Accepte ou refuse** : `{"accepte":true}`. Un administrateur suffit. Accepter une inscription retirée ou refusée, `409`. |
 | `POST /v1/administrateurs` | **Nomme** un administrateur des racines, **sous la clé d'exploitant** : corps `o ‖ signature ‖ u-…` — le genre, la signature du défi de la connexion comme pour `POST /v1/invitations`, puis le compte en dix-sept octets (sa lettre, ses seize octets), quatre-vingt-deux en tout. `DELETE /v1/administrateurs/{u}` le retire, corps `o ‖ signature`. `204` ; `401` si la signature ne tient pas ; `409` pour nommer qui l'est déjà ; `404` sans `--operator-key`, pour un compte inconnu, ou pour retirer qui ne l'est pas ; `400` pour un corps mal formé. Le défi est dépensé dans tous les cas. **Depuis le 2026-09-26, c'est un membre du groupe d'administrateurs du domaine racine** : ces deux verbes, et eux seuls, changent ce groupe-là — `POST` et `DELETE /v1/groupes/{e}/membres…` y rendent `403`. Le premier nommé encore administrateur est propriétaire du domaine racine — calculé, jamais écrit (décidé ; 0.24.0, décision 43). L'outil de l'exploitant : `asl-server --add-admin <u-…>` / `--remove-admin <u-…>`, avec `--directory`, `--ca`, `--operator-secret`. |
@@ -2037,6 +2039,11 @@ ferme la connexion, comme une clé de machine révoquée.
 rattachée à un domaine que CET annuaire héberge. Sinon, refus et journal — et
 le flux se ferme, comme sur une opération illisible entre racines
 (`replication.md` §5.2).
+
+**Une paire** (`annuaires.md` §2 ter) : chaque membre ouvre sa propre voie,
+prouve sa propre clé, et reporte ce que lui voit ; les racines savent que les
+deux parlent pour le même annuaire, et tiennent l'état par membre. Entre eux,
+les deux membres se répliquent comme deux racines (§3 bis, `--peer`).
 
 **Côté annuaire local** : un `asl-server` qui reçoit `--federation
 <hôte:port>` (l'alias des racines, ou les deux noms) et sa clé d'identité ; il

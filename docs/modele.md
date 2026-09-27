@@ -772,10 +772,11 @@ traverse un serveur de poussée qui n'a pas à le savoir.
 | Champ | Ce que c'est |
 |---|---|
 | `identifiant` | `n-` + 26 caractères. **Se déduit de la clé d'identité** — les seize premiers octets d'un SHA-256 à domaine séparé —, pour qu'épingler la clé épingle l'identifiant (`replication.md` §2.2 ; proposé, à confirmer). |
-| `propriétaire` | Un utilisateur. Les deux annuaires racines appartiennent à air-desktop-project. |
+| `propriétaire` | Un utilisateur. Les deux annuaires racines appartiennent à air-desktop-project. **Un annuaire local n'héberge que les domaines de son propriétaire**, de un à n (2026-09-27, décision 48). |
 | `clé de signature` | Ce avec quoi il signe les enregistrements dont il est l'autorité, et ce avec quoi il PROUVE qui il est à l'autre racine. **Ed25519, distincte de la clé TLS** : celle-ci tourne avec le certificat, celle-là est ce que l'autre épingle et ce que les estampilles nomment (§2.10). |
 | `rôle` | `racine`, **`local`** (2026-09-26), ou `ordinaire`. Un annuaire **local** est l'`asl-server` qu'un utilisateur fait tourner chez lui : il fait autorité sur les domaines qu'il héberge (§2.11), et il est **inscrit** auprès des racines après approbation (ci-dessous). `ordinaire` — l'annuaire qui fait autorité sur des COMPTES, relié à d'autres par une confiance bilatérale — reste décrit par `annuaires.md` §4–§5, et devient une suite nommée (`annuaires.md` §8). |
 | `pairs` | Les annuaires avec qui une relation de confiance est établie, et ce qui se réplique dans chaque sens. |
+| `membres` | **Pour un annuaire local** (2026-09-27, décision 49) : un ou deux `n-…` — le titulaire, dont le `n-…` nomme l'annuaire, et au plus un second, sa paire de secours. Chacun approuvé à son tour (`annuaires.md` §2 ter). |
 
 Deux annuaires racines sont fournis par air-desktop-project — **deux, pour ne
 pas être un point de panne unique**. D'autres utilisateurs et d'autres
