@@ -2605,6 +2605,7 @@ fn un_service_vivant_porte_son_objet_d_annonce_verbatim() {
         service: un_service(),
         nom: "grenier-http",
         etat: ServiceEtat::Annonce { annonce },
+        sonde: None,
     };
     let octets = encoder_service(&rendu);
     let texte = core::str::from_utf8(&octets).unwrap();
@@ -2626,6 +2627,7 @@ fn un_service_parti_dit_si_le_depart_fut_volontaire() {
             service: un_service(),
             nom: "nas",
             etat: ServiceEtat::Parti { volontaire },
+            sonde: None,
         };
         let octets = encoder_service(&rendu);
         let texte = core::str::from_utf8(&octets).unwrap();
@@ -2646,9 +2648,36 @@ fn un_tampon_trop_petit_se_dit_pour_un_service_rendu() {
         service: un_service(),
         nom: "nas",
         etat: ServiceEtat::Parti { volontaire: None },
+        sonde: None,
     };
     let mut minuscule = [0_u8; 8];
     assert_eq!(rendu.encoder(&mut minuscule), Err(Erreur::TamponTropPetit));
+}
+
+#[test]
+fn un_service_federe_dit_d_ou_vient_sa_sonde() {
+    use asl_api::corps::SondeFederee;
+    let membre = asl_id::Identifiant::depuis_entropie(asl_id::Genre::Annuaire, [7; 16]);
+    for locale in [true, false] {
+        let rendu = ServiceRendu {
+            service: un_service(),
+            nom: "depot",
+            etat: ServiceEtat::Parti { volontaire: None },
+            sonde: Some(SondeFederee {
+                par: membre,
+                locale,
+            }),
+        };
+        let octets = encoder_service(&rendu);
+        let texte = core::str::from_utf8(&octets).unwrap();
+        assert!(
+            texte.ends_with(&format!(
+                ",\"volontaire\":null,\"sonde_par\":\"{}\",\"sonde_locale\":{locale}}}",
+                membre.texte().as_str()
+            )),
+            "{texte}"
+        );
+    }
 }
 
 // ── Attester un appareil qui rejoint ────────────────────────────────────────
