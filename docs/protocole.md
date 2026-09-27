@@ -63,6 +63,46 @@ IPv6 publique n'est derrière aucun NAT, et tient l'exigence de joignabilité sa
 rien faire. IPv4 est le chemin où les problèmes commencent, et le nommer
 « repli » plutôt que « alternative » garde cette asymétrie visible dans le code.
 
+### Qui l'on croit : une identité, pas un nom
+
+**Décidé le 2026-09-27 (Thierry) — C20, `annuaires.md` §2 quater, décisions 53
+à 58.** Joindre un annuaire, c'est viser un **locateur** (une adresse, ou un nom
+DNS si l'on en a un) en attendant une **identité** (`n-…`). La poignée de main
+TLS 1.3 juge l'identité, jamais le locateur.
+
+- **Côté annuaire** (racine ou local) : un certificat X.509 **auto-signé par
+  sa clé d'identité Ed25519**, d'un seul maillon, présenté par
+  `ams_tls::quic_server_config` comme aujourd'hui. Le produire ne demande
+  aucune dépendance de plus (C4) : un gabarit DER fixe, une clé, une signature
+  (décision 55, proposé : à `--new-identity-key`, et à chaque démarrage si le
+  fichier manque).
+- **Côté client** (daemon, application, racine qui tire, annuaire local qui
+  fédère) : un vérificateur propre à ASL, branché par
+  `with_custom_certificate_verifier` sur la `ClientConfig` qu'ASL construit
+  déjà. Il **accepte** si et seulement si : le certificat de tête porte une clé
+  Ed25519 ; cette clé se déduit en le `n-…` attendu (`modele.md` §2.7) ; la
+  signature de la poignée de main est bonne sous cette clé. Il **ignore** le
+  nom (SNI, `subjectAltName`), l'émetteur, la chaîne et les dates (décision 54).
+- **Le nom de serveur** que `ams_quic_tls::Connection::connect` exige reste
+  requis par `rustls` : le client passe le locateur (une IP, ou le nom s'il en
+  a un) ; il ne décide de rien.
+- **Les réglages** : là où l'on donnait une autorité PEM, on donne une
+  identité attendue — `--peer-key` pour le pair (déjà), le `n-…` de chaque
+  racine pour `--federation` (décision 58, proposé : `--federation
+  <locateur>=<n-…>`), et une liste embarquée pour `asl` et les applications.
+  Les réglages PEM (`--roots`, `--ca`, `--peer-ca`, `--federation-ca`) vivent
+  le temps de la transition (décision 58), puis disparaissent au cran majeur.
+
+**Ce que la preuve HTTP garde.** Les défis de genre `n` (`POST /v1/defi`,
+`POST /v1/pair/preuve`) restent : liés au canal (§2.1 bis), ils prouvent
+l'identité au-dessus de TLS, et jugent seuls un premier contact où le client ne
+sait pas encore qui il attend.
+
+**Ce qui ne change pas.** Les machines et les appareils prouvent déjà leurs
+clés par défi HTTP (§2.0, §2.1) ; ils ne présentent pas de certificat, et rien
+ne change pour eux. Un TLS direct entre machines, authentifié par leurs clés
+`m-…`, est une suite nommée, hors de ce périmètre.
+
 ### Le cadrage
 
 **JSON** au-dessus de HTTP/3 en v1. Il se lit, se débogue, et ne coûte rien à
@@ -2080,7 +2120,11 @@ les deux membres se répliquent comme deux racines (§3 bis, `--peer`).
 **Côté annuaire local** : un `asl-server` qui reçoit `--federation
 <hôte:port>` — **une fois par racine** (0.28.0 : chacune sa voie, puisque
 l'état ne se réplique pas entre elles) —, `--federation-ca` pour leur
-certificat, et sa clé d'identité (`--identity-key`) ; il
+certificat (**jusqu'à la bascule de la décision 58** : ensuite, le `n-…` de
+chaque racine, attendu dans la poignée de main — §0, « Qui l'on croit »), et
+sa clé d'identité (`--identity-key`) ; il publie aussi **ses propres
+locateurs** (décision 57, proposé : `PUT /v1/federation/locateurs`), pour
+qu'un préfixe IPv6 qui change chez un particulier ne demande rien à personne ; il
 authentifie les annonces des daemons de ses domaines avec les clés que
 `GET /v1/federation/machines` lui transmet, et reporte leur état. Il n'a
 **aucun compte** : ses domaines appartiennent à des comptes qui vivent aux
