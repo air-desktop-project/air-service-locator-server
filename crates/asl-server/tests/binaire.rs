@@ -2343,3 +2343,313 @@ async fn deux_racines_se_repliquent_sous_leur_seule_identite() {
         "le compte écrit chez nitrogen est chez argon"
     );
 }
+
+// ── LES RACINES ET LES LOCATEURS (décisions 56 et 57) ──────────────────────
+
+/// Un client vers cet annuaire, qui le croit par cette clé d'identité seule.
+async fn client_par_cle(vers: SocketAddr, cle: &ClePublique) -> ams_quic_client::Client {
+    let configuration = asl_loop_tokio::confiance::configuration_cliente_de(
+        &asl_loop_tokio::Confiance::par_identite(std::slice::from_ref(cle)),
+    )
+    .expect("une configuration");
+    let mut client = ams_quic_client::Client::new(configuration, vers).await;
+    poignee(&mut client).await;
+    client
+}
+
+/// Annonce `depot` de cette machine chez cet annuaire, et rend le statut et
+/// le corps.
+async fn annonce_chez(
+    vers: SocketAddr,
+    cle: &ClePublique,
+    machine: Identifiant,
+    secrete: &CleSecrete,
+) -> (String, String) {
+    let mut client = client_par_cle(vers, cle).await;
+    assert_eq!(prouver(&mut client, machine, secrete, 0).await, "204");
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}]}}"#,
+        machine.texte()
+    );
+    ams_quic_client::envoyer_avec_media(
+        &mut client,
+        8,
+        20,
+        b"/v1/annonce",
+        None,
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    let corps = ams_quic_client::attendre_la_reponse(&mut client, 8).await;
+    (
+        statut(&client, 8),
+        String::from_utf8_lossy(&corps).into_owned(),
+    )
+}
+
+/// Le `421` rend-il exactement ces adresses, dans cet ordre ?
+fn renvoie_vers(reponse: &(String, String), adresses: &[&str]) -> bool {
+    let cites: Vec<String> = adresses
+        .iter()
+        .map(|texte| format!("\"{texte}\""))
+        .collect();
+    reponse.0 == "421"
+        && reponse
+            .1
+            .contains(&format!("\"adresses\":[{}]", cites.join(",")))
+}
+
+#[tokio::test]
+async fn un_annuaire_local_publie_ses_locateurs_et_les_racines_les_repliquent() {
+    // **TROIS BINAIRES, SOUS LEUR SEULE IDENTITÉ** : deux racines qui se
+    // répliquent, et speedy, un annuaire local qui fédère vers nitrogen.
+    let (cle_nitrogen, pub_nitrogen, _sn, publique_nitrogen) = identite("loc-nitrogen");
+    let (cle_argon, pub_argon, _sa, publique_argon) = identite("loc-argon");
+    let (cle_speedy, _ps, _ss, publique_speedy) = identite("loc-speedy");
+    let n_nitrogen = identifiant_de_racine(&publique_nitrogen);
+    let n_argon = identifiant_de_racine(&publique_argon);
+    let n_speedy = identifiant_de_racine(&publique_speedy);
+
+    let chemin = |quoi: &str| {
+        std::env::temp_dir().join(format!("asl-bin-{}-{quoi}.redb", std::process::id()))
+    };
+    let (base_nitrogen, base_argon, base_speedy) = (
+        chemin("loc-nitrogen"),
+        chemin("loc-argon"),
+        chemin("loc-speedy"),
+    );
+    for base in [&base_nitrogen, &base_argon, &base_speedy] {
+        let _ = std::fs::remove_file(base);
+    }
+
+    // ── CHEZ NITROGEN : ALICE, SON TÉLÉPHONE, SA MACHINE, SPEEDY ACCEPTÉ ───
+    let alice = Identifiant::depuis_entropie(Genre::Utilisateur, [0x61; 16]);
+    let iphone = Identifiant::depuis_entropie(Genre::Appareil, [0x62; 16]);
+    let grenier = Identifiant::depuis_entropie(Genre::Machine, [0x63; 16]);
+    let secrete_iphone =
+        asl_cle::CleSecreteAppareil::depuis_entropie([0x64; 32]).expect("un scalaire valide");
+    let secrete_grenier = CleSecrete::depuis_entropie([0x65; 32]);
+    {
+        let entrepot = Entrepot::ouvrir(&base_nitrogen, n_nitrogen).expect("un entrepôt");
+        entrepot
+            .creer_compte(alice, Provenance::Ici, None)
+            .expect("compte");
+        entrepot
+            .creer_appareil(
+                iphone,
+                Provenance::Ici,
+                alice,
+                secrete_iphone.publique().octets(),
+                asl_registre::Attestation::Aucune,
+            )
+            .expect("appareil");
+        entrepot
+            .creer_machine(
+                grenier,
+                Provenance::Ici,
+                alice,
+                asl_registre::NomRange::nouveau("grenier").unwrap(),
+                asl_registre::Capacites {
+                    annonce: true,
+                    lecture: true,
+                },
+            )
+            .expect("machine");
+        let code = asl_cle::CodeEnrolement::analyser("4K9M2P7R1T")
+            .unwrap()
+            .empreinte();
+        entrepot
+            .emettre_enrolement(&code, Provenance::Ici, grenier, u64::MAX)
+            .expect("code");
+        let enrolement = entrepot.consommer_enrolement(&code).unwrap().unwrap();
+        entrepot
+            .lier_cle(
+                grenier,
+                secrete_grenier.publique().octets(),
+                code,
+                enrolement.estampille,
+            )
+            .expect("clé");
+        let domaine = asl_registre::premier_domaine(alice);
+        assert!(entrepot.rattacher_machine(grenier, Some(domaine)).unwrap());
+        let declaree = asl_registre::Adresse::nouvelle("speedy.maison:6630").unwrap();
+        entrepot
+            .declarer_annuaire(alice, None, declaree, [0x66; 32], u64::MAX)
+            .expect("déclaré");
+        entrepot
+            .presenter_un_code([0x66; 32], n_speedy, publique_speedy.octets(), 0)
+            .expect("présenté");
+        entrepot
+            .decider_d_une_inscription(n_speedy, true, alice)
+            .expect("accepté");
+        entrepot
+            .confier_domaine(domaine, Some(n_speedy))
+            .expect("confié");
+    }
+
+    let (mut nitrogen, ou_nitrogen, _journal_nitrogen) = lancer_sans_chaine(
+        &base_nitrogen,
+        &[
+            "--identity-key",
+            cle_nitrogen.to_str().expect("utf-8"),
+            "--peer-key",
+            pub_argon.to_str().expect("utf-8"),
+            "--peer",
+            "127.0.0.1:6630",
+        ],
+    );
+    let vers_nitrogen = format!("127.0.0.1:{}", ou_nitrogen.port());
+    let (mut argon, ou_argon, _journal_argon) = lancer_sans_chaine(
+        &base_argon,
+        &[
+            "--identity-key",
+            cle_argon.to_str().expect("utf-8"),
+            "--peer-key",
+            pub_nitrogen.to_str().expect("utf-8"),
+            "--peer",
+            &vers_nitrogen,
+        ],
+    );
+    // Le harnais parle depuis 127.0.0.1 : on vise les deux par là.
+    let ou_nitrogen = SocketAddr::from(([127, 0, 0, 1], ou_nitrogen.port()));
+    let ou_argon = SocketAddr::from(([127, 0, 0, 1], ou_argon.port()));
+
+    // ── 1. LA LISTE DES RACINES, LUE ET VÉRIFIÉE (décision 56) ──────────────
+    let apprises = asl_loop_tokio::racines::apprendre_les_racines(
+        &vers_nitrogen,
+        &asl_loop_tokio::Confiance::par_identite(std::slice::from_ref(&publique_nitrogen)),
+    )
+    .await
+    .expect("la liste se lit sur une connexion vérifiée par clé");
+    assert_eq!(apprises.len(), asl_loop_tokio::racines::RACINES.len());
+    for (apprise, embarquee) in apprises.iter().zip(asl_loop_tokio::racines::RACINES) {
+        assert_eq!(apprise.identifiant.texte().as_str(), embarquee.identifiant);
+        assert_eq!(apprise.cle.octets(), embarquee.cle);
+        assert_eq!(apprise.locateurs, embarquee.locateurs);
+    }
+    // Qui attend une autre clé n'apprend rien de ce nitrogen-là.
+    assert!(
+        asl_loop_tokio::racines::apprendre_les_racines(
+            &vers_nitrogen,
+            &asl_loop_tokio::Confiance::par_identite(std::slice::from_ref(&publique_argon)),
+        )
+        .await
+        .is_err(),
+        "la liste ne vaut que par la connexion qui la porte"
+    );
+
+    // ── 2. SPEEDY PUBLIE SES LOCATEURS : LE `421` LES REND, CHEZ LES DEUX ───
+    let lancer_speedy = |locateurs: &[&str]| {
+        let federation = format!("{vers_nitrogen}={}", n_nitrogen.texte());
+        let mut arguments = vec![
+            "--identity-key".to_owned(),
+            cle_speedy.to_str().expect("utf-8").to_owned(),
+            "--federation".to_owned(),
+            federation,
+        ];
+        for locateur in locateurs {
+            arguments.push("--locator".to_owned());
+            arguments.push((*locateur).to_owned());
+        }
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        lancer_sans_chaine(&base_speedy, &arguments).0
+    };
+    let premiers = ["[2001:db8::51]:6630", "192.0.2.51:6630"];
+    let mut speedy = lancer_speedy(&premiers);
+    for (quelle, ou, cle) in [
+        ("nitrogen", ou_nitrogen, &publique_nitrogen),
+        ("argon", ou_argon, &publique_argon),
+    ] {
+        attendre!(
+            format!("les locateurs publiés dans le `421` de {quelle}"),
+            {
+                renvoie_vers(
+                    &annonce_chez(ou, cle, grenier, &secrete_grenier).await,
+                    &premiers,
+                )
+            }
+        );
+    }
+    // Et l'application d'alice les lit dans `GET /v1/annuaires`.
+    {
+        let mut telephone = client_par_cle(ou_nitrogen, &publique_nitrogen).await;
+        prouver_appareil(&mut telephone, iphone, &secrete_iphone, 0).await;
+        ams_quic_client::envoyer_une_requete(&mut telephone, 8, 17, b"/v1/annuaires", None, b"")
+            .await;
+        let corps = ams_quic_client::attendre_la_reponse(&mut telephone, 8).await;
+        let corps = String::from_utf8_lossy(&corps);
+        assert_eq!(statut(&telephone, 8), "200", "{corps}");
+        assert!(
+            corps.contains(r#""locateurs":["[2001:db8::51]:6630","192.0.2.51:6630"]"#),
+            "{corps}"
+        );
+    }
+
+    // ── 3. SES ADRESSES CHANGENT : IL REDÉMARRE, ET LE DIT ──────────────────
+    eteindre(&mut speedy);
+    let seconds = ["[2001:db8::52]:6630"];
+    let mut speedy = lancer_speedy(&seconds);
+    for (quelle, ou, cle) in [
+        ("nitrogen", ou_nitrogen, &publique_nitrogen),
+        ("argon", ou_argon, &publique_argon),
+    ] {
+        attendre!(format!("les nouveaux locateurs chez {quelle}"), {
+            renvoie_vers(
+                &annonce_chez(ou, cle, grenier, &secrete_grenier).await,
+                &seconds,
+            )
+        });
+    }
+
+    // ── 4. AUCUN LOCATEUR : L'ADRESSE DÉCLARÉE SERT DE NOUVEAU ──────────────
+    eteindre(&mut speedy);
+    let mut speedy = lancer_speedy(&[]);
+    for (quelle, ou, cle) in [
+        ("nitrogen", ou_nitrogen, &publique_nitrogen),
+        ("argon", ou_argon, &publique_argon),
+    ] {
+        attendre!(format!("le retour à l'adresse déclarée chez {quelle}"), {
+            renvoie_vers(
+                &annonce_chez(ou, cle, grenier, &secrete_grenier).await,
+                &["speedy.maison:6630"],
+            )
+        });
+    }
+    eteindre(&mut speedy);
+    eteindre(&mut argon);
+    eteindre(&mut nitrogen);
+
+    // ── 5. LES DEUX RACINES ONT CONVERGÉ : LE MÊME FAIT, SOUS LA MÊME ───────
+    // ── ESTAMPILLE ───────────────────────────────────────────────────────────
+    let publie = |base: &Path, racine: Identifiant| {
+        let entrepot = Entrepot::ouvrir(base, racine).expect("l'entrepôt");
+        let lu = entrepot
+            .membre_d_annuaire(n_speedy)
+            .expect("lisible")
+            .expect("speedy");
+        (lu.locateurs, lu.ou_joindre())
+    };
+    let chez_nitrogen = publie(&base_nitrogen, n_nitrogen);
+    let chez_argon = publie(&base_argon, n_argon);
+    assert_eq!(
+        chez_nitrogen, chez_argon,
+        "les deux racines lisent la même chose"
+    );
+    let (retrait, ou_joindre) = chez_nitrogen;
+    assert_eq!(
+        retrait.map(|locateurs| locateurs.adresses().count()),
+        Some(0),
+        "le retrait est un fait, qui garde son estampille"
+    );
+    assert_eq!(
+        ou_joindre
+            .iter()
+            .map(|adresse| adresse.texte().to_owned())
+            .collect::<Vec<_>>(),
+        ["speedy.maison:6630"]
+    );
+    for base in [&base_nitrogen, &base_argon, &base_speedy] {
+        let _ = std::fs::remove_file(base);
+    }
+}

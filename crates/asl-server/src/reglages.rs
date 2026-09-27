@@ -177,6 +177,11 @@ pub struct ReglageFederation {
     /// **facultative depuis 0.29.0** : sans elle, chaque racine doit être un
     /// locateur de la liste embarquée, dont on attend la clé (décision 56).
     pub ca: Option<PathBuf>,
+    /// Où l'on joint CET annuaire (`--locator`, répétable, quatre au plus),
+    /// publié aux racines à chaque ouverture de sa voie (décision 57). **Vide,
+    /// il retire ce qui était publié** : l'adresse déclarée à l'inscription
+    /// sert de nouveau.
+    pub locateurs: Vec<String>,
 }
 
 /// Une racine vers laquelle un annuaire local fédère.
@@ -370,6 +375,9 @@ pub enum Faute {
     CompteInvalide(String),
     /// `--federation <locateur>=<…>` dont l'identité n'est pas un `n-…`.
     AnnuaireInvalide(String),
+    /// `--locator` n'a pas la forme `hôte:port`, ou il y en a plus de quatre,
+    /// ou il n'y a pas de `--federation` à qui les publier.
+    LocateurInvalide(String),
     /// Un drapeau de l'ancienne grammaire, en français, qui a son
     /// équivalent en anglais.
     ///
@@ -455,6 +463,10 @@ impl core::fmt::Display for Faute {
                 "--federation <locateur>=<n-…> attend l'identifiant d'un annuaire, `n-` et \
                  26 caractères, et non « {quoi} »"
             ),
+            Self::LocateurInvalide(quoi) => write!(
+                sortie,
+                "--locator attend `hôte:port`, quatre au plus, avec --federation — et non « {quoi} »"
+            ),
             Self::Manque(quoi) => write!(sortie, "il manque {quoi}"),
             Self::Ancien { ancien, nouveau } => {
                 write!(sortie, "{ancien} n'existe plus : {nouveau}")
@@ -514,6 +526,10 @@ asl-server — an air-service-locator service directory.
                             --federation-ca given); without it, this is a root
   --federation-ca <path>    yesterday's CA for the roots' TLS certs, PEM — a
                             fallback during the transition
+  --locator      <host:port> where this LOCAL directory is reached, published
+                            to the roots each time its lane opens; repeat it
+                            (four at most); none withdraws what was published,
+                            and the address declared at registration serves
   --push-roots   <path>     the CAs that validate push servers' TLS certs, PEM
                             — typically /etc/ssl/certs/ca-certificates.crt;
                             without it, NO notification is ever sent
@@ -660,6 +676,7 @@ impl Reglages {
         let mut racines_de_poussee: Option<PathBuf> = None;
         let mut federation_racines: Vec<CibleFederee> = Vec::new();
         let mut federation_ca: Option<PathBuf> = None;
+        let mut locateurs: Vec<String> = Vec::new();
 
         let mut arguments = arguments.into_iter();
         while let Some(drapeau) = arguments.next() {
@@ -711,6 +728,7 @@ impl Reglages {
                 "--push-roots" => racines_de_poussee = Some(PathBuf::from(valeur()?.as_ref())),
                 "--federation" => federation_racines.push(cible_federee(valeur()?.as_ref())?),
                 "--federation-ca" => federation_ca = Some(PathBuf::from(valeur()?.as_ref())),
+                "--locator" => locateurs.push(locateur(valeur()?.as_ref(), locateurs.len())?),
                 autre => {
                     return Err(match ancien(autre) {
                         Some((ancien, nouveau)) => Faute::Ancien { ancien, nouveau },
@@ -790,9 +808,15 @@ impl Reglages {
                     Some(ReglageFederation {
                         racines: federation_racines,
                         ca,
+                        locateurs,
                     })
                 }
-                (true, None) => None,
+                (true, None) => match locateurs.first() {
+                    // Une racine ne publie pas ses locateurs ainsi : les
+                    // siens sont embarqués (décision 56).
+                    Some(premier) => return Err(Faute::LocateurInvalide(premier.clone())),
+                    None => None,
+                },
                 (true, Some(_)) => return Err(Faute::FederationIncomplete),
             },
             identite,
@@ -1086,6 +1110,15 @@ fn adresse_de_pair(donnee: &str) -> Result<String, Faute> {
             .map_err(|_| invalide())?;
     } else if hote.contains(':') {
         return Err(invalide());
+    }
+    Ok(donnee.to_owned())
+}
+
+/// Lit un `--locator` : la forme d'une adresse déclarée
+/// (`asl_registre::Adresse`), et quatre au plus — `deja` sont déjà lus.
+fn locateur(donnee: &str, deja: usize) -> Result<String, Faute> {
+    if deja >= asl_registre::LOCATEURS_MAX || asl_registre::Adresse::nouvelle(donnee).is_err() {
+        return Err(Faute::LocateurInvalide(donnee.to_owned()));
     }
     Ok(donnee.to_owned())
 }
@@ -1671,7 +1704,52 @@ mod tests {
                     },
                 ],
                 ca: Some(std::path::PathBuf::from("/racine.crt")),
+                locateurs: Vec::new(),
             }))
+        );
+        // `--locator` : répétable, quatre au plus, de la forme `hôte:port`,
+        // et seulement pour un annuaire local (décision 57).
+        let federe = ["--identity-key", "/id", "--federation", "a:1"];
+        let quatre = [
+            "--locator",
+            "[2001:db8::7]:6630",
+            "--locator",
+            "192.0.2.7:6630",
+            "--locator",
+            "maison.example:6630",
+            "--locator",
+            "b:2",
+        ];
+        assert_eq!(
+            Reglages::depuis(avec(&[&federe[..], &quatre[..]].concat()))
+                .map(|lus| lus.federation.map(|federation| federation.locateurs)),
+            Ok(Some(vec![
+                "[2001:db8::7]:6630".to_owned(),
+                "192.0.2.7:6630".to_owned(),
+                "maison.example:6630".to_owned(),
+                "b:2".to_owned(),
+            ]))
+        );
+        assert_eq!(
+            Reglages::depuis(avec(
+                &[&federe[..], &quatre[..], &["--locator", "c:3"]].concat()
+            ))
+            .map(|_| ()),
+            Err(Faute::LocateurInvalide("c:3".to_owned()))
+        );
+        assert_eq!(
+            Reglages::depuis(avec(&[&federe[..], &["--locator", "sans-port"]].concat()))
+                .map(|_| ()),
+            Err(Faute::LocateurInvalide("sans-port".to_owned()))
+        );
+        assert_eq!(
+            Reglages::depuis(avec(&["--locator", "b:2"])).map(|_| ()),
+            Err(Faute::LocateurInvalide("b:2".to_owned()))
+        );
+        assert!(
+            !Faute::LocateurInvalide("x".to_owned())
+                .to_string()
+                .is_empty()
         );
         // `<locateur>=<n-…>` : l'identité attendue, dite (décision 58).
         let identite = asl_id::Identifiant::depuis_entropie(asl_id::Genre::Annuaire, [7; 16]);

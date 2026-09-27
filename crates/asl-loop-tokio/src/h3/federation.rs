@@ -13,7 +13,7 @@
 //! attaque, et les deux méritent d'être vus.
 
 use asl_id::Identifiant;
-use asl_registre::{EntreeDEtat, MACHINE_FEDEREE_OCTETS, MachineFederee};
+use asl_registre::{Adresse, EntreeDEtat, MACHINE_FEDEREE_OCTETS, MachineFederee};
 use asl_session::Trouvaille;
 use asl_store::{EtatDInscription, MembreLu};
 
@@ -112,9 +112,33 @@ impl Service<'_> {
         Trouvaille::Fait
     }
 
+    /// `PUT /v1/federation/locateurs` — où joindre cet annuaire, dit par lui
+    /// (décision 57). Le corps a été lu une fois par `asl-session` ; il se
+    /// relit ici.
+    pub(super) fn publier_mes_locateurs(&self, corps: &[u8]) -> Trouvaille {
+        let Some(lu) = self.membre_accepte() else {
+            return Trouvaille::Rien;
+        };
+        let Ok(publication) = asl_api::annuaire::PublicationDeLocateurs::decoder(corps) else {
+            return Trouvaille::Rien;
+        };
+        let mut adresses = Vec::new();
+        for locateur in publication.locateurs() {
+            let Ok(adresse) = Adresse::nouvelle(locateur) else {
+                return Trouvaille::Rien;
+            };
+            adresses.push(adresse);
+        }
+        match self.entrepot.publier_locateurs(lu.membre, &adresses) {
+            Ok(true) => Trouvaille::Fait,
+            Ok(false) | Err(_) => Trouvaille::Rien,
+        }
+    }
+
     /// Cette machine appartient-elle à un domaine confié à un annuaire local ?
-    /// Si oui, le corps du `421` : l'annuaire, et les adresses déclarées de
-    /// ses membres acceptés.
+    /// Si oui, le corps du `421` : l'annuaire, et où joindre ses membres
+    /// acceptés — les locateurs que chacun a publiés, ou son adresse
+    /// déclarée (décision 57).
     pub(super) fn annonce_mal_adressee(&self, machine: Identifiant) -> Option<Vec<u8>> {
         let domaine = self.entrepot.domaine_de_machine(machine).ok()??;
         let annuaire = self.entrepot.hebergeur_de_domaine(domaine).ok()??;
@@ -133,7 +157,8 @@ impl Service<'_> {
         let adresses: Vec<String> = membres
             .iter()
             .filter(|lu| lu.annuaire == annuaire && lu.etat == EtatDInscription::Acceptee)
-            .map(|lu| format!("\"{}\"", lu.adresse.texte()))
+            .flat_map(|lu| lu.ou_joindre())
+            .map(|adresse| format!("\"{}\"", adresse.texte()))
             .collect();
         Some(
             format!(

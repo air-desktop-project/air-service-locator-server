@@ -625,6 +625,16 @@ pub enum Ressource<'a> {
     /// poste** : des entrées d'état à la suite, sans enveloppe. Chaque entrée
     /// remplace celle du même service venue du même membre.
     FederationEtat,
+    /// `/v1/federation/locateurs` — **les locateurs courants du membre qui
+    /// pose** (`PUT`, décision 57, 0.30.0) : où le joindre, sans valeur de
+    /// confiance. Un préfixe IPv6 qui change chez un particulier ne demande
+    /// ainsi rien à personne.
+    FederationLocateurs,
+    /// `/v1/racines` — **l'identité et les locateurs des racines** (décision
+    /// 56, 0.30.0), sans exigence : c'est ce qu'un client qui n'a encore rien
+    /// doit pouvoir lire, et la connexion qui le porte est déjà vérifiée par
+    /// clé — c'est elle, la signature.
+    Racines,
     /// `/v1/replication` — **l'état de la voie entre racines, vu d'ici**
     /// (`replication.md` §8) : le pair, la voie ouverte ou coupée, notre
     /// compteur, et jusqu'où l'on a appliqué ce que le pair a écrit — ou
@@ -666,6 +676,7 @@ impl Ressource<'_> {
             | Self::AppareilsDuProprietaire
             | Self::Vu
             | Self::Version
+            | Self::Racines
             | Self::Poussees
             | Self::Nouvelles
             | Self::ServicesMachine { .. }
@@ -692,7 +703,9 @@ impl Ressource<'_> {
             | Self::Administrateur { .. }
             | Self::Annuaire { .. }
             | Self::MembreAnnuaire { .. } => &[Methode::Delete],
-            Self::PousseeAppareil { .. } | Self::DescriptionAppareil { .. } => &[Methode::Put],
+            Self::PousseeAppareil { .. }
+            | Self::DescriptionAppareil { .. }
+            | Self::FederationLocateurs => &[Methode::Put],
             Self::Domaine { .. } => &[Methode::Get, Methode::Delete],
             Self::AliasDomaine { .. }
             | Self::DomaineMachine { .. }
@@ -721,7 +734,7 @@ impl Ressource<'_> {
 
     /// Ce qu'il faut prouver pour l'atteindre.
     ///
-    /// # LES SEPT RESSOURCES SANS EXIGENCE, ET POURQUOI CHACUNE
+    /// # LES RESSOURCES SANS EXIGENCE, ET POURQUOI CHACUNE
     ///
     /// - **`/v1/comptes`** : on n'a pas encore de compte. C'est l'attestation de
     ///   la plate-forme qui protège ce chemin, pas une signature de compte.
@@ -746,6 +759,9 @@ impl Ressource<'_> {
     ///   besoin ceux qui n'ont pas encore de clé — et depuis le 2026-09-24 la
     ///   posture, qu'un refus révélerait de toute façon. Voir
     ///   [`Ressource::Version`].
+    /// - **`/v1/racines`** (0.30.0) : l'identité et les locateurs des racines,
+    ///   publics comme la liste que chaque logiciel embarque. Voir
+    ///   [`Ressource::Racines`].
     #[must_use]
     pub const fn exigence(&self) -> Exigence {
         match self {
@@ -762,6 +778,7 @@ impl Ressource<'_> {
             | Self::RechercheAlias { .. }
             | Self::Vu
             | Self::Version
+            | Self::Racines
             | Self::Utilisateur { .. } => Exigence::Aucune,
             Self::Annonce | Self::Poussees => Exigence::MachineAnnonce,
             Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
@@ -771,7 +788,9 @@ impl Ressource<'_> {
             Self::PairPreuve | Self::PairOperations { .. } | Self::PairInstantane => {
                 Exigence::Racine
             }
-            Self::FederationMachines { .. } | Self::FederationEtat => Exigence::AnnuaireLocal,
+            Self::FederationMachines { .. } | Self::FederationEtat | Self::FederationLocateurs => {
+                Exigence::AnnuaireLocal
+            }
             _ => Exigence::Appareil,
         }
     }
@@ -1199,6 +1218,8 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
             apres: compteur_de_la_requete(requete)?,
         }),
         ["v1", "federation", "etat"] => Ok(Ressource::FederationEtat),
+        ["v1", "federation", "locateurs"] => Ok(Ressource::FederationLocateurs),
+        ["v1", "racines"] => Ok(Ressource::Racines),
         _ => Err(Erreur::RessourceInconnue),
     }
 }

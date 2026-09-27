@@ -726,6 +726,11 @@ impl Service<'_> {
             // ── LA VOIE DE L'ANNUAIRE LOCAL (0.28.0) ─────────────────────
             Besoin::MachinesFederees { apres } => self.rassembler_les_machines_federees(*apres),
             Besoin::EtatFedere { entrees } => self.ranger_un_etat_federe(entrees),
+            Besoin::PublierLocateurs { corps } => self.publier_mes_locateurs(corps),
+            // **LA LISTE EMBARQUÉE, TELLE QUELLE** (décision 56) : la clé
+            // voyage avec l'identifiant, et c'est la connexion vérifiée par
+            // clé qui la signe.
+            Besoin::Racines => Trouvaille::Racines(crate::racines::racines_encodees()),
 
             // **LA CLÉ VIENT DE L'ENREGISTREMENT DE LA MACHINE**, et rien
             // d'autre : une machine inconnue, une clé illisible et une

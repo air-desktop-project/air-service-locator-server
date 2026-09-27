@@ -1030,6 +1030,8 @@ impl Entrepot {
             ecriture.open_table(annuaires::REFUS)?;
             ecriture.open_table(annuaires::RETRAITS)?;
             ecriture.open_table(annuaires::HEBERGEMENTS)?;
+            // Et les locateurs publiés (0.30.0) : une table neuve.
+            ecriture.open_table(annuaires::LOCATEURS)?;
             // Et les machines qu'un annuaire local reçoit des racines
             // (0.28.0) : une table neuve, vide partout ailleurs.
             ecriture.open_table(federation::MACHINES_FEDEREES)?;
@@ -3891,6 +3893,7 @@ fn provenance_de(operation: &Operation) -> Option<Provenance> {
         Operation::Inscription { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::InscriptionPresentee { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::DomaineHebergeur { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::InscriptionLocateurs { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::InscriptionDecision { .. } | Operation::InscriptionRetiree { .. } => None,
         Operation::DomaineSupprime { .. }
         | Operation::DroitRetire { .. }
@@ -4077,6 +4080,10 @@ fn appliquer_dans(
             domaine,
             enregistrement,
         } => annuaires::appliquer_hebergement(ecriture, *domaine, enregistrement),
+        Operation::InscriptionLocateurs {
+            membre,
+            enregistrement,
+        } => annuaires::appliquer_locateurs(ecriture, *membre, enregistrement),
     }
 }
 
@@ -5293,6 +5300,12 @@ impl Reestampillable for asl_registre::Hebergement {
     }
 }
 
+impl Reestampillable for asl_registre::Locateurs {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
 impl Reestampillable for Operation {
     fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
         match self {
@@ -5315,6 +5328,9 @@ impl Reestampillable for Operation {
                 enregistrement.reestampiller(de, vers)
             }
             Self::DomaineHebergeur { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::InscriptionLocateurs { enregistrement, .. } => {
+                enregistrement.reestampiller(de, vers)
+            }
             Self::Groupe { enregistrement, .. } => {
                 let avant = *enregistrement;
                 enregistrement.estampille = sous(avant.estampille, de, vers);
@@ -5607,6 +5623,17 @@ fn reestampiller(
             annuaires::HEBERGEMENTS,
             asl_registre::Hebergement::lire,
             asl_registre::Hebergement::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            annuaires::LOCATEURS,
+            asl_registre::Locateurs::lire,
+            asl_registre::Locateurs::ecrire,
             de,
             vers,
         )?

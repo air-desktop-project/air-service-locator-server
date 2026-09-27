@@ -90,8 +90,8 @@ use asl_registre::{
 };
 use asl_registre::{
     ADRESSE_OCTETS_MAX, Adresse, EntreeDEtat, HEBERGEMENT_OCTETS, Hebergement, INSCRIPTION_OCTETS,
-    Inscription, MACHINE_FEDEREE_OCTETS, MARQUE_D_INSCRIPTION_OCTETS, MachineFederee,
-    MarqueDInscription, PRESENTATION_OCTETS, Presentation,
+    Inscription, LOCATEURS_OCTETS, Locateurs, MACHINE_FEDEREE_OCTETS, MARQUE_D_INSCRIPTION_OCTETS,
+    MachineFederee, MarqueDInscription, PRESENTATION_OCTETS, Presentation,
 };
 
 /// Ce qu'on soumet.
@@ -171,6 +171,8 @@ struct Entree {
     marque_d_inscription: [u8; MARQUE_D_INSCRIPTION_OCTETS],
     /// Les octets d'un hébergement.
     hebergement: [u8; HEBERGEMENT_OCTETS],
+    /// Les octets de locateurs publiés (0.30.0).
+    locateurs: [u8; LOCATEURS_OCTETS],
     /// Les octets d'une machine fédérée (0.28.0).
     machine_federee: [u8; MACHINE_FEDEREE_OCTETS],
     /// Les octets d'une entrée d'état fédéré — et ce qui la suit.
@@ -685,6 +687,17 @@ fuzz_target!(|entree: Entree| {
             assert_eq!(
                 refait, entree.hebergement,
                 "un hébergement relu ne se réécrit pas"
+            );
+        }
+        Err(faute) => nommee(faute),
+    }
+    match Locateurs::lire(&entree.locateurs) {
+        Ok(locateurs) => {
+            let mut refait = [0_u8; LOCATEURS_OCTETS];
+            locateurs.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.locateurs,
+                "des locateurs relus ne se réécrivent pas"
             );
         }
         Err(faute) => nommee(faute),

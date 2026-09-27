@@ -213,7 +213,8 @@ plusieurs de vos domaines. Il fédère vers chaque racine :
 cargo run -p asl-server -- --store … --attestation optional \
     --identity-key /etc/asl-server/identite.key \
     --federation '[2001:41d0:20a:900::1dd4]:6630' \
-    --federation '[2001:41d0:20a:900::1d32]:6630'
+    --federation '[2001:41d0:20a:900::1d32]:6630' \
+    --locator '[2001:db8:1234::10]:6630' --locator '192.0.2.10:6630'
 ```
 
 **Ni certificat, ni autorité, ni nom DNS** (0.29.0, C20 : ASL fonctionne sans
@@ -224,6 +225,13 @@ frappé au démarrage. `--federation` se donne une fois par racine, par un
 la clé ; `--federation <locateur>=<n-…>` dit l'identité d'un locateur hors de
 la liste. `--federation-ca` (l'autorité d'hier) ne sert plus qu'aux racines
 qui n'ont pas fini leur transition (décision 58).
+
+**Où l'on joint la maison** (0.30.0, décision 57) : `--locator`, répétable,
+quatre au plus, publié aux racines à chaque ouverture de la voie — le `421`
+et `GET /v1/annuaires` les rendent à la place de l'adresse déclarée à
+l'inscription. Un préfixe IPv6 qui change se dit en redémarrant avec le
+nouveau ; aucun `--locator` retire ce qui était publié. Les racines, elles,
+servent `GET /v1/racines` : leur identité et leurs locateurs (décision 56).
 
 **Une racine en transition** garde `--certificate`/`--key` : elle sert sa
 chaîne d'hier à qui la vise par un nom (SNI), et son certificat d'identité à
@@ -371,7 +379,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.29.0_amd64.deb
+sudo dpkg -i asl-server_0.30.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :

@@ -335,6 +335,20 @@ pub struct Federateur {
     pub journal: Box<dyn Fn(String) + Send + Sync>,
     /// Le plafond du recul, en millisecondes.
     pub plafond_recul_ms: u64,
+    /// Où l'on nous joint, publié à chaque ouverture (décision 57) — de
+    /// l'ASCII sans guillemet ni barre, que les réglages ont jugé. **Vide,
+    /// il retire ce qui était publié** : l'adresse déclarée sert de nouveau.
+    pub locateurs: Vec<String>,
+}
+
+/// Le corps de `PUT /v1/federation/locateurs` : `{"locateurs":[…]}`.
+#[must_use]
+pub fn corps_de_locateurs(locateurs: &[String]) -> Vec<u8> {
+    let cites: Vec<String> = locateurs
+        .iter()
+        .map(|locateur| format!("\"{locateur}\""))
+        .collect();
+    format!("{{\"locateurs\":[{}]}}", cites.join(",")).into_bytes()
 }
 
 impl Federateur {
@@ -380,6 +394,7 @@ impl Federateur {
             self.adresse,
             connexion.forme_dite(),
         ));
+        self.publier_les_locateurs(&mut connexion).await?;
 
         let cadence_us = self.cadence_ms.saturating_mul(1_000);
         let mut prochaine = 0_u64;
@@ -432,6 +447,24 @@ impl Federateur {
             self.fermetures.fermer(sortie);
         }
         Ok(())
+    }
+
+    /// Publie où l'on nous joint — **à chaque ouverture** : une adresse qui a
+    /// changé pendant la coupure est dite dès la reprise, et une publication
+    /// identique n'écrit rien aux racines.
+    async fn publier_les_locateurs(&self, connexion: &mut Connexion) -> Result<(), Faute> {
+        let reponse = connexion
+            .requete(
+                b"PUT",
+                b"/v1/federation/locateurs",
+                &[(b"content-type", b"application/json")],
+                &corps_de_locateurs(&self.locateurs),
+            )
+            .await?;
+        match reponse.statut.value() {
+            204 => Ok(()),
+            autre => Err(Faute::Statut(autre)),
+        }
     }
 
     /// Pousse l'état publié, part après part.
@@ -579,5 +612,14 @@ mod essais {
         assert!(lire_une_part_de_machines(&[]).is_ok_and(|machines| machines.is_empty()));
         assert!(lire_une_part_de_machines(&[0; 3]).is_err());
         assert!(lire_une_part_de_machines(&[0; MACHINE_FEDEREE_OCTETS]).is_err());
+    }
+
+    #[test]
+    fn le_corps_des_locateurs_les_cite_dans_l_ordre() {
+        assert_eq!(corps_de_locateurs(&[]), br#"{"locateurs":[]}"#);
+        assert_eq!(
+            corps_de_locateurs(&["[2001:db8::7]:6630".to_owned(), "192.0.2.7:6630".to_owned()]),
+            br#"{"locateurs":["[2001:db8::7]:6630","192.0.2.7:6630"]}"#
+        );
     }
 }

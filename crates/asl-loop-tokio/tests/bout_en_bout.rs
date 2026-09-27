@@ -6915,6 +6915,7 @@ async fn lever_un_annuaire_local(
     vers: SocketAddr,
     identite: asl_cle::CleSecrete,
     cadence_ms: u64,
+    locateurs: &[&str],
 ) -> AnnuaireLocal {
     let (autorite, racine, chaine, cle) = materiel(nom);
     let (base, fichier) = entrepot(nom);
@@ -6952,6 +6953,7 @@ async fn lever_un_annuaire_local(
         alea: Box::new(|| 0),
         journal: Box::new(|ligne| journaliser(&ligne)),
         plafond_recul_ms: 200,
+        locateurs: locateurs.iter().map(|&texte| texte.to_owned()).collect(),
     };
     AnnuaireLocal {
         adresse,
@@ -7199,6 +7201,9 @@ async fn la_federation_de_bout_en_bout() {
             adresse,
             speedy,
             200,
+            // **SPEEDY PUBLIE SES LOCATEURS** (décision 57) : ils remplacent
+            // l'adresse déclarée.
+            &["[2001:db8::51]:6630", "192.0.2.51:6630"],
         )
         .await;
     speedy_local.attendre_la_machine(machine_d).await;
@@ -7226,12 +7231,38 @@ async fn la_federation_de_bout_en_bout() {
     );
 
     // ── À LA RACINE, LA MACHINE EST RENVOYÉE CHEZ ELLE : `421` ──────────────
-    let mut daemon = connecter(&racine, adresse).await;
-    let (statut, corps) = annoncer_depot(&mut daemon, machine_d, &cle_d).await;
+    let mut a_la_racine = connecter(&racine, adresse).await;
+    let (statut, corps) = annoncer_depot(&mut a_la_racine, machine_d, &cle_d).await;
     assert_eq!(statut, b"421", "{corps}");
     assert!(
-        corps.contains(n_speedy.texte().as_str()) && corps.contains("speedy.maison:6630"),
-        "{corps}"
+        corps.contains(n_speedy.texte().as_str())
+            && corps.contains(r#""adresses":["[2001:db8::51]:6630","192.0.2.51:6630"]"#)
+            && !corps.contains("speedy.maison"),
+        "le `421` rend les locateurs publiés, pas l'adresse déclarée : {corps}"
+    );
+    // Et l'application du propriétaire les lit dans `GET /v1/annuaires`.
+    let (statut, mes_annuaires) = lire_json(&mut alice, 28, b"/v1/annuaires").await;
+    assert_eq!(statut, b"200", "{mes_annuaires}");
+    assert!(
+        mes_annuaires.contains(
+            r#""adresse":"speedy.maison:6630","locateurs":["[2001:db8::51]:6630","192.0.2.51:6630"]"#
+        ),
+        "{mes_annuaires}"
+    );
+    // **LA LISTE DES RACINES, LUE ET VÉRIFIÉE** sur une connexion vérifiée
+    // par la clé de la racine (décision 56) : la liste embarquée.
+    let apprises = asl_loop_tokio::racines::apprendre_les_racines(
+        &format!("127.0.0.1:{}", adresse.port()),
+        &asl_loop_tokio::Confiance::par_identite(&[identite_racine.publique()]),
+    )
+    .await
+    .expect("la liste se lit et se vérifie");
+    assert_eq!(
+        apprises
+            .iter()
+            .map(|apprise| apprise.identifiant.texte().as_str().to_owned())
+            .collect::<Vec<_>>(),
+        asl_loop_tokio::racines::RACINES.map(|racine| racine.identifiant.to_owned())
     );
 
     // ── CHEZ ELLE, ELLE ANNONCE ; PAR LA RACINE, ON LA TROUVE ───────────────
@@ -7328,7 +7359,7 @@ async fn la_federation_de_bout_en_bout() {
     // ── LA PAIRE : HELIUM, ACCEPTÉ ; SPEEDY TOMBE, HELIUM PORTE ─────────────
     let (statut, rendu) = poster(
         &mut alice,
-        28,
+        32,
         format!("/v1/annuaires/{}/membres", n_speedy.texte()).as_bytes(),
         br#"{"adresse":"helium.maison:6630"}"#,
         b"application/json",
@@ -7363,6 +7394,8 @@ async fn la_federation_de_bout_en_bout() {
             adresse,
             helium,
             200,
+            // Helium n'en publie aucun : son adresse déclarée sert.
+            &[],
         )
         .await;
     helium_local.attendre_la_machine(machine_d).await;
@@ -7377,6 +7410,27 @@ async fn la_federation_de_bout_en_bout() {
             .iter()
             .any(|ligne| ligne == &ouverte_d_hier),
         "helium devait croire la chaîne d'hier, pour le nom `localhost`"
+    );
+    // **LA PAIRE DANS LE `421`** : les locateurs de speedy, l'adresse
+    // déclarée d'helium — chaque membre les siens.
+    // La même connexion que le premier `421` : le harnais borne les siennes.
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}]}}"#,
+        machine_d.texte()
+    );
+    let (statut, corps) = poster(
+        &mut a_la_racine,
+        12,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    let corps = String::from_utf8_lossy(&corps);
+    assert_eq!(statut, b"421", "{corps}");
+    assert!(
+        corps.contains("[2001:db8::51]:6630") && corps.contains("helium.maison:6630"),
+        "{corps}"
     );
 
     // Speedy s'arrête ; le daemon se replie sur helium.

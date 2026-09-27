@@ -65,8 +65,8 @@ pub use groupe::{
 };
 pub use inscription::{
     ADRESSE_OCTETS, ADRESSE_OCTETS_MAX, Adresse, HEBERGEMENT_OCTETS, Hebergement,
-    INSCRIPTION_OCTETS, Inscription, MARQUE_D_INSCRIPTION_OCTETS, MarqueDInscription,
-    PRESENTATION_OCTETS, Presentation,
+    INSCRIPTION_OCTETS, Inscription, LOCATEURS_MAX, LOCATEURS_OCTETS, Locateurs,
+    MARQUE_D_INSCRIPTION_OCTETS, MarqueDInscription, PRESENTATION_OCTETS, Presentation,
 };
 
 // ── Les tailles ─────────────────────────────────────────────────────────────
@@ -2775,8 +2775,14 @@ pub mod sans_dates {
 /// Ce que l'en-tête d'une opération occupe : le genre, puis l'estampille.
 pub const OPERATION_ENTETE_OCTETS: usize = 1 + ESTAMPILLE_OCTETS;
 
-/// Ce que la plus grande charge occupe — celle d'un point de poussée.
-const CHARGE_OCTETS_MAX: usize = IDENTIFIANT_OCTETS + POINT_DE_POUSSEE_OCTETS;
+/// Ce que la plus grande charge occupe — celle d'un point de poussée, ou
+/// celle de locateurs, la plus grande des deux.
+const CHARGE_OCTETS_MAX: usize = IDENTIFIANT_OCTETS
+    + if POINT_DE_POUSSEE_OCTETS > LOCATEURS_OCTETS {
+        POINT_DE_POUSSEE_OCTETS
+    } else {
+        LOCATEURS_OCTETS
+    };
 
 /// Ce qu'une opération occupe, au plus. C'est la taille du tampon dans lequel
 /// [`Operation::ecrire`] écrit ; ce qu'elle a réellement occupé est rendu.
@@ -2810,14 +2816,12 @@ pub const OPERATION_OCTETS_MAX: usize = OPERATION_ENTETE_OCTETS + CHARGE_OCTETS_
 /// la racine qui l'écrit, et le même fait peut être rejoué par un instantané
 /// avec l'estampille d'origine — c'est pourquoi les deux se séparent.
 ///
-/// **Le point de poussée fait mille deux cents octets, les autres quelques
-/// centaines** : c'est la raison de [`Cadre`], et elle vaut ici — une
-/// opération vit sur la pile le temps d'être écrite ou appliquée, et cette
-/// crate n'alloue pas.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "une opération vit sur la pile le temps d'une lecture, et la crate n'alloue pas"
-)]
+/// **Le point de poussée fait mille deux cents octets, les locateurs mille
+/// (0.30.0), les autres quelques centaines** : c'est la raison de [`Cadre`],
+/// et elle vaut ici — une opération vit sur la pile le temps d'être écrite ou
+/// appliquée, et cette crate n'alloue pas. (Les deux grandes étant proches,
+/// `clippy::large_enum_variant` ne se lève plus : l'écart qu'il mesure est
+/// entre les deux plus grandes.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
     /// Un compte créé. Insérer si absent.
@@ -3074,6 +3078,14 @@ pub enum Operation {
         /// L'hébergement.
         enregistrement: Hebergement,
     },
+    /// Où joindre un membre d'annuaire local, publié par lui (décision 57).
+    /// Le plus récent.
+    InscriptionLocateurs {
+        /// Le membre, son `n-…`.
+        membre: Identifiant,
+        /// Les locateurs.
+        enregistrement: Locateurs,
+    },
     /// Un groupe créé dans un domaine (`docs/replication.md` §5.2,
     /// 2026-09-26). **Insérer si absent**, l'étiquette au plus récent. Le
     /// groupe d'administrateurs d'un domaine et le groupe personnel d'un
@@ -3149,7 +3161,8 @@ pub enum Operation {
 /// `groupe-etiquette`, `groupe-membre`, `groupe-membre-retire` et
 /// `groupe-supprime` de vingt-cinq à vingt-neuf (2026-09-27) ; `droit` et
 /// `droit-retire` trente et trente et un (2026-09-27) ; `machine-alias`
-/// trente-deux (0.26.0).
+/// trente-deux (0.26.0) ; les inscriptions de trente-trois à trente-sept ;
+/// `inscription-locateurs` trente-huit (0.30.0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenreOperation {
     /// `compte`.
@@ -3224,12 +3237,14 @@ pub enum GenreOperation {
     InscriptionRetiree,
     /// `domaine-hebergeur`.
     DomaineHebergeur,
+    /// `inscription-locateurs`.
+    InscriptionLocateurs,
 }
 
 impl GenreOperation {
-    /// Les trente-six, dans l'ordre de `replication.md` §5.2 — et l'ordre
-    /// de leurs étiquettes, de 1 à 14, puis 16 à 37 (voir l'en-tête du type).
-    pub const TOUS: [Self; 36] = [
+    /// Les trente-sept, dans l'ordre de `replication.md` §5.2 — et l'ordre
+    /// de leurs étiquettes, de 1 à 14, puis 16 à 38 (voir l'en-tête du type).
+    pub const TOUS: [Self; 37] = [
         Self::Compte,
         Self::Alias,
         Self::Appareil,
@@ -3266,6 +3281,7 @@ impl GenreOperation {
         Self::InscriptionDecision,
         Self::InscriptionRetiree,
         Self::DomaineHebergeur,
+        Self::InscriptionLocateurs,
     ];
 
     /// Son étiquette, en tête du cadre.
@@ -3308,6 +3324,7 @@ impl GenreOperation {
             Self::InscriptionDecision => 35,
             Self::InscriptionRetiree => 36,
             Self::DomaineHebergeur => 37,
+            Self::InscriptionLocateurs => 38,
         }
     }
 
@@ -3355,6 +3372,7 @@ impl GenreOperation {
             35 => Self::InscriptionDecision,
             36 => Self::InscriptionRetiree,
             37 => Self::DomaineHebergeur,
+            38 => Self::InscriptionLocateurs,
             lue => return Err(Faute::Etiquette { lue }),
         })
     }
@@ -3403,6 +3421,7 @@ impl GenreOperation {
             Self::InscriptionDecision => IDENTIFIANT_OCTETS + 1 + IDENTIFIANT_OCTETS,
             Self::InscriptionRetiree => IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS,
             Self::DomaineHebergeur => IDENTIFIANT_OCTETS + HEBERGEMENT_OCTETS,
+            Self::InscriptionLocateurs => IDENTIFIANT_OCTETS + LOCATEURS_OCTETS,
         }
     }
 
@@ -3459,6 +3478,7 @@ impl Operation {
             Self::InscriptionDecision { .. } => GenreOperation::InscriptionDecision,
             Self::InscriptionRetiree { .. } => GenreOperation::InscriptionRetiree,
             Self::DomaineHebergeur { .. } => GenreOperation::DomaineHebergeur,
+            Self::InscriptionLocateurs { .. } => GenreOperation::InscriptionLocateurs,
         }
     }
 
@@ -3852,6 +3872,18 @@ impl Operation {
                     &octets,
                 );
             }
+            Self::InscriptionLocateurs {
+                membre,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*membre, charge);
+                let mut octets = [0_u8; LOCATEURS_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
         }
         genre.octets()
     }
@@ -4139,6 +4171,10 @@ impl Operation {
             GenreOperation::DomaineHebergeur => Self::DomaineHebergeur {
                 domaine: lire_identifiant(charge, Genre::Domaine)?,
                 enregistrement: Hebergement::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::InscriptionLocateurs => Self::InscriptionLocateurs {
+                membre: lire_identifiant(charge, Genre::Annuaire)?,
+                enregistrement: Locateurs::lire(&copie(apres_identifiant))?,
             },
         };
         Ok((estampille, operation, attendus))
@@ -6404,7 +6440,7 @@ mod tests {
     // ── Les opérations ──────────────────────────────────────────────────────
 
     /// Une opération de chaque genre, dans l'ordre de `replication.md` §5.2.
-    fn une_de_chaque() -> [Operation; 36] {
+    fn une_de_chaque() -> [Operation; 37] {
         [
             Operation::Compte {
                 compte: un(Genre::Utilisateur, 1),
@@ -6607,6 +6643,15 @@ mod tests {
                     annuaire: Some(un(Genre::Annuaire, 4)),
                 },
             },
+            Operation::InscriptionLocateurs {
+                membre: un(Genre::Annuaire, 5),
+                enregistrement: super::Locateurs::nouveaux(
+                    Provenance::Ici,
+                    e(18),
+                    &[super::Adresse::nouvelle("[2001:db8::5]:6630").unwrap()],
+                )
+                .unwrap(),
+            },
         ]
     }
 
@@ -6640,6 +6685,7 @@ mod tests {
                 GenreOperation::InscriptionDecision => 35,
                 GenreOperation::InscriptionRetiree => 36,
                 GenreOperation::DomaineHebergeur => 37,
+                GenreOperation::InscriptionLocateurs => 38,
                 _ => rang + 1,
             };
             assert_eq!(
@@ -6733,10 +6779,10 @@ mod tests {
 
     #[test]
     fn un_genre_inconnu_est_refuse_zero_compris() {
-        // Quinze est le cadre de fin, trente-huit le premier au-delà du
-        // dernier genre (`domaine-hebergeur` tient trente-sept) : aucun des
-        // deux n'est une opération.
-        for lue in [0_u8, 15, 38, 200] {
+        // Quinze est le cadre de fin, trente-neuf le premier au-delà du
+        // dernier genre (`inscription-locateurs` tient trente-huit) : aucun
+        // des deux n'est une opération.
+        for lue in [0_u8, 15, 39, 200] {
             let mut octets = [0_u8; OPERATION_OCTETS_MAX];
             octets[0] = lue;
             assert_eq!(Operation::lire(&octets), Err(Faute::Etiquette { lue }));
@@ -6952,7 +6998,7 @@ mod tests {
 
     #[test]
     fn les_operations_d_inscription_verifient_leurs_champs() {
-        let [.., decision, retrait, hebergeur] = une_de_chaque();
+        let [.., decision, retrait, hebergeur, locateurs] = une_de_chaque();
         // La décision : accepté ou refusé, et rien d'autre ; un membre est un
         // annuaire, l'administrateur un compte.
         let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
@@ -7003,11 +7049,44 @@ mod tests {
                 attendu: Genre::Domaine
             })
         );
+        // Les locateurs : un membre est un annuaire, et l'enregistrement
+        // exige sa forme.
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        locateurs.ecrire(e(1), &mut sortie);
+        let mut membre = sortie;
+        membre[OPERATION_ENTETE_OCTETS] = b'm';
+        assert_eq!(
+            Operation::lire(&membre),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+        let mut bourre = sortie;
+        bourre
+            [OPERATION_ENTETE_OCTETS + GenreOperation::InscriptionLocateurs.charge_octets() - 1] =
+            1;
+        assert_eq!(Operation::lire(&bourre), Err(Faute::Bourrage));
     }
 
     #[test]
     fn les_operations_des_groupes_verifient_ce_qui_suit_le_groupe() {
-        let [.., _, etiquette, membre, retire, _, _, _, _, _, _, _, _, _] = une_de_chaque();
+        let [
+            ..,
+            _,
+            etiquette,
+            membre,
+            retire,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+        ] = une_de_chaque();
         // Le compte d'une adhésion est un compte, et rien d'autre.
         for operation in [membre, retire] {
             let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
@@ -7063,6 +7142,7 @@ mod tests {
                 | Operation::MachineAlias { .. }
                 | Operation::MachineDomaine { .. }
                 | Operation::DomaineHebergeur { .. }
+                | Operation::InscriptionLocateurs { .. }
                 | Operation::Groupe { .. } => OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS,
                 Operation::Enrolement { .. }
                 | Operation::Inscription { .. }

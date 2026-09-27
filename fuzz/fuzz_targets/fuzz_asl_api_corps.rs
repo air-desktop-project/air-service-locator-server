@@ -42,6 +42,9 @@
 //!     (0.27.0) : ni guillemet, ni barre oblique inverse, ni contrôle — ce
 //!     qu'`asl-registre` en garde, `InscriptionRendue` le réécrit sans
 //!     échappement, entre ses guillemets ; un hébergeur nomme un `n-…`.
+//!     **Et des locateurs publiés** (0.30.0) : quatre au plus, chacun sans ce
+//!     que l'encodeur ne réécrit pas ; une liste de racines relue se réécrit
+//!     en une liste qui se relit à l'identique.
 //! 5. **UN ALIAS DE COMPTE ACCEPTÉ EST DU TEXTE LIBRE BORNÉ** (0.26.0,
 //!    décision 46) : non vide, au plus deux cent cinquante-cinq octets bruts, sans
 //!    guillemet, barre oblique inverse ni contrôle. L'unicité de sa forme — le
@@ -143,6 +146,7 @@ fuzz_target!(|octets: &[u8]| {
                 proprietaire: None,
                 etat: "attendue",
                 adresse: adresse.texte(),
+                locateurs: &[],
                 expire_a: Some(u64::MAX),
             };
             let mut sortie = [0_u8; 512];
@@ -157,6 +161,35 @@ fuzz_target!(|octets: &[u8]| {
     }
     if let Ok(hebergeur) = asl_api::annuaire::Hebergeur::decoder(octets) {
         assert_eq!(hebergeur.annuaire.genre(), asl_id::Genre::Annuaire);
+    }
+    if let Ok(publication) = asl_api::annuaire::PublicationDeLocateurs::decoder(octets) {
+        assert!(publication.locateurs().len() <= asl_api::annuaire::LOCATEURS_MAX);
+        assert!(publication.locateurs().iter().all(|locateur| {
+            !locateur
+                .chars()
+                .any(|c| c == '"' || c == '\\' || c.is_control())
+        }));
+    }
+    if let Ok(liste) = asl_api::annuaire::ListeDeRacines::decoder(octets) {
+        let mut refaite = b"[".to_vec();
+        for (rang, racine) in liste.racines().enumerate() {
+            assert_eq!(racine.annuaire.genre(), asl_id::Genre::Annuaire);
+            if rang > 0 {
+                refaite.push(b',');
+            }
+            let mut sortie = [0_u8; 4_096];
+            let combien = asl_api::annuaire::RacineRendue {
+                annuaire: racine.annuaire,
+                cle: racine.cle,
+                locateurs: racine.locateurs(),
+            }
+            .encoder(&mut sortie)
+            .expect("une racine relue tient");
+            refaite.extend_from_slice(&sortie[..combien]);
+        }
+        refaite.push(b']');
+        let relue = asl_api::annuaire::ListeDeRacines::decoder(&refaite).expect("elle se relit");
+        assert!(liste.racines().eq(relue.racines()), "l'aller-retour tient");
     }
     // Une décision n'a que deux valeurs : il suffit qu'elle ne panique pas.
     let _ = asl_api::annuaire::DecisionDInscription::decoder(octets);
