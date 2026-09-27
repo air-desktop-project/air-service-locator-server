@@ -88,7 +88,7 @@ use asl_api::{Exigence, Ressource};
 use asl_cle::{CleAppareil, ClePublique, Defi, LiaisonDeCanal, Signature, SignatureAppareil};
 use asl_cle::{CodeEnrolement, TexteCode};
 use asl_id::{Genre, Identifiant};
-use asl_registre::{AliasDeDomaine, AliasRange, ClefDeRecherche, NomRange};
+use asl_registre::{AliasDeDomaine, AliasRange, ClefDeRecherche, Droits, NomRange};
 
 /// **CE QU'UNE GRAMMAIRE ACCEPTE, L'AUTRE DOIT POUVOIR LE RANGER.**
 ///
@@ -723,6 +723,28 @@ pub enum Besoin<'a> {
         /// Le compte.
         compte: Identifiant,
     },
+    // ── Les droits (`modele.md` §2.13, 2026-09-27) ──────────────────────────
+    /// Les droits que le compte de cette connexion a accordés, et ceux que ses
+    /// groupes ont reçus.
+    MesDroits,
+    /// Accorder un droit à un groupe sur un élément. **Les droits ont un sens
+    /// sur l'élément** : la session l'a vérifié, un droit qui n'en a pas est
+    /// un `400` avant d'arriver ici.
+    AccorderDroit {
+        /// Le groupe qui le recevra.
+        groupe: Identifiant,
+        /// Ce sur quoi il portera.
+        element: Identifiant,
+        /// Ce qu'il permettra — non vide.
+        droits: Droits,
+        /// L'étiquette.
+        etiquette: NomRange,
+    },
+    /// Retirer un droit.
+    RetirerDroit {
+        /// Le droit.
+        droit: Identifiant,
+    },
     /// **L'exploitant nomme un administrateur des racines** (`protocole.md`
     /// §2.2) — ou, `nomme` faux, en retire un. La preuve est celle de
     /// [`Besoin::EmettreInvitation`] : le défi de cette connexion, signé par la
@@ -1060,6 +1082,10 @@ pub enum Trouvaille {
     GroupeLu(alloc::vec::Vec<u8>),
     /// Un groupe a été créé.
     GroupeCree(Identifiant),
+    /// Des droits, **chacun déjà encodé**.
+    Droits(alloc::vec::Vec<alloc::vec::Vec<u8>>),
+    /// Un droit a été accordé.
+    DroitCree(Identifiant),
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -1540,6 +1566,12 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
             Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
         },
         Ressource::MembreGroupe { groupe, compte } => Besoin::RetirerMembre { groupe, compte },
+        // ── LES DROITS ──────────────────────────────────────────────────
+        Ressource::Droits => match methode {
+            asl_api::Methode::Get => Besoin::MesDroits,
+            _ => lire_une_demande_de_droit(corps),
+        },
+        Ressource::Droit { droit } => Besoin::RetirerDroit { droit },
         Ressource::Administrateurs => match asl_api::groupe::Nomination::decoder(corps) {
             Ok(demande) => {
                 lire_une_preuve_d_exploitant(session, demande.signature, demande.compte, true)
@@ -1660,6 +1692,29 @@ fn lire_une_demande_d_invitation<'a>(session: &Session, corps: &[u8]) -> Besoin<
         defi,
         signature: Signature::depuis_octets(brute),
     }
+}
+
+/// Lit une demande de droit, et la juge avant l'étage 3 : **des droits qui
+/// ont un sens sur l'élément**, une étiquette qui se range. Sinon, `400` — la
+/// faute est dans la requête (`protocole.md` §2.2 : `rattacher` sur une
+/// machine).
+fn lire_une_demande_de_droit(corps: &[u8]) -> Besoin<'_> {
+    juger_une_demande_de_droit(corps).unwrap_or(Besoin::Deja(StatusCode::BAD_REQUEST))
+}
+
+/// Le jugement de [`lire_une_demande_de_droit`] : `None` pour toute faute.
+fn juger_une_demande_de_droit(corps: &[u8]) -> Option<Besoin<'static>> {
+    let demande = asl_api::droit::DemandeDeDroit::decoder(corps).ok()?;
+    let (droits, etiquette) = Droits::depuis(demande.droits)
+        .ok()
+        .filter(|droits| droits.ont_un_sens_sur(demande.element.genre()))
+        .zip(NomRange::nouveau(demande.etiquette).ok())?;
+    Some(Besoin::AccorderDroit {
+        groupe: demande.groupe,
+        element: demande.element,
+        droits,
+        etiquette,
+    })
 }
 
 /// Lit l'étiquette d'un groupe : `{"etiquette": "…"}`, rangée comme un nom de
@@ -2071,6 +2126,28 @@ pub fn repondre<'o>(
             Trouvaille::Groupes(quoi) => composer_une_liste(quoi, sortie),
             _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
         },
+        Besoin::MesDroits => match trouvaille {
+            Trouvaille::Droits(quoi) => composer_une_liste(quoi, sortie),
+            _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
+        },
+        // **`404` POUR UN GROUPE OU UN ÉLÉMENT QU'ON NE VOIT PAS, `403` SANS LE
+        // DROIT D'ACCORDER sur un élément qu'on voit** (`protocole.md` §2.2).
+        Besoin::AccorderDroit { .. } => match trouvaille {
+            Trouvaille::DroitCree(droit) => {
+                let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
+                corps.pousser(br#"{"droit":""#);
+                corps.pousser(droit.texte().as_str().as_bytes());
+                corps.pousser(br#""}"#);
+                composer(StatusCode::CREATED, JSON_MEDIA, corps.rendu(), sortie)
+            }
+            Trouvaille::Rien => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+            autre => rendre_l_echec(autre, sortie),
+        },
         // **`404` POUR L'ABSENT COMME POUR L'INTERDIT** (C10), comme un domaine.
         Besoin::LireGroupe { .. } => match trouvaille {
             Trouvaille::GroupeLu(corps) => composer(StatusCode::OK, JSON_MEDIA, corps, sortie),
@@ -2395,7 +2472,8 @@ pub fn repondre<'o>(
         | Besoin::EtiqueterGroupe { .. }
         | Besoin::SupprimerGroupe { .. }
         | Besoin::AjouterMembre { .. }
-        | Besoin::RetirerMembre { .. } => match trouvaille {
+        | Besoin::RetirerMembre { .. }
+        | Besoin::RetirerDroit { .. } => match trouvaille {
             Trouvaille::Fait => composer(StatusCode::NO_CONTENT, JSON_MEDIA, &[], sortie),
             Trouvaille::Conflit => composer(
                 StatusCode::CONFLICT,
@@ -8143,5 +8221,174 @@ mod groupes {
             assert_eq!(rendre(&mut session, &changer, &trouvaille).0, attendu);
             assert!(session.defi.is_none(), "le défi est dépensé");
         }
+    }
+}
+
+#[cfg(test)]
+mod droits {
+    //! Les droits (`protocole.md` §2.2, 2026-09-27) : ce que la session lit
+    //! d'une requête, ce qu'elle juge avant l'étage 3, et ce qu'elle répond.
+
+    extern crate alloc;
+
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
+    use asl_cle::LiaisonDeCanal;
+    use asl_id::{Genre, Identifiant};
+    use asl_registre::{Droits, NomRange};
+
+    use super::{Besoin, Session, Trouvaille, besoin, repondre};
+
+    fn un(genre: Genre, graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(genre, [graine; 16])
+    }
+
+    fn session() -> Session {
+        let mut session = Session::new(LiaisonDeCanal::depuis_octets(
+            [0x11; asl_cle::LIAISON_OCTETS],
+        ));
+        session.pair = Some(un(Genre::Appareil, 9));
+        session
+    }
+
+    fn tete<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
+        let limites = Limits::default();
+        let mut constructeur = HeadBuilder::new(&limites);
+        constructeur.field(b":method", verbe).expect("le verbe");
+        constructeur.field(b":scheme", b"https").expect("le schéma");
+        constructeur
+            .field(b":authority", b"annuaire.example")
+            .expect("l'autorité");
+        constructeur.field(b":path", cible).expect("la cible");
+        constructeur.finish().expect("une tête close")
+    }
+
+    fn lire<'a>(verbe: &'a [u8], cible: &'a [u8], corps: &'a [u8]) -> Besoin<'a> {
+        besoin(&session(), &tete(verbe, cible), corps)
+    }
+
+    fn rendre(quoi: &Besoin<'_>, trouvaille: &Trouvaille) -> (StatusCode, Vec<u8>) {
+        let mut sortie = [0_u8; 1024];
+        let reponse = repondre(&mut session(), quoi, trouvaille, None, &mut sortie);
+        (reponse.status(), reponse.body().to_vec())
+    }
+
+    fn demande(element: Identifiant, droits: &str) -> alloc::string::String {
+        alloc::format!(
+            r#"{{"groupe":"{}","element":"{}","droits":{droits},"etiquette":"Famille"}}"#,
+            un(Genre::Ensemble, 5).texte().as_str(),
+            element.texte().as_str()
+        )
+    }
+
+    #[test]
+    fn les_noms_du_fil_sont_les_bits_de_l_entrepot() {
+        // **UNE GRAMMAIRE NE DÉPEND PAS D'UN FORMAT DE DISQUE** : c'est ici,
+        // où l'on voit les deux, que l'on vérifie qu'ils disent la même chose.
+        for (rang, nom) in asl_api::droit::NOMS_DE_DROITS.iter().enumerate() {
+            assert_eq!(
+                Droits::depuis_nom(nom).map(Droits::octet),
+                Some(1_u8 << rang),
+                "{nom}"
+            );
+        }
+    }
+
+    #[test]
+    fn la_session_lit_chaque_verbe_des_droits() {
+        let d = un(Genre::Domaine, 4);
+        let g = un(Genre::Autorisation, 7);
+        assert_eq!(lire(b"GET", b"/v1/droits", b""), Besoin::MesDroits);
+        let corps = demande(d, r#"["rattacher","voir"]"#);
+        assert_eq!(
+            lire(b"POST", b"/v1/droits", corps.as_bytes()),
+            Besoin::AccorderDroit {
+                groupe: un(Genre::Ensemble, 5),
+                element: d,
+                droits: Droits::RATTACHER.union(Droits::VOIR),
+                etiquette: NomRange::nouveau("Famille").unwrap(),
+            }
+        );
+        let chemin = alloc::format!("/v1/droits/{}", g.texte().as_str());
+        assert_eq!(
+            lire(b"DELETE", chemin.as_bytes(), b""),
+            Besoin::RetirerDroit { droit: g }
+        );
+    }
+
+    #[test]
+    fn un_droit_sans_sens_ou_mal_forme_est_un_400() {
+        let machine = un(Genre::Machine, 4);
+        for corps in [
+            // `rattacher` ou `administrer` sur une machine : ils n'ont de sens
+            // que sur un domaine.
+            demande(machine, r#"["rattacher"]"#),
+            demande(machine, r#"["administrer","voir"]"#),
+            demande(un(Genre::Service, 4), r#"["administrer"]"#),
+            // Mal formé.
+            alloc::string::String::from("{}"),
+        ] {
+            assert_eq!(
+                lire(b"POST", b"/v1/droits", corps.as_bytes()),
+                Besoin::Deja(StatusCode::BAD_REQUEST),
+                "{corps}"
+            );
+        }
+        // Et sur une machine, ce qui a un sens passe.
+        let corps = demande(machine, r#"["localiser"]"#);
+        assert_eq!(
+            lire(b"POST", b"/v1/droits", corps.as_bytes()),
+            Besoin::AccorderDroit {
+                groupe: un(Genre::Ensemble, 5),
+                element: machine,
+                droits: Droits::LOCALISER,
+                etiquette: NomRange::nouveau("Famille").unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn chaque_trouvaille_des_droits_rend_son_statut() {
+        let g = un(Genre::Autorisation, 7);
+        let (statut, corps) = rendre(
+            &Besoin::MesDroits,
+            &Trouvaille::Droits(vec![b"{}".to_vec()]),
+        );
+        assert_eq!((statut, corps.as_slice()), (StatusCode::OK, &b"[{}]"[..]));
+        let (statut, corps) = rendre(&Besoin::MesDroits, &Trouvaille::Rien);
+        assert_eq!((statut, corps.as_slice()), (StatusCode::OK, &b"[]"[..]));
+
+        let accorder = Besoin::AccorderDroit {
+            groupe: un(Genre::Ensemble, 5),
+            element: un(Genre::Domaine, 4),
+            droits: Droits::VOIR,
+            etiquette: NomRange::nouveau("Famille").unwrap(),
+        };
+        let (statut, corps) = rendre(&accorder, &Trouvaille::DroitCree(g));
+        assert_eq!(statut, StatusCode::CREATED);
+        assert_eq!(
+            corps,
+            alloc::format!("{{\"droit\":\"{}\"}}", g.texte().as_str()).into_bytes()
+        );
+        assert_eq!(
+            rendre(&accorder, &Trouvaille::Rien).0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            rendre(&accorder, &Trouvaille::Refus).0,
+            StatusCode::FORBIDDEN
+        );
+
+        let retirer = Besoin::RetirerDroit { droit: g };
+        assert_eq!(
+            rendre(&retirer, &Trouvaille::Fait).0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            rendre(&retirer, &Trouvaille::Refus).0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(rendre(&retirer, &Trouvaille::Rien).0, StatusCode::NOT_FOUND);
     }
 }

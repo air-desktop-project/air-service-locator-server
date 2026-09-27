@@ -39,6 +39,7 @@
 use asl_id::{Genre, Identifiant};
 
 mod domaine;
+mod droit;
 mod groupe;
 mod plis;
 
@@ -48,6 +49,7 @@ pub use domaine::{
     DOMAINE_OCTETS, Domaine, RATTACHEMENT_OCTETS, Rattachement, SEPARATEUR_PREMIER_DOMAINE,
     UNICODE, premier_domaine,
 };
+pub use droit::{DROIT_OCTETS, Droit, Droits};
 pub use groupe::{
     ADHESION_OCTETS, Adhesion, ETIQUETTE_DOMAINE_RACINE, GROUPE_OCTETS, Groupe,
     MARQUE_DE_GROUPE_OCTETS, MarqueDeGroupe, SEPARATEUR_DOMAINE_RACINE,
@@ -3047,6 +3049,21 @@ pub enum Operation {
         /// Le groupe.
         groupe: Identifiant,
     },
+    /// Un droit accordé à un groupe (`docs/replication.md` §5.2, décision
+    /// 41). **Insérer si absent** ; il remplace [`Operation::Autorisation`],
+    /// qui reste lue et se convertit à l'application.
+    Droit {
+        /// Son identifiant — la lettre de l'autorisation, gardée.
+        droit: Identifiant,
+        /// L'enregistrement.
+        enregistrement: Droit,
+    },
+    /// Un droit retiré. **Toujours** : la plus petite estampille de retrait.
+    /// Il remplace [`Operation::AutorisationRevoquee`], lue de même.
+    DroitRetire {
+        /// Lequel.
+        droit: Identifiant,
+    },
 }
 
 /// Le genre d'une opération, tel qu'il s'écrit en tête du cadre.
@@ -3062,7 +3079,8 @@ pub enum Operation {
 /// (2026-09-25) ; `domaine`, `domaine-supprime`, `domaine-alias` et
 /// `machine-domaine` de vingt et un à vingt-quatre (2026-09-26) ; `groupe`,
 /// `groupe-etiquette`, `groupe-membre`, `groupe-membre-retire` et
-/// `groupe-supprime` de vingt-cinq à vingt-neuf (2026-09-27).
+/// `groupe-supprime` de vingt-cinq à vingt-neuf (2026-09-27) ; `droit` et
+/// `droit-retire` trente et trente et un (2026-09-27).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenreOperation {
     /// `compte`.
@@ -3121,12 +3139,16 @@ pub enum GenreOperation {
     GroupeMembreRetire,
     /// `groupe-supprime`.
     GroupeSupprime,
+    /// `droit`.
+    Droit,
+    /// `droit-retire`.
+    DroitRetire,
 }
 
 impl GenreOperation {
-    /// Les vingt-huit, dans l'ordre de `replication.md` §5.2 — et l'ordre de
-    /// leurs étiquettes, de 1 à 14, puis 16 à 29 (voir l'en-tête du type).
-    pub const TOUS: [Self; 28] = [
+    /// Les trente, dans l'ordre de `replication.md` §5.2 — et l'ordre de
+    /// leurs étiquettes, de 1 à 14, puis 16 à 31 (voir l'en-tête du type).
+    pub const TOUS: [Self; 30] = [
         Self::Compte,
         Self::Alias,
         Self::Appareil,
@@ -3155,6 +3177,8 @@ impl GenreOperation {
         Self::GroupeMembre,
         Self::GroupeMembreRetire,
         Self::GroupeSupprime,
+        Self::Droit,
+        Self::DroitRetire,
     ];
 
     /// Son étiquette, en tête du cadre.
@@ -3189,6 +3213,8 @@ impl GenreOperation {
             Self::GroupeMembre => 27,
             Self::GroupeMembreRetire => 28,
             Self::GroupeSupprime => 29,
+            Self::Droit => 30,
+            Self::DroitRetire => 31,
         }
     }
 
@@ -3228,6 +3254,8 @@ impl GenreOperation {
             27 => Self::GroupeMembre,
             28 => Self::GroupeMembreRetire,
             29 => Self::GroupeSupprime,
+            30 => Self::Droit,
+            31 => Self::DroitRetire,
             lue => return Err(Faute::Etiquette { lue }),
         })
     }
@@ -3268,6 +3296,8 @@ impl GenreOperation {
             Self::GroupeMembre => IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS,
             Self::GroupeMembreRetire => IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS + ESTAMPILLE_OCTETS,
             Self::GroupeSupprime => IDENTIFIANT_OCTETS,
+            Self::Droit => IDENTIFIANT_OCTETS + DROIT_OCTETS,
+            Self::DroitRetire => IDENTIFIANT_OCTETS,
         }
     }
 
@@ -3316,6 +3346,8 @@ impl Operation {
             Self::GroupeMembre { .. } => GenreOperation::GroupeMembre,
             Self::GroupeMembreRetire { .. } => GenreOperation::GroupeMembreRetire,
             Self::GroupeSupprime { .. } => GenreOperation::GroupeSupprime,
+            Self::Droit { .. } => GenreOperation::Droit,
+            Self::DroitRetire { .. } => GenreOperation::DroitRetire,
         }
     }
 
@@ -3629,6 +3661,21 @@ impl Operation {
             Self::GroupeSupprime { groupe } => {
                 ecrire_identifiant(*groupe, charge);
             }
+            Self::Droit {
+                droit,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*droit, charge);
+                let mut octets = [0_u8; DROIT_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::DroitRetire { droit } => {
+                ecrire_identifiant(*droit, charge);
+            }
         }
         genre.octets()
     }
@@ -3870,6 +3917,13 @@ impl Operation {
             },
             GenreOperation::GroupeSupprime => Self::GroupeSupprime {
                 groupe: lire_identifiant(charge, Genre::Ensemble)?,
+            },
+            GenreOperation::Droit => Self::Droit {
+                droit: lire_identifiant(charge, Genre::Autorisation)?,
+                enregistrement: Droit::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::DroitRetire => Self::DroitRetire {
+                droit: lire_identifiant(charge, Genre::Autorisation)?,
             },
         };
         Ok((estampille, operation, attendus))
@@ -4197,10 +4251,10 @@ mod tests {
         ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS, AliasRange, Appareil, Attestation,
         Autorisation, CADRE_DE_FIN_OCTETS, CLE_APPAREIL_OCTETS, CLE_OCTETS, CLEF_JOURNAL_OCTETS,
         COMPTE_OCTETS, Cadre, Capacites, Cause, CleLiee, Compte, Court, DESCRIPTION_OCTETS,
-        Description, EFFACEMENT_OCTETS, EMPREINTE_OCTETS, ENROLEMENT_OCTETS, ENTREE_OCTETS,
-        ESTAMPILLE_OCTETS, ETIQUETTE_DE_FIN, Effacement, Enrolement, EntreeJournal, Estampille,
-        Faute, GenreOperation, IDENTIFIANT_OCTETS, JETON_OCTETS_MAX, JetonPoussee, JetonRange,
-        MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, OPERATION_ENTETE_OCTETS,
+        Description, Droit, Droits, EFFACEMENT_OCTETS, EMPREINTE_OCTETS, ENROLEMENT_OCTETS,
+        ENTREE_OCTETS, ESTAMPILLE_OCTETS, ETIQUETTE_DE_FIN, Effacement, Enrolement, EntreeJournal,
+        Estampille, Faute, GenreOperation, IDENTIFIANT_OCTETS, JETON_OCTETS_MAX, JetonPoussee,
+        JetonRange, MACHINE_OCTETS, Machine, NOM_OCTETS_MAX, NomRange, OPERATION_ENTETE_OCTETS,
         OPERATION_OCTETS_MAX, Operation, POINT_DE_POUSSEE_OCTETS, POINT_OCTETS_MAX, PORTEE_OCTETS,
         POUSSEE_OCTETS, PROVENANCE_OCTETS, Plateforme, PointDePoussee, PointRange, Portee,
         Provenance, SERVICE_OCTETS, Service, Systeme, Verdict, ancien, sans_dates,
@@ -6135,7 +6189,7 @@ mod tests {
     // ── Les opérations ──────────────────────────────────────────────────────
 
     /// Une opération de chaque genre, dans l'ordre de `replication.md` §5.2.
-    fn une_de_chaque() -> [Operation; 28] {
+    fn une_de_chaque() -> [Operation; 30] {
         [
             Operation::Compte {
                 compte: un(Genre::Utilisateur, 1),
@@ -6277,6 +6331,22 @@ mod tests {
             Operation::GroupeSupprime {
                 groupe: un(Genre::Ensemble, 7),
             },
+            Operation::Droit {
+                droit: un(Genre::Autorisation, 8),
+                enregistrement: Droit {
+                    provenance: Provenance::Ici,
+                    estampille: e(17),
+                    par: un(Genre::Utilisateur, 1),
+                    groupe: un(Genre::Ensemble, 7),
+                    element: un(Genre::Domaine, 4),
+                    droits: Droits::TOUS,
+                    retire: None,
+                    etiquette: NomRange::nouveau("Famille").unwrap(),
+                },
+            },
+            Operation::DroitRetire {
+                droit: un(Genre::Autorisation, 8),
+            },
         ]
     }
 
@@ -6302,6 +6372,8 @@ mod tests {
                 GenreOperation::GroupeMembre => 27,
                 GenreOperation::GroupeMembreRetire => 28,
                 GenreOperation::GroupeSupprime => 29,
+                GenreOperation::Droit => 30,
+                GenreOperation::DroitRetire => 31,
                 _ => rang + 1,
             };
             assert_eq!(
@@ -6395,10 +6467,10 @@ mod tests {
 
     #[test]
     fn un_genre_inconnu_est_refuse_zero_compris() {
-        // Quinze est le cadre de fin, trente le premier au-delà du dernier
-        // genre (`groupe-supprime` tient vingt-neuf) : aucun des deux n'est
-        // une opération.
-        for lue in [0_u8, 15, 30, 200] {
+        // Quinze est le cadre de fin, trente-deux le premier au-delà du
+        // dernier genre (`droit-retire` tient trente et un) : aucun des deux
+        // n'est une opération.
+        for lue in [0_u8, 15, 32, 200] {
             let mut octets = [0_u8; OPERATION_OCTETS_MAX];
             octets[0] = lue;
             assert_eq!(Operation::lire(&octets), Err(Faute::Etiquette { lue }));
@@ -6578,6 +6650,8 @@ mod tests {
             Genre::Ensemble,
             Genre::Ensemble,
             Genre::Ensemble,
+            Genre::Autorisation,
+            Genre::Autorisation,
         ]) {
             let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
             operation.ecrire(e(1), &mut sortie);
@@ -6588,6 +6662,13 @@ mod tests {
                 "{operation:?}"
             );
         }
+        // Et l'enregistrement d'un droit est relu, pas seulement copié.
+        let droit = une_de_chaque()[28];
+        assert_eq!(droit.genre(), GenreOperation::Droit);
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        droit.ecrire(e(1), &mut sortie);
+        sortie[OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS] = 9;
+        assert_eq!(Operation::lire(&sortie), Err(Faute::Etiquette { lue: 9 }));
         // Et le point de poussée, venu après : un appareil, rien d'autre.
         let point = une_de_chaque()[18];
         assert_eq!(point.genre(), GenreOperation::PointDePoussee);
@@ -6604,7 +6685,7 @@ mod tests {
 
     #[test]
     fn les_operations_des_groupes_verifient_ce_qui_suit_le_groupe() {
-        let [.., _, etiquette, membre, retire, _] = une_de_chaque();
+        let [.., _, etiquette, membre, retire, _, _, _] = une_de_chaque();
         // Le compte d'une adhésion est un compte, et rien d'autre.
         for operation in [membre, retire] {
             let mut sortie = [0_u8; OPERATION_OCTETS_MAX];

@@ -64,6 +64,11 @@
 //! 9. **UN GROUPE, UNE MARQUE, UNE ADHÉSION SE RELISENT OU REFUSENT PAR UNE
 //!    FAUTE NOMMÉE** (`docs/modele.md` §2.12, 2026-09-27), et ce qui se relit
 //!    se réécrit à l'identique.
+//! 10. **UN DROIT SE RELIT OU REFUSE PAR UNE FAUTE NOMMÉE** (`docs/modele.md`
+//!    §2.13, 2026-09-27) ; ce qui se relit se réécrit à l'identique, porte des
+//!    droits qui ont un sens sur son élément, et une autorisation quelconque,
+//!    convertie, est un droit qui se relit et se redit à l'identique dans la
+//!    forme d'hier.
 
 #![no_main]
 
@@ -76,9 +81,9 @@ use asl_registre::{
     APPAREIL_OCTETS, AUTORISATION_OCTETS, Adhesion, AliasDeDomaine, AliasDeDomaineRange,
     AliasRange, Appareil, Attestation, Autorisation, CADRE_DE_FIN_OCTETS, COMPTE_OCTETS, Cadre,
     Capacites, Cause, CleLiee, ClefDeRecherche, Compte, DESCRIPTION_OCTETS, DOMAINE_OCTETS,
-    Description, Domaine, ENROLEMENT_OCTETS, ENTREE_OCTETS, ETIQUETTE_DE_FIN, Effacement,
-    Enrolement, EntreeJournal, Estampille, Faute, GROUPE_OCTETS, Groupe, MACHINE_OCTETS,
-    MARQUE_DE_GROUPE_OCTETS, Machine, MarqueDeGroupe, NOM_OCTETS_MAX, NomRange,
+    DROIT_OCTETS, Description, Domaine, Droit, ENROLEMENT_OCTETS, ENTREE_OCTETS, ETIQUETTE_DE_FIN,
+    Effacement, Enrolement, EntreeJournal, Estampille, Faute, GROUPE_OCTETS, Groupe,
+    MACHINE_OCTETS, MARQUE_DE_GROUPE_OCTETS, Machine, MarqueDeGroupe, NOM_OCTETS_MAX, NomRange,
     OPERATION_OCTETS_MAX, Operation, Portee, Provenance, RATTACHEMENT_OCTETS, Rattachement,
     SERVICE_OCTETS, Service, Systeme, Verdict, sans_dates,
 };
@@ -146,6 +151,10 @@ struct Entree {
     marque: [u8; MARQUE_DE_GROUPE_OCTETS],
     /// Les octets d'une adhésion.
     adhesion: [u8; ADHESION_OCTETS],
+    /// Les octets d'un droit.
+    droit: [u8; DROIT_OCTETS],
+    /// Les octets d'une autorisation d'hier, à convertir.
+    autorisation_d_hier: [u8; AUTORISATION_OCTETS],
 }
 
 /// Une faute d'enregistrement est toujours l'une des cinq, et jamais une
@@ -527,6 +536,31 @@ fuzz_target!(|entree: Entree| {
             );
         }
         Err(faute) => nommee(faute),
+    }
+    // ── PROPRIÉTÉ 10 : les droits ───────────────────────────────────────────
+    match Droit::lire(&entree.droit) {
+        Ok(droit) => {
+            assert!(droit.droits.ont_un_sens_sur(droit.element.genre()));
+            let mut refait = [0_u8; DROIT_OCTETS];
+            droit.ecrire(&mut refait);
+            assert_eq!(refait, entree.droit, "un droit relu ne se réécrit pas");
+        }
+        Err(faute) => nommee(faute),
+    }
+    if let Ok(autorisation) = Autorisation::lire(&entree.autorisation_d_hier) {
+        let droit = Droit::depuis_autorisation(&autorisation);
+        let mut octets = [0_u8; DROIT_OCTETS];
+        droit.ecrire(&mut octets);
+        assert_eq!(
+            Droit::lire(&octets),
+            Ok(droit),
+            "un droit converti ne se relit pas"
+        );
+        assert_eq!(
+            droit.en_autorisation(autorisation.a),
+            Some(autorisation),
+            "une autorisation convertie ne se redit pas à l'identique"
+        );
     }
     // ── PROPRIÉTÉ 9 : les groupes ───────────────────────────────────────────
     match Groupe::lire(&entree.groupe) {

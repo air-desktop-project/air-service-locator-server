@@ -153,7 +153,14 @@ impl Service<'_> {
     /// `POST /v1/groupes/{e}/membres` — un compte de plus. `403` sur un groupe
     /// personnel et sur celui des administrateurs des racines ; `404` si le
     /// compte n'existe pas ; `409` s'il est déjà membre.
-    pub(super) fn ajouter_un_membre(&self, groupe: Identifiant, membre: Identifiant) -> Trouvaille {
+    ///
+    /// **Réveille le compte ajouté si le groupe porte des droits**
+    /// (`docs/modele.md` §2.13) : il vient d'en recevoir.
+    pub(super) fn ajouter_un_membre(
+        &mut self,
+        groupe: Identifiant,
+        membre: Identifiant,
+    ) -> Trouvaille {
         let Some(compte) = self.compte_de_la_connexion() else {
             return Trouvaille::Rien;
         };
@@ -169,6 +176,16 @@ impl Service<'_> {
             return Trouvaille::Rien;
         }
         match self.entrepot.ajouter_membre(groupe, membre) {
+            Ok(EcritureDeGroupe::Faite) => {
+                if self
+                    .entrepot
+                    .groupe_porte_des_droits(groupe)
+                    .unwrap_or(false)
+                {
+                    self.a_reveiller.push(membre);
+                }
+                Trouvaille::Fait
+            }
             Ok(ecrit) => trouvaille_de(ecrit),
             Err(_) => Trouvaille::Rien,
         }

@@ -286,6 +286,15 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                 entrepot.premiers_domaines(),
             );
         }
+        // **ET LES AUTORISATIONS D'HIER, DEVENUES DES DROITS** (décision 41) :
+        // une fois, sous le même `g-…`, au même résultat sur l'autre racine.
+        if entrepot.autorisations_converties() > 0 {
+            eprintln!(
+                "asl-server : droits — {} autorisation(s) d'hier converties en droits `voir` + \
+                 `localiser` au groupe personnel du bénéficiaire, sous le même identifiant.",
+                entrepot.autorisations_converties(),
+            );
+        }
         // **LA RÈGLE DES ORPHELINS SE DIT AU DÉMARRAGE**, et « jamais » aussi
         // (`replication.md` §8) : c'est là qu'on relit ce qu'on croyait avoir
         // réglé.

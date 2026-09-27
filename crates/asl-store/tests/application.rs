@@ -387,7 +387,57 @@ fn prelude() -> Vec<(Estampille, Operation)> {
                 compte: c1,
             },
         ),
+        // ── Les droits (2026-09-27) ─────────────────────────────────────
+        //
+        // c1 donne `voir` et `localiser` sur son premier domaine au groupe
+        // « Famille », et `localiser` sur m1 au groupe personnel de c2.
+        (
+            est(pair(), 76),
+            Operation::Droit {
+                droit: un(Genre::Autorisation, 20),
+                enregistrement: droit(
+                    est(pair(), 76),
+                    c1,
+                    un(Genre::Ensemble, 1),
+                    asl_registre::premier_domaine(c1),
+                    asl_registre::Droits::D_UNE_AUTORISATION,
+                ),
+            },
+        ),
+        (
+            est(pair(), 77),
+            Operation::Droit {
+                droit: un(Genre::Autorisation, 21),
+                enregistrement: droit(
+                    est(pair(), 77),
+                    c1,
+                    asl_registre::groupe_personnel(c2),
+                    m1,
+                    asl_registre::Droits::LOCALISER,
+                ),
+            },
+        ),
     ]
+}
+
+/// Un droit vivant, sous cette estampille.
+fn droit(
+    estampille: Estampille,
+    par: Identifiant,
+    groupe: Identifiant,
+    element: Identifiant,
+    droits: asl_registre::Droits,
+) -> asl_registre::Droit {
+    asl_registre::Droit {
+        provenance: Provenance::Ici,
+        estampille,
+        par,
+        groupe,
+        element,
+        droits,
+        retire: None,
+        etiquette: nom("partage"),
+    }
 }
 
 /// Un groupe créé dans ce domaine, sous cette estampille.
@@ -931,6 +981,65 @@ fn conflits() -> Vec<(Estampille, Operation)> {
                 groupe: asl_registre::groupe_d_administrateurs(asl_registre::premier_domaine(c1)),
                 compte: c1,
                 ajout: est(pair(), 1),
+            },
+        ),
+        // ── Les droits (2026-09-27) ─────────────────────────────────────
+        //
+        // Le même droit retiré des deux côtés : la plus petite estampille.
+        (
+            est(pair(), 181),
+            Operation::DroitRetire {
+                droit: un(Genre::Autorisation, 21),
+            },
+        ),
+        (
+            est(autre(), 180),
+            Operation::DroitRetire {
+                droit: un(Genre::Autorisation, 21),
+            },
+        ),
+        // Un droit au groupe « Voisins », que les deux racines suppriment
+        // (166, 168) : arrivé avant, la marque l'emporte ; après, il est
+        // refusé.
+        (
+            est(pair(), 182),
+            Operation::Droit {
+                droit: un(Genre::Autorisation, 22),
+                enregistrement: droit(
+                    est(pair(), 182),
+                    c2,
+                    un(Genre::Ensemble, 2),
+                    asl_registre::premier_domaine(c2),
+                    asl_registre::Droits::VOIR,
+                ),
+            },
+        ),
+        // Un droit au groupe personnel de c3, que les deux racines effacent
+        // (120, 125) ; et un droit de c3 lui-même, sur sa machine m5.
+        (
+            est(pair(), 183),
+            Operation::Droit {
+                droit: un(Genre::Autorisation, 23),
+                enregistrement: droit(
+                    est(pair(), 183),
+                    un(Genre::Utilisateur, 4),
+                    asl_registre::groupe_personnel(un(Genre::Utilisateur, 3)),
+                    un(Genre::Machine, 1),
+                    asl_registre::Droits::LOCALISER,
+                ),
+            },
+        ),
+        (
+            est(pair(), 184),
+            Operation::Droit {
+                droit: un(Genre::Autorisation, 24),
+                enregistrement: droit(
+                    est(pair(), 184),
+                    un(Genre::Utilisateur, 3),
+                    asl_registre::groupe_personnel(c1),
+                    un(Genre::Machine, 5),
+                    asl_registre::Droits::LOCALISER,
+                ),
             },
         ),
     ]
@@ -2018,5 +2127,410 @@ fn les_groupes_convergent_vers_ce_que_les_regles_annoncent() {
         base.administrateurs_des_racines().expect("lisible"),
         (vec![c4], Some(c4))
     );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+// ── Les droits (2026-09-27) ─────────────────────────────────────────────────
+
+#[test]
+fn les_droits_convergent_vers_ce_que_les_regles_annoncent() {
+    let (base, chemin) = entrepot("droits-verifie");
+    for (estampille, operation) in prelude() {
+        appliquer(&base, estampille, operation);
+    }
+    for (estampille, operation) in conflits() {
+        appliquer(&base, estampille, operation);
+    }
+    let c1 = un(Genre::Utilisateur, 1);
+    let c2 = un(Genre::Utilisateur, 2);
+
+    // Retiré des deux côtés : la plus petite estampille de retrait, et
+    // l'octroi garde la sienne.
+    let retire = base
+        .droit(un(Genre::Autorisation, 21))
+        .expect("lisible")
+        .expect("il reste, marqué");
+    assert_eq!(retire.retire, Some(est(autre(), 180)));
+    assert_eq!(retire.estampille, est(pair(), 77));
+    // Le groupe supprimé n'a rien gardé ; le groupe personnel d'un compte
+    // effacé non plus ; ce qu'un compte effacé avait accordé non plus.
+    for quel in [22, 23, 24] {
+        assert!(
+            base.droit(un(Genre::Autorisation, quel))
+                .expect("lisible")
+                .is_none(),
+            "g{quel}"
+        );
+    }
+    // Le droit sur le domaine de c1, au groupe « Famille » dont c2 est membre.
+    let famille = base
+        .droit(un(Genre::Autorisation, 20))
+        .expect("lisible")
+        .expect("vivant");
+    assert!(famille.retire.is_none());
+    assert!(
+        base.droits_recus(c2)
+            .expect("lisible")
+            .iter()
+            .any(|(quel, _)| *quel == un(Genre::Autorisation, 20))
+    );
+    assert_eq!(
+        base.droits_recus_sur(c2, asl_registre::premier_domaine(c1))
+            .expect("lisible"),
+        asl_registre::Droits::D_UNE_AUTORISATION
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+/// Un compte, créé sous cette estampille par la racine du pair.
+fn creer(base: &Entrepot, compte_: Identifiant, compteur: u64) {
+    appliquer(
+        base,
+        est(pair(), compteur),
+        Operation::Compte {
+            compte: compte_,
+            enregistrement: compte(est(pair(), compteur), None),
+        },
+    );
+}
+
+#[test]
+fn un_droit_sur_un_domaine_descend_a_ses_machines_et_s_arrete_la() {
+    // **`docs/modele.md` §2.13** : un droit sur un domaine vaut pour les
+    // machines qui y sont rangées — tant qu'elles y valent rangées —, et
+    // `voir` ne donne pas `localiser`.
+    let (base, chemin) = entrepot("droits-domaine");
+    let proprietaire = un(Genre::Utilisateur, 1);
+    let ami = un(Genre::Utilisateur, 2);
+    let tiers = un(Genre::Utilisateur, 3);
+    for (rang, qui) in [proprietaire, ami, tiers].into_iter().enumerate() {
+        creer(&base, qui, u64::try_from(rang).unwrap() + 1);
+    }
+    let maison = asl_registre::premier_domaine(proprietaire);
+    let nas = un(Genre::Machine, 1);
+    let hors = un(Genre::Machine, 2);
+    for (compteur, quelle) in [(10, nas), (11, hors)] {
+        appliquer(
+            &base,
+            est(pair(), compteur),
+            Operation::Machine {
+                machine: quelle,
+                enregistrement: machine(est(pair(), compteur), proprietaire, "nas"),
+            },
+        );
+    }
+    base.rattacher_machine(nas, Some(maison)).expect("rangée");
+
+    // `voir` au groupe personnel de l'ami, sur le domaine.
+    base.accorder_droit(
+        un(Genre::Autorisation, 1),
+        proprietaire,
+        asl_registre::groupe_personnel(ami),
+        maison,
+        asl_registre::Droits::VOIR,
+        nom("maison"),
+    )
+    .expect("écrit");
+    let voir = base.acces(ami, asl_store::Voulu::Voir).expect("lisible");
+    assert_eq!(
+        voir,
+        vec![asl_store::Acces {
+            proprietaire,
+            portee: Portee::UneMachine(nas),
+        }],
+        "la machine rangée, et elle seule"
+    );
+    assert!(
+        base.acces(ami, asl_store::Voulu::Localiser)
+            .expect("lisible")
+            .is_empty(),
+        "voir n'est pas localiser"
+    );
+    assert!(
+        base.acces(tiers, asl_store::Voulu::Voir)
+            .expect("lisible")
+            .is_empty()
+    );
+
+    // Sortie du domaine, la machine n'est plus couverte.
+    base.rattacher_machine(nas, None).expect("sortie");
+    assert!(
+        base.acces(ami, asl_store::Voulu::Voir)
+            .expect("lisible")
+            .is_empty()
+    );
+
+    // Retiré, le droit ne donne plus rien, et reste — marqué.
+    base.rattacher_machine(nas, Some(maison)).expect("rangée");
+    let avant = base
+        .retirer_droit(un(Genre::Autorisation, 1))
+        .expect("lisible")
+        .expect("il existait");
+    assert!(avant.retire.is_none());
+    assert!(
+        base.acces(ami, asl_store::Voulu::Voir)
+            .expect("lisible")
+            .is_empty()
+    );
+    assert!(
+        base.droit(un(Genre::Autorisation, 1))
+            .expect("lisible")
+            .expect("il reste")
+            .retire
+            .is_some()
+    );
+    // Retirer deux fois ne réécrit rien.
+    let compteur = base.compteur().expect("lisible");
+    base.retirer_droit(un(Genre::Autorisation, 1))
+        .expect("lisible");
+    assert_eq!(base.compteur().expect("lisible"), compteur);
+    assert_eq!(
+        base.retirer_droit(un(Genre::Autorisation, 9))
+            .expect("lisible"),
+        None
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn administrer_et_rattacher_se_recoivent_par_un_droit() {
+    let (base, chemin) = entrepot("droits-administrer");
+    let proprietaire = un(Genre::Utilisateur, 1);
+    let gerant = un(Genre::Utilisateur, 2);
+    let voisin = un(Genre::Utilisateur, 3);
+    for (rang, qui) in [proprietaire, gerant, voisin].into_iter().enumerate() {
+        creer(&base, qui, u64::try_from(rang).unwrap() + 1);
+    }
+    let maison = asl_registre::premier_domaine(proprietaire);
+    assert!(!base.administre(gerant, maison).expect("lisible"));
+    assert!(
+        base.droits_sur_domaine(gerant, maison)
+            .expect("lisible")
+            .est_vide()
+    );
+
+    // `administrer` : il administre, et voit le domaine dans les siens.
+    base.accorder_droit(
+        un(Genre::Autorisation, 1),
+        proprietaire,
+        asl_registre::groupe_personnel(gerant),
+        maison,
+        asl_registre::Droits::ADMINISTRER,
+        nom("gérance"),
+    )
+    .expect("écrit");
+    assert!(base.administre(gerant, maison).expect("lisible"));
+    assert!(
+        base.domaines_administres(gerant)
+            .expect("lisible")
+            .contains(&maison)
+    );
+    let droits = base.droits_sur_domaine(gerant, maison).expect("lisible");
+    assert!(
+        droits.contient(asl_registre::Droits::ADMINISTRER.union(asl_registre::Droits::RATTACHER))
+    );
+    assert!(droits.contient(asl_registre::Droits::VOIR));
+    assert!(!droits.contient(asl_registre::Droits::LOCALISER));
+
+    // `rattacher` seul : il range SES machines, sans administrer.
+    base.accorder_droit(
+        un(Genre::Autorisation, 2),
+        proprietaire,
+        asl_registre::groupe_personnel(voisin),
+        maison,
+        asl_registre::Droits::RATTACHER,
+        nom("voisin"),
+    )
+    .expect("écrit");
+    assert!(!base.administre(voisin, maison).expect("lisible"));
+    assert!(base.peut_ranger(voisin, maison).expect("lisible"));
+    let sienne = un(Genre::Machine, 7);
+    appliquer(
+        &base,
+        est(pair(), 20),
+        Operation::Machine {
+            machine: sienne,
+            enregistrement: machine(est(pair(), 20), voisin, "sienne"),
+        },
+    );
+    base.rattacher_machine(sienne, Some(maison))
+        .expect("rangée");
+    assert_eq!(
+        base.domaine_de_machine(sienne).expect("lisible"),
+        Some(maison)
+    );
+    // Retiré, le rattachement ne vaut plus — à la lecture (décision 43).
+    base.retirer_droit(un(Genre::Autorisation, 2))
+        .expect("retiré");
+    assert_eq!(base.domaine_de_machine(sienne).expect("lisible"), None);
+    // Le propriétaire voit ce que son gérant voit, et accorde sur la machine
+    // de son voisin tant qu'elle est rangée chez lui.
+    assert!(
+        !base
+            .peut_accorder_sur_la_machine(proprietaire, sienne)
+            .expect("lisible")
+    );
+    // Le domaine racine ne se reçoit pas.
+    assert!(
+        !base
+            .peut_ranger(voisin, asl_registre::domaine_racine())
+            .expect("lisible")
+    );
+    assert!(
+        base.droits_sur_domaine(voisin, asl_registre::domaine_racine())
+            .expect("lisible")
+            .est_vide()
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn un_droit_sur_une_machine_ne_vaut_que_tant_que_son_donneur_en_a_le_pouvoir() {
+    // **Décision 44** : l'administrateur d'un domaine partage une machine qui y
+    // est rangée ; sortie du domaine, son partage ne vaut plus, et revient si
+    // elle y rentre. Ce que le propriétaire a partagé, lui, vaut toujours.
+    let (base, chemin) = entrepot("droits-donneur");
+    let proprietaire = un(Genre::Utilisateur, 1);
+    let admin = un(Genre::Utilisateur, 2);
+    let ami = un(Genre::Utilisateur, 3);
+    for (rang, qui) in [proprietaire, admin, ami].into_iter().enumerate() {
+        creer(&base, qui, u64::try_from(rang).unwrap() + 1);
+    }
+    let chez_admin = asl_registre::premier_domaine(admin);
+    base.accorder_droit(
+        un(Genre::Autorisation, 1),
+        admin,
+        asl_registre::groupe_personnel(proprietaire),
+        chez_admin,
+        asl_registre::Droits::RATTACHER,
+        nom("rangement"),
+    )
+    .expect("écrit");
+    let nas = un(Genre::Machine, 1);
+    appliquer(
+        &base,
+        est(pair(), 10),
+        Operation::Machine {
+            machine: nas,
+            enregistrement: machine(est(pair(), 10), proprietaire, "nas"),
+        },
+    );
+    let depot = un(Genre::Service, 1);
+    appliquer(
+        &base,
+        est(pair(), 11),
+        Operation::Service {
+            service: depot,
+            enregistrement: service(est(pair(), 11), nas, "depot"),
+        },
+    );
+    base.rattacher_machine(nas, Some(chez_admin))
+        .expect("rangée");
+    assert!(
+        base.peut_accorder_sur_la_machine(admin, nas)
+            .expect("lisible")
+    );
+    assert_eq!(
+        base.machine_de_l_element(depot).expect("lisible"),
+        Some(nas)
+    );
+    base.accorder_droit(
+        un(Genre::Autorisation, 2),
+        admin,
+        asl_registre::groupe_personnel(ami),
+        depot,
+        asl_registre::Droits::LOCALISER,
+        nom("par l'admin"),
+    )
+    .expect("écrit");
+    let attendu = vec![asl_store::Acces {
+        proprietaire,
+        portee: Portee::UnService(depot),
+    }];
+    assert_eq!(
+        base.acces(ami, asl_store::Voulu::Localiser)
+            .expect("lisible"),
+        attendu
+    );
+
+    base.rattacher_machine(nas, None).expect("sortie");
+    assert!(
+        base.acces(ami, asl_store::Voulu::Localiser)
+            .expect("lisible")
+            .is_empty()
+    );
+    base.rattacher_machine(nas, Some(chez_admin))
+        .expect("rentrée");
+    assert_eq!(
+        base.acces(ami, asl_store::Voulu::Localiser)
+            .expect("lisible"),
+        attendu
+    );
+
+    // Et le groupe qui le reçoit porte des droits : ajouter un compte le
+    // réveillera.
+    assert!(
+        base.groupe_porte_des_droits(asl_registre::groupe_personnel(ami))
+            .expect("lisible")
+    );
+    assert!(
+        !base
+            .groupe_porte_des_droits(asl_registre::groupe_personnel(admin))
+            .expect("lisible")
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn un_droit_n_entre_pas_sans_son_groupe_ni_son_element() {
+    let (base, chemin) = entrepot("droits-refus");
+    let c1 = un(Genre::Utilisateur, 1);
+    creer(&base, c1, 1);
+    let accorder = |quel: u8, groupe: Identifiant, element: Identifiant| {
+        base.accorder_droit(
+            un(Genre::Autorisation, quel),
+            c1,
+            groupe,
+            element,
+            asl_registre::Droits::VOIR,
+            nom("x"),
+        )
+        .expect("lisible")
+    };
+    let personnel = asl_registre::groupe_personnel(c1);
+    // Un groupe qui n'existe pas.
+    assert_eq!(
+        accorder(1, un(Genre::Ensemble, 9), asl_registre::premier_domaine(c1)),
+        asl_store::EcritureDeDroit::Absent
+    );
+    // Des éléments qui n'existent pas, et le domaine racine.
+    for (quel, element) in [
+        (2, un(Genre::Machine, 9)),
+        (3, un(Genre::Service, 9)),
+        (4, un(Genre::Domaine, 9)),
+        (5, asl_registre::domaine_racine()),
+        (6, un(Genre::Utilisateur, 9)),
+    ] {
+        assert_eq!(
+            accorder(quel, personnel, element),
+            asl_store::EcritureDeDroit::Absent
+        );
+    }
+    // Un compte existant : l'élément « compte » entre.
+    assert_eq!(
+        accorder(7, personnel, c1),
+        asl_store::EcritureDeDroit::Faite
+    );
+    assert!(matches!(
+        base.accorder_droit(
+            un(Genre::Autorisation, 7),
+            c1,
+            personnel,
+            c1,
+            asl_registre::Droits::VOIR,
+            nom("x"),
+        ),
+        Err(asl_store::Faute::Existe)
+    ));
     let _ = std::fs::remove_file(&chemin);
 }

@@ -1224,3 +1224,32 @@ fn les_administrateurs_se_nomment_sous_la_cle_d_exploitant_sans_autre_exigence()
         })
     );
 }
+
+// ── Les droits (2026-09-27) ─────────────────────────────────────────────────
+
+#[test]
+fn les_chemins_des_droits_designent_leurs_ressources() {
+    let g = ident(Genre::Autorisation);
+    for methode in [Methode::Get, Methode::Post] {
+        let droits = resoudre(methode, b"/v1/droits").unwrap();
+        assert_eq!(droits.ressource, Ressource::Droits);
+        assert_eq!(droits.exigence, Exigence::Appareil);
+        assert!(droits.sert);
+    }
+    assert!(!resoudre(Methode::Delete, b"/v1/droits").unwrap().sert);
+    let chemin = format!("/v1/droits/{g}");
+    let retirer = resoudre(Methode::Delete, chemin.as_bytes()).unwrap();
+    assert!(matches!(
+        retirer.ressource,
+        Ressource::Droit { droit } if droit.texte().as_str() == g
+    ));
+    assert_eq!(retirer.exigence, Exigence::Appareil);
+    assert!(retirer.sert);
+    assert!(!resoudre(Methode::Get, chemin.as_bytes()).unwrap().sert);
+    assert_eq!(
+        resoudre_get(&format!("/v1/droits/{}", ident(Genre::Ensemble))),
+        Err(Erreur::IdentifiantInvalide {
+            attendu: Genre::Autorisation
+        })
+    );
+}

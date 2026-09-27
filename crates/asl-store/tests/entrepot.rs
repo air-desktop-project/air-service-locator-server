@@ -233,6 +233,10 @@ fn chaque_ecriture_avance_le_compteur_et_laisse_une_operation() {
         .expect("9");
     base.declarer_service(depot, Provenance::Ici, grenier, nom("depot"))
         .expect("10");
+    // **LE BÉNÉFICIAIRE EXISTE** : une autorisation d'hier devient un droit à
+    // son groupe personnel, qui naît avec son compte.
+    base.creer_compte(un(Genre::Utilisateur, 6), Provenance::Ici, None)
+        .expect("11");
     base.accorder_autorisation(
         accordee,
         Provenance::Ici,
@@ -241,14 +245,14 @@ fn chaque_ecriture_avance_le_compteur_et_laisse_une_operation() {
         Portee::UneMachine(grenier),
         nom("le grenier"),
     )
-    .expect("11");
-    base.revoquer_autorisation(accordee).expect("12");
-    base.revoquer_cle(grenier).expect("13");
-    base.revoquer_appareil(iphone, REVOQUE_LE).expect("14");
+    .expect("12");
+    base.revoquer_autorisation(accordee).expect("13");
+    base.revoquer_cle(grenier).expect("14");
+    base.revoquer_appareil(iphone, REVOQUE_LE).expect("15");
 
-    assert_eq!(base.compteur().expect("lisible"), 14);
+    assert_eq!(base.compteur().expect("lisible"), 15);
     let journal = operations(&base, 0);
-    assert_eq!(journal.len(), 14);
+    assert_eq!(journal.len(), 15);
     for (rang, (estampille, _)) in journal.iter().enumerate() {
         assert_eq!(*estampille, e(u64::try_from(rang).expect("petit") + 1));
     }
@@ -271,8 +275,10 @@ fn chaque_ecriture_avance_le_compteur_et_laisse_une_operation() {
             G::Enrolement,
             G::CleMachine,
             G::Service,
-            G::Autorisation,
-            G::AutorisationRevoquee,
+            G::Compte,
+            // Le verbe d'hier écrit un droit (décision 41).
+            G::Droit,
+            G::DroitRetire,
             G::CleMachineRevoquee,
             G::AppareilRevoque,
         ]
@@ -286,7 +292,7 @@ fn chaque_ecriture_avance_le_compteur_et_laisse_une_operation() {
         .machine(grenier)
         .expect("lisible")
         .expect("elle est là");
-    assert_eq!(machine.estampille, e(13), "la révocation de la clé");
+    assert_eq!(machine.estampille, e(14), "la révocation de la clé");
     assert_eq!(machine.nom_estampille, e(7), "le renommage");
     assert_eq!(
         machine.capacites_estampille,
@@ -295,13 +301,15 @@ fn chaque_ecriture_avance_le_compteur_et_laisse_une_operation() {
     );
     assert!(machine.cle.is_none());
     let appareil = base.appareil(iphone).expect("lisible").expect("il est là");
-    assert_eq!(appareil.estampille, e(14));
+    assert_eq!(appareil.estampille, e(15));
     assert!(appareil.revoque());
+    // Dans la forme d'hier, une autorisation révoquée porte l'estampille de sa
+    // révocation.
     assert_eq!(
         base.autorisation(accordee)
             .expect("lisible")
             .map(|quoi| quoi.estampille),
-        Some(e(12))
+        Some(e(13))
     );
     assert_eq!(
         base.service(depot)
@@ -311,8 +319,8 @@ fn chaque_ecriture_avance_le_compteur_et_laisse_une_operation() {
     );
 
     // Le rattrapage rend ce qui suit un compteur, et rien avant.
-    assert_eq!(operations(&base, 12).len(), 2);
-    assert_eq!(operations(&base, 14).len(), 0);
+    assert_eq!(operations(&base, 12).len(), 3);
+    assert_eq!(operations(&base, 15).len(), 0);
     let _ = std::fs::remove_file(&chemin);
 }
 
@@ -637,19 +645,22 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
         .expect("9");
     base.declarer_service(depot, Provenance::Ici, grenier, nom("depot"))
         .expect("10");
+    // Le bénéficiaire existe : le droit converti vise son groupe personnel.
+    let lea = un(Genre::Utilisateur, 6);
+    base.creer_compte(lea, Provenance::Ici, None).expect("11");
     base.accorder_autorisation(
         accordee,
         Provenance::Ici,
         thierry,
-        un(Genre::Utilisateur, 6),
+        lea,
         Portee::UneMachine(grenier),
         nom("le grenier"),
     )
-    .expect("11");
-    base.revoquer_autorisation(accordee).expect("12");
-    base.revoquer_appareil(iphone, REVOQUE_LE).expect("13");
+    .expect("12");
+    base.revoquer_autorisation(accordee).expect("13");
+    base.revoquer_appareil(iphone, REVOQUE_LE).expect("14");
     base.emettre_enrolement(&en_attente, Provenance::Ici, grenier, 20_000)
-        .expect("14");
+        .expect("15");
     // **CE QUI NE VIENT PAS D'ICI NE SORT PAS** (C11) : une écriture de
     // provenance distante est estampillée — c'est une écriture —, mais elle
     // n'entre ni dans le journal, ni dans l'instantané.
@@ -658,12 +669,12 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
         Provenance::Annuaire(un(Genre::Annuaire, 1)),
         None,
     )
-    .expect("15");
-    assert_eq!(base.compteur().expect("lisible"), 15);
+    .expect("16");
+    assert_eq!(base.compteur().expect("lisible"), 16);
 
     let cadres = instantane(&base);
     let (fin, operations) = cadres.split_last().expect("au moins la fin");
-    assert_eq!(*fin, Cadre::Fin { coupe: e(15) }, "le compteur de coupe");
+    assert_eq!(*fin, Cadre::Fin { coupe: e(16) }, "le compteur de coupe");
     assert!(
         operations
             .iter()
@@ -726,6 +737,16 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
             ),
         ]
     );
+    // Léa, et sa réclamation vide.
+    assert!(matches!(
+        operations[2],
+        (_, Operation::Compte { compte, .. }) if compte == lea
+    ));
+    assert!(matches!(
+        operations[3],
+        (_, Operation::Alias { compte, alias: None }) if compte == lea
+    ));
+    let operations = [&operations[..2], &operations[4..]].concat();
 
     // La machine : sans clé, puis le nom sous SON estampille, les capacités
     // sous la leur, et la clé sous celle de la liaison — l'empreinte du code
@@ -785,21 +806,21 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
         &operations[6..10],
         [
             (
-                e(13),
+                e(14),
                 Operation::Appareil {
                     appareil: iphone,
                     enregistrement: appareil,
                 },
             ),
             (
-                e(13),
+                e(14),
                 Operation::AppareilRevoque {
                     appareil: iphone,
                     revoque_le: REVOQUE_LE,
                 },
             ),
             (
-                e(13),
+                e(14),
                 Operation::AppareilAtteste {
                     appareil: iphone,
                     atteste: Attestation::Apple,
@@ -824,17 +845,19 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
         "le jeton est parti avec l'appareil"
     );
 
-    // Le code en attente, le service, l'autorisation révoquée.
+    // Le code en attente, le service, le droit qu'est devenue l'autorisation
+    // révoquée — l'enregistrement entier, retrait compris, sous l'estampille
+    // de l'octroi.
     assert_eq!(
         &operations[10..],
         [
             (
-                e(14),
+                e(15),
                 Operation::Enrolement {
                     empreinte: en_attente,
                     enregistrement: asl_registre::Enrolement {
                         provenance: Provenance::Ici,
-                        estampille: e(14),
+                        estampille: e(15),
                         machine: grenier,
                         expire_a: 20_000,
                     },
@@ -849,21 +872,18 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
             ),
             (
                 e(12),
-                Operation::Autorisation {
-                    autorisation: accordee,
-                    enregistrement: base
-                        .autorisation(accordee)
-                        .expect("lisible")
-                        .expect("elle est là"),
-                },
-            ),
-            (
-                e(12),
-                Operation::AutorisationRevoquee {
-                    autorisation: accordee,
+                Operation::Droit {
+                    droit: accordee,
+                    enregistrement: base.droit(accordee).expect("lisible").expect("il est là"),
                 },
             ),
         ]
+    );
+    assert_eq!(
+        base.droit(accordee)
+            .expect("lisible")
+            .and_then(|droit| droit.retire),
+        Some(e(13))
     );
     let _ = std::fs::remove_file(&chemin);
 }
@@ -1940,6 +1960,10 @@ fn les_autorisations_recues_sont_celles_du_beneficiaire_et_pas_d_un_autre() {
     let donneur = un(Genre::Utilisateur, 1);
     let beneficiaire = un(Genre::Utilisateur, 2);
     let etranger = un(Genre::Utilisateur, 3);
+    for qui in [donneur, beneficiaire, etranger] {
+        base.creer_compte(qui, Provenance::Ici, None)
+            .expect("un compte");
+    }
 
     base.accorder_autorisation(
         un(Genre::Autorisation, 1),
@@ -1984,6 +2008,8 @@ fn un_meme_beneficiaire_peut_en_recevoir_plusieurs() {
     // n'accorderait pas ce qu'il fallait.
     let (base, chemin) = entrepot("plusieurs");
     let beneficiaire = un(Genre::Utilisateur, 2);
+    base.creer_compte(beneficiaire, Provenance::Ici, None)
+        .expect("un compte");
     for (rang, portee) in [
         (1_u8, Portee::ToutLeCompte),
         (2, Portee::UneMachine(un(Genre::Machine, 1))),
@@ -2545,6 +2571,8 @@ fn revoquer_une_autorisation_la_marque_et_la_laisse_visible() {
     let (base, fichier) = entrepot("revoque-autorisation");
     let quelle = un(Genre::Autorisation, 6);
     let beneficiaire = un(Genre::Utilisateur, 7);
+    base.creer_compte(beneficiaire, Provenance::Ici, None)
+        .expect("un compte");
     assert!(base.autorisation(quelle).expect("lisible").is_none());
     assert!(
         base.revoquer_autorisation(quelle)
@@ -2681,6 +2709,11 @@ fn les_autorisations_sortent_dans_les_deux_sens_avec_leur_identifiant() {
     let (entrepot, chemin) = entrepot("autorisations-deux-sens");
     let moi = un(Genre::Utilisateur, 1);
     let autre = un(Genre::Utilisateur, 2);
+    for qui in [moi, autre] {
+        entrepot
+            .creer_compte(qui, Provenance::Ici, None)
+            .expect("un compte");
+    }
 
     let accordee = un(Genre::Autorisation, 30);
     let recue = un(Genre::Autorisation, 31);
@@ -2739,6 +2772,11 @@ fn une_autorisation_revoquee_reste_dans_la_liste() {
     let (entrepot, chemin) = entrepot("autorisation-revoquee");
     let moi = un(Genre::Utilisateur, 1);
     let autre = un(Genre::Utilisateur, 2);
+    for qui in [moi, autre] {
+        entrepot
+            .creer_compte(qui, Provenance::Ici, None)
+            .expect("un compte");
+    }
     let quelle = un(Genre::Autorisation, 30);
 
     entrepot

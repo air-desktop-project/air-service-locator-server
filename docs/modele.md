@@ -965,7 +965,7 @@ propre, une liste propre, ses opérations propres — les groupes et les droits
 |---|---|
 | **Le propriétaire** | Tout. **Membre d'office** du groupe d'administrateurs, et **il ne s'en retire pas** : un domaine sans personne pour le gérer ne se rattraperait pas. Lui seul supprime le domaine et le confie à un annuaire local. |
 | **Un membre du groupe d'administrateurs** | Le droit `administrer` sur le domaine (§2.13) : poser l'alias, créer et supprimer les groupes du domaine, en changer les membres — y compris celui des administrateurs —, accorder et retirer des droits sur le domaine, ses machines et ses services. |
-| **Un membre d'un groupe qui a `rattacher`** | Rattacher et détacher **SES PROPRES** machines. **En 0.24.0, avant les droits** (PR 2), ranger dans un domaine, c'est l'administrer : le propriétaire ou un membre du groupe d'administrateurs. |
+| **Un membre d'un groupe qui a `rattacher`** | Rattacher et détacher **SES PROPRES** machines — sans administrer (0.25.0 ; en 0.24.0, avant les droits, ranger c'était administrer). |
 
 **On ne rattache que des machines dont on est propriétaire**, quel que soit le
 droit qu'on tient : `rattacher` ouvre le domaine, jamais les machines d'un
@@ -1077,7 +1077,8 @@ serait le mode anonyme que C10 interdit.
 
 ### 2.13 Droit
 
-**Décidé le 2026-09-26 (Thierry)** (`replication.md` décisions 40 et 41). Un
+**Décidé le 2026-09-26 (Thierry)** (`replication.md` décisions 40 et 41 ; la
+forme codée, décision 44, 0.25.0). Un
 droit est ce qui remplace l'autorisation (§2.5) : **un groupe reçoit des droits
 sur un élément**.
 
@@ -1085,7 +1086,7 @@ sur un élément**.
 |---|---|
 | `identifiant` | `g-` + 26 caractères — **la lettre de l'autorisation, gardée** : une autorisation convertie garde son identifiant, et une application qui tient un `g-…` le retrouve. |
 | `groupe` | Le groupe bénéficiaire (§2.12). **Jamais un compte seul** : pour une personne, c'est son groupe personnel. |
-| `élément` | Un domaine `d-…`, une machine `m-…`, ou un service `s-…` ; et, pour les seules autorisations converties, **un compte `u-…`** — « tout ce que ce compte possède » (proposé, ci-dessous). |
+| `élément` | Un domaine `d-…`, une machine `m-…`, ou un service `s-…` ; et, pour les seules autorisations converties, **un compte `u-…`** — « tout ce que ce compte possède » (décidé, ci-dessous). |
 | `droits` | Un ou plusieurs de : **`administrer`**, **`rattacher`**, **`voir`**, **`localiser`** (ci-dessous). |
 | `étiquette` | Libre — pour savoir ce qu'on retire six mois plus tard, comme l'autorisation. |
 | `accordé par` / `accordé le` / `retiré le` | Le compte qui l'a accordé, et les dates. Un droit retiré reste, marqué — même raison qu'un appareil révoqué. |
@@ -1094,7 +1095,7 @@ sur un élément**.
 
 | Droit | Ce qu'il permet | Sur quoi il a un sens |
 |---|---|---|
-| `administrer` | Gérer le domaine : son alias, ses groupes et leurs membres, les droits accordés sur lui, ses machines et ses services. **Emporte `voir`.** | Un domaine. |
+| `administrer` | Gérer le domaine : son alias, ses groupes et leurs membres, les droits accordés sur lui, ses machines et ses services. **Emporte `rattacher` et `voir`** (décision 44) : qui administre un domaine y range, et voit ce qu'il administre. | Un domaine. |
 | `rattacher` | Rattacher et détacher **ses propres** machines au domaine. | Un domaine. |
 | `voir` | Lister les machines et les services — identifiants, noms, état —, **pas leurs adresses**. | Domaine, machine, service. |
 | `localiser` | Obtenir l'adresse et le port d'un service : `GET /v1/ou` (`protocole.md` §3). **Emporte `voir`** sur ce qu'il couvre. | Domaine, machine, service. |
@@ -1106,7 +1107,19 @@ services, quel que soit le domaine où elle est : **son propriétaire**, toujour
 **Aucun droit ne se crée pour soi par un autre chemin** : on n'accorde que sur
 ce qu'on possède ou qu'on administre.
 
-**La règle de résolution : l'UNION, sans droit négatif** (proposé). Ce qu'un compte peut sur un élément est **la réunion** de
+**Un droit sur une machine ou un service ne vaut que tant que celui qui l'a
+accordé en a encore le pouvoir** (décision 44) : il en est le propriétaire, ou
+il administre le domaine où elle est rangée. Sortir sa machine d'un domaine
+retire donc, **à la lecture**, ce que les administrateurs du domaine en avaient
+partagé ; l'y remettre le rend. Rien ne s'écrit pour cela — la règle du
+rattachement (décision 43, point 5) appliquée au partage. Un droit sur un
+domaine, lui, vaut tant que le domaine vit.
+
+**Retirer un droit** : celui qui l'a accordé, ou qui a aujourd'hui le pouvoir
+d'accorder sur l'élément. Un membre du groupe bénéficiaire le voit, et ne le
+retire pas (`403`) : il quitte le groupe, ou demande.
+
+**La règle de résolution : l'UNION, sans droit négatif** (décidé, décision 44). Ce qu'un compte peut sur un élément est **la réunion** de
 tous les droits accordés, sur cet élément et sur ce qui le contient — le
 service, sa machine, le domaine de sa machine —, à **tous** les groupes dont il
 est membre. Le propriétaire d'une machine a tous les droits sur elle et ses
@@ -1135,7 +1148,7 @@ s'arrête au domaine de la machine.
 #### Les autorisations d'hier — converties, et ce qu'elles deviennent
 
 **Chaque autorisation existante devient un droit, à la reprise de l'entrepôt**
-(décidé : Thierry ; le détail proposé), sur les deux racines, chacune de son
+(décidé : Thierry ; le détail, décision 44), sur les deux racines, chacune de son
 côté et au même résultat — rien ne s'échange :
 
 | L'autorisation | Le droit |
@@ -1143,7 +1156,7 @@ côté et au même résultat — rien ne s'échange :
 | `g-…` | **Le même `g-…`.** |
 | `accordée par` A, `accordée à` B | Accordé par A, au **groupe personnel de B** (identifiant déduit de `u-…` de B, donc le même sur les deux racines). |
 | Portée « un service » / « une machine » | Élément : ce service / cette machine. |
-| Portée « tout mon compte » | Élément : **le compte d'A** (proposé). Hier, cette portée couvrait toutes les machines d'A, y compris celles déclarées après ; un droit par domaine ne couvrirait pas les machines d'A **sans domaine** — celles d'avant les domaines —, et un droit par machine ne couvrirait pas les suivantes. Le quatrième élément est la seule conversion qui ne change pas en silence ce qu'A avait accordé. Il ne s'accorde plus que par le verbe de compatibilité ; les applications nouvelles accordent sur un domaine. |
+| Portée « tout mon compte » | Élément : **le compte d'A** (décidé). Hier, cette portée couvrait toutes les machines d'A, y compris celles déclarées après ; un droit par domaine ne couvrirait pas les machines d'A **sans domaine** — celles d'avant les domaines —, et un droit par machine ne couvrirait pas les suivantes. Le quatrième élément est la seule conversion qui ne change pas en silence ce qu'A avait accordé. Il ne s'accorde plus que par le verbe de compatibilité ; les applications nouvelles accordent sur un domaine. |
 | Les droits | **`voir` et `localiser`** : exactement ce qu'une autorisation donnait (§2.5, « Ce que le bénéficiaire voit »). |
 | `étiquette`, `révoquée le` | L'étiquette ; `retiré le`. |
 
@@ -1164,6 +1177,17 @@ côté et au même résultat — rien ne s'échange :
   La ligne du flux des nouvelles garde son genre, `{"quoi":"autorisation"}` :
   les applications déployées relisent sur elle, et c'est ce qu'on veut
   (`protocole.md` §2.2).
+- **La conversion est une fonction des seuls octets de l'autorisation** : le
+  même enregistrement des deux côtés, octet pour octet. Elle se fait une fois,
+  à la première ouverture en 0.25.0, et **ne vide pas le journal** : une
+  opération `autorisation` encore au journal de l'autre racine se convertit à
+  l'application par la même fonction (`replication.md` décision 44).
+- **La vue de compatibilité rend les octets d'hier** : `GET /v1/autorisations`
+  rend, pour un droit converti ou accordé par le verbe d'hier, exactement ce
+  qu'il rendait pour l'autorisation — sans champ `groupe`, ni rien de neuf. Un
+  droit qui n'a pas de forme d'hier — sur un domaine, ou sans `localiser` —
+  n'y paraît pas ; de ceux que j'ai accordés, seuls ceux donnés à un groupe
+  personnel y paraissent, son titulaire pour bénéficiaire.
 - **L'exposition** (§2.8) n'est pas touchée : elle concerne ce qu'un annuaire
   réplique vers un pair, pas qui peut lire.
 
