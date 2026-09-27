@@ -16,6 +16,7 @@ asl-cle.workspace = true
 asl-id.workspace = true
 asl-keystore.workspace = true
 asl-proto.workspace = true
+asl-racines.workspace = true
 asl-registre.workspace = true
 asl-reveil.workspace = true
 asl-session.workspace = true

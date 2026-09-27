@@ -2114,9 +2114,17 @@ publie sans redémarrer — est une suite nommée.
 La réponse d'annonce est **l'objet que `GET /v1/ou` rend**, encodé par
 l'annuaire local : les racines le rendent tel quel à qui peut le localiser.
 Et une racine qui reçoit l'annonce d'une machine d'un domaine confié répond
-**`421`** avec `{"annuaire":"n-…","adresses":["hôte:port",…]}` : pour chaque
-membre accepté, les locateurs qu'il a publiés, ou son adresse déclarée s'il
-n'en a publié aucun (décision 57) — huit au plus pour une paire.
+**`421`** avec `{"annuaire":"n-…","adresses":["hôte:port",…],"identites":"n-… n-…"}` :
+pour chaque membre accepté, les locateurs qu'il a publiés, ou son adresse
+déclarée s'il n'en a publié aucun (décision 57) — huit au plus pour une paire.
+**`identites` dit, rang par rang, l'identité du membre au bout de chaque
+adresse** (décision 59, 0.31.0) : le second d'une paire a SA clé, et c'est
+elle qu'un client doit attendre en le joignant, pas celle du titulaire que
+porte `annuaire`. C'est une **chaîne**, des `n-…` séparés d'une espace, et non
+une liste d'objets : le lecteur d'hier (client 0.16/0.17) ne saute une clé
+inconnue que si sa valeur est une chaîne — il ignore donc `identites` et suit
+les mêmes adresses. Un annuaire d'avant 0.31.0 ne l'écrit pas : le client
+attend alors `annuaire` au bout de chaque adresse, comme hier.
 
 **L'exigence est nouvelle** : une clé d'identité `n-…` **inscrite et
 acceptée**, pas celle de `--peer-key`. Une racine qui reçoit un `POST /v1/defi`

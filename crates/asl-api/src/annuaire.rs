@@ -344,6 +344,68 @@ fn ecrire_des_chaines(ecrivain: &mut Ecrivain<'_>, chaines: &[&str]) {
     ecrivain.pousser(b"]");
 }
 
+// ── Le renvoi (`421`, décisions 52, 57 et 59) ──────────────────────────────
+
+/// Le corps d'un `421` : l'annuaire local d'un domaine confié, et où joindre
+/// chacun de ses membres acceptés — **avec son identité** (décision 59).
+///
+/// ```jsonc
+/// {"annuaire":"n-titulaire","adresses":["[2001:db8::51]:6630","192.0.2.52:6630"],
+///  "identites":"n-titulaire n-second"}
+/// ```
+///
+/// # POURQUOI `identites` EST UNE CHAÎNE, ET PAS UNE LISTE D'OBJETS
+///
+/// Un membre d'une paire a SA clé (décision 49) : sous la forme nouvelle
+/// (décision 53), un client qui joint le second membre doit attendre le `n-…`
+/// du second, pas celui du titulaire — que seul `annuaire` portait jusqu'à la
+/// 0.30.0. Mais le lecteur d'hier (client 0.16/0.17, `asl-client::renvoi`)
+/// **ne saute une clé inconnue que si sa valeur est une chaîne** : une liste
+/// `"membres":[{…}]` lui ferait refuser le renvoi entier. D'où une chaîne,
+/// **positionnelle** : le `i`-ème identifiant est celui de la `i`-ème adresse,
+/// séparés par une espace. Le lecteur d'hier l'ignore et suit comme avant ;
+/// le lecteur de demain attend, pour chaque adresse, l'identité écrite en face.
+///
+/// `annuaire` et `adresses` ne changent pas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenvoiRendu<'a> {
+    /// L'annuaire : son titulaire.
+    pub annuaire: Identifiant,
+    /// Chaque adresse, et l'identité du membre qu'on doit trouver au bout.
+    pub adresses: &'a [(&'a str, Identifiant)],
+}
+
+impl RenvoiRendu<'_> {
+    /// Encode le renvoi en JSON.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`] si `sortie` ne suffit pas.
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{\"annuaire\":\"");
+        ecrivain.pousser(self.annuaire.texte().as_str().as_bytes());
+        ecrivain.pousser(b"\",\"adresses\":[");
+        for (rang, (adresse, _)) in self.adresses.iter().enumerate() {
+            if rang > 0 {
+                ecrivain.pousser(b",");
+            }
+            ecrivain.pousser(b"\"");
+            ecrivain.pousser(adresse.as_bytes());
+            ecrivain.pousser(b"\"");
+        }
+        ecrivain.pousser(b"],\"identites\":\"");
+        for (rang, (_, identite)) in self.adresses.iter().enumerate() {
+            if rang > 0 {
+                ecrivain.pousser(b" ");
+            }
+            ecrivain.pousser(identite.texte().as_str().as_bytes());
+        }
+        ecrivain.pousser(b"\"}");
+        ecrivain.achever()
+    }
+}
+
 // ── Les racines (décision 56) ───────────────────────────────────────────────
 
 /// Une racine telle que `GET /v1/racines` la rend : son identité, sa clé, ses

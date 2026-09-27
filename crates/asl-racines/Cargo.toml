@@ -1,0 +1,16 @@
+[package]
+name = "asl-racines"
+description = "Qui l'on croit, sans résoudre un nom : les racines embarquées, la règle « clé = identité » d'un certificat d'un seul maillon, et la vérification d'une liste de racines — sans entrée-sortie, partagées par le serveur et le client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+asl-api.workspace = true
+asl-cle.workspace = true
+asl-id.workspace = true
+
+[lints]
+workspace = true
