@@ -43,6 +43,7 @@
 
 #![no_std]
 
+pub mod annuaire;
 pub mod corps;
 pub mod domaine;
 pub mod droit;
@@ -555,6 +556,49 @@ pub enum Ressource<'a> {
         /// Le droit visé.
         droit: Identifiant,
     },
+    /// `/v1/annuaires` — **mes annuaires locaux** (`GET`), ou en déclarer un
+    /// (`POST`) (`protocole.md` §2.2, 0.27.0).
+    Annuaires,
+    /// `/v1/annuaires/{n}` — retirer l'inscription de mon annuaire.
+    Annuaire {
+        /// L'annuaire — son titulaire.
+        annuaire: Identifiant,
+    },
+    /// `/v1/annuaires/{n}/membres` — déclarer son second membre.
+    MembresAnnuaire {
+        /// L'annuaire — son titulaire.
+        annuaire: Identifiant,
+    },
+    /// `/v1/annuaires/{n}/membres/{n2}` — retirer son second membre.
+    MembreAnnuaire {
+        /// L'annuaire — son titulaire.
+        annuaire: Identifiant,
+        /// Le membre retiré.
+        membre: Identifiant,
+    },
+    /// `/v1/annuaires/inscription` — **un annuaire local présente son code
+    /// avec sa clé d'identité** : `code ‖ clé ‖ preuve`, la forme d'un
+    /// enrôlement. Comme [`Ressource::Enrolement`], elle n'exige rien : le
+    /// code est le justificatif, et la preuve lie la clé à cette connexion.
+    InscriptionAnnuaire,
+    /// `/v1/annuaires/etat` — **un annuaire local relit son inscription** :
+    /// `clé ‖ preuve`. Elle n'exige rien non plus : la preuve dit qui demande,
+    /// et la réponse ne parle que de lui.
+    EtatAnnuaire,
+    /// `/v1/inscriptions` — les inscriptions en attente, pour un
+    /// administrateur des racines.
+    Inscriptions,
+    /// `/v1/inscriptions/{n}/decision` — l'accepter ou la refuser.
+    DecisionInscription {
+        /// Le membre tranché.
+        membre: Identifiant,
+    },
+    /// `/v1/domaines/{d}/hebergeur` — confier mon domaine à mon annuaire
+    /// local, ou le rendre aux racines.
+    HebergeurDomaine {
+        /// Le domaine visé.
+        domaine: Identifiant,
+    },
     /// `/v1/replication` — **l'état de la voie entre racines, vu d'ici**
     /// (`replication.md` §8) : le pair, la voie ouverte ou coupée, notre
     /// compteur, et jusqu'où l'on a appliqué ce que le pair a écrit — ou
@@ -584,7 +628,11 @@ impl Ressource<'_> {
             | Self::Attestation
             | Self::Enrolement
             | Self::Invitations
-            | Self::Administrateurs => &[Methode::Post],
+            | Self::Administrateurs
+            | Self::InscriptionAnnuaire
+            | Self::EtatAnnuaire
+            | Self::MembresAnnuaire { .. }
+            | Self::DecisionInscription { .. } => &[Methode::Post],
             Self::Utilisateur { .. }
             | Self::MachinesUtilisateur { .. }
             | Self::Moi
@@ -603,6 +651,7 @@ impl Ressource<'_> {
             | Self::PairInstantane
             | Self::RechercheDomaines { .. }
             | Self::Groupes
+            | Self::Inscriptions
             | Self::Replication => &[Methode::Get],
             Self::PairPreuve => &[Methode::Post],
             Self::Appareil { .. }
@@ -612,12 +661,15 @@ impl Ressource<'_> {
             | Self::Exposition { .. }
             | Self::MembreGroupe { .. }
             | Self::Droit { .. }
-            | Self::Administrateur { .. } => &[Methode::Delete],
+            | Self::Administrateur { .. }
+            | Self::Annuaire { .. }
+            | Self::MembreAnnuaire { .. } => &[Methode::Delete],
             Self::PousseeAppareil { .. } | Self::DescriptionAppareil { .. } => &[Methode::Put],
             Self::Domaine { .. } => &[Methode::Get, Methode::Delete],
-            Self::AliasDomaine { .. } | Self::DomaineMachine { .. } | Self::AliasMachine { .. } => {
-                &[Methode::Put, Methode::Delete]
-            }
+            Self::AliasDomaine { .. }
+            | Self::DomaineMachine { .. }
+            | Self::AliasMachine { .. }
+            | Self::HebergeurDomaine { .. } => &[Methode::Put, Methode::Delete],
             Self::Machine { .. } => &[Methode::Patch],
             Self::EnrolementMachine { .. }
             | Self::GroupesDomaine { .. }
@@ -627,7 +679,8 @@ impl Ressource<'_> {
             | Self::Machines
             | Self::Autorisations
             | Self::Domaines
-            | Self::Droits => &[Methode::Get, Methode::Post],
+            | Self::Droits
+            | Self::Annuaires => &[Methode::Get, Methode::Post],
             Self::Alias => &[Methode::Put, Methode::Delete],
         }
     }
@@ -675,6 +728,8 @@ impl Ressource<'_> {
             | Self::Administrateurs
             | Self::Administrateur { .. }
             | Self::Enrolement
+            | Self::InscriptionAnnuaire
+            | Self::EtatAnnuaire
             | Self::AliasResolu { .. }
             | Self::RechercheAlias { .. }
             | Self::Vu
@@ -1043,6 +1098,29 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "droits"] => Ok(Ressource::Droits),
         ["v1", "droits", droit] => Ok(Ressource::Droit {
             droit: identifiant(droit, Genre::Autorisation)?,
+        }),
+        // **LES MOTS AVANT L'IDENTIFIANT** : `inscription` et `etat` ne sont
+        // pas des `n-…`, et l'analyse d'un identifiant les refuserait de
+        // toute façon — l'ordre des bras le dit sans compter là-dessus.
+        ["v1", "annuaires"] => Ok(Ressource::Annuaires),
+        ["v1", "annuaires", "inscription"] => Ok(Ressource::InscriptionAnnuaire),
+        ["v1", "annuaires", "etat"] => Ok(Ressource::EtatAnnuaire),
+        ["v1", "annuaires", annuaire] => Ok(Ressource::Annuaire {
+            annuaire: identifiant(annuaire, Genre::Annuaire)?,
+        }),
+        ["v1", "annuaires", annuaire, "membres"] => Ok(Ressource::MembresAnnuaire {
+            annuaire: identifiant(annuaire, Genre::Annuaire)?,
+        }),
+        ["v1", "annuaires", annuaire, "membres", membre] => Ok(Ressource::MembreAnnuaire {
+            annuaire: identifiant(annuaire, Genre::Annuaire)?,
+            membre: identifiant(membre, Genre::Annuaire)?,
+        }),
+        ["v1", "inscriptions"] => Ok(Ressource::Inscriptions),
+        ["v1", "inscriptions", membre, "decision"] => Ok(Ressource::DecisionInscription {
+            membre: identifiant(membre, Genre::Annuaire)?,
+        }),
+        ["v1", "domaines", domaine, "hebergeur"] => Ok(Ressource::HebergeurDomaine {
+            domaine: identifiant(domaine, Genre::Domaine)?,
         }),
         ["v1", "administrateurs"] => Ok(Ressource::Administrateurs),
         ["v1", "administrateurs", compte] => Ok(Ressource::Administrateur {

@@ -1318,3 +1318,96 @@ fn les_ressources_sans_preuve_et_les_flux_disent_leurs_verbes() {
         );
     }
 }
+
+// ── L'inscription des annuaires locaux (0.27.0) ─────────────────────────────
+
+#[test]
+fn les_chemins_des_annuaires_locaux_designent_leurs_ressources() {
+    let n = ident(Genre::Annuaire);
+    let d = ident(Genre::Domaine);
+    let cas: [(Methode, String, Exigence); 11] = [
+        (Methode::Get, "/v1/annuaires".to_owned(), Exigence::Appareil),
+        (
+            Methode::Post,
+            "/v1/annuaires".to_owned(),
+            Exigence::Appareil,
+        ),
+        (
+            Methode::Delete,
+            format!("/v1/annuaires/{n}"),
+            Exigence::Appareil,
+        ),
+        (
+            Methode::Post,
+            format!("/v1/annuaires/{n}/membres"),
+            Exigence::Appareil,
+        ),
+        (
+            Methode::Delete,
+            format!("/v1/annuaires/{n}/membres/{n}"),
+            Exigence::Appareil,
+        ),
+        (
+            Methode::Post,
+            "/v1/annuaires/inscription".to_owned(),
+            Exigence::Aucune,
+        ),
+        (
+            Methode::Post,
+            "/v1/annuaires/etat".to_owned(),
+            Exigence::Aucune,
+        ),
+        (
+            Methode::Get,
+            "/v1/inscriptions".to_owned(),
+            Exigence::Appareil,
+        ),
+        (
+            Methode::Post,
+            format!("/v1/inscriptions/{n}/decision"),
+            Exigence::Appareil,
+        ),
+        (
+            Methode::Put,
+            format!("/v1/domaines/{d}/hebergeur"),
+            Exigence::Appareil,
+        ),
+        (
+            Methode::Delete,
+            format!("/v1/domaines/{d}/hebergeur"),
+            Exigence::Appareil,
+        ),
+    ];
+    for (methode, chemin, exigence) in cas {
+        let resolu = resoudre(methode, chemin.as_bytes()).unwrap();
+        assert!(resolu.sert, "{chemin}");
+        assert_eq!(resolu.exigence, exigence, "{chemin}");
+    }
+    assert!(matches!(
+        resoudre_get(&format!("/v1/annuaires/{n}/membres/{n}")),
+        Ok(Ressource::MembreAnnuaire { annuaire, membre }) if annuaire == membre
+    ));
+    assert!(matches!(
+        resoudre_get(&format!("/v1/inscriptions/{n}/decision")),
+        Ok(Ressource::DecisionInscription { .. })
+    ));
+    assert!(matches!(
+        resoudre_get(&format!("/v1/domaines/{d}/hebergeur")),
+        Ok(Ressource::HebergeurDomaine { .. })
+    ));
+    // Un domaine n'est pas un annuaire, ni l'inverse.
+    assert!(resoudre_get(&format!("/v1/annuaires/{d}")).is_err());
+    assert!(resoudre_get(&format!("/v1/annuaires/{n}/membres")).is_ok());
+    assert!(resoudre_get(&format!("/v1/annuaires/{d}/membres")).is_err());
+    assert!(resoudre_get(&format!("/v1/annuaires/{n}/membres/{d}")).is_err());
+    assert!(resoudre_get(&format!("/v1/annuaires/{d}/membres/{n}")).is_err());
+    assert!(resoudre_get(&format!("/v1/inscriptions/{d}/decision")).is_err());
+    assert!(resoudre_get(&format!("/v1/domaines/{n}/hebergeur")).is_err());
+    // Les verbes non servis se rapportent, sans être jugés ici.
+    assert!(
+        !resoudre(Methode::Get, b"/v1/annuaires/inscription")
+            .unwrap()
+            .sert
+    );
+    assert!(!resoudre(Methode::Post, b"/v1/inscriptions").unwrap().sert);
+}

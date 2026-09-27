@@ -88,6 +88,10 @@ use asl_registre::{
     RATTACHEMENT_OCTETS, Rattachement, SERVICE_OCTETS, Service, Systeme, Verdict, alias_de_compte,
     nom_d_hote, sans_dates,
 };
+use asl_registre::{
+    ADRESSE_OCTETS_MAX, Adresse, HEBERGEMENT_OCTETS, Hebergement, INSCRIPTION_OCTETS, Inscription,
+    MARQUE_D_INSCRIPTION_OCTETS, MarqueDInscription, PRESENTATION_OCTETS, Presentation,
+};
 
 /// Ce qu'on soumet.
 #[derive(Arbitrary, Debug)]
@@ -158,6 +162,14 @@ struct Entree {
     droit: [u8; DROIT_OCTETS],
     /// Les octets d'une autorisation d'hier, à convertir.
     autorisation_d_hier: [u8; AUTORISATION_OCTETS],
+    /// Les octets d'une déclaration d'annuaire local (0.27.0).
+    inscription: Vec<u8>,
+    /// Les octets d'une présentation.
+    presentation: [u8; PRESENTATION_OCTETS],
+    /// Les octets d'une marque d'inscription.
+    marque_d_inscription: [u8; MARQUE_D_INSCRIPTION_OCTETS],
+    /// Les octets d'un hébergement.
+    hebergement: [u8; HEBERGEMENT_OCTETS],
 }
 
 /// Une faute d'enregistrement est toujours l'une des cinq, et jamais une
@@ -615,6 +627,72 @@ fuzz_target!(|entree: Entree| {
         }
         Err(faute) => nommee(faute),
     }
+    // ── PROPRIÉTÉ 10 : l'inscription des annuaires locaux (0.27.0) ──────────
+    //
+    // Une déclaration se relit sur une adresse qu'`Adresse::nouvelle` aurait
+    // prise — ou se refuse, nommément ; les trois autres, comme les groupes.
+    let mut declaration = [0_u8; INSCRIPTION_OCTETS];
+    for (place, octet) in declaration.iter_mut().zip(&entree.inscription) {
+        *place = *octet;
+    }
+    match Inscription::lire(&declaration) {
+        Ok(inscription) => {
+            assert_eq!(
+                Adresse::nouvelle(inscription.adresse.texte()),
+                Ok(inscription.adresse)
+            );
+            let mut refait = [0_u8; INSCRIPTION_OCTETS];
+            inscription.ecrire(&mut refait);
+            assert_eq!(
+                refait, declaration,
+                "une déclaration relue ne se réécrit pas"
+            );
+        }
+        Err(Faute::Vide | Faute::Forme) => {}
+        Err(faute) => nommee(faute),
+    }
+    match Presentation::lire(&entree.presentation) {
+        Ok(presentation) => {
+            let mut refait = [0_u8; PRESENTATION_OCTETS];
+            presentation.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.presentation,
+                "une présentation relue ne se réécrit pas"
+            );
+        }
+        Err(faute) => nommee(faute),
+    }
+    match MarqueDInscription::lire(&entree.marque_d_inscription) {
+        Ok(marque) => {
+            let mut refait = [0_u8; MARQUE_D_INSCRIPTION_OCTETS];
+            marque.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.marque_d_inscription,
+                "une marque relue ne se réécrit pas"
+            );
+        }
+        Err(faute) => nommee(faute),
+    }
+    match Hebergement::lire(&entree.hebergement) {
+        Ok(hebergement) => {
+            let mut refait = [0_u8; HEBERGEMENT_OCTETS];
+            hebergement.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.hebergement,
+                "un hébergement relu ne se réécrit pas"
+            );
+        }
+        Err(faute) => nommee(faute),
+    }
+    // Le même texte, comme adresse : ce qui se prend est de l'ASCII
+    // imprimable borné, et se reprend à l'identique.
+    if let Ok(adresse) = Adresse::nouvelle(&entree.texte_de_domaine) {
+        let texte = adresse.texte();
+        assert!(texte.len() <= ADRESSE_OCTETS_MAX && texte.bytes().all(|o| o.is_ascii_graphic()));
+        assert!(!texte.contains(['"', '\\']));
+        assert_eq!(Adresse::nouvelle(texte), Ok(adresse));
+    }
+
     if let Ok(alias) = AliasDeDomaine::nouveau(&entree.texte_de_domaine) {
         let texte = alias.texte();
         assert!(!texte.is_empty() && texte.len() <= ALIAS_DE_DOMAINE_OCTETS_MAX);

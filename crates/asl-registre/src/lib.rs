@@ -41,6 +41,7 @@ use asl_id::{Genre, Identifiant};
 mod domaine;
 mod droit;
 mod groupe;
+mod inscription;
 
 pub use domaine::{
     ALIAS_DE_COMPTE_BRUT_MAX, ALIAS_DE_COMPTE_OCTETS_MIN, ALIAS_DE_DOMAINE_BRUT_MAX,
@@ -56,6 +57,11 @@ pub use groupe::{
     MARQUE_DE_GROUPE_OCTETS, MarqueDeGroupe, SEPARATEUR_DOMAINE_RACINE,
     SEPARATEUR_GROUPE_D_ADMINISTRATEURS, SEPARATEUR_GROUPE_PERSONNEL, SorteDeGroupe,
     domaine_racine, groupe_d_administrateurs, groupe_personnel,
+};
+pub use inscription::{
+    ADRESSE_OCTETS, ADRESSE_OCTETS_MAX, Adresse, HEBERGEMENT_OCTETS, Hebergement,
+    INSCRIPTION_OCTETS, Inscription, MARQUE_D_INSCRIPTION_OCTETS, MarqueDInscription,
+    PRESENTATION_OCTETS, Presentation,
 };
 
 // ── Les tailles ─────────────────────────────────────────────────────────────
@@ -3020,6 +3026,49 @@ pub enum Operation {
         /// L'enregistrement.
         enregistrement: AliasDeMachineRange,
     },
+    /// Un annuaire local — ou un second membre — déclaré, et le code émis
+    /// pour lui (`docs/replication.md` §5.2, 0.27.0). **Insérer si absent.**
+    Inscription {
+        /// L'empreinte du code.
+        empreinte: [u8; EMPREINTE_OCTETS],
+        /// La déclaration.
+        enregistrement: Inscription,
+    },
+    /// La clé qui a présenté ce code. **La plus petite estampille** : deux
+    /// présentations du même code sur deux racines finissent sur la même clé.
+    InscriptionPresentee {
+        /// L'empreinte du code présenté.
+        empreinte: [u8; EMPREINTE_OCTETS],
+        /// La présentation.
+        enregistrement: Presentation,
+    },
+    /// Un administrateur des racines accepte ou refuse ce membre. La plus
+    /// petite estampille de chaque sorte ; **un refus l'emporte** à la
+    /// lecture (décision 32).
+    InscriptionDecision {
+        /// Le membre, son `n-…`.
+        membre: Identifiant,
+        /// Accepté, ou refusé.
+        accepte: bool,
+        /// L'administrateur.
+        par: Identifiant,
+    },
+    /// Un membre retiré — le titulaire retire l'annuaire entier. **Toujours** ;
+    /// la plus petite estampille.
+    InscriptionRetiree {
+        /// Le membre, son `n-…`.
+        membre: Identifiant,
+        /// Qui l'a retiré.
+        par: Identifiant,
+    },
+    /// Un domaine confié à un annuaire local, ou rendu aux racines. Le plus
+    /// récent.
+    DomaineHebergeur {
+        /// Le domaine.
+        domaine: Identifiant,
+        /// L'hébergement.
+        enregistrement: Hebergement,
+    },
     /// Un groupe créé dans un domaine (`docs/replication.md` §5.2,
     /// 2026-09-26). **Insérer si absent**, l'étiquette au plus récent. Le
     /// groupe d'administrateurs d'un domaine et le groupe personnel d'un
@@ -3160,12 +3209,22 @@ pub enum GenreOperation {
     DroitRetire,
     /// `machine-alias`.
     MachineAlias,
+    /// `inscription`.
+    Inscription,
+    /// `inscription-presentee`.
+    InscriptionPresentee,
+    /// `inscription-decision`.
+    InscriptionDecision,
+    /// `inscription-retiree`.
+    InscriptionRetiree,
+    /// `domaine-hebergeur`.
+    DomaineHebergeur,
 }
 
 impl GenreOperation {
-    /// Les trente et un, dans l'ordre de `replication.md` §5.2 — et l'ordre
-    /// de leurs étiquettes, de 1 à 14, puis 16 à 32 (voir l'en-tête du type).
-    pub const TOUS: [Self; 31] = [
+    /// Les trente-six, dans l'ordre de `replication.md` §5.2 — et l'ordre
+    /// de leurs étiquettes, de 1 à 14, puis 16 à 37 (voir l'en-tête du type).
+    pub const TOUS: [Self; 36] = [
         Self::Compte,
         Self::Alias,
         Self::Appareil,
@@ -3197,6 +3256,11 @@ impl GenreOperation {
         Self::Droit,
         Self::DroitRetire,
         Self::MachineAlias,
+        Self::Inscription,
+        Self::InscriptionPresentee,
+        Self::InscriptionDecision,
+        Self::InscriptionRetiree,
+        Self::DomaineHebergeur,
     ];
 
     /// Son étiquette, en tête du cadre.
@@ -3234,6 +3298,11 @@ impl GenreOperation {
             Self::Droit => 30,
             Self::DroitRetire => 31,
             Self::MachineAlias => 32,
+            Self::Inscription => 33,
+            Self::InscriptionPresentee => 34,
+            Self::InscriptionDecision => 35,
+            Self::InscriptionRetiree => 36,
+            Self::DomaineHebergeur => 37,
         }
     }
 
@@ -3276,6 +3345,11 @@ impl GenreOperation {
             30 => Self::Droit,
             31 => Self::DroitRetire,
             32 => Self::MachineAlias,
+            33 => Self::Inscription,
+            34 => Self::InscriptionPresentee,
+            35 => Self::InscriptionDecision,
+            36 => Self::InscriptionRetiree,
+            37 => Self::DomaineHebergeur,
             lue => return Err(Faute::Etiquette { lue }),
         })
     }
@@ -3319,6 +3393,11 @@ impl GenreOperation {
             Self::GroupeSupprime => IDENTIFIANT_OCTETS,
             Self::Droit => IDENTIFIANT_OCTETS + DROIT_OCTETS,
             Self::DroitRetire => IDENTIFIANT_OCTETS,
+            Self::Inscription => EMPREINTE_OCTETS + INSCRIPTION_OCTETS,
+            Self::InscriptionPresentee => EMPREINTE_OCTETS + PRESENTATION_OCTETS,
+            Self::InscriptionDecision => IDENTIFIANT_OCTETS + 1 + IDENTIFIANT_OCTETS,
+            Self::InscriptionRetiree => IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS,
+            Self::DomaineHebergeur => IDENTIFIANT_OCTETS + HEBERGEMENT_OCTETS,
         }
     }
 
@@ -3370,6 +3449,11 @@ impl Operation {
             Self::GroupeSupprime { .. } => GenreOperation::GroupeSupprime,
             Self::Droit { .. } => GenreOperation::Droit,
             Self::DroitRetire { .. } => GenreOperation::DroitRetire,
+            Self::Inscription { .. } => GenreOperation::Inscription,
+            Self::InscriptionPresentee { .. } => GenreOperation::InscriptionPresentee,
+            Self::InscriptionDecision { .. } => GenreOperation::InscriptionDecision,
+            Self::InscriptionRetiree { .. } => GenreOperation::InscriptionRetiree,
+            Self::DomaineHebergeur { .. } => GenreOperation::DomaineHebergeur,
         }
     }
 
@@ -3710,6 +3794,59 @@ impl Operation {
             Self::DroitRetire { droit } => {
                 ecrire_identifiant(*droit, charge);
             }
+            Self::Inscription {
+                empreinte,
+                enregistrement,
+            } => {
+                poser(charge, empreinte);
+                let mut octets = [0_u8; INSCRIPTION_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(EMPREINTE_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::InscriptionPresentee {
+                empreinte,
+                enregistrement,
+            } => {
+                poser(charge, empreinte);
+                let mut octets = [0_u8; PRESENTATION_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(EMPREINTE_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::InscriptionDecision {
+                membre,
+                accepte,
+                par,
+            } => {
+                ecrire_identifiant(*membre, charge);
+                let reste = charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default();
+                poser_un(reste, u8::from(*accepte));
+                ecrire_identifiant(*par, reste.get_mut(1..).unwrap_or_default());
+            }
+            Self::InscriptionRetiree { membre, par } => {
+                ecrire_identifiant(*membre, charge);
+                ecrire_identifiant(
+                    *par,
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                );
+            }
+            Self::DomaineHebergeur {
+                domaine,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*domaine, charge);
+                let mut octets = [0_u8; HEBERGEMENT_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
         }
         genre.octets()
     }
@@ -3962,6 +4099,41 @@ impl Operation {
             },
             GenreOperation::DroitRetire => Self::DroitRetire {
                 droit: lire_identifiant(charge, Genre::Autorisation)?,
+            },
+            GenreOperation::Inscription => Self::Inscription {
+                empreinte: copie(charge),
+                enregistrement: Inscription::lire(&copie(
+                    charge.get(EMPREINTE_OCTETS..).unwrap_or_default(),
+                ))?,
+            },
+            GenreOperation::InscriptionPresentee => Self::InscriptionPresentee {
+                empreinte: copie(charge),
+                enregistrement: Presentation::lire(&copie(
+                    charge.get(EMPREINTE_OCTETS..).unwrap_or_default(),
+                ))?,
+            },
+            GenreOperation::InscriptionDecision => {
+                let accepte = match apres_identifiant.first().copied().unwrap_or(0) {
+                    0 => false,
+                    1 => true,
+                    lue => return Err(Faute::Etiquette { lue }),
+                };
+                Self::InscriptionDecision {
+                    membre: lire_identifiant(charge, Genre::Annuaire)?,
+                    accepte,
+                    par: lire_identifiant(
+                        apres_identifiant.get(1..).unwrap_or_default(),
+                        Genre::Utilisateur,
+                    )?,
+                }
+            }
+            GenreOperation::InscriptionRetiree => Self::InscriptionRetiree {
+                membre: lire_identifiant(charge, Genre::Annuaire)?,
+                par: lire_identifiant(apres_identifiant, Genre::Utilisateur)?,
+            },
+            GenreOperation::DomaineHebergeur => Self::DomaineHebergeur {
+                domaine: lire_identifiant(charge, Genre::Domaine)?,
+                enregistrement: Hebergement::lire(&copie(apres_identifiant))?,
             },
         };
         Ok((estampille, operation, attendus))
@@ -6227,7 +6399,7 @@ mod tests {
     // ── Les opérations ──────────────────────────────────────────────────────
 
     /// Une opération de chaque genre, dans l'ordre de `replication.md` §5.2.
-    fn une_de_chaque() -> [Operation; 31] {
+    fn une_de_chaque() -> [Operation; 36] {
         [
             Operation::Compte {
                 compte: un(Genre::Utilisateur, 1),
@@ -6393,6 +6565,43 @@ mod tests {
                     alias: Some(super::AliasDeMachine::nouveau("Grenier.maison.Local").unwrap()),
                 },
             },
+            Operation::Inscription {
+                empreinte: [0x31; EMPREINTE_OCTETS],
+                enregistrement: super::Inscription {
+                    provenance: Provenance::Ici,
+                    estampille: e(15),
+                    proprietaire: un(Genre::Utilisateur, 1),
+                    annuaire: Some(un(Genre::Annuaire, 4)),
+                    expire_a: 1_790_000_000_000,
+                    adresse: super::Adresse::nouvelle("helium.maison:6630").unwrap(),
+                },
+            },
+            Operation::InscriptionPresentee {
+                empreinte: [0x31; EMPREINTE_OCTETS],
+                enregistrement: super::Presentation {
+                    provenance: Provenance::Ici,
+                    estampille: e(16),
+                    membre: un(Genre::Annuaire, 5),
+                    cle: [0x55; CLE_OCTETS],
+                },
+            },
+            Operation::InscriptionDecision {
+                membre: un(Genre::Annuaire, 5),
+                accepte: true,
+                par: un(Genre::Utilisateur, 2),
+            },
+            Operation::InscriptionRetiree {
+                membre: un(Genre::Annuaire, 5),
+                par: un(Genre::Utilisateur, 1),
+            },
+            Operation::DomaineHebergeur {
+                domaine: un(Genre::Domaine, 6),
+                enregistrement: super::Hebergement {
+                    provenance: Provenance::Ici,
+                    estampille: e(17),
+                    annuaire: Some(un(Genre::Annuaire, 4)),
+                },
+            },
         ]
     }
 
@@ -6421,6 +6630,11 @@ mod tests {
                 GenreOperation::Droit => 30,
                 GenreOperation::DroitRetire => 31,
                 GenreOperation::MachineAlias => 32,
+                GenreOperation::Inscription => 33,
+                GenreOperation::InscriptionPresentee => 34,
+                GenreOperation::InscriptionDecision => 35,
+                GenreOperation::InscriptionRetiree => 36,
+                GenreOperation::DomaineHebergeur => 37,
                 _ => rang + 1,
             };
             assert_eq!(
@@ -6514,10 +6728,10 @@ mod tests {
 
     #[test]
     fn un_genre_inconnu_est_refuse_zero_compris() {
-        // Quinze est le cadre de fin, trente-trois le premier au-delà du
-        // dernier genre (`machine-alias` tient trente-deux) : aucun des deux
-        // n'est une opération.
-        for lue in [0_u8, 15, 33, 200] {
+        // Quinze est le cadre de fin, trente-huit le premier au-delà du
+        // dernier genre (`domaine-hebergeur` tient trente-sept) : aucun des
+        // deux n'est une opération.
+        for lue in [0_u8, 15, 38, 200] {
             let mut octets = [0_u8; OPERATION_OCTETS_MAX];
             octets[0] = lue;
             assert_eq!(Operation::lire(&octets), Err(Faute::Etiquette { lue }));
@@ -6732,8 +6946,63 @@ mod tests {
     }
 
     #[test]
+    fn les_operations_d_inscription_verifient_leurs_champs() {
+        let [.., decision, retrait, hebergeur] = une_de_chaque();
+        // La décision : accepté ou refusé, et rien d'autre ; un membre est un
+        // annuaire, l'administrateur un compte.
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        decision.ecrire(e(1), &mut sortie);
+        let refus = Operation::InscriptionDecision {
+            membre: un(Genre::Annuaire, 5),
+            accepte: false,
+            par: un(Genre::Utilisateur, 2),
+        };
+        let mut sortie_refus = [0_u8; OPERATION_OCTETS_MAX];
+        refus.ecrire(e(1), &mut sortie_refus);
+        assert_eq!(Operation::lire(&sortie_refus).map(|lu| lu.1), Ok(refus));
+        let mut drapeau = sortie;
+        drapeau[OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS] = 2;
+        assert_eq!(Operation::lire(&drapeau), Err(Faute::Etiquette { lue: 2 }));
+        let mut membre = sortie;
+        membre[OPERATION_ENTETE_OCTETS] = b'm';
+        assert_eq!(
+            Operation::lire(&membre),
+            Err(Faute::Genre {
+                attendu: Genre::Annuaire
+            })
+        );
+        let mut par = sortie;
+        par[OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS + 1] = b'm';
+        assert_eq!(
+            Operation::lire(&par),
+            Err(Faute::Genre {
+                attendu: Genre::Utilisateur
+            })
+        );
+        // Le retrait : les mêmes genres.
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        retrait.ecrire(e(1), &mut sortie);
+        let mut membre = sortie;
+        membre[OPERATION_ENTETE_OCTETS] = b'm';
+        assert!(Operation::lire(&membre).is_err());
+        let mut par = sortie;
+        par[OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS] = b'm';
+        assert!(Operation::lire(&par).is_err());
+        // L'hébergement : un domaine.
+        let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
+        hebergeur.ecrire(e(1), &mut sortie);
+        sortie[OPERATION_ENTETE_OCTETS] = b'm';
+        assert_eq!(
+            Operation::lire(&sortie),
+            Err(Faute::Genre {
+                attendu: Genre::Domaine
+            })
+        );
+    }
+
+    #[test]
     fn les_operations_des_groupes_verifient_ce_qui_suit_le_groupe() {
-        let [.., _, etiquette, membre, retire, _, _, _, _] = une_de_chaque();
+        let [.., _, etiquette, membre, retire, _, _, _, _, _, _, _, _, _] = une_de_chaque();
         // Le compte d'une adhésion est un compte, et rien d'autre.
         for operation in [membre, retire] {
             let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
@@ -6788,8 +7057,13 @@ mod tests {
                 | Operation::DomaineAlias { .. }
                 | Operation::MachineAlias { .. }
                 | Operation::MachineDomaine { .. }
+                | Operation::DomaineHebergeur { .. }
                 | Operation::Groupe { .. } => OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS,
-                Operation::Enrolement { .. } => OPERATION_ENTETE_OCTETS + EMPREINTE_OCTETS,
+                Operation::Enrolement { .. }
+                | Operation::Inscription { .. }
+                | Operation::InscriptionPresentee { .. } => {
+                    OPERATION_ENTETE_OCTETS + EMPREINTE_OCTETS
+                }
                 _ => continue,
             };
             let mut sortie = [0_u8; OPERATION_OCTETS_MAX];

@@ -6502,3 +6502,337 @@ async fn un_droit_accorde_reveille_les_membres_du_groupe_et_un_ajout_aussi() {
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
+
+// ── L'INSCRIPTION DES ANNUAIRES LOCAUX (0.27.0) ─────────────────────────────
+
+/// Le corps d'une présentation : le code, la clé d'identité, la preuve — ou,
+/// sans code, celui d'une demande d'état.
+fn corps_d_annuaire(
+    identite: &asl_cle::CleSecrete,
+    defi: &asl_cle::Defi,
+    liaison: &asl_cle::LiaisonDeCanal,
+    code: Option<&str>,
+) -> Vec<u8> {
+    let mut corps = Vec::new();
+    if let Some(code) = code {
+        corps.extend_from_slice(
+            asl_cle::CodeInscription::analyser(code)
+                .expect("un code")
+                .texte()
+                .as_bytes(),
+        );
+    }
+    corps.extend_from_slice(&identite.publique().octets());
+    corps.extend_from_slice(identite.prouver_la_possession(defi, liaison).octets());
+    corps
+}
+
+/// Un annuaire local se présente — ou relit son état — sur une connexion
+/// neuve : le statut, et l'état rendu.
+async fn se_presenter(
+    racine: &[u8],
+    adresse: SocketAddr,
+    identite: &asl_cle::CleSecrete,
+    code: Option<&str>,
+) -> (Vec<u8>, String) {
+    let mut local = connecter(racine, adresse).await;
+    let liaison = liaison_du_client(&local);
+    let defi = tirer_le_defi(&mut local, 0).await;
+    let cible: &[u8] = if code.is_some() {
+        b"/v1/annuaires/inscription"
+    } else {
+        b"/v1/annuaires/etat"
+    };
+    let (statut, rendu) = poster(
+        &mut local,
+        4,
+        cible,
+        &corps_d_annuaire(identite, &defi, &liaison, code),
+        b"application/octet-stream",
+    )
+    .await;
+    (statut, String::from_utf8_lossy(&rendu).into_owned())
+}
+
+#[tokio::test]
+async fn un_annuaire_local_s_inscrit_est_tranche_et_heberge_les_domaines_de_son_proprietaire() {
+    let (autorite, racine, chaine, cle) = materiel("inscriptions");
+    let (base, fichier) = entrepot("inscriptions");
+    let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
+    let exploitant_cle = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        bail,
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            exploitant: Some(exploitant_cle.publique()),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA1).await;
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, _, _) = creer_un_compte(&mut bob, 0, 0xB1).await;
+    let mut carole = connecter(&racine, adresse).await;
+    let (compte_c, _, _) = creer_un_compte(&mut carole, 0, 0xC1).await;
+
+    // Bob administre les racines, sous la clé d'exploitant.
+    let mut exploitant = connecter(&racine, adresse).await;
+    let liaison = liaison_du_client(&exploitant);
+    let defi = tirer_le_defi(&mut exploitant, 0).await;
+    let (statut, _) = poster(
+        &mut exploitant,
+        4,
+        b"/v1/administrateurs",
+        &corps_d_exploitant(&exploitant_cle, &defi, &liaison, Some(compte_b)),
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+
+    // ── ALICE DÉCLARE SON ANNUAIRE ; SPEEDY SE PRÉSENTE ─────────────────────
+    let (statut, rendu) = poster(
+        &mut alice,
+        8,
+        b"/v1/annuaires",
+        br#"{"adresse":"speedy.maison:6630"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let code_1 = valeur_json(&rendu, "code");
+    let (statut, attente) = lire_json(&mut alice, 12, b"/v1/annuaires").await;
+    assert_eq!(statut, b"200");
+    assert!(
+        attente.contains("\"etat\":\"attendue\",\"adresse\":\"speedy.maison:6630\""),
+        "{attente}"
+    );
+
+    let speedy = asl_cle::CleSecrete::depuis_entropie([0x51; 32]);
+    let n_speedy = asl_cle::identifiant_de_racine(&speedy.publique());
+    let (statut, etat) = se_presenter(&racine, adresse, &speedy, Some(&code_1)).await;
+    assert_eq!(statut, b"200", "{etat}");
+    assert!(
+        etat.contains(&format!("\"membre\":\"{}\"", n_speedy.texte().as_str()))
+            && etat.contains("\"etat\":\"en attente\""),
+        "{etat}"
+    );
+    // La même clé, le même code : l'état, rien de plus.
+    let (statut, _) = se_presenter(&racine, adresse, &speedy, Some(&code_1)).await;
+    assert_eq!(statut, b"200");
+    // Une autre clé, le même code : `409`. Un code inconnu : `404`.
+    let intrus = asl_cle::CleSecrete::depuis_entropie([0x52; 32]);
+    let (statut, _) = se_presenter(&racine, adresse, &intrus, Some(&code_1)).await;
+    assert_eq!(statut, b"409");
+    let (statut, _) = se_presenter(&racine, adresse, &intrus, Some("00000-00000")).await;
+    assert_eq!(statut, b"404");
+    let (statut, _) = se_presenter(&racine, adresse, &intrus, None).await;
+    assert_eq!(statut, b"404", "une clé membre de rien n'a pas d'état");
+
+    // ── LES ADMINISTRATEURS, ET EUX SEULS, TRANCHENT ────────────────────────
+    let (statut, _) = lire_json(&mut carole, 8, b"/v1/inscriptions").await;
+    assert_eq!(
+        statut, b"404",
+        "qui n'administre pas les racines ne voit rien"
+    );
+    let (statut, liste) = lire_json(&mut bob, 8, b"/v1/inscriptions").await;
+    assert_eq!(statut, b"200");
+    assert!(
+        liste.contains(n_speedy.texte().as_str())
+            && liste.contains(&format!(
+                "\"proprietaire\":\"{}\"",
+                compte_a.texte().as_str()
+            )),
+        "{liste}"
+    );
+    let decision = format!("/v1/inscriptions/{}/decision", n_speedy.texte().as_str());
+    let (statut, _) = poster(
+        &mut carole,
+        12,
+        decision.as_bytes(),
+        br#"{"accepte":true}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"404");
+    let (statut, _) = poster(
+        &mut bob,
+        12,
+        decision.as_bytes(),
+        br#"{"accepte":true}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+    let (statut, etat) = se_presenter(&racine, adresse, &speedy, None).await;
+    assert_eq!(statut, b"200");
+    assert!(etat.contains("\"etat\":\"acceptée\""), "{etat}");
+
+    // ── LE DOMAINE D'ALICE, CONFIÉ À SON ANNUAIRE — ET À PERSONNE D'AUTRE ───
+    let domaine_a = asl_registre::premier_domaine(compte_a);
+    let vers_speedy = format!("{{\"annuaire\":\"{}\"}}", n_speedy.texte().as_str());
+    let hebergeur_a = format!("/v1/domaines/{}/hebergeur", domaine_a.texte().as_str());
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            16,
+            hebergeur_a.as_bytes(),
+            vers_speedy.as_bytes()
+        )
+        .await,
+        b"204"
+    );
+    let (_, liste) = lire_json(&mut alice, 20, b"/v1/domaines").await;
+    assert!(
+        liste.contains(&format!(
+            "\"heberge_par\":\"{}\"",
+            n_speedy.texte().as_str()
+        )),
+        "{liste}"
+    );
+    // Carole ne confie pas son domaine à l'annuaire d'Alice (décision 48).
+    let hebergeur_c = format!(
+        "/v1/domaines/{}/hebergeur",
+        asl_registre::premier_domaine(compte_c).texte().as_str()
+    );
+    assert_eq!(
+        poser_json(
+            &mut carole,
+            16,
+            hebergeur_c.as_bytes(),
+            vers_speedy.as_bytes()
+        )
+        .await,
+        b"404"
+    );
+
+    // ── LA PAIRE : UN SECOND REFUSÉ, UN AUTRE ACCEPTÉ, UN TROISIÈME DE TROP ─
+    let membres = format!("/v1/annuaires/{}/membres", n_speedy.texte().as_str());
+    let (statut, rendu) = poster(
+        &mut alice,
+        24,
+        membres.as_bytes(),
+        br#"{"adresse":"helium.maison:6630"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    let helium_refuse = asl_cle::CleSecrete::depuis_entropie([0x53; 32]);
+    let n_refuse = asl_cle::identifiant_de_racine(&helium_refuse.publique());
+    let (statut, _) = se_presenter(
+        &racine,
+        adresse,
+        &helium_refuse,
+        Some(&valeur_json(&rendu, "code")),
+    )
+    .await;
+    assert_eq!(statut, b"200");
+    let decision_refuse = format!("/v1/inscriptions/{}/decision", n_refuse.texte().as_str());
+    let (statut, _) = poster(
+        &mut bob,
+        16,
+        decision_refuse.as_bytes(),
+        br#"{"accepte":false}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+    let (statut, _) = poster(
+        &mut bob,
+        20,
+        decision_refuse.as_bytes(),
+        br#"{"accepte":true}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"409", "un refus ne s'accepte plus");
+
+    let (statut, rendu) = poster(
+        &mut alice,
+        28,
+        membres.as_bytes(),
+        br#"{"adresse":"helium.maison:6630"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "le refusé ne compte plus pour le second");
+    let helium = asl_cle::CleSecrete::depuis_entropie([0x54; 32]);
+    let n_helium = asl_cle::identifiant_de_racine(&helium.publique());
+    let (statut, etat) = se_presenter(
+        &racine,
+        adresse,
+        &helium,
+        Some(&valeur_json(&rendu, "code")),
+    )
+    .await;
+    assert_eq!(statut, b"200");
+    assert!(
+        etat.contains(&format!("\"annuaire\":\"{}\"", n_speedy.texte().as_str())),
+        "{etat}"
+    );
+    let (statut, _) = poster(
+        &mut alice,
+        32,
+        membres.as_bytes(),
+        br#"{"adresse":"xenon.maison:6630"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"409", "un annuaire n'a qu'un second");
+    // Carole ne déclare pas de membre dans l'annuaire d'Alice.
+    let (statut, _) = poster(
+        &mut carole,
+        20,
+        membres.as_bytes(),
+        br#"{"adresse":"x.maison:1"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"404");
+
+    // Le refus l'emporte sur l'acceptation, même venue avant : ce que deux
+    // racines décident chacune de leur côté converge vers le refus.
+    let decision_helium = format!("/v1/inscriptions/{}/decision", n_helium.texte().as_str());
+    for (flux, accepte) in [(24, "true"), (28, "false")] {
+        let (statut, _) = poster(
+            &mut bob,
+            flux,
+            decision_helium.as_bytes(),
+            format!("{{\"accepte\":{accepte}}}").as_bytes(),
+            b"application/json",
+        )
+        .await;
+        assert_eq!(statut, b"204");
+    }
+    let (_, etat) = se_presenter(&racine, adresse, &helium, None).await;
+    assert!(etat.contains("\"etat\":\"refusée\""), "{etat}");
+
+    // ── LE RETRAIT : L'ANNUAIRE ENTIER, ET SON DOMAINE REVIENT ──────────────
+    let cible_speedy = format!("/v1/annuaires/{}", n_speedy.texte().as_str());
+    assert_eq!(
+        retirer(&mut carole, 24, cible_speedy.as_bytes()).await,
+        b"404"
+    );
+    assert_eq!(
+        retirer(&mut alice, 36, cible_speedy.as_bytes()).await,
+        b"204"
+    );
+    let (_, liste) = lire_json(&mut alice, 40, b"/v1/domaines").await;
+    assert!(liste.contains("\"heberge_par\":\"racines\""), "{liste}");
+    let (_, etat) = se_presenter(&racine, adresse, &helium, None).await;
+    assert!(
+        etat.contains("\"etat\":\"retirée\""),
+        "le second part avec son titulaire : {etat}"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}

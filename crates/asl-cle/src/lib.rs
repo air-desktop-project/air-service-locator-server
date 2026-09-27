@@ -821,6 +821,20 @@ const DOMAINE_CODE: &[u8] = b"air-service-locator/v1/code-d-enrolement\x00";
 /// même chose. C'est la règle de [`DOMAINE`], appliquée là aussi.
 const DOMAINE_INVITATION: &[u8] = b"air-service-locator/v1/code-d-invitation\x00";
 
+/// Le séparateur de domaine de l'empreinte d'un code d'INSCRIPTION — celui
+/// qu'un propriétaire obtient pour son annuaire local (`protocole.md` §2.2,
+/// 0.27.0). La raison de [`DOMAINE_INVITATION`], une troisième fois : même
+/// forme, autre porte, autre table.
+const DOMAINE_INSCRIPTION: &[u8] = b"air-service-locator/v1/code-d-inscription\x00";
+
+/// Combien de temps un code d'inscription se présente, en secondes.
+///
+/// **Vingt-quatre heures**, comme une invitation, et non dix minutes comme un
+/// enrôlement : entre le geste dans l'application et la première présentation
+/// de l'annuaire, il y a une machine à installer, un paquet à poser, une clé à
+/// frapper.
+pub const VALIDITE_INSCRIPTION_SECONDES: u64 = 86_400;
+
 /// Combien de temps un code vaut, en secondes.
 ///
 /// Dix minutes : le temps d'aller du téléphone au terminal, et pas davantage.
@@ -1050,6 +1064,58 @@ impl CodeInvitation {
         use sha2::Digest as _;
         let mut condensat = sha2::Sha256::new();
         condensat.update(DOMAINE_INVITATION);
+        condensat.update(self.0.texte().as_bytes());
+        let mut octets = [0_u8; EMPREINTE_OCTETS];
+        octets.copy_from_slice(&condensat.finalize());
+        octets
+    }
+}
+
+/// Le code court qu'un propriétaire obtient pour inscrire son annuaire local
+/// — ou son second membre —, et que l'annuaire présente aux racines avec sa
+/// clé d'identité (`protocole.md` §2.2, `docs/annuaires.md` §4.1).
+///
+/// La forme d'un code d'enrôlement, pour la même raison qu'une invitation : un
+/// humain le recopie d'un écran vers un terminal. Un type à part, et son
+/// empreinte a son domaine ([`DOMAINE_INSCRIPTION`]).
+#[derive(Debug, Clone, Copy)]
+pub struct CodeInscription(CodeEnrolement);
+
+impl CodeInscription {
+    /// Fabrique un code à partir de huit octets d'entropie.
+    #[must_use]
+    pub fn depuis_entropie(entropie: [u8; 8]) -> Self {
+        Self(CodeEnrolement::depuis_entropie(entropie))
+    }
+
+    /// Lit un code tapé par un humain.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Faute::CodeLongueur`], [`Faute::CodeSymboleInvalide`].
+    pub fn analyser(texte: &str) -> Result<Self, Faute> {
+        Ok(Self(CodeEnrolement::analyser(texte)?))
+    }
+
+    /// Le texte canonique, en majuscules.
+    #[must_use]
+    pub fn texte(&self) -> &str {
+        self.0.texte()
+    }
+
+    /// Le texte groupé pour l'œil : `XXXXX-XXXXX`.
+    #[must_use]
+    pub fn texte_groupe(&self) -> TexteCode {
+        self.0.texte_groupe()
+    }
+
+    /// L'empreinte sous laquelle les racines rangent ce code — jamais celle
+    /// d'un code d'enrôlement ni d'une invitation.
+    #[must_use]
+    pub fn empreinte(&self) -> [u8; EMPREINTE_OCTETS] {
+        use sha2::Digest as _;
+        let mut condensat = sha2::Sha256::new();
+        condensat.update(DOMAINE_INSCRIPTION);
         condensat.update(self.0.texte().as_bytes());
         let mut octets = [0_u8; EMPREINTE_OCTETS];
         octets.copy_from_slice(&condensat.finalize());

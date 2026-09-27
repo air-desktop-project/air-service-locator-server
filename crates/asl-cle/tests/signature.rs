@@ -445,6 +445,31 @@ fn un_code_d_invitation_a_la_forme_d_un_code_et_une_autre_empreinte() {
 }
 
 #[test]
+fn un_code_d_inscription_a_la_forme_d_un_code_et_sa_propre_empreinte() {
+    use asl_cle::{CodeEnrolement, CodeInscription, CodeInvitation};
+
+    let graine = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
+    let inscription = CodeInscription::depuis_entropie(graine);
+    assert_eq!(inscription.texte().len(), asl_cle::CODE_SYMBOLES);
+    let groupe = inscription.texte_groupe();
+    assert_eq!(
+        CodeInscription::analyser(groupe.as_str())
+            .expect("la forme groupée se relit")
+            .empreinte(),
+        inscription.empreinte()
+    );
+    assert_ne!(
+        inscription.empreinte(),
+        CodeEnrolement::depuis_entropie(graine).empreinte()
+    );
+    assert_ne!(
+        inscription.empreinte(),
+        CodeInvitation::depuis_entropie(graine).empreinte()
+    );
+    assert!(CodeInscription::analyser("trop-court").is_err());
+}
+
+#[test]
 fn la_preuve_d_un_exploitant_lie_le_defi_et_le_canal() {
     use asl_cle::{CleSecrete, Defi, LiaisonDeCanal};
 

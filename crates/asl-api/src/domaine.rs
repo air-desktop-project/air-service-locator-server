@@ -33,10 +33,8 @@ const CHAMP_ALIAS: &str = "alias";
 /// Le champ qui porte un domaine.
 const CHAMP_DOMAINE: &str = "domaine";
 
-/// Ce que tient la seule racine hébergeuse de la v1.
-///
-/// **Toujours `racines` avant les annuaires locaux** (PR suivantes) : un
-/// domaine est hébergé par les racines, ou par un `n-…` inscrit et accepté.
+/// Ce que `heberge_par` dit d'un domaine que les racines tiennent — le cas de
+/// tout domaine qu'aucun annuaire local accepté n'héberge (0.27.0).
 pub const HEBERGE_PAR_LES_RACINES: &str = "racines";
 
 /// Les quatre droits qu'un propriétaire tient sur son domaine
@@ -227,6 +225,9 @@ pub struct DomaineRendu<'a> {
     pub domaine: Identifiant,
     /// Le compte qui le possède.
     pub proprietaire: Identifiant,
+    /// L'annuaire local qui l'héberge effectivement — ou rien : les racines
+    /// (0.27.0).
+    pub heberge_par: Option<Identifiant>,
     /// Son alias, en NFC, s'il en a un.
     pub alias: Option<&'a str>,
     /// Ce que le demandeur peut sur lui — l'union de ses droits
@@ -269,7 +270,10 @@ impl DomaineRendu<'_> {
             ecrivain.pousser(b"\"");
         }
         ecrivain.pousser(b",\"heberge_par\":\"");
-        ecrivain.pousser(HEBERGE_PAR_LES_RACINES.as_bytes());
+        match self.heberge_par {
+            Some(annuaire) => ecrivain.pousser(annuaire.texte().as_str().as_bytes()),
+            None => ecrivain.pousser(HEBERGE_PAR_LES_RACINES.as_bytes()),
+        }
         ecrivain.pousser(b"\",\"droits\":[");
         for (rang, droit) in self.droits.iter().enumerate() {
             if rang > 0 {

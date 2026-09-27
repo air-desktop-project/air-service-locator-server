@@ -786,6 +786,57 @@ pub enum Besoin<'a> {
         /// Nommer, ou retirer.
         nomme: bool,
     },
+    // ── L'INSCRIPTION DES ANNUAIRES LOCAUX (0.27.0) ─────────────────────────
+    /// `GET /v1/annuaires` — mes annuaires locaux et mes déclarations qui
+    /// attendent.
+    MesAnnuaires,
+    /// `POST /v1/annuaires` — déclarer un annuaire neuf (`annuaire: None`) ;
+    /// `POST /v1/annuaires/{n}/membres` — son second membre.
+    DeclarerAnnuaire {
+        /// Rien, ou le titulaire.
+        annuaire: Option<Identifiant>,
+        /// L'adresse déclarée, déjà vérifiée.
+        adresse: asl_registre::Adresse,
+    },
+    /// `DELETE /v1/annuaires/{n}` (le membre est le titulaire) ou
+    /// `DELETE /v1/annuaires/{n}/membres/{n2}`.
+    RetirerAnnuaire {
+        /// L'annuaire — son titulaire.
+        annuaire: Identifiant,
+        /// Le membre retiré.
+        membre: Identifiant,
+    },
+    /// `POST /v1/annuaires/inscription` — un annuaire présente son code et sa
+    /// clé, dont la possession est déjà prouvée.
+    PresenterInscription {
+        /// L'empreinte du code présenté.
+        empreinte: [u8; asl_cle::EMPREINTE_OCTETS],
+        /// La clé d'identité de l'annuaire.
+        cle: ClePublique,
+    },
+    /// `POST /v1/annuaires/etat` — un annuaire relit son inscription ; la
+    /// possession de sa clé est déjà prouvée.
+    EtatDInscription {
+        /// La clé d'identité de l'annuaire.
+        cle: ClePublique,
+    },
+    /// `GET /v1/inscriptions` — les inscriptions en attente, pour un
+    /// administrateur des racines.
+    InscriptionsEnAttente,
+    /// `POST /v1/inscriptions/{n}/decision`.
+    DeciderInscription {
+        /// Le membre tranché.
+        membre: Identifiant,
+        /// Accepter, ou refuser.
+        accepte: bool,
+    },
+    /// `PUT` / `DELETE /v1/domaines/{d}/hebergeur`.
+    ConfierDomaine {
+        /// Le domaine.
+        domaine: Identifiant,
+        /// L'annuaire, ou rien : les racines.
+        annuaire: Option<Identifiant>,
+    },
 }
 
 /// La voie vers l'autre racine, telle que le tireur la voit en ce moment.
@@ -1113,6 +1164,10 @@ pub enum Trouvaille {
     Droits(alloc::vec::Vec<alloc::vec::Vec<u8>>),
     /// Un droit a été accordé.
     DroitCree(Identifiant),
+    /// Des inscriptions, **chacune déjà encodée** (0.27.0).
+    Inscriptions(alloc::vec::Vec<alloc::vec::Vec<u8>>),
+    /// Une inscription, déjà encodée — celle de l'annuaire qui se présente.
+    InscriptionLue(alloc::vec::Vec<u8>),
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -1656,6 +1711,46 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
                 Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             }
         }
+        // ── LES ANNUAIRES LOCAUX (0.27.0) ───────────────────────────────
+        Ressource::Annuaires => match methode {
+            asl_api::Methode::Get => Besoin::MesAnnuaires,
+            _ => lire_une_declaration_d_annuaire(None, corps),
+        },
+        Ressource::MembresAnnuaire { annuaire } => {
+            lire_une_declaration_d_annuaire(Some(annuaire), corps)
+        }
+        Ressource::Annuaire { annuaire } => Besoin::RetirerAnnuaire {
+            annuaire,
+            membre: annuaire,
+        },
+        Ressource::MembreAnnuaire { annuaire, membre } => {
+            Besoin::RetirerAnnuaire { annuaire, membre }
+        }
+        Ressource::InscriptionAnnuaire => lire_une_inscription(session, corps),
+        Ressource::EtatAnnuaire => lire_une_demande_d_etat(session, corps),
+        Ressource::Inscriptions => Besoin::InscriptionsEnAttente,
+        Ressource::DecisionInscription { membre } => {
+            match asl_api::annuaire::DecisionDInscription::decoder(corps) {
+                Ok(decision) => Besoin::DeciderInscription {
+                    membre,
+                    accepte: decision.accepte,
+                },
+                Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+            }
+        }
+        Ressource::HebergeurDomaine { domaine } => match methode {
+            asl_api::Methode::Delete => Besoin::ConfierDomaine {
+                domaine,
+                annuaire: None,
+            },
+            _ => match asl_api::annuaire::Hebergeur::decoder(corps) {
+                Ok(demande) => Besoin::ConfierDomaine {
+                    domaine,
+                    annuaire: Some(demande.annuaire),
+                },
+                Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+            },
+        },
         // ── LA VOIE ENTRE RACINES ───────────────────────────────────────
         Ressource::PairPreuve => lire_un_defi(corps),
         Ressource::PairOperations { apres } => Besoin::LireLesOperations { apres },
@@ -1813,6 +1908,62 @@ fn lire_une_preuve_d_exploitant<'a>(
         signature: Signature::depuis_octets(signature),
         compte,
         nomme,
+    }
+}
+
+/// Lit `POST /v1/annuaires` ou `POST /v1/annuaires/{n}/membres` : une
+/// adresse, dont la forme se juge ici.
+fn lire_une_declaration_d_annuaire<'a>(annuaire: Option<Identifiant>, corps: &[u8]) -> Besoin<'a> {
+    match asl_api::annuaire::DeclarationDAnnuaire::decoder(corps)
+        .ok()
+        .and_then(|demande| asl_registre::Adresse::nouvelle(demande.adresse).ok())
+    {
+        Some(adresse) => Besoin::DeclarerAnnuaire { annuaire, adresse },
+        None => Besoin::Deja(StatusCode::BAD_REQUEST),
+    }
+}
+
+/// Lit `POST /v1/annuaires/inscription` : un code, la clé d'identité de
+/// l'annuaire, et la preuve qu'il la détient — **la forme d'un enrôlement**,
+/// lue de la même façon, sous le domaine des codes d'inscription.
+fn lire_une_inscription<'a>(session: &Session, corps: &[u8]) -> Besoin<'a> {
+    if corps.len() != ENROLEMENT_CORPS_OCTETS {
+        return Besoin::Deja(StatusCode::BAD_REQUEST);
+    }
+    let symboles = corps.get(..asl_cle::CODE_SYMBOLES).unwrap_or_default();
+    let Ok(code) = core::str::from_utf8(symboles)
+        .map_err(|_| ())
+        .and_then(|texte| asl_cle::CodeInscription::analyser(texte).map_err(|_| ()))
+    else {
+        return Besoin::Deja(StatusCode::BAD_REQUEST);
+    };
+    let Some((cle, preuve)) =
+        lire_cle_et_preuve(corps.get(asl_cle::CODE_SYMBOLES..).unwrap_or(&[]))
+    else {
+        return Besoin::Deja(StatusCode::BAD_REQUEST);
+    };
+    if session.possession(&cle, &preuve) {
+        Besoin::PresenterInscription {
+            empreinte: code.empreinte(),
+            cle,
+        }
+    } else {
+        Besoin::PreuveRefusee
+    }
+}
+
+/// Lit `POST /v1/annuaires/etat` : la clé d'identité, et la preuve.
+fn lire_une_demande_d_etat<'a>(session: &Session, corps: &[u8]) -> Besoin<'a> {
+    if corps.len() != ENROLEMENT_CORPS_OCTETS.saturating_sub(asl_cle::CODE_SYMBOLES) {
+        return Besoin::Deja(StatusCode::BAD_REQUEST);
+    }
+    let Some((cle, preuve)) = lire_cle_et_preuve(corps) else {
+        return Besoin::Deja(StatusCode::BAD_REQUEST);
+    };
+    if session.possession(&cle, &preuve) {
+        Besoin::EtatDInscription { cle }
+    } else {
+        Besoin::PreuveRefusee
     }
 }
 
@@ -2519,6 +2670,88 @@ pub fn repondre<'o>(
             }
             autre => rendre_l_echec(autre, sortie),
         },
+        // ── LES ANNUAIRES LOCAUX (0.27.0) ───────────────────────────────
+        //
+        // **UNE LISTE, VIDE SI RIEN** — et pour qui n'administre pas les
+        // racines, `GET /v1/inscriptions` rend `404` : l'étage 3 dit `Rien`.
+        Besoin::MesAnnuaires => match trouvaille {
+            Trouvaille::Inscriptions(quoi) => composer_une_liste(quoi, sortie),
+            _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
+        },
+        Besoin::InscriptionsEnAttente => match trouvaille {
+            Trouvaille::Inscriptions(quoi) => composer_une_liste(quoi, sortie),
+            _ => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+        },
+        // **`201` ET LE CODE, UNE FOIS** : l'annuaire n'en garde que
+        // l'empreinte. `404` pour un annuaire qui n'est pas à moi ou pas
+        // accepté, `409` quand il a déjà son second membre.
+        Besoin::DeclarerAnnuaire { .. } => match trouvaille {
+            Trouvaille::CodeEmis { code, expire_a } => {
+                let mut corps = Corps::<CREATION_CORPS_MAX>::neuf();
+                corps.pousser(br#"{"code":""#);
+                corps.pousser(code.as_str().as_bytes());
+                corps.pousser(br#"","expire_a":"#);
+                corps.pousser_un_nombre(*expire_a);
+                corps.pousser(b"}");
+                composer(StatusCode::CREATED, JSON_MEDIA, corps.rendu(), sortie)
+            }
+            Trouvaille::Rien => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+            Trouvaille::Conflit => composer(
+                StatusCode::CONFLICT,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::CONFLICT),
+                sortie,
+            ),
+            autre => rendre_l_echec(autre, sortie),
+        },
+        // **LE DÉFI EST DÉPENSÉ, QU'IL SERVE OU NON** — la règle de
+        // l'enrôlement. Et **jamais `500`** : ces deux ressources n'exigent
+        // rien, et un `500` qu'un inconnu fabrique ne dit plus rien des vraies
+        // pannes. `404` pour un code inconnu ou une clé qui n'est membre de
+        // rien, `403` pour un code expiré, `409` pour un code qu'une autre clé
+        // a présenté, `429` après trop d'essais.
+        Besoin::PresenterInscription { .. } | Besoin::EtatDInscription { .. } => {
+            session.consommer_le_defi();
+            match trouvaille {
+                Trouvaille::InscriptionLue(corps) => {
+                    composer(StatusCode::OK, JSON_MEDIA, corps, sortie)
+                }
+                Trouvaille::Refus => composer(
+                    StatusCode::FORBIDDEN,
+                    PROBLEME_MEDIA,
+                    probleme(StatusCode::FORBIDDEN),
+                    sortie,
+                ),
+                Trouvaille::Conflit => composer(
+                    StatusCode::CONFLICT,
+                    PROBLEME_MEDIA,
+                    probleme(StatusCode::CONFLICT),
+                    sortie,
+                ),
+                Trouvaille::TropDEssais => composer(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    PROBLEME_MEDIA,
+                    probleme(StatusCode::TOO_MANY_REQUESTS),
+                    sortie,
+                ),
+                _ => composer(
+                    StatusCode::NOT_FOUND,
+                    PROBLEME_MEDIA,
+                    probleme(StatusCode::NOT_FOUND),
+                    sortie,
+                ),
+            }
+        }
         // ── CE QUI RETIRE, ET L'ALIAS ───────────────────────────────────
         //
         // **UNE SEULE FORME DE RÉPONSE POUR LES CINQ**, et c'est ce qui les rend
@@ -2546,7 +2779,10 @@ pub fn repondre<'o>(
         | Besoin::SupprimerGroupe { .. }
         | Besoin::AjouterMembre { .. }
         | Besoin::RetirerMembre { .. }
-        | Besoin::RetirerDroit { .. } => match trouvaille {
+        | Besoin::RetirerDroit { .. }
+        | Besoin::RetirerAnnuaire { .. }
+        | Besoin::DeciderInscription { .. }
+        | Besoin::ConfierDomaine { .. } => match trouvaille {
             Trouvaille::Fait => composer(StatusCode::NO_CONTENT, JSON_MEDIA, &[], sortie),
             Trouvaille::Conflit => composer(
                 StatusCode::CONFLICT,
@@ -8589,5 +8825,371 @@ mod droits {
             StatusCode::FORBIDDEN
         );
         assert_eq!(rendre(&retirer, &Trouvaille::Rien).0, StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod annuaires_locaux {
+    //! L'inscription des annuaires locaux (`protocole.md` §2.2, 0.27.0) : ce
+    //! que la session lit d'une requête, et ce qu'elle répond de ce que
+    //! l'étage 3 a trouvé.
+
+    extern crate alloc;
+
+    use alloc::vec::Vec;
+    use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
+    use asl_cle::{CleSecrete, Defi, LiaisonDeCanal};
+    use asl_id::{Genre, Identifiant};
+
+    use super::{Besoin, ENROLEMENT_CORPS_OCTETS, Session, Trouvaille, besoin, repondre};
+
+    fn un(genre: Genre, graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(genre, [graine; 16])
+    }
+
+    fn liaison() -> LiaisonDeCanal {
+        LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
+    }
+
+    fn defi() -> Defi {
+        Defi::depuis_octets([0x5A; asl_cle::DEFI_OCTETS])
+    }
+
+    fn session_avec_defi() -> Session {
+        let mut session = Session::new(liaison());
+        let _ = session.poser_le_defi(defi());
+        session
+    }
+
+    fn session_d_appareil() -> Session {
+        let mut session = Session::new(liaison());
+        session.pair = Some(un(Genre::Appareil, 9));
+        session
+    }
+
+    fn tete<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
+        let limites = Limits::default();
+        let mut constructeur = HeadBuilder::new(&limites);
+        constructeur.field(b":method", verbe).expect("le verbe");
+        constructeur.field(b":scheme", b"https").expect("le schéma");
+        constructeur
+            .field(b":authority", b"annuaire.example")
+            .expect("l'autorité");
+        constructeur.field(b":path", cible).expect("la cible");
+        constructeur.finish().expect("une tête close")
+    }
+
+    fn lire<'a>(
+        session: &Session,
+        verbe: &'a [u8],
+        cible: &'a [u8],
+        corps: &'a [u8],
+    ) -> Besoin<'a> {
+        besoin(session, &tete(verbe, cible), corps)
+    }
+
+    fn rendre(
+        session: &mut Session,
+        quoi: &Besoin<'_>,
+        trouvaille: &Trouvaille,
+    ) -> (StatusCode, Vec<u8>) {
+        let mut sortie = [0_u8; 1024];
+        let reponse = repondre(session, quoi, trouvaille, None, &mut sortie);
+        (reponse.status(), reponse.body().to_vec())
+    }
+
+    /// La clé d'identité d'un annuaire, et sa preuve de possession.
+    fn possession(graine: u8) -> Vec<u8> {
+        let secrete = CleSecrete::depuis_entropie([graine; 32]);
+        let preuve = secrete.prouver_la_possession(&defi(), &liaison());
+        let mut corps = Vec::new();
+        corps.extend_from_slice(&secrete.publique().octets());
+        corps.extend_from_slice(preuve.octets());
+        corps
+    }
+
+    fn inscription(code: &[u8], graine: u8) -> Vec<u8> {
+        let mut corps = Vec::with_capacity(ENROLEMENT_CORPS_OCTETS);
+        corps.extend_from_slice(code);
+        corps.extend_from_slice(&possession(graine));
+        corps
+    }
+
+    #[test]
+    fn la_session_lit_chaque_verbe_des_annuaires() {
+        let appareil = session_d_appareil();
+        let n = un(Genre::Annuaire, 1);
+        let n2 = un(Genre::Annuaire, 2);
+        let d = un(Genre::Domaine, 3);
+        let texte_n = n.texte();
+        let chemin_n = alloc::format!("/v1/annuaires/{}", texte_n.as_str());
+        let chemin_membres = alloc::format!("/v1/annuaires/{}/membres", texte_n.as_str());
+        let chemin_membre = alloc::format!(
+            "/v1/annuaires/{}/membres/{}",
+            texte_n.as_str(),
+            n2.texte().as_str()
+        );
+        let chemin_decision = alloc::format!("/v1/inscriptions/{}/decision", texte_n.as_str());
+        let chemin_hebergeur = alloc::format!("/v1/domaines/{}/hebergeur", d.texte().as_str());
+        let hebergeur = alloc::format!("{{\"annuaire\":\"{}\"}}", texte_n.as_str());
+        let adresse = asl_registre::Adresse::nouvelle("speedy:6630").unwrap();
+
+        assert_eq!(
+            lire(&appareil, b"GET", b"/v1/annuaires", b""),
+            Besoin::MesAnnuaires
+        );
+        assert_eq!(
+            lire(
+                &appareil,
+                b"POST",
+                b"/v1/annuaires",
+                br#"{"adresse":"speedy:6630"}"#
+            ),
+            Besoin::DeclarerAnnuaire {
+                annuaire: None,
+                adresse
+            }
+        );
+        assert_eq!(
+            lire(
+                &appareil,
+                b"POST",
+                chemin_membres.as_bytes(),
+                br#"{"adresse":"speedy:6630"}"#
+            ),
+            Besoin::DeclarerAnnuaire {
+                annuaire: Some(n),
+                adresse
+            }
+        );
+        // Une adresse sans port, ou un corps illisible : `400`.
+        for corps in [&br#"{"adresse":"speedy"}"#[..], b"{}"] {
+            assert_eq!(
+                lire(&appareil, b"POST", b"/v1/annuaires", corps),
+                Besoin::Deja(StatusCode::BAD_REQUEST)
+            );
+        }
+        assert_eq!(
+            lire(&appareil, b"DELETE", chemin_n.as_bytes(), b""),
+            Besoin::RetirerAnnuaire {
+                annuaire: n,
+                membre: n
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"DELETE", chemin_membre.as_bytes(), b""),
+            Besoin::RetirerAnnuaire {
+                annuaire: n,
+                membre: n2
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"GET", b"/v1/inscriptions", b""),
+            Besoin::InscriptionsEnAttente
+        );
+        assert_eq!(
+            lire(
+                &appareil,
+                b"POST",
+                chemin_decision.as_bytes(),
+                br#"{"accepte":false}"#
+            ),
+            Besoin::DeciderInscription {
+                membre: n,
+                accepte: false
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"POST", chemin_decision.as_bytes(), b"{}"),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            lire(
+                &appareil,
+                b"PUT",
+                chemin_hebergeur.as_bytes(),
+                hebergeur.as_bytes()
+            ),
+            Besoin::ConfierDomaine {
+                domaine: d,
+                annuaire: Some(n)
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"DELETE", chemin_hebergeur.as_bytes(), b""),
+            Besoin::ConfierDomaine {
+                domaine: d,
+                annuaire: None
+            }
+        );
+        assert_eq!(
+            lire(&appareil, b"PUT", chemin_hebergeur.as_bytes(), b"{}"),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn une_inscription_lit_le_code_la_cle_et_la_preuve() {
+        let session = session_avec_defi();
+        let corps = inscription(b"0123456789", 0x44);
+        let attendue = asl_cle::CodeInscription::analyser("0123456789")
+            .unwrap()
+            .empreinte();
+        assert!(matches!(
+            lire(&session, b"POST", b"/v1/annuaires/inscription", &corps),
+            Besoin::PresenterInscription { empreinte, .. } if empreinte == attendue
+        ));
+        // Longueur, texte, symbole, clé, preuve.
+        let mut court = corps.clone();
+        court.pop();
+        let mut pas_du_texte = corps.clone();
+        pas_du_texte[0] = 0xFF;
+        let mauvais_symbole = inscription(b"01234U6789", 0x44);
+        let mut mauvaise_cle = corps.clone();
+        mauvaise_cle[asl_cle::CODE_SYMBOLES..asl_cle::CODE_SYMBOLES + 32].fill(0x02);
+        for faux in [court, pas_du_texte, mauvais_symbole, mauvaise_cle] {
+            assert_eq!(
+                lire(&session, b"POST", b"/v1/annuaires/inscription", &faux),
+                Besoin::Deja(StatusCode::BAD_REQUEST)
+            );
+        }
+        let mut sans_preuve = corps;
+        let dernier = sans_preuve.len() - 1;
+        sans_preuve[dernier] ^= 0xFF;
+        assert_eq!(
+            lire(
+                &session,
+                b"POST",
+                b"/v1/annuaires/inscription",
+                &sans_preuve
+            ),
+            Besoin::PreuveRefusee
+        );
+    }
+
+    #[test]
+    fn une_demande_d_etat_lit_la_cle_et_la_preuve() {
+        let session = session_avec_defi();
+        let corps = possession(0x44);
+        let mut cle = [0_u8; 32];
+        cle.copy_from_slice(&corps[..32]);
+        assert_eq!(
+            lire(&session, b"POST", b"/v1/annuaires/etat", &corps),
+            Besoin::EtatDInscription {
+                cle: asl_cle::ClePublique::depuis_octets(cle).expect("une clé")
+            }
+        );
+        let mut court = corps.clone();
+        court.pop();
+        assert_eq!(
+            lire(&session, b"POST", b"/v1/annuaires/etat", &court),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+        let mut mauvaise_cle = corps.clone();
+        mauvaise_cle[..32].fill(0x02);
+        assert_eq!(
+            lire(&session, b"POST", b"/v1/annuaires/etat", &mauvaise_cle),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+        let mut sans_preuve = corps;
+        let dernier = sans_preuve.len() - 1;
+        sans_preuve[dernier] ^= 0xFF;
+        assert_eq!(
+            lire(&session, b"POST", b"/v1/annuaires/etat", &sans_preuve),
+            Besoin::PreuveRefusee
+        );
+    }
+
+    #[test]
+    fn la_session_rend_ce_que_l_etage_trois_a_trouve() {
+        let mut session = session_d_appareil();
+        let n = un(Genre::Annuaire, 1);
+        let adresse = asl_registre::Adresse::nouvelle("speedy:6630").unwrap();
+        let liste = Trouvaille::Inscriptions(alloc::vec![b"{}".to_vec()]);
+
+        assert_eq!(
+            rendre(&mut session, &Besoin::MesAnnuaires, &liste),
+            (StatusCode::OK, b"[{}]".to_vec())
+        );
+        assert_eq!(
+            rendre(&mut session, &Besoin::MesAnnuaires, &Trouvaille::Rien),
+            (StatusCode::OK, b"[]".to_vec())
+        );
+        assert_eq!(
+            rendre(&mut session, &Besoin::InscriptionsEnAttente, &liste).0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            rendre(
+                &mut session,
+                &Besoin::InscriptionsEnAttente,
+                &Trouvaille::Rien
+            )
+            .0,
+            StatusCode::NOT_FOUND
+        );
+
+        let declarer = Besoin::DeclarerAnnuaire {
+            annuaire: None,
+            adresse,
+        };
+        let code = asl_cle::CodeInscription::analyser("0123456789")
+            .unwrap()
+            .texte_groupe();
+        let (statut, corps) = rendre(
+            &mut session,
+            &declarer,
+            &Trouvaille::CodeEmis { code, expire_a: 42 },
+        );
+        assert_eq!(statut, StatusCode::CREATED);
+        assert_eq!(corps, br#"{"code":"01234-56789","expire_a":42}"#.to_vec());
+        for (trouvaille, attendu) in [
+            (Trouvaille::Rien, StatusCode::NOT_FOUND),
+            (Trouvaille::Conflit, StatusCode::CONFLICT),
+            (Trouvaille::Refus, StatusCode::FORBIDDEN),
+        ] {
+            assert_eq!(rendre(&mut session, &declarer, &trouvaille).0, attendu);
+        }
+
+        let presenter = Besoin::PresenterInscription {
+            empreinte: [0; 32],
+            cle: asl_cle::CleSecrete::depuis_entropie([1; 32]).publique(),
+        };
+        for (trouvaille, attendu) in [
+            (Trouvaille::InscriptionLue(b"{}".to_vec()), StatusCode::OK),
+            (Trouvaille::Refus, StatusCode::FORBIDDEN),
+            (Trouvaille::Conflit, StatusCode::CONFLICT),
+            (Trouvaille::TropDEssais, StatusCode::TOO_MANY_REQUESTS),
+            (Trouvaille::Rien, StatusCode::NOT_FOUND),
+        ] {
+            let mut session = session_avec_defi();
+            assert_eq!(rendre(&mut session, &presenter, &trouvaille).0, attendu);
+            // Le défi est dépensé, quoi qu'il arrive.
+            assert_eq!(session.defi, None);
+        }
+
+        for retrait in [
+            Besoin::RetirerAnnuaire {
+                annuaire: n,
+                membre: n,
+            },
+            Besoin::DeciderInscription {
+                membre: n,
+                accepte: true,
+            },
+            Besoin::ConfierDomaine {
+                domaine: un(Genre::Domaine, 2),
+                annuaire: Some(n),
+            },
+        ] {
+            assert_eq!(
+                rendre(&mut session, &retrait, &Trouvaille::Fait).0,
+                StatusCode::NO_CONTENT
+            );
+            assert_eq!(
+                rendre(&mut session, &retrait, &Trouvaille::Conflit).0,
+                StatusCode::CONFLICT
+            );
+        }
     }
 }

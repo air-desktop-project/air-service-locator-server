@@ -49,6 +49,7 @@
 
 pub mod exploitant;
 pub mod h3;
+pub mod inscription;
 pub mod pont;
 pub mod privileges;
 pub mod quic;

@@ -38,6 +38,10 @@
 //!    (2026-09-27) : un groupe, un élément domaine, machine ou service, au
 //!    moins un droit connu, une étiquette aux règles d'un nom — et elle se
 //!    relit à l'identique une fois réécrite.
+//! 10. **UNE ADRESSE D'ANNUAIRE LOCAL ACCEPTÉE SE RÉÉMET TELLE QUELLE**
+//!     (0.27.0) : ni guillemet, ni barre oblique inverse, ni contrôle — ce
+//!     qu'`asl-registre` en garde, `InscriptionRendue` le réécrit sans
+//!     échappement, entre ses guillemets ; un hébergeur nomme un `n-…`.
 //! 5. **UN ALIAS DE COMPTE ACCEPTÉ EST DU TEXTE LIBRE BORNÉ** (0.26.0,
 //!    décision 46) : non vide, au plus deux cent cinquante-cinq octets bruts, sans
 //!    guillemet, barre oblique inverse ni contrôle. L'unicité de sa forme — le
@@ -123,6 +127,40 @@ const fn invisible(caractere: char) -> bool {
 }
 
 fuzz_target!(|octets: &[u8]| {
+    // ── 10. LES ANNUAIRES LOCAUX ────────────────────────────────────────────
+    if let Ok(declaration) = asl_api::annuaire::DeclarationDAnnuaire::decoder(octets) {
+        assert!(
+            !declaration
+                .adresse
+                .chars()
+                .any(|c| c == '"' || c == '\\' || c.is_control()),
+            "une adresse acceptée porte ce que l'encodeur ne réécrit pas"
+        );
+        if let Ok(adresse) = asl_registre::Adresse::nouvelle(declaration.adresse) {
+            let rendue = asl_api::annuaire::InscriptionRendue {
+                membre: None,
+                annuaire: None,
+                proprietaire: None,
+                etat: "attendue",
+                adresse: adresse.texte(),
+                expire_a: Some(u64::MAX),
+            };
+            let mut sortie = [0_u8; 512];
+            let combien = rendue.encoder(&mut sortie).expect("elle tient");
+            let attendu = format!(
+                "{{\"etat\":\"attendue\",\"adresse\":\"{}\",\"expire_a\":{}}}",
+                declaration.adresse,
+                u64::MAX
+            );
+            assert_eq!(&sortie[..combien], attendu.as_bytes());
+        }
+    }
+    if let Ok(hebergeur) = asl_api::annuaire::Hebergeur::decoder(octets) {
+        assert_eq!(hebergeur.annuaire.genre(), asl_id::Genre::Annuaire);
+    }
+    // Une décision n'a que deux valeurs : il suffit qu'elle ne panique pas.
+    let _ = asl_api::annuaire::DecisionDInscription::decoder(octets);
+
     // ── 9. LES DROITS ───────────────────────────────────────────────────────
     //
     // Une demande acceptée porte un groupe, un élément d'un des trois genres
