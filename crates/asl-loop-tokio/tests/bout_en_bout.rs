@@ -7100,6 +7100,50 @@ async fn chercher_jusqu_a(
     None
 }
 
+/// **Décision 62** : un annuaire local renvoie aux racines, par `421` et la
+/// liste des racines, tout ce qui vit chez elles — et sert toujours ce qui est
+/// à lui ; une racine, elle, ne renvoie rien de tout cela.
+async fn un_annuaire_local_renvoie_aux_racines(
+    racine_locale: &[u8],
+    adresse_locale: SocketAddr,
+    a_la_racine: &mut ams_quic_client::Client,
+    flux: &mut u64,
+) {
+    // **UN ANNUAIRE LOCAL N'A AUCUN COMPTE** (décision 62) : ce qui vit aux
+    // racines leur est renvoyé par `421`, avec la liste des racines pour
+    // corps ; ce qui est à lui — la version — reste servi. La racine, elle,
+    // ne renvoie rien de tout cela.
+    let mut egare = connecter(racine_locale, adresse_locale).await;
+    let (statut, corps) = poster(
+        &mut egare,
+        0,
+        b"/v1/comptes",
+        b"n'importe quoi",
+        b"application/octet-stream",
+    )
+    .await;
+    let corps = String::from_utf8_lossy(&corps).into_owned();
+    assert_eq!(statut, b"421", "{corps}");
+    assert!(
+        asl_loop_tokio::racines::RACINES
+            .iter()
+            .all(|racine| corps.contains(racine.identifiant)),
+        "le `421` d'un annuaire local dit où sont les racines : {corps}"
+    );
+    let (statut, corps) = lire_json(&mut egare, 4, b"/v1/domaines").await;
+    assert_eq!(statut, b"421", "{corps}");
+    let (statut, corps) = lire_json(&mut egare, 8, b"/v1/version").await;
+    assert_eq!(statut, b"200", "{corps}");
+    // Une racine ne renvoie rien de tout cela : une machine n'a pas droit aux
+    // domaines, c'est `401` — pas `421`.
+    let (statut, corps) = lire_json(a_la_racine, *flux, b"/v1/domaines").await;
+    *flux = flux.saturating_add(4);
+    assert_eq!(
+        statut, b"401",
+        "une racine sert les domaines, elle ne renvoie pas : {corps}"
+    );
+}
+
 #[tokio::test]
 async fn la_federation_de_bout_en_bout() {
     let (autorite, racine, chaine, cle) = materiel("federation");
@@ -7320,6 +7364,17 @@ async fn la_federation_de_bout_en_bout() {
     let annonce_faite = std::time::Instant::now();
     let (statut, corps) = annoncer_depot(&mut daemon, machine_d, &cle_d).await;
     assert_eq!(statut, b"200", "{corps}");
+
+    // **UN ANNUAIRE LOCAL N'A AUCUN COMPTE** (décision 62) — voir
+    // `un_annuaire_local_renvoie_aux_racines`, hors de ce futur déjà long.
+    Box::pin(un_annuaire_local_renvoie_aux_racines(
+        &speedy_local.racine,
+        speedy_local.adresse,
+        &mut chercheur,
+        &mut flux,
+    ))
+    .await;
+
     let (latence, trouve) = chercher_jusqu_a(
         &mut chercheur,
         &mut flux,
