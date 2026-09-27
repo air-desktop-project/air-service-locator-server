@@ -237,6 +237,47 @@ qui serait faux plus longtemps sans que rien ne le signale.
 
 ---
 
+## 2 ter. À qui appartient un annuaire local, et sa paire de secours
+
+**Décidé le 2026-09-27 (Thierry ; `replication.md` décisions 48 et 49).**
+
+**Un annuaire local appartient à UN compte, et n'héberge que les domaines de ce
+compte — de un à n.** Jamais le domaine d'un autre : l'inscription lie le
+compte à l'annuaire (§4.1), et confier un domaine (`PUT /v1/domaines/{d}/hebergeur`)
+n'est permis qu'à son propriétaire, vers un annuaire que ce même compte a fait
+inscrire. Un domaine qu'un autre compte administre — son groupe
+d'administrateurs, un droit reçu — ne se confie pas pour autant à l'annuaire de
+cet administrateur : l'hébergement suit la propriété, pas la gestion. Le cas
+réel qui a fixé la règle : le domaine « air-desktop-dictator » de Thierry,
+hébergé chez lui. Que ce compte soit aussi le propriétaire des racines n'y
+change rien — le code ne connaît aucun compte, et le domaine racine n'est
+hébergé par aucun annuaire local (§2 bis).
+
+**Un annuaire local peut être tenu par DEUX machines — une paire de secours.**
+Le même mécanisme qu'entre nitrogen et argon (`replication.md` §2) : chacune a
+**sa** clé d'identité et son `n-…`, chacune nomme l'autre par `--peer` et
+`--peer-key`, et elles se répliquent tout ce que l'annuaire local écrit — les
+services déclarés de ses domaines. Le cas réel : speedy tient l'annuaire du
+domaine « air-desktop-dictator », helium le seconde.
+
+**Aux racines, la paire est UN SEUL annuaire local, à deux membres** (décision
+49, et c'est l'objet qui a été tranché) :
+
+| | Ce que c'est | Pourquoi |
+|---|---|---|
+| **L'annuaire** | Une inscription, **nommée par le `n-…` de son premier membre** — le titulaire. C'est ce `n-…` que `heberge_par` porte, que `GET /v1/annuaires` rend, que `DELETE /v1/annuaires/{n}` retire. | Un nom de plus (un genre d'identifiant pour « l'annuaire logique ») n'apporterait rien que le titulaire ne donne déjà, et les verbes de la spec nomment déjà l'annuaire par un `n-…`. |
+| **Ses membres** | Un ou deux `n-…` : le titulaire, et au plus un second. Chacun est **approuvé à son tour** par un administrateur des racines. | Une clé de plus est un annuaire de plus qui parle pour les mêmes domaines : ce que les racines servent en son nom, elles doivent pouvoir le refuser (décision 32). Le propriétaire est de confiance pour ses domaines ; une clé qu'on n'a pas vue ne l'est pas. |
+| **Remplacer une machine** | La clé d'identité est un fichier : la machine qui remplace le titulaire **reprend son fichier**, et garde son `n-…`. Retirer le second membre et en inscrire un autre se fait sans toucher au titulaire. | L'identité est la clé, pas la machine — comme pour une racine. Perdre le fichier du titulaire, c'est perdre l'annuaire : ses domaines se rendent aux racines et une nouvelle inscription recommence (§7). |
+
+**Chaque membre ouvre SA voie vers chaque racine** (`protocole.md` §3 ter), et
+reporte les services que **lui** voit — un daemon s'annonce à l'un des deux, pas
+aux deux. Les racines tiennent l'état de chaque service **par membre**, en
+mémoire (§5.4) ; **proposé** : un service est vivant tant qu'au moins un membre
+le dit vivant, et son adresse et son port sont ceux du dernier rapport vivant
+reçu **par cette racine** — l'état vivant ne se réplique pas entre racines, et
+chacune tranche avec ce qu'elle reçoit. Un membre qui se tait ne fait tomber
+que ce que lui seul disait.
+
 ## 4. S'enregistrer, puis se faire connaître
 
 **Deux étapes distinctes, et la première ne donne accès à rien.**
@@ -269,6 +310,11 @@ demande de **servir l'état de ses services** (§5.4). La marche devient :
 4. Acceptée, l'annuaire peut **héberger** les domaines de son propriétaire —
    que celui-ci lui confie un par un depuis l'application — et la voie de §5.4
    s'ouvre.
+5. **Pour une paire** (§2 ter) : le propriétaire déclare un second membre à
+   l'annuaire accepté (`POST /v1/annuaires/{n}/membres`), obtient un second
+   code, que la seconde machine présente avec **sa** clé ; ce membre-là est en
+   attente à son tour, et un administrateur l'accepte ou le refuse comme le
+   premier.
 
 **Retirer une inscription** — par son propriétaire, par un administrateur, ou
 par l'effacement du compte — ferme la voie ; ses domaines reviennent aux
@@ -638,22 +684,54 @@ Rassemblé, plutôt que dispersé.
 6. **Le passage d'un domaine des racines vers un annuaire local, et retour**
    (2026-09-26). Pendant la bascule, les daemons s'annoncent encore à
    l'ancien hébergeur : ils apparaissent `parti` jusqu'à ce qu'ils se
-   ré-annoncent au nouveau. Comment un daemon apprend que son domaine a changé
-   d'hébergeur — le lui pousser, ou qu'il le lise à la reconnexion — n'est pas
-   décidé.
+   ré-annoncent au nouveau. **Proposé (2026-09-27)** : une racine qui reçoit
+   l'annonce d'une machine dont le domaine est confié à un annuaire local la
+   **refuse en `421`** (« mauvais destinataire », RFC 9110) en donnant
+   l'adresse déclarée de l'annuaire ; le daemon la suit, comme une redirection.
+   Au retour aux racines, l'annuaire local ferme ses sessions de ce domaine, et
+   les daemons se retournent vers les racines par leur tournée ordinaire.
 7. **Ce qui se passe quand l'annuaire local disparaît** — éteint, cassé,
    jamais revenu. Ses services apparaissent `parti` dès que sa voie tombe ; au
    bout de combien de temps ses domaines reviennent-ils d'eux-mêmes aux
-   racines, et le faut-il ?
+   racines, et le faut-il ? **Proposé (2026-09-27)** : ce qu'un membre
+   rapportait tombe **quand sa voie tombe** — au plus l'inactivité de la
+   connexion, trente secondes, comme un bail (`modele.md` §4.1) ; avec une
+   paire, seulement ce que ce membre-là était seul à dire. **Les domaines ne
+   reviennent pas d'eux-mêmes** : c'est au propriétaire de les rendre
+   (`DELETE /v1/domaines/{d}/hebergeur`) ; une panne longue n'est pas une
+   décision, et un domaine qui changerait d'hébergeur tout seul ferait
+   basculer ses daemons sans que personne l'ait voulu.
 8. **La latence acceptable de « vivant »** propagé par un annuaire local :
    combien de temps un service mort peut-il être servi comme vivant par les
    racines ? Elle dépend du keepalive entre daemon et annuaire local, puis
    entre annuaire local et racines.
 9. **IPv4 derrière un NAT** (§5.4) : l'adresse qu'un annuaire local transmet
    n'est joignable que si la traversée est résolue (`modele.md` §6.3).
+   **Précisé (2026-09-27)** : la voie entre l'annuaire local et les racines
+   **n'exige aucun port entrant** — c'est l'annuaire qui ouvre. Un port entrant
+   (UDP 6630 sur la box, en IPv6 vers l'adresse publique de chaque membre)
+   n'est nécessaire que pour les daemons de ses domaines qui sont **hors de la
+   maison** : ce sont eux qui doivent joindre l'annuaire. **Proposé** :
+   l'adresse que le propriétaire déclare (`POST /v1/annuaires`) est celle que
+   ces daemons emploient ; les racines ne s'en servent que pour la dire (le
+   `421` de la question 6).
 10. **Le certificat de l'annuaire local.** Les daemons de la maison le
     joignent en TLS : sous quelle autorité, et comment ils l'épinglent — sans
-    appeler de tiers (C19).
+    appeler de tiers (C19). **Proposé (2026-09-27)** : une **autorité propre au
+    propriétaire**, un fichier qu'il frappe une fois chez lui, qui signe le
+    certificat de chaque membre (le même nom pour les deux, pour qu'un daemon
+    bascule de l'un à l'autre sans rien changer) et que ses daemons épinglent
+    par `--roots`, comme ils épinglent aujourd'hui celle des racines. **Pas
+    l'autorité des racines** : elles frapperaient des certificats pour les
+    maisons de tout le monde, ce qui ferait d'elles l'autorité de noms
+    qu'elles ne tiennent pas. Et **pas la clé `n-…`** : elle prouve l'annuaire
+    aux racines, elle ne tourne pas, et la garder distincte du TLS est la règle
+    des racines (`modele.md` §2.7).
+13. **Le paquet pour les deux architectures.** Un membre peut être un PC ou
+    un Raspberry Pi — helium est `aarch64`, sous Ubuntu 26.04. **Le paquet
+    `asl-server` doit exister en `amd64` ET en `arm64`** avant qu'une paire
+    se déploie ; rien dans le code ne l'empêche (C4 : pas une ligne de C), mais
+    `scripts/paquet.sh` ne fabrique aujourd'hui que le premier.
 11. ~~**Les groupes généraux.**~~ **Décidé le 2026-09-26** : dès la v1, avec
     les droits (`modele.md` §2.12, §2.13). Restent ouverts les droits
     négatifs, l'imbrication des groupes et leurs bornes (`modele.md` §6).
