@@ -2182,6 +2182,14 @@ authentifie les annonces des daemons de ses domaines avec les clés que
 **aucun compte** : ses domaines appartiennent à des comptes qui vivent aux
 racines.
 
+**Et il le fait respecter** (`replication.md` décision 62, 0.33.0) : il ne
+sert lui-même que `/v1/defi` (pour une machine de ses domaines), `/v1/annonce`
+et `/v1/poussees`, `/v1/vu`, `/v1/version`, `/v1/racines`, et la voie de sa
+paire (`/v1/pair/*`, `/v1/replication`). Tout autre verbe reçoit **`421`**, dont
+le corps est la liste des racines (la forme de `GET /v1/racines`) : c'est là
+qu'on crée un compte, qu'on administre un domaine, qu'on accorde un droit et
+qu'on résout un service.
+
 ## 4. Ce qui est nommé et repoussé
 
 ### 4.1 La sonde réflexive UDP

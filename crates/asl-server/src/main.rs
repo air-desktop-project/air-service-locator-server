@@ -376,7 +376,19 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         // **LA POSTURE SE DIT AU DÉMARRAGE, ET FORT.** Un annuaire qui laisse
         // n'importe qui créer un compte doit l'annoncer dans son journal
         // d'exploitation : c'est là qu'on relit ce qu'on croyait avoir réglé.
-        if reglages.politique == asl_auth::Politique::AttestationFacultative {
+        //
+        // **UN ANNUAIRE LOCAL N'A PAS DE POSTURE À DIRE** (décision 62) : il ne
+        // crée aucun compte, quelle que soit `--attestation`, que l'unité
+        // systemd passe toujours et qu'on accepte donc sans en rien faire.
+        // Annoncer « n'importe qui peut créer un compte » serait faux.
+        if reglages.federation.is_some() {
+            eprintln!(
+                "asl-server : annuaire LOCAL — aucun compte ne se crée ici, et rien de ce \
+                 qui vit aux racines (comptes, appareils, domaines, droits) ne s'y lit ni \
+                 ne s'y écrit : ces verbes sont renvoyés aux racines (421). --attestation \
+                 est sans effet."
+            );
+        } else if reglages.politique == asl_auth::Politique::AttestationFacultative {
             eprintln!(
                 "asl-server : ATTENTION — l'attestation de plate-forme n'est pas exigée. \
                  N'IMPORTE QUI peut créer un compte sur cet annuaire."

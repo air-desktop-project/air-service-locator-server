@@ -665,6 +665,10 @@ struct Service<'a> {
     /// réveiller. `Annuaire::au_tour` les verse aux flux des nouvelles et au
     /// réveilleur — jamais ici : la boucle ne fait pas d'appel sortant.
     a_reveiller: &'a mut Vec<Identifiant>,
+    /// **Cet annuaire est-il LOCAL ?** (décision 62) Alors ce qui relève des
+    /// racines — comptes, appareils, domaines, droits… — leur est renvoyé par
+    /// `421`, avant toute lecture.
+    local: bool,
 }
 
 impl ams_h3::Service for Service<'_> {
@@ -674,7 +678,11 @@ impl ams_h3::Service for Service<'_> {
         corps: &[u8],
         sortie: &'o mut [u8],
     ) -> Reponse<'o> {
-        let besoin = asl_session::besoin(self.session, tete, corps);
+        let besoin = if self.local {
+            asl_session::besoin_d_un_annuaire_local(self.session, tete, corps)
+        } else {
+            asl_session::besoin(self.session, tete, corps)
+        };
         self.corps = corps.to_vec();
         let trouvaille = self.chercher(&besoin);
         asl_session::repondre(self.session, &besoin, &trouvaille, self.defi, sortie)
@@ -730,7 +738,9 @@ impl Service<'_> {
             // **LA LISTE EMBARQUÉE, TELLE QUELLE** (décision 56) : la clé
             // voyage avec l'identifiant, et c'est la connexion vérifiée par
             // clé qui la signe.
-            Besoin::Racines => Trouvaille::Racines(crate::racines::racines_encodees()),
+            Besoin::Racines | Besoin::AuxRacines => {
+                Trouvaille::Racines(crate::racines::racines_encodees())
+            }
 
             // **LA CLÉ VIENT DE L'ENREGISTREMENT DE LA MACHINE**, et rien
             // d'autre : une machine inconnue, une clé illisible et une
@@ -3881,6 +3891,10 @@ impl Application for Annuaire<'_> {
             a_reveiller: &mut self.a_reveiller,
             etat_federe: &mut self.etat_federe,
             expiration_federee_us: self.expiration_federee_us,
+            // **LOCAL SI L'ON PUBLIE UN ÉTAT AUX RACINES** : c'est
+            // `publier_l_etat_dans` qui fait d'un annuaire un annuaire local
+            // (`--federation`), et rien d'autre ne le fait.
+            local: self.publies.is_some(),
         };
         if let Err(faute) = conducteur.on_readable(&mut Pont(connexion), &mut service, flux) {
             Self::condamner(connexion, &faute);

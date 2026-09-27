@@ -857,6 +857,12 @@ pub enum Besoin<'a> {
     /// `GET /v1/racines` — l'identité et les locateurs des racines
     /// (décision 56). Sans exigence.
     Racines,
+    /// **Ce verbe relève des racines, et cet annuaire est LOCAL** (décision
+    /// 62) : `421`, avec la liste des racines pour corps — celle que rend
+    /// `GET /v1/racines`, identités et locateurs. Un annuaire local n'a
+    /// aucun compte (`protocole.md` §3 ter) : ni création, ni lecture, ni
+    /// administration de ce qui vit aux racines ne se fait chez lui.
+    AuxRacines,
     /// `PUT` / `DELETE /v1/domaines/{d}/hebergeur`.
     ConfierDomaine {
         /// Le domaine.
@@ -1460,6 +1466,68 @@ impl Session {
     fn consommer_le_defi(&mut self) {
         self.defi = None;
     }
+}
+
+/// Ce qu'un annuaire LOCAL sert lui-même (décision 62) — tout le reste relève
+/// des racines, et il le leur renvoie par `421`.
+///
+/// # CE QU'IL SERT, ET POURQUOI CELA SEULEMENT
+///
+/// Un annuaire local **n'a aucun compte** (`protocole.md` §3 ter) : il
+/// authentifie les daemons des domaines qu'on lui a confiés, avec les clés que
+/// les racines lui transmettent, et tient leurs annonces. Il sert donc :
+///
+/// - **la preuve** (`/v1/defi`) — celle d'une machine de ses domaines ;
+/// - **l'annonce** et les **poussées** de verdict qui la suivent ;
+/// - ce qui n'exige rien et ne dit rien d'un compte : `/v1/vu`, `/v1/version`,
+///   `/v1/racines` (sa liste embarquée — où aller pour le reste) ;
+/// - **la voie de sa paire** (`/v1/pair/*`, `/v1/replication`) : deux membres
+///   d'une paire se répliquent comme deux racines (décision 49).
+///
+/// Tout le reste — créer un compte, prouver un appareil (le défi le permet,
+/// mais aucun appareil n'est connu ici), lire ou écrire un compte, ses
+/// machines, ses domaines, ses groupes, ses droits, ses autorisations, les
+/// inscriptions, les administrateurs, la résolution (`/v1/ou` : elle se fait
+/// sous des droits qui vivent aux racines), les nouvelles d'un appareil, et la
+/// voie de fédération elle-même (qu'on sert aux annuaires locaux, pas qu'on
+/// reçoit) — **relève des racines**.
+#[must_use]
+pub const fn servie_par_un_annuaire_local(ressource: &Ressource<'_>) -> bool {
+    matches!(
+        ressource,
+        Ressource::Defi
+            | Ressource::Annonce
+            | Ressource::Poussees
+            | Ressource::Vu
+            | Ressource::Version
+            | Ressource::Racines
+            | Ressource::PairPreuve
+            | Ressource::PairOperations { .. }
+            | Ressource::PairInstantane
+            | Ressource::Replication
+    )
+}
+
+/// [`besoin`], pour un annuaire LOCAL : ce qu'il ne sert pas
+/// ([`servie_par_un_annuaire_local`]) devient [`Besoin::AuxRacines`], AVANT
+/// toute exigence et toute lecture — un annuaire local ne dit pas s'il
+/// connaîtrait un compte, il dit où aller.
+///
+/// Une route inconnue ou une méthode refusée gardent leur réponse : ce n'est
+/// pas aux racines qu'une faute de chemin se corrige.
+pub fn besoin_d_un_annuaire_local<'a>(
+    session: &Session,
+    tete: &RequestHead<'a>,
+    corps: &'a [u8],
+) -> Besoin<'a> {
+    if let Some((methode, _)) = traduire(tete.method())
+        && let Ok(resolu) = asl_api::resoudre(methode, tete.path())
+        && resolu.sert
+        && !servie_par_un_annuaire_local(&resolu.ressource)
+    {
+        return Besoin::AuxRacines;
+    }
+    besoin(session, tete, corps)
 }
 
 /// **PREMIER TEMPS** : que faut-il pour répondre à cette requête ?
@@ -2859,6 +2927,13 @@ pub fn repondre<'o>(
         // **UNE LISTE, TOUJOURS** : la liste embarquée ne manque jamais. Et
         // jamais `500` pour `Rien` — la ressource n'exige rien (voir
         // `Besoin::Version`).
+        // **`421` : PAS ICI, MAIS LÀ** (décision 62). Le corps est la liste des
+        // racines, la même que `GET /v1/racines` : qui s'est trompé d'annuaire
+        // apprend où aller, identités comprises.
+        Besoin::AuxRacines => match trouvaille {
+            Trouvaille::Racines(quoi) => composer_une_liste_sous(MAL_ADRESSEE, quoi, sortie),
+            _ => composer(MAL_ADRESSEE, PROBLEME_MEDIA, probleme(MAL_ADRESSEE), sortie),
+        },
         Besoin::Racines => match trouvaille {
             Trouvaille::Racines(quoi) => composer_une_liste(quoi, sortie),
             _ => composer(
@@ -3371,6 +3446,16 @@ fn composer_les_resolutions<'o>(quoi: &[Resolution], sortie: &'o mut [u8]) -> Re
 
 /// Compose un tableau d'éléments déjà encodés.
 fn composer_une_liste<'o>(quoi: &[alloc::vec::Vec<u8>], sortie: &'o mut [u8]) -> Reponse<'o> {
+    composer_une_liste_sous(StatusCode::OK, quoi, sortie)
+}
+
+/// [`composer_une_liste`], sous un autre statut que `200` — le `421` d'un
+/// annuaire local, dont le corps dit où aller.
+fn composer_une_liste_sous<'o>(
+    statut: StatusCode,
+    quoi: &[alloc::vec::Vec<u8>],
+    sortie: &'o mut [u8],
+) -> Reponse<'o> {
     let mut place = [0_u8; asl_proto::cadrage::MESSAGE_MAX];
     let combien = {
         let mut liste = asl_proto::cadrage::Liste::nouvelle(&mut place);
@@ -3391,7 +3476,7 @@ fn composer_une_liste<'o>(quoi: &[alloc::vec::Vec<u8>], sortie: &'o mut [u8]) ->
         }
     };
     composer(
-        StatusCode::OK,
+        statut,
         JSON_MEDIA,
         place.get(..combien).unwrap_or_default(),
         sortie,
@@ -9389,7 +9474,7 @@ mod voie_de_l_annuaire_local {
 
     use super::{
         Besoin, CleTrouvee, JSON_MEDIA, MAL_ADRESSEE, OCTETS_MEDIA, PREUVE_OCTETS, Session,
-        Trouvaille, besoin, repondre,
+        Trouvaille, besoin, besoin_d_un_annuaire_local, repondre,
     };
 
     fn liaison() -> LiaisonDeCanal {
@@ -9622,5 +9707,90 @@ mod voie_de_l_annuaire_local {
         assert_eq!(MAL_ADRESSEE.value(), 421);
         assert_eq!(champ(&reponse, b"content-type"), Some(JSON_MEDIA));
         assert_eq!(reponse.body(), corps);
+    }
+
+    /// **Décision 62** : un annuaire local ne sert que la preuve, l'annonce et
+    /// ses poussées, ce qui ne dit rien d'un compte, et la voie de sa paire.
+    #[test]
+    fn un_annuaire_local_ne_sert_que_ce_qui_est_a_lui() {
+        let session = Session::new(liaison());
+        // Ce qu'il sert lui-même : même besoin qu'une racine.
+        for (verbe, cible) in [
+            (&b"GET"[..], &b"/v1/version"[..]),
+            (b"GET", b"/v1/vu"),
+            (b"GET", b"/v1/racines"),
+            (b"GET", b"/v1/defi"),
+            (b"POST", b"/v1/annonce"),
+            (b"GET", b"/v1/poussees"),
+            (b"POST", b"/v1/pair/preuve"),
+            (b"GET", b"/v1/pair/operations?apres=0"),
+            (b"GET", b"/v1/pair/instantane"),
+            (b"GET", b"/v1/replication"),
+        ] {
+            let requete = tete(verbe, cible);
+            assert_eq!(
+                besoin_d_un_annuaire_local(&session, &requete, b""),
+                besoin(&session, &requete, b""),
+                "{cible:?}"
+            );
+        }
+        // Ce qui relève des racines : `421`, avant toute exigence.
+        for (verbe, cible) in [
+            (&b"POST"[..], &b"/v1/comptes"[..]),
+            (b"POST", b"/v1/appareils"),
+            (b"POST", b"/v1/attestation"),
+            (b"POST", b"/v1/invitations"),
+            (b"DELETE", b"/v1/compte"),
+            (b"GET", b"/v1/machines"),
+            (b"POST", b"/v1/machines"),
+            (b"GET", b"/v1/autorisations"),
+            (b"POST", b"/v1/droits"),
+            (b"GET", b"/v1/domaines"),
+            (b"GET", b"/v1/groupes"),
+            (b"PUT", b"/v1/alias"),
+            (b"GET", b"/v1/inscriptions"),
+            (b"POST", b"/v1/annuaires"),
+            (b"GET", b"/v1/nouvelles"),
+            (b"GET", b"/v1/moi"),
+            (b"GET", b"/v1/federation/machines?apres=0"),
+        ] {
+            assert_eq!(
+                besoin_d_un_annuaire_local(&session, &tete(verbe, cible), b""),
+                Besoin::AuxRacines,
+                "{cible:?}"
+            );
+        }
+        // Une faute de chemin ou de méthode garde sa réponse.
+        for (verbe, cible) in [
+            (&b"GET"[..], &b"/v1/rien"[..]),
+            (b"OPTIONS", b"/v1/comptes"),
+            (b"DELETE", b"/v1/version"),
+        ] {
+            let requete = tete(verbe, cible);
+            assert_eq!(
+                besoin_d_un_annuaire_local(&session, &requete, b""),
+                besoin(&session, &requete, b"")
+            );
+        }
+    }
+
+    #[test]
+    fn aux_racines_rend_421_et_la_liste_des_racines() {
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 256];
+        let liste = Trouvaille::Racines(alloc::vec![br#"{"annuaire":"n-a"}"#.to_vec()]);
+        let reponse = repondre(&mut session, &Besoin::AuxRacines, &liste, None, &mut sortie);
+        assert_eq!(reponse.status(), MAL_ADRESSEE);
+        assert_eq!(champ(&reponse, b"content-type"), Some(JSON_MEDIA));
+        assert_eq!(reponse.body(), br#"[{"annuaire":"n-a"}]"#);
+        let mut sortie = [0_u8; 256];
+        let reponse = repondre(
+            &mut session,
+            &Besoin::AuxRacines,
+            &Trouvaille::Rien,
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), MAL_ADRESSEE);
     }
 }
