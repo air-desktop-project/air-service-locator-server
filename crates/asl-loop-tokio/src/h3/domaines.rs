@@ -78,9 +78,14 @@ impl Service<'_> {
             if !membres.contains(&compte) {
                 return None;
             }
+            // **SON ALIAS EST RANGÉ COMME CELUI D'UN AUTRE** (0.31.1, #58) : le
+            // domaine racine est calculé, mais son alias, lui, est écrit — et se
+            // relit ici. Rendre `None` en dur, c'était accepter l'écriture (204)
+            // et la taire à la lecture.
+            let alias = self.entrepot.alias_de_domaine(domaine).ok().flatten();
             return Some((
                 premier?,
-                None,
+                alias,
                 &asl_api::domaine::DROITS_SUR_LE_DOMAINE_RACINE,
             ));
         }

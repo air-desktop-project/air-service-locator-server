@@ -6072,6 +6072,50 @@ async fn les_groupes_administrent_un_domaine_et_les_racines_se_nomment_sous_la_c
         )),
         "{liste}"
     );
+    // **ELLE LUI POSE UN ALIAS, ET IL SE RELIT PARTOUT** (vu le 27/09 : « R »
+    // accepté en 204, mais absent de la liste et du détail). `21` est l'index
+    // QPACK de `:method: PUT`.
+    let cible_alias = format!("/v1/domaines/{}/alias", racine_d.texte().as_str());
+    ams_quic_client::envoyer_avec_media(
+        &mut alice,
+        76,
+        21,
+        cible_alias.as_bytes(),
+        None,
+        br#"{"alias":"R"}"#,
+        b"application/json",
+    )
+    .await;
+    let _ = ams_quic_client::attendre_la_reponse(&mut alice, 76).await;
+    assert_eq!(
+        champ(&champs(alice.recu(76)), b":status"),
+        Some(&b"204"[..]),
+        "un administrateur des racines nomme le domaine racine"
+    );
+    let (_, liste) = lire_json(&mut alice, 80, b"/v1/domaines").await;
+    assert!(
+        liste.contains(&format!(
+            "\"domaine\":\"{}\",\"proprietaire\":\"{}\",\"alias\":\"R\"",
+            racine_d.texte().as_str(),
+            compte_a.texte().as_str()
+        )),
+        "la liste dit l'alias du domaine racine, à sa ligne : {liste}"
+    );
+    let (statut, detail) = lire_json(
+        &mut alice,
+        84,
+        format!("/v1/domaines/{}", racine_d.texte().as_str()).as_bytes(),
+    )
+    .await;
+    assert_eq!(statut, b"200", "{detail}");
+    assert!(
+        detail.contains("\"alias\":\"R\""),
+        "le détail dit l'alias du domaine racine : {detail}"
+    );
+    let (statut, trouves) = lire_json(&mut alice, 88, b"/v1/domaines?alias=R").await;
+    assert_eq!(statut, b"200", "{trouves}");
+    assert!(trouves.contains(racine_d.texte().as_str()), "{trouves}");
+
     // Mais elle ne nomme personne par la voie des groupes.
     let admins_racine = asl_registre::groupe_d_administrateurs(racine_d);
     let par_les_groupes = format!("/v1/groupes/{}/membres", admins_racine.texte().as_str());
@@ -6106,7 +6150,7 @@ async fn les_groupes_administrent_un_domaine_et_les_racines_se_nomment_sous_la_c
         champ(&champs(exploitant.recu(28)), b":status").expect("un statut"),
         b"204"
     );
-    let (_, liste) = lire_json(&mut alice, 72, b"/v1/domaines").await;
+    let (_, liste) = lire_json(&mut alice, 92, b"/v1/domaines").await;
     assert!(!liste.contains(racine_d.texte().as_str()), "{liste}");
 
     let _ = dire_stop.send(());
@@ -7304,6 +7348,43 @@ async fn la_federation_de_bout_en_bout() {
     .await;
     assert_eq!(statut, b"404", "sans droit, un service fédéré n'existe pas");
 
+    // **L'ÉCRAN DU PROPRIÉTAIRE VOIT LE SERVICE, PAR LA RACINE** (décision
+    // 60) : `GET /v1/machines/{m}/services` rend ce que l'annuaire local
+    // rapporte, et dit qui l'a sondé. Le daemon est venu de 127.0.0.1, et
+    // l'annuaire local se joint ailleurs (ses locateurs publiés) : sa sonde
+    // n'est pas une sonde de l'intérieur.
+    let (statut, services) = lire_json(
+        &mut alice,
+        32,
+        format!("/v1/machines/{}/services", machine_d.texte()).as_bytes(),
+    )
+    .await;
+    assert_eq!(statut, b"200", "{services}");
+    assert!(
+        services.contains("\"nom\":\"depot\"") && services.contains("\"etat\":\"annonce\""),
+        "le service fédéré se voit vivant par la racine : {services}"
+    );
+    assert!(
+        services.contains(&format!("\"sonde_par\":\"{}\"", n_speedy.texte().as_str())),
+        "l'écran sait QUI a sondé : {services}"
+    );
+    assert!(
+        services.contains("\"sonde_locale\":false"),
+        "le daemon n'est pas venu d'une adresse de l'annuaire local : {services}"
+    );
+    // Un autre compte ne voit rien de cette machine par cette porte.
+    let (statut, rien) = lire_json(
+        &mut carole,
+        12,
+        format!("/v1/machines/{}/services", machine_d.texte()).as_bytes(),
+    )
+    .await;
+    assert_eq!(statut, b"200");
+    assert_eq!(
+        rien, "[]",
+        "la porte de l'administration n'ouvre que ses propres machines"
+    );
+
     // **RIEN DE L'ÉTAT FÉDÉRÉ N'EST ÉCRIT DANS L'ENTREPÔT DES RACINES** (C13).
     assert!(
         entrepot_racine
@@ -7362,7 +7443,7 @@ async fn la_federation_de_bout_en_bout() {
     // ── LA PAIRE : HELIUM, ACCEPTÉ ; SPEEDY TOMBE, HELIUM PORTE ─────────────
     let (statut, rendu) = poster(
         &mut alice,
-        32,
+        36,
         format!("/v1/annuaires/{}/membres", n_speedy.texte()).as_bytes(),
         br#"{"adresse":"helium.maison:6630"}"#,
         b"application/json",
@@ -7470,6 +7551,18 @@ async fn la_federation_de_bout_en_bout() {
     .await
     .expect("le second membre porte le service quand le premier est tombé");
     assert!(trouve.contains("49152"), "{trouve}");
+    // L'écran le voit aussi, et sait que c'est HELIUM qui le rapporte.
+    let (statut, services) = lire_json(
+        &mut alice,
+        40,
+        format!("/v1/machines/{}/services", machine_d.texte()).as_bytes(),
+    )
+    .await;
+    assert_eq!(statut, b"200", "{services}");
+    assert!(
+        services.contains(&format!("\"sonde_par\":\"{}\"", n_helium.texte().as_str())),
+        "le rapport retenu est celui du membre qui le dit vivant : {services}"
+    );
 
     // ── HELIUM SE TAIT : EN MOINS DE L'EXPIRATION, PLUS RIEN ────────────────
     helium_local.federateur.abort();
@@ -7490,6 +7583,18 @@ async fn la_federation_de_bout_en_bout() {
     eprintln!(
         "fédération : l'annuaire local s'est tu, le service est tombé en {:?}",
         tait.elapsed()
+    );
+    // Et l'écran ne le montre plus : plus personne ne le confirme (C6).
+    let (statut, services) = lire_json(
+        &mut alice,
+        44,
+        format!("/v1/machines/{}/services", machine_d.texte()).as_bytes(),
+    )
+    .await;
+    assert_eq!(statut, b"200");
+    assert_eq!(
+        services, "[]",
+        "un service que plus personne ne rapporte n'existe plus"
     );
 
     helium_local.arreter().await;

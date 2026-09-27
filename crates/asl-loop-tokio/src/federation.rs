@@ -102,6 +102,9 @@ pub struct LueFederee {
     pub service: Identifiant,
     /// Sa réponse d'annonce, s'il est vivant.
     pub reponse: Option<Vec<u8>>,
+    /// Le membre dont le rapport a été retenu : c'est LUI qui a sondé, et
+    /// c'est ce que `sonde_par` dit à l'écran (décision 60).
+    pub membre: Identifiant,
 }
 
 /// La clé d'un service : sa machine, puis son nom.
@@ -111,6 +114,37 @@ fn clef_de_service(machine: Identifiant, nom: &[u8]) -> Vec<u8> {
     clef.extend_from_slice(machine.octets());
     clef.extend_from_slice(nom);
     clef
+}
+
+/// Ce qu'on retient des rapports des membres sur UN service.
+///
+/// **Vivant si un membre le dit** (décision 49), et sa réponse est celle
+/// du rapport vivant le plus récent. Déclaré mais parti si les membres qui
+/// en parlent encore le disent tous parti. Rien si aucun rapport n'a moins
+/// de `expiration` microsecondes : le silence ne prouve rien (C6).
+fn retenir(
+    tenus: &HashMap<Identifiant, Tenue>,
+    maintenant: u64,
+    expiration: u64,
+) -> Option<LueFederee> {
+    let mut plus_recent: Option<(&Identifiant, &Tenue)> = None;
+    let mut vivant: Option<(&Identifiant, &Tenue)> = None;
+    for (membre, tenue) in tenus
+        .iter()
+        .filter(|(_, tenue)| tenue.recu_a.saturating_add(expiration) >= maintenant)
+    {
+        if plus_recent.is_none_or(|(_, avant)| tenue.recu_a > avant.recu_a) {
+            plus_recent = Some((membre, tenue));
+        }
+        if tenue.reponse.is_some() && vivant.is_none_or(|(_, avant)| tenue.recu_a > avant.recu_a) {
+            vivant = Some((membre, tenue));
+        }
+    }
+    vivant.or(plus_recent).map(|(membre, tenue)| LueFederee {
+        service: tenue.service,
+        reponse: tenue.reponse.clone(),
+        membre: *membre,
+    })
 }
 
 impl EtatFedere {
@@ -151,24 +185,39 @@ impl EtatFedere {
         maintenant: u64,
         expiration: u64,
     ) -> Option<LueFederee> {
-        let tenus = self.tenus.get(&clef_de_service(machine, nom))?;
-        let frais = tenus
-            .values()
-            .filter(|tenue| tenue.recu_a.saturating_add(expiration) >= maintenant);
-        let mut plus_recent: Option<&Tenue> = None;
-        let mut vivant: Option<&Tenue> = None;
-        for tenue in frais {
-            if plus_recent.is_none_or(|avant| tenue.recu_a > avant.recu_a) {
-                plus_recent = Some(tenue);
-            }
-            if tenue.reponse.is_some() && vivant.is_none_or(|avant| tenue.recu_a > avant.recu_a) {
-                vivant = Some(tenue);
-            }
-        }
-        vivant.or(plus_recent).map(|tenue| LueFederee {
-            service: tenue.service,
-            reponse: tenue.reponse.clone(),
-        })
+        retenir(
+            self.tenus.get(&clef_de_service(machine, nom))?,
+            maintenant,
+            expiration,
+        )
+    }
+
+    /// Tous les services qu'on rapporte d'une machine, en ce moment, avec
+    /// leur nom — ce que `GET /v1/machines/{m}/services` rend pour une
+    /// machine d'un domaine confié (décision 60).
+    ///
+    /// **La même règle que [`Self::lire`], service par service** : vivant si
+    /// un membre le dit, parti si tous ceux qui en parlent encore le disent
+    /// parti, rien pour ce que plus personne ne confirme. L'ordre est celui
+    /// des noms, pour qu'un écran relu ne voie pas ses lignes danser.
+    #[must_use]
+    pub fn services_de(
+        &self,
+        machine: Identifiant,
+        maintenant: u64,
+        expiration: u64,
+    ) -> Vec<(Vec<u8>, LueFederee)> {
+        let prefixe = clef_de_service(machine, b"");
+        let mut trouves: Vec<(Vec<u8>, LueFederee)> = self
+            .tenus
+            .iter()
+            .filter_map(|(clef, tenus)| {
+                let nom = clef.strip_prefix(prefixe.as_slice())?;
+                Some((nom.to_vec(), retenir(tenus, maintenant, expiration)?))
+            })
+            .collect();
+        trouves.sort_by(|a, b| a.0.cmp(&b.0));
+        trouves
     }
 
     /// Oublie ce qu'aucun membre ne confirme plus : la mémoire ne grossit pas
@@ -196,6 +245,30 @@ impl EtatFedere {
     ) -> bool {
         self.derniers_rapports.insert(membre, (entrees, vivantes)) != Some((entrees, vivantes))
     }
+}
+
+/// L'annuaire local s'est-il sondé DE L'INTÉRIEUR (décision 60) ?
+///
+/// Il a vu le daemon arriver depuis `vu_depuis` ; `ou_le_joindre` sont les
+/// adresses où on le joint lui-même. Si le daemon est venu de l'une d'elles,
+/// l'annuaire local et la machine sont le même hôte : son « joignable » dit
+/// ce qu'on voit de l'intérieur, et rien de ce qu'un client verra dehors.
+///
+/// **Seules les adresses littérales comptent** (C20) : un locateur qui serait
+/// un nom ne se résout pas ici, et ne fait rien conclure. **Une IPv4 vue au
+/// travers d'une socket double pile arrive habillée en IPv6**
+/// (`::ffff:a.b.c.d`) : on la déshabille avant de comparer.
+#[must_use]
+pub fn sonde_de_l_interieur(
+    vu_depuis: std::net::IpAddr,
+    ou_le_joindre: &[asl_registre::Adresse],
+) -> bool {
+    ou_le_joindre.iter().any(|adresse| {
+        adresse
+            .texte()
+            .parse::<std::net::SocketAddr>()
+            .is_ok_and(|ou| ou.ip().to_canonical() == vu_depuis.to_canonical())
+    })
 }
 
 // ── Côté annuaire local ─────────────────────────────────────────────────────
@@ -577,6 +650,7 @@ mod essais {
             Some(LueFederee {
                 service: vivante.service,
                 reponse: Some(b"{\"a\":1}".to_vec()),
+                membre: a,
             })
         );
         // Le rapport de A a vieilli : seul B parle, et il le dit parti.
@@ -586,6 +660,7 @@ mod essais {
             Some(LueFederee {
                 service: partie.service,
                 reponse: None,
+                membre: b,
             })
         );
         // Plus personne : rien.
@@ -594,6 +669,91 @@ mod essais {
         assert_eq!(etat.combien(), 1);
         etat.oublier_les_perimes(5_000, 1_000);
         assert_eq!(etat.combien(), 0);
+    }
+
+    #[test]
+    fn les_services_d_une_machine_se_lisent_par_nom_et_seulement_les_siens() {
+        let mut etat = EtatFedere::nouveau();
+        let (machine, autre) = (id(Genre::Machine, 1), id(Genre::Machine, 2));
+        let membre = id(Genre::Annuaire, 1);
+        let depot = EntreeDEtat {
+            service: id(Genre::Service, 1),
+            machine,
+            nom: nom("depot"),
+            reponse: Some(b"1"),
+        };
+        let archive = EntreeDEtat {
+            service: id(Genre::Service, 2),
+            nom: nom("archive"),
+            reponse: None,
+            ..depot
+        };
+        let ailleurs = EntreeDEtat {
+            service: id(Genre::Service, 3),
+            machine: autre,
+            ..depot
+        };
+        etat.ranger(membre, &depot, 100);
+        etat.ranger(membre, &archive, 100);
+        etat.ranger(membre, &ailleurs, 100);
+        let lus = etat.services_de(machine, 150, 1_000);
+        // Rangés par nom, sans la machine d'à côté.
+        assert_eq!(
+            lus,
+            vec![
+                (
+                    b"archive".to_vec(),
+                    LueFederee {
+                        service: archive.service,
+                        reponse: None,
+                        membre,
+                    }
+                ),
+                (
+                    b"depot".to_vec(),
+                    LueFederee {
+                        service: depot.service,
+                        reponse: Some(b"1".to_vec()),
+                        membre,
+                    }
+                ),
+            ]
+        );
+        // Plus personne ne confirme : plus rien.
+        assert!(etat.services_de(machine, 5_000, 1_000).is_empty());
+    }
+
+    #[test]
+    fn une_sonde_de_l_interieur_se_reconnait_a_l_adresse_du_daemon() {
+        let adresses = |textes: &[&str]| -> Vec<asl_registre::Adresse> {
+            textes
+                .iter()
+                .map(|texte| {
+                    asl_registre::Adresse::nouvelle(texte).unwrap_or_else(|_| unreachable!())
+                })
+                .collect()
+        };
+        let ip =
+            |texte: &str| -> std::net::IpAddr { texte.parse().unwrap_or_else(|_| unreachable!()) };
+        let speedy = adresses(&[
+            "[2a01:cb19:d27:2f00:3ac9:86ff:fe47:9d54]:6630",
+            "192.0.2.51:6630",
+        ]);
+        // Le cas du 27/09 : speedy est la machine, et le daemon vient de lui.
+        assert!(sonde_de_l_interieur(
+            ip("2a01:cb19:d27:2f00:3ac9:86ff:fe47:9d54"),
+            &speedy
+        ));
+        // Une IPv4 habillée en IPv6 par la socket double pile.
+        assert!(sonde_de_l_interieur(ip("::ffff:192.0.2.51"), &speedy));
+        // Un daemon venu d'ailleurs : une vraie sonde.
+        assert!(!sonde_de_l_interieur(ip("2a01:cb19:d27:2f00::77"), &speedy));
+        // Un nom ne fait rien conclure (C20), et rien ne se résout.
+        assert!(!sonde_de_l_interieur(
+            ip("192.0.2.51"),
+            &adresses(&["speedy.maison:6630"])
+        ));
+        assert!(!sonde_de_l_interieur(ip("192.0.2.51"), &[]));
     }
 
     #[test]

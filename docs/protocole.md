@@ -1735,6 +1735,32 @@ qui montre MES machines ; les chemins inter-comptes sont `GET /v1/ou` pour les
 services et `GET /v1/utilisateurs/{u}/machines` pour les machines — chacun
 calculé depuis les arêtes du demandeur, jamais depuis ce qu'il désigne (C10).
 
+**Une machine d'un domaine confié : ses services viennent de l'état fédéré**
+(décision 60, 0.32.0). Elle s'annonce chez l'annuaire local, et rien n'en est
+rangé chez les racines (C13) ; `GET /v1/machines/{m}/services` y ajoute donc ce
+que les membres de l'annuaire local rapportent, **sous la même règle que la
+résolution** : vivant si un membre le dit, `parti` (`volontaire: null`) si tous
+ceux qui en parlent encore le disent parti, **absent** si plus personne ne le
+confirme depuis l'expiration (30 s). Un nom que la racine tient elle-même
+l'emporte. Ces objets portent deux champs de plus, que ne portent pas les
+services tenus ici :
+
+```jsonc
+{"service":"s-…","nom":"depot","etat":"annonce","annonce":{…},
+ "sonde_par":"n-…",      // le membre dont le rapport est retenu : c'est LUI qui a sondé
+ "sonde_locale":true}    // le daemon est venu de l'une de SES adresses : il s'est sondé de l'intérieur
+```
+
+**`sonde_locale` est là parce que la joignabilité d'un service fédéré est
+celle que l'annuaire local a constatée.** Quand il tourne sur la machine même
+(speedy, 27/09), il se sonde de l'intérieur : « joignable » ne dit alors rien
+de ce qu'un client verra dehors — l'essai réel l'a montré, un pare-feu bloquait
+le port en IPv6 que la sonde disait joignable. La règle : le daemon est venu
+(`vu_depuis`) d'une adresse **littérale** où l'on joint le membre (ses
+locateurs publiés, sinon son adresse déclarée) ; une IPv4 habillée en IPv6
+(`::ffff:…`) est déshabillée ; un nom ne fait rien conclure (C20). Un lecteur
+d'hier, qui lit par clés, ignore les deux champs.
+
 ### Les machines d'un utilisateur — ce qu'une autorisation donne à voir
 
 ```jsonc

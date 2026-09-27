@@ -884,6 +884,23 @@ fn conflits() -> Vec<(Estampille, Operation)> {
                 enregistrement: alias_de_domaine(est(autre(), 143), "Cave"),
             },
         ),
+        // L'alias du DOMAINE RACINE, calculé et sans rangée (décision 43) :
+        // posé des deux côtés, le plus récent — et il passe d'une racine à
+        // l'autre comme celui d'un domaine rangé.
+        (
+            est(pair(), 147),
+            Operation::DomaineAlias {
+                domaine: asl_registre::domaine_racine(),
+                enregistrement: alias_de_domaine(est(pair(), 147), "R"),
+            },
+        ),
+        (
+            est(autre(), 148),
+            Operation::DomaineAlias {
+                domaine: asl_registre::domaine_racine(),
+                enregistrement: alias_de_domaine(est(autre(), 148), "Racine"),
+            },
+        ),
         // Une machine rangée d'un côté, sortie de l'autre : le plus récent.
         (
             est(pair(), 144),
@@ -3124,4 +3141,49 @@ fn les_machines_federees_se_remplacent_en_bloc_et_portent_les_services_d_une_pai
             ))
     );
     let _ = std::fs::remove_file(&fichier);
+}
+
+#[test]
+fn l_alias_du_domaine_racine_passe_d_une_racine_a_l_autre() {
+    // **VU LE 27/09** : « R » posé sur nitrogen, jamais vu sur argon. Le
+    // domaine racine n'a pas de rangée (décision 43), et l'application
+    // ignorait tout alias d'un domaine qu'elle ne trouvait pas.
+    let (base, chemin) = entrepot("alias-domaine-racine");
+    let racine = asl_registre::domaine_racine();
+    assert!(
+        base.domaine(racine).expect("lisible").is_none(),
+        "calculé, sans rangée"
+    );
+    appliquer(
+        &base,
+        est(pair(), 7),
+        Operation::DomaineAlias {
+            domaine: racine,
+            enregistrement: alias_de_domaine(est(pair(), 7), "R"),
+        },
+    );
+    assert_eq!(
+        base.alias_de_domaine(racine)
+            .expect("lisible")
+            .map(|quoi| quoi.texte().to_owned()),
+        Some("R".to_owned()),
+        "l'autre racine a rangé l'alias du domaine racine"
+    );
+    let cherche = asl_registre::AliasDeDomaine::nouveau("R").expect("un alias");
+    assert_eq!(
+        base.domaines_par_alias(&cherche).expect("lisible"),
+        vec![racine]
+    );
+    // Un domaine inconnu, lui, reste ignoré : il ne revient pas par son alias.
+    let inconnu = un(Genre::Domaine, 0x5E);
+    appliquer(
+        &base,
+        est(pair(), 8),
+        Operation::DomaineAlias {
+            domaine: inconnu,
+            enregistrement: alias_de_domaine(est(pair(), 8), "Fantome"),
+        },
+    );
+    assert!(base.alias_de_domaine(inconnu).expect("lisible").is_none());
+    let _ = std::fs::remove_file(&chemin);
 }

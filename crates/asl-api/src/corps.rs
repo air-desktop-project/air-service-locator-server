@@ -1627,6 +1627,27 @@ pub struct ServiceRendu<'a> {
     pub nom: &'a str,
     /// Son état, et ce qui s'y rattache.
     pub etat: ServiceEtat<'a>,
+    /// D'où vient ce qu'on en dit, quand c'est un annuaire local qui l'a
+    /// rapporté (décision 60) ; rien pour un service tenu ici.
+    pub sonde: Option<SondeFederee>,
+}
+
+/// L'origine de ce qu'une racine dit d'un service fédéré (décision 60).
+///
+/// # POURQUOI L'ÉCRAN DOIT LE SAVOIR
+///
+/// Le verdict de joignabilité d'un service fédéré, c'est l'annuaire local qui
+/// l'a posé en sondant — pas la racine. Et quand l'annuaire local tourne sur
+/// la machine même (speedy, le 27/09), il se sonde **de l'intérieur** : son
+/// « joignable » ne dit rien de ce qu'un client de l'extérieur verra. Le taire
+/// laisserait l'écran affirmer une joignabilité que personne n'a constatée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SondeFederee {
+    /// Le membre de l'annuaire local dont le rapport est retenu.
+    pub par: Identifiant,
+    /// L'annuaire local a-t-il vu le daemon arriver depuis sa PROPRE adresse
+    /// — l'une de celles où on le joint ? Alors il se sonde lui-même.
+    pub locale: bool,
 }
 
 impl ServiceRendu<'_> {
@@ -1636,7 +1657,13 @@ impl ServiceRendu<'_> {
     /// {"service":"s-…","nom":"grenier-http","etat":"annonce","annonce":{…}}
     /// {"service":"s-…","nom":"grenier-http","etat":"parti","volontaire":true}
     /// {"service":"s-…","nom":"grenier-http","etat":"parti","volontaire":null}
+    /// {"service":"s-…","nom":"depot","etat":"annonce","annonce":{…},
+    ///  "sonde_par":"n-…","sonde_locale":true}
     /// ```
+    ///
+    /// `sonde_par` et `sonde_locale` n'existent que pour un service rapporté
+    /// par un annuaire local (décision 60) : un lecteur d'hier, qui lit par
+    /// clés, les ignore.
     ///
     /// # PAS DE DÉCODEUR, ET C'EST ASSUMÉ
     ///
@@ -1670,6 +1697,16 @@ impl ServiceRendu<'_> {
                     None => b"null".as_slice(),
                 });
             }
+        }
+        if let Some(sonde) = self.sonde {
+            ecrivain.pousser(b",\"sonde_par\":\"");
+            ecrivain.pousser(sonde.par.texte().as_str().as_bytes());
+            ecrivain.pousser(b"\",\"sonde_locale\":");
+            ecrivain.pousser(if sonde.locale {
+                b"true".as_slice()
+            } else {
+                b"false".as_slice()
+            });
         }
         ecrivain.pousser(b"}");
         ecrivain.achever()

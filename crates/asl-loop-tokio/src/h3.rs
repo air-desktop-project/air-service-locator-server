@@ -2393,6 +2393,10 @@ impl Service<'_> {
         let Ok(services) = self.entrepot.services_de_machine(machine) else {
             return Trouvaille::Rien;
         };
+        let noms_d_ici: Vec<Vec<u8>> = services
+            .iter()
+            .map(|(_, enregistre)| enregistre.nom.octets().to_vec())
+            .collect();
 
         // **ON NE FILTRE PLUS LES SERVICES NON VIVANTS.** L'écran veut aussi ceux
         // qui sont partis (`docs/modele.md` §4.2) : un service déclaré dont la
@@ -2419,6 +2423,7 @@ impl Service<'_> {
                                     asl_annuaire::MotifDeDepart::Volontaire
                                 )),
                             },
+                            sonde: None,
                         }
                         .encoder(&mut sortie)
                         .ok()?,
@@ -2432,6 +2437,7 @@ impl Service<'_> {
                                 service: quel,
                                 nom,
                                 etat: asl_api::corps::ServiceEtat::Annonce { annonce: &objet },
+                                sonde: None,
                             }
                             .encoder(&mut sortie)
                             .ok()?
@@ -2442,6 +2448,7 @@ impl Service<'_> {
                         service: quel,
                         nom,
                         etat: asl_api::corps::ServiceEtat::Parti { volontaire: None },
+                        sonde: None,
                     }
                     .encoder(&mut sortie)
                     .ok()?,
@@ -2449,13 +2456,76 @@ impl Service<'_> {
                 sortie.truncate(combien);
                 Some(sortie)
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        // **ET CE QU'EN RAPPORTENT LES ANNUAIRES LOCAUX** (décision 60). Une
+        // machine d'un domaine confié s'annonce chez l'annuaire local, et rien
+        // n'en est rangé ici : ses services n'existent pour la racine que dans
+        // l'état fédéré, en mémoire (C13). Un nom déjà rendu d'ici l'emporte —
+        // c'est la mémoire de CETTE racine, et elle n'a pas à douter d'elle.
+        let mut annonces = annonces;
+        annonces.extend(self.services_federes(machine, &noms_d_ici));
 
         Trouvaille::ServicesDeMachine {
             demandeur: rangee.proprietaire,
             proprietaire: visee.proprietaire,
             annonces,
         }
+    }
+
+    /// Les services qu'un annuaire local rapporte de cette machine, encodés
+    /// comme l'écran les lit, et dont le nom n'est pas parmi `deja` — les
+    /// noms que cette racine tient elle-même.
+    ///
+    /// **Vivant si un membre le dit, parti s'ils le disent tous, rien pour ce
+    /// que plus personne ne confirme** — la règle de [`crate::federation`].
+    /// Un service fédéré parti se rend `parti`, sans motif (`volontaire:
+    /// null`) : l'annuaire local ne le rapporte pas, et un écran doit voir
+    /// qu'il a existé, comme pour un service tenu ici.
+    fn services_federes(&self, machine: Identifiant, deja: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        self.etat_federe
+            .services_de(machine, maintenant(), self.expiration_federee_us)
+            .into_iter()
+            .filter(|(nom, _)| !deja.contains(nom))
+            .filter_map(|(nom, lue)| {
+                let nom = core::str::from_utf8(&nom).ok()?;
+                let sonde = asl_api::corps::SondeFederee {
+                    par: lue.membre,
+                    locale: lue
+                        .reponse
+                        .as_deref()
+                        .is_some_and(|reponse| self.sonde_de_l_interieur(lue.membre, reponse)),
+                };
+                let mut sortie = alloc_reponse();
+                let combien = asl_api::corps::ServiceRendu {
+                    service: lue.service,
+                    nom,
+                    etat: match lue.reponse.as_deref() {
+                        Some(annonce) => asl_api::corps::ServiceEtat::Annonce { annonce },
+                        None => asl_api::corps::ServiceEtat::Parti { volontaire: None },
+                    },
+                    sonde: Some(sonde),
+                }
+                .encoder(&mut sortie)
+                .ok()?;
+                sortie.truncate(combien);
+                Some(sortie)
+            })
+            .collect()
+    }
+
+    /// Le membre s'est-il sondé de l'intérieur ? La règle est
+    /// [`crate::federation::sonde_de_l_interieur`] ; ici, on lit l'adresse
+    /// d'où il a vu venir le daemon, et celles où on le joint.
+    fn sonde_de_l_interieur(&self, membre: Identifiant, reponse: &[u8]) -> bool {
+        let mut tampons = asl_proto::cadrage::TamponsReponse::nouveaux();
+        let Ok(lue) = asl_proto::Reponse::decoder(reponse, &mut tampons) else {
+            return false;
+        };
+        let Ok(Some(lu)) = self.entrepot.membre_d_annuaire(membre) else {
+            return false;
+        };
+        crate::federation::sonde_de_l_interieur(lue.vu_depuis.adresse, &lu.ou_joindre())
     }
 
     /// Les machines du compte qui demande, pour l'écran qui les liste.

@@ -647,13 +647,16 @@ pub(crate) fn appliquer_domaine_supprime(
 /// `domaine-alias` — le plus récent, **mort ou vif** : un alias posé sur un
 /// domaine supprimé reste rangé, et le lecteur ne le trouve pas tant que le
 /// domaine est mort. **Ignoré pour un domaine inconnu** : effacé avec son
-/// compte, il ne revient pas par son alias.
+/// compte, il ne revient pas par son alias. **Sauf le domaine racine**
+/// (décision 43) : calculé, il n'a jamais de rangée, et son alias doit
+/// pourtant passer d'une racine à l'autre — l'ignorer, c'était ne le voir que
+/// sur la racine où on l'a posé.
 pub(crate) fn appliquer_domaine_alias(
     ecriture: &WriteTransaction,
     domaine: Identifiant,
     enregistrement: &AliasDeDomaineRange,
 ) -> Result<(), Faute> {
-    if domaine_dans(ecriture, domaine)?.is_none() {
+    if domaine != domaine_racine() && domaine_dans(ecriture, domaine)?.is_none() {
         return Ok(());
     }
     if alias_dans(ecriture, domaine)?
