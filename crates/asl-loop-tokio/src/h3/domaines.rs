@@ -99,6 +99,7 @@ impl Service<'_> {
         let rendu = asl_api::domaine::DomaineRendu {
             domaine,
             proprietaire,
+            heberge_par: self.entrepot.hebergeur_de_domaine(domaine).ok().flatten(),
             alias: alias.as_ref().map(AliasDeDomaine::texte),
             droits,
         };
@@ -231,6 +232,7 @@ impl Service<'_> {
             domaine: asl_api::domaine::DomaineRendu {
                 domaine,
                 proprietaire,
+                heberge_par: self.entrepot.hebergeur_de_domaine(domaine).ok().flatten(),
                 alias: alias.as_ref().map(AliasDeDomaine::texte),
                 droits,
             },

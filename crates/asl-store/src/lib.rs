@@ -69,10 +69,15 @@ use redb::{
 // ── Les tables ──────────────────────────────────────────────────────────────
 
 /// Les comptes, par identifiant.
+mod annuaires;
 mod domaines;
 mod droits;
 mod groupes;
 
+pub use annuaires::{
+    DecisionDInscription, DeclarationAttendue, DeclarationDAnnuaire, EtatDInscription, MembreLu,
+    PresentationDeCode,
+};
 pub use domaines::SuppressionDeDomaine;
 pub use droits::{Acces, EcritureDeDroit, Voulu};
 pub use groupes::{EcritureDeGroupe, GroupeLu};
@@ -1016,6 +1021,14 @@ impl Entrepot {
             ecriture.open_table(groupes::ADHESIONS_PAR_COMPTE)?;
             // Et les droits (2026-09-27) : quatre tables neuves, de même.
             ecriture.open_table(droits::DROITS)?;
+            // Et les inscriptions des annuaires locaux (0.27.0) : six tables
+            // neuves, de même.
+            ecriture.open_table(annuaires::INSCRIPTIONS)?;
+            ecriture.open_table(annuaires::PRESENTATIONS)?;
+            ecriture.open_table(annuaires::ACCEPTATIONS)?;
+            ecriture.open_table(annuaires::REFUS)?;
+            ecriture.open_table(annuaires::RETRAITS)?;
+            ecriture.open_table(annuaires::HEBERGEMENTS)?;
             ecriture.open_table(droits::DROITS_PAR_GROUPE)?;
             ecriture.open_table(droits::DROITS_ACCORDES)?;
             ecriture.open_table(droits::DROITS_PAR_ELEMENT)?;
@@ -3216,6 +3229,11 @@ impl Entrepot {
         // exige sa machine chez le lecteur, et un alias son domaine.
         domaines::instantane_des_alias_et_rattachements(&lecture, &mut suite)?;
 
+        // **LES INSCRIPTIONS APRÈS TOUT LE RESTE** : une déclaration nomme un
+        // compte, un hébergement un domaine. Leur application ne les exige
+        // pas — la lecture juge —, mais l'ordre de l'entrepôt reste celui-là.
+        annuaires::instantane_des_inscriptions(&lecture, &mut suite)?;
+
         // **LE COMPTEUR DE COUPE EST LU DANS LA MÊME TRANSACTION** : tout ce
         // qui a été écrit jusqu'à lui est dans l'instantané, et tout ce qui
         // suivra sera dans le journal après lui.
@@ -3628,6 +3646,7 @@ impl Entrepot {
         }
         combien = combien.saturating_add(domaines::oublier_ce_qui_vient_de(&ecriture, annuaire)?);
         combien = combien.saturating_add(groupes::oublier_ce_qui_vient_de(&ecriture, annuaire)?);
+        combien = combien.saturating_add(annuaires::oublier_ce_qui_vient_de(&ecriture, annuaire)?);
         ecriture.commit()?;
         Ok(combien)
     }
@@ -3857,6 +3876,10 @@ fn provenance_de(operation: &Operation) -> Option<Provenance> {
         Operation::MachineAlias { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Groupe { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Droit { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::Inscription { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::InscriptionPresentee { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::DomaineHebergeur { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::InscriptionDecision { .. } | Operation::InscriptionRetiree { .. } => None,
         Operation::DomaineSupprime { .. }
         | Operation::DroitRetire { .. }
         | Operation::GroupeEtiquette { .. }
@@ -4022,6 +4045,26 @@ fn appliquer_dans(
         Operation::GroupeSupprime { groupe } => {
             groupes::appliquer_groupe_supprime(ecriture, *groupe, estampille)
         }
+        Operation::Inscription {
+            empreinte,
+            enregistrement,
+        } => annuaires::appliquer_inscription(ecriture, empreinte, enregistrement),
+        Operation::InscriptionPresentee {
+            empreinte,
+            enregistrement,
+        } => annuaires::appliquer_presentation(ecriture, empreinte, enregistrement),
+        Operation::InscriptionDecision {
+            membre,
+            accepte,
+            par,
+        } => annuaires::appliquer_decision(ecriture, *membre, *accepte, *par, estampille),
+        Operation::InscriptionRetiree { membre, par } => {
+            annuaires::appliquer_retrait(ecriture, *membre, *par, estampille)
+        }
+        Operation::DomaineHebergeur {
+            domaine,
+            enregistrement,
+        } => annuaires::appliquer_hebergement(ecriture, *domaine, enregistrement),
     }
 }
 
@@ -5206,6 +5249,30 @@ impl Reestampillable for asl_registre::Rattachement {
     }
 }
 
+impl Reestampillable for asl_registre::Inscription {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
+impl Reestampillable for asl_registre::Presentation {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
+impl Reestampillable for asl_registre::MarqueDInscription {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
+impl Reestampillable for asl_registre::Hebergement {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
 impl Reestampillable for Operation {
     fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
         match self {
@@ -5223,6 +5290,11 @@ impl Reestampillable for Operation {
             Self::DomaineAlias { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::MachineDomaine { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::MachineAlias { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::Inscription { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::InscriptionPresentee { enregistrement, .. } => {
+                enregistrement.reestampiller(de, vers)
+            }
+            Self::DomaineHebergeur { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Groupe { enregistrement, .. } => {
                 let avant = *enregistrement;
                 enregistrement.estampille = sous(avant.estampille, de, vers);
@@ -5258,6 +5330,8 @@ impl Reestampillable for Operation {
             | Self::GroupeEtiquette { .. }
             | Self::GroupeMembre { .. }
             | Self::GroupeSupprime { .. }
+            | Self::InscriptionDecision { .. }
+            | Self::InscriptionRetiree { .. }
             | Self::DroitRetire { .. }
             | Self::CompteEfface { .. } => false,
         }
@@ -5464,6 +5538,60 @@ fn reestampiller(
     combien = combien.saturating_add(groupes::reestampiller(ecriture, de, vers)?);
     // ── LES DROITS ──────────────────────────────────────────────────────────
     combien = combien.saturating_add(droits::reestampiller(ecriture, de, vers)?);
+    // ── LES INSCRIPTIONS DES ANNUAIRES LOCAUX (0.27.0) ────────────────────────
+    //
+    // Aucune estampille n'entre dans une clé : l'empreinte, le membre, le
+    // domaine.
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            annuaires::INSCRIPTIONS,
+            asl_registre::Inscription::lire,
+            asl_registre::Inscription::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            annuaires::PRESENTATIONS,
+            asl_registre::Presentation::lire,
+            asl_registre::Presentation::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+    for table in [
+        annuaires::ACCEPTATIONS,
+        annuaires::REFUS,
+        annuaires::RETRAITS,
+    ] {
+        combien = combien.saturating_add(
+            reestampiller_table(
+                ecriture,
+                table,
+                asl_registre::MarqueDInscription::lire,
+                asl_registre::MarqueDInscription::ecrire,
+                de,
+                vers,
+            )?
+            .len(),
+        );
+    }
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            annuaires::HEBERGEMENTS,
+            asl_registre::Hebergement::lire,
+            asl_registre::Hebergement::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
 
     // ── LE JOURNAL D'OPÉRATIONS ─────────────────────────────────────────────
     let mut journal = ecriture.open_table(OPERATIONS)?;

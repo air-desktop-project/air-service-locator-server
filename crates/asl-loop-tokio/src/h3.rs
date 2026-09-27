@@ -29,6 +29,7 @@
 //! Elle est donc rangée avec le conducteur, sous l'identifiant local de la
 //! connexion, et les deux disparaissent ensemble.
 
+mod annuaires;
 mod domaines;
 mod droits;
 mod groupes;
@@ -924,6 +925,26 @@ impl Service<'_> {
                 compte,
                 nomme,
             } => self.changer_les_administrateurs(defi, signature, *compte, *nomme),
+
+            // ── LES ANNUAIRES LOCAUX (`h3/annuaires.rs`, 0.27.0) ────────────
+            Besoin::MesAnnuaires => self.rassembler_mes_annuaires(),
+            Besoin::DeclarerAnnuaire { annuaire, adresse } => {
+                self.declarer_un_annuaire(*annuaire, *adresse)
+            }
+            Besoin::RetirerAnnuaire { annuaire, membre } => {
+                self.retirer_un_annuaire(*annuaire, *membre)
+            }
+            Besoin::PresenterInscription { empreinte, cle } => {
+                self.presenter_une_inscription(*empreinte, cle)
+            }
+            Besoin::EtatDInscription { cle } => self.lire_l_etat_d_une_inscription(cle),
+            Besoin::InscriptionsEnAttente => self.rassembler_les_inscriptions_en_attente(),
+            Besoin::DeciderInscription { membre, accepte } => {
+                self.decider_d_une_inscription(*membre, *accepte)
+            }
+            Besoin::ConfierDomaine { domaine, annuaire } => {
+                self.confier_un_domaine(*domaine, *annuaire)
+            }
 
             // ── LA VOIE ENTRE RACINES ───────────────────────────────────
             //

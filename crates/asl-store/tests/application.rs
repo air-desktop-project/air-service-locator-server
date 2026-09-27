@@ -1067,7 +1067,216 @@ fn conflits() -> Vec<(Estampille, Operation)> {
                 ),
             },
         ),
+        // ── LES INSCRIPTIONS DES ANNUAIRES LOCAUX (0.27.0) ────────────────
+        //
+        // n1 : c1 déclare (E90) ; deux clés présentent le même code sur les
+        // deux racines (191, 192) — la plus petite estampille tient, n1 ;
+        // accepté d'un côté (193), refusé de l'autre (194) : le refus
+        // l'emporte à la lecture.
+        (
+            est(pair(), 190),
+            Operation::Inscription {
+                empreinte: empreinte(90),
+                enregistrement: declaration(est(pair(), 190), un(Genre::Utilisateur, 1), None),
+            },
+        ),
+        (
+            est(pair(), 191),
+            Operation::InscriptionPresentee {
+                empreinte: empreinte(90),
+                enregistrement: presentation(est(pair(), 191), un(Genre::Annuaire, 1)),
+            },
+        ),
+        (
+            est(autre(), 192),
+            Operation::InscriptionPresentee {
+                empreinte: empreinte(90),
+                enregistrement: presentation(est(autre(), 192), un(Genre::Annuaire, 9)),
+            },
+        ),
+        (
+            est(pair(), 193),
+            Operation::InscriptionDecision {
+                membre: un(Genre::Annuaire, 1),
+                accepte: true,
+                par: un(Genre::Utilisateur, 2),
+            },
+        ),
+        (
+            est(autre(), 194),
+            Operation::InscriptionDecision {
+                membre: un(Genre::Annuaire, 1),
+                accepte: false,
+                par: un(Genre::Utilisateur, 2),
+            },
+        ),
+        // n2 : c2 déclare, présente, est accepté deux fois (197, 196).
+        (
+            est(autre(), 195),
+            Operation::Inscription {
+                empreinte: empreinte(91),
+                enregistrement: declaration(est(autre(), 195), un(Genre::Utilisateur, 2), None),
+            },
+        ),
+        (
+            est(pair(), 196),
+            Operation::InscriptionPresentee {
+                empreinte: empreinte(91),
+                enregistrement: presentation(est(pair(), 196), un(Genre::Annuaire, 2)),
+            },
+        ),
+        (
+            est(autre(), 197),
+            Operation::InscriptionDecision {
+                membre: un(Genre::Annuaire, 2),
+                accepte: true,
+                par: un(Genre::Utilisateur, 1),
+            },
+        ),
+        (
+            est(pair(), 197),
+            Operation::InscriptionDecision {
+                membre: un(Genre::Annuaire, 2),
+                accepte: true,
+                par: un(Genre::Utilisateur, 1),
+            },
+        ),
+        // Deux seconds membres de n2 déclarés sur les deux racines (198,
+        // 200) : le plus ancien, n3, est le second ; n4 se lit refusé.
+        (
+            est(pair(), 198),
+            Operation::Inscription {
+                empreinte: empreinte(92),
+                enregistrement: declaration(
+                    est(pair(), 198),
+                    un(Genre::Utilisateur, 2),
+                    Some(un(Genre::Annuaire, 2)),
+                ),
+            },
+        ),
+        (
+            est(pair(), 199),
+            Operation::InscriptionPresentee {
+                empreinte: empreinte(92),
+                enregistrement: presentation(est(pair(), 199), un(Genre::Annuaire, 3)),
+            },
+        ),
+        (
+            est(autre(), 200),
+            Operation::Inscription {
+                empreinte: empreinte(93),
+                enregistrement: declaration(
+                    est(autre(), 200),
+                    un(Genre::Utilisateur, 2),
+                    Some(un(Genre::Annuaire, 2)),
+                ),
+            },
+        ),
+        (
+            est(autre(), 201),
+            Operation::InscriptionPresentee {
+                empreinte: empreinte(93),
+                enregistrement: presentation(est(autre(), 201), un(Genre::Annuaire, 4)),
+            },
+        ),
+        // n4 retiré deux fois (205, 204) : la marque est la plus petite.
+        (
+            est(autre(), 205),
+            Operation::InscriptionRetiree {
+                membre: un(Genre::Annuaire, 4),
+                par: un(Genre::Utilisateur, 2),
+            },
+        ),
+        (
+            est(pair(), 204),
+            Operation::InscriptionRetiree {
+                membre: un(Genre::Annuaire, 4),
+                par: un(Genre::Utilisateur, 2),
+            },
+        ),
+        // Le premier domaine de c2 confié à n2 (206), rendu aux racines
+        // (207), confié de nouveau (208) : le plus récent, n2.
+        (
+            est(pair(), 206),
+            Operation::DomaineHebergeur {
+                domaine: asl_registre::premier_domaine(un(Genre::Utilisateur, 2)),
+                enregistrement: hebergement(est(pair(), 206), Some(un(Genre::Annuaire, 2))),
+            },
+        ),
+        (
+            est(autre(), 207),
+            Operation::DomaineHebergeur {
+                domaine: asl_registre::premier_domaine(un(Genre::Utilisateur, 2)),
+                enregistrement: hebergement(est(autre(), 207), None),
+            },
+        ),
+        (
+            est(pair(), 208),
+            Operation::DomaineHebergeur {
+                domaine: asl_registre::premier_domaine(un(Genre::Utilisateur, 2)),
+                enregistrement: hebergement(est(pair(), 208), Some(un(Genre::Annuaire, 2))),
+            },
+        ),
+        // n5 : c3 — effacé plus haut — déclare, présente, est accepté ; il se
+        // lit retiré.
+        (
+            est(pair(), 210),
+            Operation::Inscription {
+                empreinte: empreinte(94),
+                enregistrement: declaration(est(pair(), 210), un(Genre::Utilisateur, 3), None),
+            },
+        ),
+        (
+            est(pair(), 211),
+            Operation::InscriptionPresentee {
+                empreinte: empreinte(94),
+                enregistrement: presentation(est(pair(), 211), un(Genre::Annuaire, 5)),
+            },
+        ),
+        (
+            est(autre(), 212),
+            Operation::InscriptionDecision {
+                membre: un(Genre::Annuaire, 5),
+                accepte: true,
+                par: un(Genre::Utilisateur, 1),
+            },
+        ),
     ]
+}
+
+/// Une déclaration d'annuaire local.
+fn declaration(
+    estampille: Estampille,
+    proprietaire: Identifiant,
+    annuaire: Option<Identifiant>,
+) -> asl_registre::Inscription {
+    asl_registre::Inscription {
+        provenance: Provenance::Ici,
+        estampille,
+        proprietaire,
+        annuaire,
+        expire_a: u64::MAX,
+        adresse: asl_registre::Adresse::nouvelle("maison.local:6630").expect("une adresse"),
+    }
+}
+
+/// Une présentation par la clé de ce membre.
+fn presentation(estampille: Estampille, membre: Identifiant) -> asl_registre::Presentation {
+    asl_registre::Presentation {
+        provenance: Provenance::Ici,
+        estampille,
+        membre,
+        cle: [0x33; 32],
+    }
+}
+
+/// Un hébergement.
+fn hebergement(estampille: Estampille, annuaire: Option<Identifiant>) -> asl_registre::Hebergement {
+    asl_registre::Hebergement {
+        provenance: Provenance::Ici,
+        estampille,
+        annuaire,
+    }
 }
 
 /// Un générateur congruentiel — pas de crate, pas d'aléa du système : un essai
@@ -2066,6 +2275,79 @@ fn les_domaines_convergent_vers_ce_que_les_regles_annoncent() {
 }
 
 #[test]
+fn les_inscriptions_convergent_vers_ce_que_les_regles_annoncent() {
+    use asl_store::EtatDInscription;
+
+    let (base, chemin) = entrepot("inscriptions-verifie");
+    for (estampille, operation) in prelude() {
+        appliquer(&base, estampille, operation);
+    }
+    for (estampille, operation) in conflits() {
+        appliquer(&base, estampille, operation);
+    }
+    let etat = |graine: u8| {
+        base.membre_d_annuaire(un(Genre::Annuaire, graine))
+            .expect("lisible")
+            .map(|lu| lu.etat)
+    };
+    // n1 a gagné le code ; n9 n'est membre de rien. Refusé : le refus
+    // l'emporte sur l'acceptation.
+    assert_eq!(etat(1), Some(EtatDInscription::Refusee));
+    assert_eq!(etat(9), None);
+    // n2 accepté ; n3 son second, en attente ; n4, le rival plus récent, et
+    // de toute façon retiré.
+    assert_eq!(etat(2), Some(EtatDInscription::Acceptee));
+    assert_eq!(etat(3), Some(EtatDInscription::EnAttente));
+    assert_eq!(etat(4), Some(EtatDInscription::Retiree));
+    let n3 = base
+        .membre_d_annuaire(un(Genre::Annuaire, 3))
+        .expect("lisible")
+        .expect("n3");
+    assert_eq!(n3.annuaire, un(Genre::Annuaire, 2));
+    assert!(!n3.titulaire());
+    // n5 : son propriétaire est effacé.
+    assert_eq!(etat(5), Some(EtatDInscription::Retiree));
+    // Le premier domaine de c2 : confié à n2, le plus récent.
+    let p2 = asl_registre::premier_domaine(un(Genre::Utilisateur, 2));
+    assert_eq!(
+        base.hebergeur_de_domaine(p2).expect("lisible"),
+        Some(un(Genre::Annuaire, 2))
+    );
+    // Le premier domaine de c1, confié à n2 — l'annuaire d'un autre compte :
+    // posé, peut-être par une racine fautive, il ne s'héberge pas là.
+    let p1 = asl_registre::premier_domaine(un(Genre::Utilisateur, 1));
+    base.confier_domaine(p1, Some(un(Genre::Annuaire, 2)))
+        .expect("posé");
+    assert_eq!(base.hebergeur_de_domaine(p1).expect("lisible"), None);
+    // Les en attente, pour les administrateurs : n3 seul.
+    let attente: Vec<Identifiant> = base
+        .inscriptions_en_attente()
+        .expect("lisible")
+        .into_iter()
+        .map(|lu| lu.membre)
+        .collect();
+    assert_eq!(attente, vec![un(Genre::Annuaire, 3)]);
+    // Retiré deux fois : la marque est la plus ancienne des deux.
+    let retraits: Vec<Estampille> = base
+        .instantane()
+        .expect("l'instantané se lit")
+        .iter()
+        .filter_map(|octets| match Cadre::lire(octets) {
+            Ok((
+                Cadre::Operation {
+                    estampille,
+                    operation: Operation::InscriptionRetiree { membre, .. },
+                },
+                _,
+            )) if membre == un(Genre::Annuaire, 4) => Some(estampille),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(retraits, vec![est(pair(), 204)]);
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
 fn les_groupes_convergent_vers_ce_que_les_regles_annoncent() {
     let (base, chemin) = entrepot("groupes-verifie");
     for (estampille, operation) in prelude() {
@@ -2570,5 +2852,79 @@ fn un_droit_n_entre_pas_sans_son_groupe_ni_son_element() {
         ),
         Err(asl_store::Faute::Existe)
     ));
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn un_code_d_inscription_expire_ne_sert_qu_une_cle_et_un_annuaire_n_a_qu_un_second() {
+    use asl_store::{DeclarationDAnnuaire, EtatDInscription, PresentationDeCode};
+
+    let (base, chemin) = entrepot("inscriptions-codes");
+    let alice = un(Genre::Utilisateur, 1);
+    creer(&base, alice, 1);
+    let adresse = asl_registre::Adresse::nouvelle("speedy.maison:6630").expect("une adresse");
+    let (n1, n2, n3) = (
+        un(Genre::Annuaire, 1),
+        un(Genre::Annuaire, 2),
+        un(Genre::Annuaire, 3),
+    );
+
+    // Un code présenté après son échéance ne sert plus ; avant, si.
+    assert_eq!(
+        base.declarer_annuaire(alice, None, adresse, [1; 32], 1_000)
+            .expect("posée"),
+        DeclarationDAnnuaire::Faite
+    );
+    assert_eq!(
+        base.presenter_un_code([1; 32], n1, [0x11; 32], 1_001)
+            .expect("lue"),
+        PresentationDeCode::Expire
+    );
+    assert_eq!(
+        base.presenter_un_code([9; 32], n1, [0x11; 32], 0)
+            .expect("lue"),
+        PresentationDeCode::Inconnu
+    );
+    assert!(matches!(
+        base.presenter_un_code([1; 32], n1, [0x11; 32], 1_000),
+        Ok(PresentationDeCode::Faite(lu)) if lu.etat == EtatDInscription::EnAttente
+    ));
+    // Une clé déjà membre ne devient pas celui d'un autre annuaire.
+    base.declarer_annuaire(alice, None, adresse, [2; 32], 1_000)
+        .expect("posée");
+    assert_eq!(
+        base.presenter_un_code([2; 32], n1, [0x11; 32], 0)
+            .expect("lue"),
+        PresentationDeCode::Deja
+    );
+    // Un second ne se déclare que pour un titulaire accepté.
+    assert_eq!(
+        base.declarer_annuaire(alice, Some(n1), adresse, [3; 32], 1_000)
+            .expect("lue"),
+        DeclarationDAnnuaire::Inconnu
+    );
+    base.decider_d_une_inscription(n1, true, alice)
+        .expect("tranchée");
+    // Un second déclaré ; un autre, tant que le premier vaut, de trop.
+    assert_eq!(
+        base.declarer_annuaire(alice, Some(n1), adresse, [3; 32], 1_000)
+            .expect("posée"),
+        DeclarationDAnnuaire::Faite
+    );
+    assert!(matches!(
+        base.presenter_un_code([3; 32], n2, [0x22; 32], 0),
+        Ok(PresentationDeCode::Faite(lu)) if lu.annuaire == n1 && !lu.titulaire()
+    ));
+    assert_eq!(
+        base.declarer_annuaire(alice, Some(n1), adresse, [4; 32], 1_000)
+            .expect("lue"),
+        DeclarationDAnnuaire::Complet
+    );
+    // Un annuaire inconnu, ou un second pour second : rien.
+    assert_eq!(
+        base.declarer_annuaire(alice, Some(n3), adresse, [5; 32], 1_000)
+            .expect("lue"),
+        DeclarationDAnnuaire::Inconnu
+    );
     let _ = std::fs::remove_file(&chemin);
 }

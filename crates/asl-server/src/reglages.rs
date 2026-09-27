@@ -213,6 +213,25 @@ pub struct Administration {
     pub nomme: bool,
 }
 
+/// Le geste `--register` / `--registration-status` : un annuaire LOCAL se
+/// présente aux racines avec sa clé d'identité, ou relit son inscription, et
+/// s'arrête (`docs/annuaires.md` §4.1, 0.27.0).
+///
+/// **La clé est celle d'identité de l'annuaire local** — celle que
+/// `--new-identity-key` frappe, dont son `n-…` se déduit —, et elle ne quitte
+/// pas la machine : on prouve qu'on la détient, on ne l'envoie pas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inscription {
+    /// Où joindre une racine : `hôte:port`.
+    pub racine: String,
+    /// L'autorité qui valide le certificat TLS de la racine, en PEM.
+    pub ca: PathBuf,
+    /// La clé d'identité de cet annuaire local.
+    pub identite: PathBuf,
+    /// Le code que l'application a donné — ou rien : relire l'état.
+    pub code: Option<String>,
+}
+
 /// L'autre racine, telle qu'on la joint et telle qu'on la reconnaît.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReglagePair {
@@ -444,6 +463,13 @@ asl-server — an air-service-locator service directory.
                             that RUNNING directory, then exit
   --remove-admin <u-…> --directory <host:port> --ca <path> --operator-secret <path>
                             remove it, then exit
+  --register <code> --directory <host:port> --ca <path> --identity-key <path>
+                            present this LOCAL directory to a RUNNING root with
+                            the registration code the app gave, print the
+                            state of its registration, then exit
+  --registration-status --directory <host:port> --ca <path> --identity-key <path>
+                            print the state of this local directory's
+                            registration, then exit
   --forget <u-…> --store <path> [--identity-key <path>]
                             erase THAT account offline — the store must not be
                             held by a running directory —, log what was
@@ -839,6 +865,44 @@ impl Reglages {
             },
             compte,
             nomme: drapeau == "--add-admin",
+        }))
+    }
+
+    /// Le geste `--register` ou `--registration-status`, s'il est demandé
+    /// dans ces arguments — lu à part des réglages, comme `--invite`.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::SansValeur`] si un drapeau n'a pas sa valeur,
+    /// [`Faute::Manque`] si `--directory`, `--ca` ou `--identity-key` manque.
+    pub fn geste_d_inscription<S: AsRef<str>>(
+        arguments: &[S],
+    ) -> Result<Option<Inscription>, Faute> {
+        let present = |drapeau: &str| arguments.iter().any(|quoi| quoi.as_ref() == drapeau);
+        if !present("--register") && !present("--registration-status") {
+            return Ok(None);
+        }
+        let valeur_de = |nom: &str| {
+            arguments
+                .iter()
+                .position(|quoi| quoi.as_ref() == nom)
+                .map(|place| {
+                    arguments
+                        .get(place.saturating_add(1))
+                        .map(|quoi| quoi.as_ref().to_owned())
+                        .ok_or_else(|| Faute::SansValeur(nom.to_owned()))
+                })
+                .transpose()
+        };
+        let code = valeur_de("--register")?;
+        let racine = valeur_de("--directory")?.ok_or(Faute::Manque("--directory"))?;
+        let ca = valeur_de("--ca")?.ok_or(Faute::Manque("--ca"))?;
+        let identite = valeur_de("--identity-key")?.ok_or(Faute::Manque("--identity-key"))?;
+        Ok(Some(Inscription {
+            racine,
+            ca: PathBuf::from(ca),
+            identite: PathBuf::from(identite),
+            code,
         }))
     }
 
@@ -1515,6 +1579,72 @@ mod tests {
             Reglages::depuis(avec(&["--orphans"])).map(|_| ()),
             Err(Faute::SansValeur("--orphans".to_owned()))
         );
+    }
+
+    #[test]
+    fn le_geste_d_inscription_se_lit_a_part() {
+        use super::Inscription;
+        assert_eq!(Reglages::geste_d_inscription(&minimum()), Ok(None));
+        let commun = [
+            "--directory",
+            "banc:6630",
+            "--ca",
+            "/c",
+            "--identity-key",
+            "/i",
+        ];
+        let mut presenter = vec!["--register", "01234-56789"];
+        presenter.extend_from_slice(&commun);
+        assert_eq!(
+            Reglages::geste_d_inscription(&presenter),
+            Ok(Some(Inscription {
+                racine: "banc:6630".to_owned(),
+                ca: "/c".into(),
+                identite: "/i".into(),
+                code: Some("01234-56789".to_owned()),
+            }))
+        );
+        let mut relire = vec!["--registration-status"];
+        relire.extend_from_slice(&commun);
+        assert_eq!(
+            Reglages::geste_d_inscription(&relire).map(|lu| lu.and_then(|quoi| quoi.code)),
+            Ok(None)
+        );
+        assert_eq!(
+            Reglages::geste_d_inscription(&["--register"]),
+            Err(Faute::SansValeur("--register".to_owned()))
+        );
+        for (manque, arguments) in [
+            (
+                "--directory",
+                vec![
+                    "--registration-status",
+                    "--ca",
+                    "/c",
+                    "--identity-key",
+                    "/i",
+                ],
+            ),
+            (
+                "--ca",
+                vec![
+                    "--registration-status",
+                    "--directory",
+                    "b:1",
+                    "--identity-key",
+                    "/i",
+                ],
+            ),
+            (
+                "--identity-key",
+                vec!["--registration-status", "--directory", "b:1", "--ca", "/c"],
+            ),
+        ] {
+            assert_eq!(
+                Reglages::geste_d_inscription(&arguments),
+                Err(Faute::Manque(manque))
+            );
+        }
     }
 
     #[test]

@@ -2976,6 +2976,7 @@ mod domaines {
         let rendu = DomaineRendu {
             domaine: d,
             proprietaire: u,
+            heberge_par: None,
             alias: Some("Maison"),
             droits: &DROITS_DU_PROPRIETAIRE,
         };
@@ -3001,6 +3002,19 @@ mod domaines {
         let texte = core::str::from_utf8(&sortie[..combien]).unwrap();
         assert!(!texte.contains("alias"), "{texte}");
         assert!(texte.ends_with("\"droits\":[]}"), "{texte}");
+        // Hébergé par un annuaire local : son `n-…` (0.27.0).
+        let n = un(Genre::Annuaire, 4);
+        let combien = DomaineRendu {
+            heberge_par: Some(n),
+            ..rendu
+        }
+        .encoder(&mut sortie)
+        .unwrap();
+        let texte = core::str::from_utf8(&sortie[..combien]).unwrap();
+        assert!(
+            texte.contains(&format!("\"heberge_par\":\"{}\"", n.texte().as_str())),
+            "{texte}"
+        );
 
         let machines = [
             MachineDeDomaine {
@@ -3288,5 +3302,150 @@ mod groupes {
             rendu.encoder_avec_ses_membres(&[u], &mut court),
             Err(Erreur::TamponTropPetit)
         );
+    }
+}
+
+// ── L'inscription des annuaires locaux (0.27.0) ─────────────────────────────
+
+mod annuaires {
+    use asl_api::annuaire::{
+        DecisionDInscription, DeclarationDAnnuaire, Hebergeur, InscriptionRendue,
+    };
+    use asl_id::{Genre, Identifiant};
+
+    fn un(genre: Genre, graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(genre, [graine; 16])
+    }
+
+    #[test]
+    fn une_declaration_porte_une_adresse() {
+        assert_eq!(
+            DeclarationDAnnuaire::decoder(br#"{"adresse":"[2001:db8::1]:6630"}"#),
+            Ok(DeclarationDAnnuaire {
+                adresse: "[2001:db8::1]:6630"
+            })
+        );
+        for corps in [
+            &br#"{"adr":"x:1"}"#[..],
+            br#"{"adresse":1}"#,
+            br#"{"adresse":"x:1""#,
+            br#"["adresse"]"#,
+            br#"{"adresse" "x:1"}"#,
+        ] {
+            assert!(DeclarationDAnnuaire::decoder(corps).is_err());
+        }
+        let long = vec![b' '; asl_api::corps::CORPS_MAX + 1];
+        assert!(DeclarationDAnnuaire::decoder(&long).is_err());
+    }
+
+    #[test]
+    fn une_decision_est_vraie_ou_fausse() {
+        assert_eq!(
+            DecisionDInscription::decoder(br#"{"accepte":true}"#),
+            Ok(DecisionDInscription { accepte: true })
+        );
+        assert_eq!(
+            DecisionDInscription::decoder(br#"{"accepte": false}"#),
+            Ok(DecisionDInscription { accepte: false })
+        );
+        for corps in [
+            &br#"{"accepte":1}"#[..],
+            br#"{"accepte":"true"}"#,
+            br#"{"accepte":true"#,
+            br#"{"refuse":true}"#,
+        ] {
+            assert!(DecisionDInscription::decoder(corps).is_err());
+        }
+    }
+
+    #[test]
+    fn un_hebergeur_est_un_annuaire() {
+        let n = un(Genre::Annuaire, 3);
+        let corps = format!("{{\"annuaire\":\"{}\"}}", n.texte().as_str());
+        assert_eq!(
+            Hebergeur::decoder(corps.as_bytes()),
+            Ok(Hebergeur { annuaire: n })
+        );
+        let d = un(Genre::Domaine, 3);
+        let faux = format!("{{\"annuaire\":\"{}\"}}", d.texte().as_str());
+        assert!(Hebergeur::decoder(faux.as_bytes()).is_err());
+        assert!(Hebergeur::decoder(br#"{"annuaire":"n-1"} x"#).is_err());
+        assert!(Hebergeur::decoder(br#"{"annuaire":1}"#).is_err());
+        let traine = format!("{{\"annuaire\":\"{}\",}}", n.texte().as_str());
+        assert!(Hebergeur::decoder(traine.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn une_inscription_rendue_ecrit_ce_qu_elle_porte() {
+        let n = un(Genre::Annuaire, 1);
+        let t = un(Genre::Annuaire, 2);
+        let u = un(Genre::Utilisateur, 3);
+        let mut sortie = [0_u8; 512];
+        let entiere = InscriptionRendue {
+            membre: Some(n),
+            annuaire: Some(t),
+            proprietaire: Some(u),
+            etat: "en attente",
+            adresse: "speedy:6630",
+            expire_a: None,
+        };
+        let combien = entiere.encoder(&mut sortie).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&sortie[..combien]).unwrap(),
+            format!(
+                "{{\"membre\":\"{}\",\"annuaire\":\"{}\",\"proprietaire\":\"{}\",\
+                 \"etat\":\"en attente\",\"adresse\":\"speedy:6630\"}}",
+                n.texte().as_str(),
+                t.texte().as_str(),
+                u.texte().as_str()
+            )
+        );
+        // Une déclaration qui attend : ni membre, ni annuaire, une échéance.
+        let attendue = InscriptionRendue {
+            membre: None,
+            annuaire: None,
+            proprietaire: None,
+            etat: "attendue",
+            adresse: "speedy:6630",
+            expire_a: Some(1_790_000_000_000),
+        };
+        let combien = attendue.encoder(&mut sortie).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&sortie[..combien]).unwrap(),
+            "{\"etat\":\"attendue\",\"adresse\":\"speedy:6630\",\"expire_a\":1790000000000}"
+        );
+        let zero = InscriptionRendue {
+            expire_a: Some(0),
+            ..attendue
+        };
+        let combien = zero.encoder(&mut sortie).unwrap();
+        assert!(
+            core::str::from_utf8(&sortie[..combien])
+                .unwrap()
+                .ends_with("\"expire_a\":0}")
+        );
+        let maximum = InscriptionRendue {
+            expire_a: Some(u64::MAX),
+            ..attendue
+        };
+        let combien = maximum.encoder(&mut sortie).unwrap();
+        assert!(
+            core::str::from_utf8(&sortie[..combien])
+                .unwrap()
+                .ends_with("\"expire_a\":18446744073709551615}")
+        );
+        // Un annuaire seul, sans membre : pas de virgule en tête.
+        let seul = InscriptionRendue {
+            annuaire: Some(t),
+            ..attendue
+        };
+        let combien = seul.encoder(&mut sortie).unwrap();
+        assert!(
+            core::str::from_utf8(&sortie[..combien])
+                .unwrap()
+                .starts_with("{\"annuaire\"")
+        );
+        let mut petit = [0_u8; 4];
+        assert!(entiere.encoder(&mut petit).is_err());
     }
 }

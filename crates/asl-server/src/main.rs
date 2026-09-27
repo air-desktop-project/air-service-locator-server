@@ -44,7 +44,7 @@ use asl_loop_tokio::{
 };
 use asl_store::{Entrepot, RACINE_SANS_IDENTITE};
 
-use crate::reglages::{Administration, Invite, Oubli, Reglages, USAGE};
+use crate::reglages::{Administration, Inscription, Invite, Oubli, Reglages, USAGE};
 
 /// Combien de temps entre deux passages d'expiration du journal.
 ///
@@ -138,6 +138,13 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         Reglages::geste_d_administration(&arguments).inspect_err(|_| eprint!("{USAGE}"))?
     {
         return administrer(&administration);
+    }
+    // **UN ANNUAIRE LOCAL SE PRÉSENTE AUX RACINES** (`annuaires.md` §4.1) :
+    // un geste en ligne aussi, sous la clé d'identité de cet annuaire.
+    if let Some(inscription) =
+        Reglages::geste_d_inscription(&arguments).inspect_err(|_| eprint!("{USAGE}"))?
+    {
+        return inscrire(&inscription);
     }
     // **EFFACER UN COMPTE HORS LIGNE EST UN GESTE AUSSI** (`modele.md` §2.1,
     // `replication.md` §8) : l'entrepôt, l'identité si on l'a, et rien
@@ -642,6 +649,41 @@ fn administrer(administration: &Administration) -> Result<(), Box<dyn std::error
             "retiré des administrateurs des racines"
         },
         joindre.annuaire,
+    );
+    Ok(())
+}
+
+/// Présente cet annuaire local à une racine — ou relit son inscription —,
+/// imprime l'état, et s'arrête.
+///
+/// L'état va sur la sortie standard, seul : `en attente`, `acceptée`,
+/// `refusée`, `retirée`. Le reste — le `n-…` de la clé, l'annuaire — sur la
+/// sortie d'erreur.
+fn inscrire(inscription: &Inscription) -> Result<(), Box<dyn std::error::Error>> {
+    let racines = std::fs::read(&inscription.ca)
+        .map_err(|quoi| format!("{} : {quoi}", inscription.ca.display()))?;
+    let identite_secrete = identite::lire_secrete(&inscription.identite)?;
+    let execution = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let lu = match &inscription.code {
+        Some(code) => execution.block_on(asl_loop_tokio::inscription::presenter(
+            &inscription.racine,
+            &racines,
+            &identite_secrete,
+            code,
+        )),
+        None => execution.block_on(asl_loop_tokio::inscription::relire(
+            &inscription.racine,
+            &racines,
+            &identite_secrete,
+        )),
+    }
+    .map_err(|quoi| format!("{} : {quoi}", inscription.racine))?;
+    println!("{}", lu.etat);
+    eprintln!(
+        "asl-server : annuaire local {} (membre {}) — inscription {} sur {}.",
+        lu.annuaire, lu.membre, lu.etat, inscription.racine,
     );
     Ok(())
 }

@@ -768,14 +768,16 @@ l'empêcherait de comprendre.
 | `PUT /v1/machines/{m}/alias` | **Pose l'alias** de MA machine (0.26.0) : `{"alias":"Le Grenier — NAS.maison"}` — UTF-8, sensible à la casse, rangé en NFC, 1 à 253 octets (`modele.md` §2.3). `204` ; `400` pour un alias qu'on ne peut pas ranger ; `404` si la machine n'est pas à moi. **Le propriétaire seul** : ranger une machine dans un domaine confie à ses administrateurs le droit de la partager (décision 40), pas de la renommer. |
 | `DELETE /v1/machines/{m}/alias` | Le retire. |
 | `DELETE /v1/domaines/{d}` | Supprime un domaine : ses machines détachées, son alias, ses groupes et les droits qui le visent retirés. **`409` si c'est mon dernier.** Propriétaire seulement ; le domaine racine ne se supprime pas. |
-| `POST /v1/annuaires` | **Déclare MON annuaire local** : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription — dix symboles, à usage unique, comme un code d'enrôlement. L'annuaire le présente aux racines avec sa clé d'identité (§3 ter) ; l'inscription est alors **en attente**. |
-| `GET /v1/annuaires` | Mes annuaires locaux et l'état de leur inscription : `attendue`, `en attente`, `acceptée`, `refusée`, `retirée`. |
-| `DELETE /v1/annuaires/{n}` | Retire l'inscription de mon annuaire local ; ses domaines reviennent aux racines. |
+| `POST /v1/annuaires` | **Déclare MON annuaire local** : `{"adresse":"hôte:port"}` — ASCII imprimable, sans `"` ni `\`, un port de 1 à 65 535 ; `201` `{"code":"XXXXX-XXXXX","expire_a":<ms>}`, un code d'inscription — dix symboles, à usage unique, comme un code d'enrôlement, **valable vingt-quatre heures** (0.27.0). L'annuaire le présente aux racines avec sa clé d'identité (`POST /v1/annuaires/inscription`) ; l'inscription est alors **en attente**. |
+| `GET /v1/annuaires` | Mes annuaires locaux et l'état de leur inscription : `attendue` (un code déclaré, pas encore présenté ni expiré — `adresse`, `expire_a`), `en attente`, `acceptée`, `refusée`, `retirée` (`membre`, `annuaire` — son titulaire —, `adresse`). |
+| `DELETE /v1/annuaires/{n}` | Retire l'inscription de mon annuaire local — son second avec lui ; ses domaines reviennent aux racines. **Un administrateur des racines le peut aussi** : c'est révoquer une inscription acceptée (0.27.0). |
 | `POST /v1/annuaires/{n}/membres` | **Déclare le second membre** de mon annuaire local accepté — sa paire de secours (2026-09-27, décision 49) : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription, que la seconde machine présente avec **sa** clé. `409` si l'annuaire a déjà deux membres ; `404` s'il n'est pas à moi ou pas accepté. |
-| `DELETE /v1/annuaires/{n}/membres/{n2}` | Retire le second membre ; le titulaire ne se retire pas ainsi — c'est l'annuaire entier qui se retire. |
+| `DELETE /v1/annuaires/{n}/membres/{n2}` | Retire le second membre. Nommer ici le titulaire, c'est retirer l'annuaire entier, comme `DELETE /v1/annuaires/{n}`. `404` pour un membre d'un autre annuaire. |
 | `PUT /v1/domaines/{d}/hebergeur` | **Confie** mon domaine à mon annuaire local accepté : `{"annuaire":"n-…"}` ; `DELETE` le rend aux racines. Propriétaire seulement, et **vers un annuaire de son propre compte** : `404` pour l'annuaire d'un autre, même si j'administre le domaine (décision 48). |
-| `GET /v1/inscriptions` | **Les inscriptions en attente**, pour un administrateur des racines (`modele.md` §2.12) : `n-…`, propriétaire, adresse, date. Aux autres, `404`. |
-| `POST /v1/inscriptions/{n}/decision` | **Accepte ou refuse** : `{"accepte":true}`. Un administrateur suffit. Accepter une inscription retirée ou refusée, `409`. |
+| `GET /v1/inscriptions` | **Les inscriptions en attente**, pour un administrateur des racines (`modele.md` §2.12) : `membre`, `annuaire`, `proprietaire`, `etat`, `adresse`. Aux autres, `404`. |
+| `POST /v1/inscriptions/{n}/decision` | **Accepte ou refuse** : `{"accepte":true}`. Un administrateur suffit ; **le refus l'emporte**, même arrivé après une acceptation, même d'une autre racine (`replication.md` décision 51). Accepter une inscription retirée ou refusée, `409` ; redemander, c'est une inscription neuve. |
+| `POST /v1/annuaires/inscription` | **L'annuaire local présente son code** (0.27.0), **sans session** : corps binaire `code (10) ‖ clé d'identité (32) ‖ preuve de possession (64)`, la forme d'un enrôlement, la preuve signant le défi de la connexion (`POST /v1/defi` d'abord). `200` et l'inscription (`membre` — `asl_cle::identifiant_de_racine` de la clé —, `annuaire`, `etat`, `adresse`) ; la même clé qui représente le même code, `200` encore ; une autre clé, ou une clé déjà membre d'un annuaire, `409` ; un code inconnu, `404` ; expiré, `403` ; une preuve fausse ou sans défi, `401` ; trop d'échecs d'une adresse, `429` — le frein des invitations. |
+| `POST /v1/annuaires/etat` | **L'annuaire local relit son état** (0.27.0), sans session : `clé (32) ‖ preuve (64)` ; `200` et l'inscription, `404` pour une clé membre de rien. |
 | `POST /v1/administrateurs` | **Nomme** un administrateur des racines, **sous la clé d'exploitant** : corps `o ‖ signature ‖ u-…` — le genre, la signature du défi de la connexion comme pour `POST /v1/invitations`, puis le compte en dix-sept octets (sa lettre, ses seize octets), quatre-vingt-deux en tout. `DELETE /v1/administrateurs/{u}` le retire, corps `o ‖ signature`. `204` ; `401` si la signature ne tient pas ; `409` pour nommer qui l'est déjà ; `404` sans `--operator-key`, pour un compte inconnu, ou pour retirer qui ne l'est pas ; `400` pour un corps mal formé. Le défi est dépensé dans tous les cas. **Depuis le 2026-09-26, c'est un membre du groupe d'administrateurs du domaine racine** : ces deux verbes, et eux seuls, changent ce groupe-là — `POST` et `DELETE /v1/groupes/{e}/membres…` y rendent `403`. Le premier nommé encore administrateur est propriétaire du domaine racine — calculé, jamais écrit (décidé ; 0.24.0, décision 43). L'outil de l'exploitant : `asl-server --add-admin <u-…>` / `--remove-admin <u-…>`, avec `--directory`, `--ca`, `--operator-secret`. |
 | `GET /v1/groupes` | **Mes groupes** — ceux dont je suis membre, mon groupe personnel compris, et ceux des domaines que j'administre : `[{"groupe":"e-…","domaine":"d-…"\|null,"etiquette":"Famille","sorte":"administrateurs"\|"domaine"\|"personnel","membre":true}]`. (2026-09-26, `modele.md` §2.12.) |
 | `POST /v1/domaines/{d}/groupes` | **Crée un groupe** dans le domaine : `{"etiquette":"Famille"}` ; `201`, `{"groupe":"e-…"}`. `administrer`. |
@@ -2018,8 +2020,8 @@ racines (`replication.md` §1).
 GET  /v1/defi
 POST /v1/defi              genre `n` ‖ n-… (17) ‖ signature (64)
                                         prouve sa clé d'identité, comme une racine
-POST /v1/annuaires/inscription   code (10)      la première fois : lie la clé au code
-                                                 que l'application a obtenu (§2.2)
+POST /v1/annuaires/inscription   code ‖ clé ‖ preuve   la première fois : lie la clé
+                                  au code que l'application a obtenu (§2.2) — 0.27.0
 GET  /v1/federation/machines     SANS FIN — les machines rattachées à ses domaines :
                                   m-…, clé, capacités, puis leurs changements et
                                   leurs révocations
@@ -2027,6 +2029,13 @@ POST /v1/federation/etat         SANS FIN, dans l'autre sens — ses services :
                                   s-…, machine, nom, adresse, port, vivant ou non,
                                   et chaque changement
 ```
+
+**Ce que la 0.27.0 sert de cette esquisse** (`replication.md` décision 51) :
+la présentation et la relecture de l'état, **sans** le `POST /v1/defi` de
+genre `n` — le corps porte la clé et sa preuve de possession, comme un
+enrôlement, et l'on n'a pas eu à ouvrir une seconde manière de prouver une
+clé. La voie elle-même, `federation/machines` et `federation/etat`, est la
+PR 4.
 
 **L'exigence est nouvelle** : une clé d'identité `n-…` **inscrite et
 acceptée**, pas celle de `--peer-key`. Une racine qui reçoit un `POST /v1/defi`

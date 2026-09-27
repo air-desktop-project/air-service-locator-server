@@ -119,6 +119,17 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Droit { droit } => format!("/v1/droits/{droit}"),
         Ressource::Administrateurs => "/v1/administrateurs".to_owned(),
         Ressource::Administrateur { compte } => format!("/v1/administrateurs/{compte}"),
+        Ressource::Annuaires => "/v1/annuaires".to_owned(),
+        Ressource::InscriptionAnnuaire => "/v1/annuaires/inscription".to_owned(),
+        Ressource::EtatAnnuaire => "/v1/annuaires/etat".to_owned(),
+        Ressource::Annuaire { annuaire } => format!("/v1/annuaires/{annuaire}"),
+        Ressource::MembresAnnuaire { annuaire } => format!("/v1/annuaires/{annuaire}/membres"),
+        Ressource::MembreAnnuaire { annuaire, membre } => {
+            format!("/v1/annuaires/{annuaire}/membres/{membre}")
+        }
+        Ressource::Inscriptions => "/v1/inscriptions".to_owned(),
+        Ressource::DecisionInscription { membre } => format!("/v1/inscriptions/{membre}/decision"),
+        Ressource::HebergeurDomaine { domaine } => format!("/v1/domaines/{domaine}/hebergeur"),
     }
 }
 
@@ -233,11 +244,14 @@ fuzz_target!(|entree: Entree| {
 
     // ── LA LISTE CLOSE DE CE QUI N'EXIGE RIEN ───────────────────────────────
     //
-    // Onze ressources, et chacune a sa raison écrite sur `Ressource::exigence`.
-    // **CETTE ASSERTION A DÉJÀ SERVI QUATRE FOIS** : elle a arrêté
-    // `/v1/enrolement` le jour de son ajout, puis `/v1/attestation` le sien,
-    // puis `/v1/invitations`, puis `/v1/administrateurs` (2026-09-27) — la
-    // preuve de l'exploitant est dans le corps, comme pour les invitations. Le verbe était légitime et sa liberté délibérée
+    // Quatorze ressources, et chacune a sa raison écrite sur
+    // `Ressource::exigence`. **CETTE ASSERTION A DÉJÀ SERVI CINQ FOIS** : elle
+    // a arrêté `/v1/enrolement` le jour de son ajout, puis `/v1/attestation`
+    // le sien, puis `/v1/invitations`, puis `/v1/administrateurs`
+    // (2026-09-27) — la preuve de l'exploitant est dans le corps, comme pour
+    // les invitations —, puis `/v1/annuaires/inscription` et
+    // `/v1/annuaires/etat` (0.27.0) — la preuve de possession de l'annuaire
+    // local est dans le corps, comme pour l'enrôlement. Le verbe était légitime et sa liberté délibérée
     // — mais c'est précisément le point : une ressource ne devient publique
     // que si quelqu'un l'écrit ICI, jamais parce qu'un `_ =>` l'a laissée
     // passer.
@@ -254,6 +268,8 @@ fuzz_target!(|entree: Entree| {
                     | Ressource::Invitations
                     | Ressource::Administrateurs
                     | Ressource::Administrateur { .. }
+                    | Ressource::InscriptionAnnuaire
+                    | Ressource::EtatAnnuaire
                     | Ressource::AliasResolu { .. }
                     | Ressource::RechercheAlias { .. }
                     | Ressource::Utilisateur { .. }
