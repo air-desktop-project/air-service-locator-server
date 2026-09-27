@@ -48,6 +48,7 @@
 //! rend `501`, parce qu'aucune ressource de cette API ne se sert sans état.
 
 pub mod exploitant;
+pub mod federation;
 pub mod h3;
 pub mod inscription;
 pub mod pont;
@@ -58,6 +59,7 @@ pub mod sonde;
 pub mod tireur;
 pub mod vivier;
 
+pub use federation::{EtatFedere, Federateur, ServicesPublies};
 #[cfg(feature = "porte-d-essai")]
 pub use h3::PanneDInstantane;
 pub use h3::{Annuaire, Fermetures};

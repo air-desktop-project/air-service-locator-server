@@ -830,6 +830,19 @@ pub enum Besoin<'a> {
         /// Accepter, ou refuser.
         accepte: bool,
     },
+    /// `GET /v1/federation/machines?apres=<rang>` — les machines des domaines
+    /// que l'annuaire local de cette connexion héberge (0.28.0).
+    MachinesFederees {
+        /// Le rang à partir duquel rendre.
+        apres: u64,
+    },
+    /// `POST /v1/federation/etat` — l'état de ses services. **Le corps est déjà
+    /// lu une fois ici** : des entrées entières, sans rien derrière ; l'étage 3
+    /// les relit pour décider de chacune (C11).
+    EtatFedere {
+        /// Les entrées, à la suite.
+        entrees: &'a [u8],
+    },
     /// `PUT` / `DELETE /v1/domaines/{d}/hebergeur`.
     ConfierDomaine {
         /// Le domaine.
@@ -934,6 +947,11 @@ pub enum CleTrouvee {
     /// La clé d'identité de l'autre racine, Ed25519 — **celle de
     /// `--peer-key`, jamais une clé de l'entrepôt** (`replication.md` §2.2).
     Racine(ClePublique),
+    /// La clé d'identité d'un **annuaire local inscrit et accepté**, Ed25519
+    /// — lue des inscriptions, jamais de `--peer-key` (`protocole.md` §3 ter,
+    /// 0.28.0). Même courbe, même message qu'une racine ; ce qu'elle ouvre
+    /// n'est pas la même chose ([`Session::annuaire_local`]).
+    AnnuaireLocal(ClePublique),
 }
 
 /// autorisations sont une liste, dont la longueur ne se connaît qu'à
@@ -1168,6 +1186,13 @@ pub enum Trouvaille {
     Inscriptions(alloc::vec::Vec<alloc::vec::Vec<u8>>),
     /// Une inscription, déjà encodée — celle de l'annuaire qui se présente.
     InscriptionLue(alloc::vec::Vec<u8>),
+    /// Une part des machines fédérées, **déjà encodée** : des
+    /// `asl_registre::MachineFederee` à la suite (0.28.0).
+    MachinesFederees(alloc::vec::Vec<u8>),
+    /// **Cette machine s'annonce à un annuaire local** : son domaine est
+    /// confié. Le corps, déjà encodé, dit lequel et où le joindre — `421`
+    /// (`protocole.md` §3 ter, 0.28.0).
+    Ailleurs(alloc::vec::Vec<u8>),
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -1196,6 +1221,12 @@ pub struct Session {
     /// appareil authentifiés à la fois », état qui ne correspond à rien et qu'il
     /// aurait fallu se rappeler d'interdire à chaque lecture.
     pair: Option<Identifiant>,
+    /// **Le pair de genre `n` est-il un annuaire local, et non l'autre
+    /// racine ?** Les deux prouvent la même sorte de clé ; ce qui les sépare
+    /// est l'endroit d'où la clé est venue (`CleTrouvee`), et c'est ce que ce
+    /// drapeau retient. Sans lui, un annuaire local qui a prouvé sa clé
+    /// passerait l'exigence de la voie entre racines.
+    local: bool,
 }
 
 impl Session {
@@ -1206,6 +1237,7 @@ impl Session {
             liaison,
             defi: None,
             pair: None,
+            local: false,
         }
     }
 
@@ -1246,7 +1278,21 @@ impl Session {
     /// genre `n` de son identifiant est ce qui tient les trois à part.
     #[must_use]
     pub fn racine(&self) -> Option<Identifiant> {
-        self.pair.filter(|qui| qui.genre() == Genre::Annuaire)
+        self.pair
+            .filter(|qui| qui.genre() == Genre::Annuaire)
+            .filter(|_| !self.local)
+    }
+
+    /// L'annuaire local inscrit, si c'est lui qui a prouvé sa clé sur cette
+    /// connexion (`protocole.md` §3 ter, 0.28.0).
+    ///
+    /// **Il n'est pas l'autre racine** : il ne lit rien de la voie entre
+    /// racines, et l'autre racine ne lit rien de la sienne.
+    #[must_use]
+    pub fn annuaire_local(&self) -> Option<Identifiant> {
+        self.pair
+            .filter(|qui| qui.genre() == Genre::Annuaire)
+            .filter(|_| self.local)
     }
 
     /// Ce à quoi une signature de cette connexion est liée.
@@ -1287,7 +1333,7 @@ impl Session {
             // **UNE RACINE PROUVE COMME UNE MACHINE** : même courbe, même
             // message, un genre de plus — et une clé qui ne vient pas de
             // l'entrepôt.
-            CleTrouvee::Machine(cle) | CleTrouvee::Racine(cle) => {
+            CleTrouvee::Machine(cle) | CleTrouvee::Racine(cle) | CleTrouvee::AnnuaireLocal(cle) => {
                 cle.verifie(pair, &defi, &self.liaison, signature)
             }
             CleTrouvee::Appareil(cle) => cle.verifie(
@@ -1301,6 +1347,7 @@ impl Session {
             return false;
         }
         self.pair = Some(pair);
+        self.local = matches!(cle, CleTrouvee::AnnuaireLocal(_));
         true
     }
 
@@ -1466,6 +1513,14 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         // et seule la clé de `--peer-key` l'ouvre.
         Exigence::Racine => {
             if session.racine().is_none() {
+                return Besoin::Deja(StatusCode::UNAUTHORIZED);
+            }
+        }
+        // **UN ANNUAIRE LOCAL ACCEPTÉ, ET RIEN D'AUTRE** — ni l'autre racine,
+        // qui a sa voie, ni une machine : la voie de l'annuaire local ne porte
+        // que ses domaines, et c'est sa clé qui dit lesquels.
+        Exigence::AnnuaireLocal => {
+            if session.annuaire_local().is_none() {
                 return Besoin::Deja(StatusCode::UNAUTHORIZED);
             }
         }
@@ -1727,6 +1782,8 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
             Besoin::RetirerAnnuaire { annuaire, membre }
         }
         Ressource::InscriptionAnnuaire => lire_une_inscription(session, corps),
+        Ressource::FederationMachines { apres } => Besoin::MachinesFederees { apres },
+        Ressource::FederationEtat => lire_un_etat_federe(corps),
         Ressource::EtatAnnuaire => lire_une_demande_d_etat(session, corps),
         Ressource::Inscriptions => Besoin::InscriptionsEnAttente,
         Ressource::DecisionInscription { membre } => {
@@ -1950,6 +2007,23 @@ fn lire_une_inscription<'a>(session: &Session, corps: &[u8]) -> Besoin<'a> {
     } else {
         Besoin::PreuveRefusee
     }
+}
+
+/// Lit `POST /v1/federation/etat` : des entrées d'état entières, à la suite.
+///
+/// **Tout ou rien** : une entrée illisible, ou des octets qui traînent
+/// derrière la dernière, refusent le corps entier — l'étage 3 ne range jamais
+/// la moitié d'un rapport. Un corps vide est permis : c'est l'annuaire local
+/// qui n'a aucun service à dire, et qui le dit.
+fn lire_un_etat_federe(corps: &[u8]) -> Besoin<'_> {
+    let mut reste = corps;
+    while !reste.is_empty() {
+        match asl_registre::EntreeDEtat::lire(reste) {
+            Ok((_, occupe)) => reste = reste.get(occupe..).unwrap_or_default(),
+            Err(_) => return Besoin::Deja(StatusCode::BAD_REQUEST),
+        }
+    }
+    Besoin::EtatFedere { entrees: corps }
 }
 
 /// Lit `POST /v1/annuaires/etat` : la clé d'identité, et la preuve.
@@ -2180,6 +2254,12 @@ pub fn repondre<'o>(
         // fait qu'habiller ce qu'il rend.
         Besoin::Annoncer => match trouvaille {
             Trouvaille::Annoncee(corps) => composer(StatusCode::OK, JSON_MEDIA, corps, sortie),
+            // **`421`, ET NON UN REFUS** (`protocole.md` §3 ter, 0.28.0) : la
+            // machine a le droit d'annoncer, mais pas ICI — son domaine est
+            // confié à un annuaire local, que le corps nomme avec l'adresse
+            // où le joindre. C'est « mal adressée » au sens de RFC 9110
+            // §15.5.20 : le même service, servi par un autre.
+            Trouvaille::Ailleurs(corps) => composer(MAL_ADRESSEE, JSON_MEDIA, corps, sortie),
             // **`403` ICI, ET NON `404`.** C10 impose de ne rien dire de ce qui
             // existe sur une LECTURE ; une annonce ne lit rien. Le daemon est
             // authentifié, il n'a simplement pas la capacité `annonce` — ou son
@@ -2713,6 +2793,41 @@ pub fn repondre<'o>(
                 sortie,
             ),
             autre => rendre_l_echec(autre, sortie),
+        },
+        // ── LA VOIE DE L'ANNUAIRE LOCAL (0.28.0) ─────────────────────────
+        //
+        // **Une part de machines, en octets** : ce ne sont pas des objets pour
+        // un humain, et leur forme est celle de l'entrepôt. `404` si
+        // l'annuaire n'est plus accepté entre sa preuve et sa demande.
+        Besoin::MachinesFederees { .. } => match trouvaille {
+            Trouvaille::MachinesFederees(corps) => {
+                composer(StatusCode::OK, OCTETS_MEDIA, corps, sortie)
+            }
+            _ => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+        },
+        // **`204` rangé ; `403` hors de son périmètre** (C11 : une entrée sur
+        // une machine qui n'est pas dans ses domaines refuse le rapport
+        // entier, et l'étage 3 le journalise) ; `404` s'il n'est plus
+        // accepté.
+        Besoin::EtatFedere { .. } => match trouvaille {
+            Trouvaille::Fait => composer(StatusCode::NO_CONTENT, OCTETS_MEDIA, b"", sortie),
+            Trouvaille::Refus => composer(
+                StatusCode::FORBIDDEN,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::FORBIDDEN),
+                sortie,
+            ),
+            _ => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
         },
         // **LE DÉFI EST DÉPENSÉ, QU'IL SERVE OU NON** — la règle de
         // l'enrôlement. Et **jamais `500`** : ces deux ressources n'exigent
@@ -3391,6 +3506,13 @@ const fn statut_de(faute: asl_api::Erreur) -> StatusCode {
 ///
 /// **Elles ne nomment jamais ce qui a échoué en détail**, et c'est délibéré : un
 /// refus de routage bavard décrit la surface de l'API à qui la sonde.
+/// `421 Misdirected Request` (RFC 9110 §15.5.20) : la pile HTTP n'en a pas de
+/// constante, et la valeur est une donnée de la norme.
+const MAL_ADRESSEE: StatusCode = match StatusCode::new(421) {
+    Ok(statut) => statut,
+    Err(_) => StatusCode::FORBIDDEN,
+};
+
 const fn probleme(statut: StatusCode) -> &'static [u8] {
     match statut {
         StatusCode::BAD_REQUEST => br#"{"type":"about:blank","title":"Bad Request","status":400}"#,
@@ -9191,5 +9313,195 @@ mod annuaires_locaux {
                 StatusCode::CONFLICT
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod voie_de_l_annuaire_local {
+    //! La voie de l'annuaire local (`protocole.md` §3 ter, 0.28.0) : sa
+    //! preuve, son exigence, ses deux verbes, et le `421` d'une annonce mal
+    //! adressée.
+
+    extern crate alloc;
+
+    use alloc::vec::Vec;
+    use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
+    use asl_cle::{CleSecrete, Defi, LiaisonDeCanal, identifiant_de_racine};
+    use asl_id::{Genre, Identifiant};
+
+    use super::{
+        Besoin, CleTrouvee, JSON_MEDIA, MAL_ADRESSEE, OCTETS_MEDIA, PREUVE_OCTETS, Session,
+        Trouvaille, besoin, repondre,
+    };
+
+    fn liaison() -> LiaisonDeCanal {
+        LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
+    }
+
+    fn tete<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
+        let limites = Limits::default();
+        let mut constructeur = HeadBuilder::new(&limites);
+        constructeur.field(b":method", verbe).expect("le verbe");
+        constructeur.field(b":scheme", b"https").expect("le schéma");
+        constructeur
+            .field(b":authority", b"annuaire.example")
+            .expect("l'autorité");
+        constructeur.field(b":path", cible).expect("la cible");
+        constructeur.finish().expect("une tête close")
+    }
+
+    fn champ<'a>(reponse: &ams_h3::Reponse<'a>, nom: &[u8]) -> Option<&'a [u8]> {
+        reponse
+            .fields()
+            .find(|(cle, _)| *cle == nom)
+            .map(|(_, valeur)| valeur)
+    }
+
+    /// Une session où ce `n-…` a prouvé sa clé, trouvée comme `cle`.
+    fn session_prouvee(
+        trouvee: impl Fn(asl_cle::ClePublique) -> CleTrouvee,
+    ) -> (Session, Identifiant) {
+        let secrete = CleSecrete::depuis_entropie([0x51; 32]);
+        let annuaire = identifiant_de_racine(&secrete.publique());
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 256];
+        let defi = Defi::depuis_octets([0x42; 32]);
+        let quoi = besoin(&session, &tete(b"GET", b"/v1/defi"), b"");
+        let _ = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Rien,
+            Some(defi),
+            &mut sortie,
+        );
+        let signature = secrete
+            .signer(annuaire, &defi, &liaison())
+            .expect("il signe");
+        let mut corps = Vec::with_capacity(PREUVE_OCTETS);
+        corps.push(Genre::Annuaire.prefixe());
+        corps.extend_from_slice(annuaire.octets());
+        corps.extend_from_slice(signature.octets());
+        let quoi = besoin(&session, &tete(b"POST", b"/v1/defi"), &corps);
+        let reponse = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Cle(trouvee(secrete.publique())),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::NO_CONTENT);
+        (session, annuaire)
+    }
+
+    fn entree(machine: u8, reponse: Option<&[u8]>) -> Vec<u8> {
+        let mut sortie = [0_u8; 128];
+        let n = asl_registre::EntreeDEtat {
+            service: Identifiant::depuis_entropie(Genre::Service, [1; 16]),
+            machine: Identifiant::depuis_entropie(Genre::Machine, [machine; 16]),
+            nom: asl_registre::NomRange::nouveau("depot").expect("un nom"),
+            reponse,
+        }
+        .ecrire(&mut sortie)
+        .expect("une entrée");
+        sortie[..n].to_vec()
+    }
+
+    #[test]
+    fn un_annuaire_local_n_est_pas_l_autre_racine_et_inversement() {
+        let (session, annuaire) = session_prouvee(CleTrouvee::AnnuaireLocal);
+        assert_eq!(session.annuaire_local(), Some(annuaire));
+        assert_eq!(session.racine(), None);
+        assert_eq!(session.pair(), Some(annuaire));
+        // Sa clé ne passe pas l'exigence de la voie entre racines…
+        let quoi = besoin(&session, &tete(b"GET", b"/v1/pair/instantane"), b"");
+        assert_eq!(quoi, Besoin::Deja(StatusCode::UNAUTHORIZED));
+        // … et celle de l'autre racine ne passe pas la sienne.
+        let (racine, _) = session_prouvee(CleTrouvee::Racine);
+        assert_eq!(racine.annuaire_local(), None);
+        let quoi = besoin(&racine, &tete(b"POST", b"/v1/federation/etat"), b"");
+        assert_eq!(quoi, Besoin::Deja(StatusCode::UNAUTHORIZED));
+        // Ni un inconnu.
+        let inconnu = Session::new(liaison());
+        let quoi = besoin(
+            &inconnu,
+            &tete(b"GET", b"/v1/federation/machines?apres=0"),
+            b"",
+        );
+        assert_eq!(quoi, Besoin::Deja(StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn les_machines_federees_se_rendent_en_octets() {
+        let (mut session, _) = session_prouvee(CleTrouvee::AnnuaireLocal);
+        let quoi = besoin(
+            &session,
+            &tete(b"GET", b"/v1/federation/machines?apres=7"),
+            b"",
+        );
+        assert_eq!(quoi, Besoin::MachinesFederees { apres: 7 });
+        let mut sortie = [0_u8; 256];
+        let reponse = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::MachinesFederees(alloc::vec![9_u8; 5]),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert_eq!(champ(&reponse, b"content-type"), Some(OCTETS_MEDIA));
+        assert_eq!(reponse.body(), &[9_u8; 5]);
+        let mut sortie = [0_u8; 256];
+        let reponse = repondre(&mut session, &quoi, &Trouvaille::Rien, None, &mut sortie);
+        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn un_etat_se_lit_tout_ou_rien() {
+        let (mut session, _) = session_prouvee(CleTrouvee::AnnuaireLocal);
+        let mut corps = entree(3, Some(b"{}"));
+        corps.extend(entree(4, None));
+        let quoi = besoin(&session, &tete(b"POST", b"/v1/federation/etat"), &corps);
+        assert_eq!(quoi, Besoin::EtatFedere { entrees: &corps });
+        // Vide : permis.
+        let quoi_vide = besoin(&session, &tete(b"POST", b"/v1/federation/etat"), b"");
+        assert_eq!(quoi_vide, Besoin::EtatFedere { entrees: b"" });
+        // Des octets qui traînent : le corps entier est refusé.
+        let mut traine = corps.clone();
+        traine.push(0);
+        assert_eq!(
+            besoin(&session, &tete(b"POST", b"/v1/federation/etat"), &traine),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+
+        let mut sortie = [0_u8; 256];
+        for (trouvaille, statut) in [
+            (Trouvaille::Fait, StatusCode::NO_CONTENT),
+            (Trouvaille::Refus, StatusCode::FORBIDDEN),
+            (Trouvaille::Rien, StatusCode::NOT_FOUND),
+        ] {
+            let reponse = repondre(&mut session, &quoi, &trouvaille, None, &mut sortie);
+            assert_eq!(reponse.status(), statut);
+        }
+    }
+
+    #[test]
+    fn une_annonce_mal_adressee_rend_421_avec_ou_aller() {
+        let mut session = Session::new(liaison());
+        session.pair = Some(Identifiant::depuis_entropie(Genre::Machine, [5; 16]));
+        let quoi = besoin(&session, &tete(b"POST", b"/v1/annonce"), b"{}");
+        assert_eq!(quoi, Besoin::Annoncer);
+        let mut sortie = [0_u8; 256];
+        let corps = br#"{"annuaire":"n-x","adresses":["speedy:6630"]}"#;
+        let reponse = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Ailleurs(corps.to_vec()),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), MAL_ADRESSEE);
+        assert_eq!(MAL_ADRESSEE.value(), 421);
+        assert_eq!(champ(&reponse, b"content-type"), Some(JSON_MEDIA));
+        assert_eq!(reponse.body(), corps);
     }
 }

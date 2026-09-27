@@ -32,6 +32,7 @@
 mod annuaires;
 mod domaines;
 mod droits;
+mod federation;
 mod groupes;
 
 use std::collections::{HashMap, VecDeque};
@@ -656,6 +657,10 @@ struct Service<'a> {
     preparateur: &'a Preparateur,
     /// Le compte dont cette connexion écoute les nouvelles, s'il y en a un.
     nouvelles_de: &'a mut Option<Identifiant>,
+    /// Côté racine : l'état que les annuaires locaux rapportent.
+    etat_federe: &'a mut crate::federation::EtatFedere,
+    /// Combien de temps on le croit, en microsecondes.
+    expiration_federee_us: u64,
     /// Les comptes qu'une autorisation écrite sur CETTE requête doit
     /// réveiller. `Annuaire::au_tour` les verse aux flux des nouvelles et au
     /// réveilleur — jamais ici : la boucle ne fait pas d'appel sortant.
@@ -704,9 +709,23 @@ impl Service<'_> {
             // pouvoir demander un code d'invitation AVANT d'essuyer un refus.
             Besoin::Version => Trouvaille::Version(env!("CARGO_PKG_VERSION"), self.politique),
 
-            Besoin::Annoncer => self
-                .annoncer()
-                .map_or(Trouvaille::Rien, Trouvaille::Annoncee),
+            // **UNE MACHINE D'UN DOMAINE CONFIÉ S'ANNONCE AILLEURS** (0.28.0) :
+            // `421`, avec l'annuaire local et où le joindre. Sa machine est
+            // rangée ici — c'est ici qu'elle s'enrôle —, mais ses services
+            // vivent chez lui.
+            Besoin::Annoncer => match self
+                .session
+                .machine()
+                .and_then(|qui| self.annonce_mal_adressee(qui))
+            {
+                Some(ailleurs) => Trouvaille::Ailleurs(ailleurs),
+                None => self
+                    .annoncer()
+                    .map_or(Trouvaille::Rien, Trouvaille::Annoncee),
+            },
+            // ── LA VOIE DE L'ANNUAIRE LOCAL (0.28.0) ─────────────────────
+            Besoin::MachinesFederees { apres } => self.rassembler_les_machines_federees(*apres),
+            Besoin::EtatFedere { entrees } => self.ranger_un_etat_federe(entrees),
 
             // **LA CLÉ VIENT DE L'ENREGISTREMENT DE LA MACHINE**, et rien
             // d'autre : une machine inconnue, une clé illisible et une
@@ -721,11 +740,22 @@ impl Service<'_> {
                 // celle de `--peer-key`, une seule, et `asl_auth::decider_pair`
                 // dit si le `n-…` présenté est le sien. Un autre rend le refus
                 // d'une clé inconnue (`protocole.md` §3 bis).
+                // **OU UN ANNUAIRE LOCAL ACCEPTÉ** (0.28.0) : sa clé vient des
+                // inscriptions, et ce qu'elle ouvre est sa voie à lui, jamais
+                // celle entre racines (`CleTrouvee::AnnuaireLocal`).
                 asl_id::Genre::Annuaire => match self.voie.pair {
                     Some(cle) if asl_auth::decider_pair(*qui, self.pair_attendu).permet() => {
                         Trouvaille::Cle(CleTrouvee::Racine(cle))
                     }
-                    _ => Trouvaille::Rien,
+                    _ => match self.entrepot.membre_d_annuaire(*qui).ok().flatten() {
+                        Some(lu) if lu.etat == asl_store::EtatDInscription::Acceptee => {
+                            match ClePublique::depuis_octets(lu.cle) {
+                                Ok(cle) => Trouvaille::Cle(CleTrouvee::AnnuaireLocal(cle)),
+                                Err(_) => Trouvaille::Rien,
+                            }
+                        }
+                        _ => Trouvaille::Rien,
+                    },
                 },
                 // **UN APPAREIL SIGNE EN P-256**, et sa clé rangée fait 33
                 // octets. La lire comme un Ed25519 échouerait, et une panne de
@@ -2324,14 +2354,13 @@ impl Service<'_> {
             let Ok(machines) = self.entrepot.machines_de_compte(compte) else {
                 continue;
             };
+            // `rassembler` cherche le service ici, puis dans ce que les
+            // annuaires locaux rapportent : une machine qui n'a ni l'un ni
+            // l'autre ne rend rien.
             for (quelle, _) in machines {
-                let Ok(Some(service)) = self.entrepot.service_par_nom(quelle, nom) else {
-                    continue;
-                };
                 if let Some(resolution) = self.rassembler(quelle, nom) {
                     trouvees.push(resolution);
                 }
-                let _ = service;
             }
         }
         trouvees
@@ -2742,22 +2771,41 @@ impl Service<'_> {
         )
         .ok()?;
 
-        let service = self.entrepot.service_par_nom(machine, nom).ok().flatten()?;
         let visee = self.entrepot.machine(machine).ok().flatten()?;
+
+        // **LE SERVICE EST ICI, OU CHEZ L'ANNUAIRE LOCAL QUI HÉBERGE SA
+        // MACHINE** (0.28.0) : dans le second cas, c'est son rapport — en
+        // mémoire — qui dit le service et sa réponse. La décision qui suit est
+        // la même : ce qu'on rend d'un service fédéré, on le rend à qui peut
+        // le localiser, et à personne d'autre (`annuaires.md` §5.4).
+        let (service, annonce) = match self.entrepot.service_par_nom(machine, nom).ok().flatten() {
+            // **CE QUI EST ANNONCÉ, LU MAINTENANT ET RÉVÉLÉ PLUS TARD.** C'est
+            // notre propre mémoire : la lire ne dit rien à personne. La RENDRE
+            // est une décision, et elle se prend à l'étage 2, après
+            // l'autorisation.
+            Some(service) => (
+                service,
+                self.vivier.annonce(service).and_then(|vivante| {
+                    let mut sortie = alloc_reponse();
+                    let combien = vivante.reponse().ok()?.encoder(&mut sortie).ok()?;
+                    sortie.truncate(combien);
+                    Some(sortie)
+                }),
+            ),
+            None => {
+                let lue = self.etat_federe.lire(
+                    machine,
+                    nom.as_bytes(),
+                    maintenant(),
+                    self.expiration_federee_us,
+                )?;
+                (lue.service, lue.reponse)
+            }
+        };
         let cible = asl_auth::Cible::nouvelle(service, machine, visee.proprietaire).ok()?;
 
         // **CE QUE LE DEMANDEUR PEUT LOCALISER** (décision 40).
         let autorisations = self.acces_de(demandeur.proprietaire(), asl_store::Voulu::Localiser);
-
-        // **CE QUI EST ANNONCÉ, LU MAINTENANT ET RÉVÉLÉ PLUS TARD.** C'est
-        // notre propre mémoire : la lire ne dit rien à personne. La RENDRE est
-        // une décision, et elle se prend à l'étage 2, après l'autorisation.
-        let annonce = self.vivier.annonce(service).and_then(|vivante| {
-            let mut sortie = alloc_reponse();
-            let combien = vivante.reponse().ok()?.encoder(&mut sortie).ok()?;
-            sortie.truncate(combien);
-            Some(sortie)
-        });
 
         Some(Resolution {
             demandeur,
@@ -2951,6 +2999,20 @@ pub struct Annuaire<'a> {
     /// Ce que la porte d'essai ajoute avant chaque verdict de sonde.
     #[cfg(feature = "porte-d-essai")]
     lenteur_de_sonde: Option<std::time::Duration>,
+    /// Côté racine : l'état des services que les annuaires locaux
+    /// rapportent (0.28.0). **En mémoire, et seulement ici** (C13 amendée) —
+    /// ni l'entrepôt ni la voie entre racines ne le voient.
+    etat_federe: crate::federation::EtatFedere,
+    /// Combien de temps on croit un rapport qu'aucun membre ne confirme, en
+    /// microsecondes ([`crate::federation::EXPIRATION_US`] en service).
+    expiration_federee_us: u64,
+    /// Quand l'état fédéré a été balayé pour la dernière fois.
+    dernier_balayage_federe: u64,
+    /// Côté annuaire local : où la boucle publie l'état de ses services pour
+    /// les fédérateurs — `None` sur une racine.
+    publies: Option<Arc<crate::federation::ServicesPublies>>,
+    /// Quand la boucle a publié pour la dernière fois.
+    derniere_publication: u64,
 }
 
 impl<'a> Annuaire<'a> {
@@ -3026,7 +3088,84 @@ impl<'a> Annuaire<'a> {
             preparations,
             #[cfg(feature = "porte-d-essai")]
             lenteur_de_sonde: None,
+            etat_federe: crate::federation::EtatFedere::nouveau(),
+            expiration_federee_us: crate::federation::EXPIRATION_US,
+            dernier_balayage_federe: 0,
+            publies: None,
+            derniere_publication: 0,
         }
+    }
+
+    /// Oublie, au plus une fois par expiration, ce qu'aucun annuaire local ne
+    /// confirme plus — la mémoire ne garde pas les maisons disparues.
+    fn balayer_l_etat_federe(&mut self) {
+        let maintenant = maintenant();
+        if maintenant
+            < self
+                .dernier_balayage_federe
+                .saturating_add(self.expiration_federee_us)
+        {
+            return;
+        }
+        self.dernier_balayage_federe = maintenant;
+        self.etat_federe
+            .oublier_les_perimes(maintenant, self.expiration_federee_us);
+    }
+
+    /// Côté racine : combien de temps croire un rapport d'annuaire local
+    /// qu'aucun membre ne confirme, en microsecondes.
+    ///
+    /// Trente secondes en service ([`crate::federation::EXPIRATION_US`]) ; un
+    /// essai le raccourcit pour voir tomber un service sans attendre.
+    pub const fn expirer_l_etat_federe_apres(&mut self, delai_us: u64) {
+        self.expiration_federee_us = delai_us;
+    }
+
+    /// Côté annuaire local : publie l'état de nos services ici, pour que les
+    /// fédérateurs le poussent aux racines (`crate::federation`).
+    pub fn publier_l_etat_dans(&mut self, publies: Arc<crate::federation::ServicesPublies>) {
+        self.publies = Some(publies);
+    }
+
+    /// Publie l'état des services de nos machines fédérées, au plus tous les
+    /// dixièmes de seconde.
+    ///
+    /// **Toutes les machines fédérées, et tous leurs services déclarés** —
+    /// vivants avec leur réponse, les autres « partis » : une racine apprend
+    /// ainsi qu'un daemon s'en est allé sans attendre que son rapport vieillisse.
+    fn publier(&mut self) {
+        let Some(publies) = &self.publies else {
+            return;
+        };
+        let maintenant = maintenant();
+        if maintenant < self.derniere_publication.saturating_add(100_000) {
+            return;
+        }
+        self.derniere_publication = maintenant;
+        let Ok(machines) = self.entrepot.machines_federees() else {
+            return;
+        };
+        let mut liste = Vec::new();
+        for (machine, _) in machines {
+            let Ok(services) = self.entrepot.services_de_machine(machine) else {
+                continue;
+            };
+            for (service, rangee) in services {
+                let reponse = self.vivier.annonce(service).and_then(|vivante| {
+                    let mut sortie = alloc_reponse();
+                    let combien = vivante.reponse().ok()?.encoder(&mut sortie).ok()?;
+                    sortie.truncate(combien);
+                    Some(sortie)
+                });
+                liste.push(crate::federation::ServicePublie {
+                    service,
+                    machine,
+                    nom: rangee.nom,
+                    reponse,
+                });
+            }
+        }
+        publies.publier(liste);
     }
 
     /// Ralentit chaque lecture d'instantané de ce délai, sur son fil.
@@ -3484,6 +3623,10 @@ impl Application for Annuaire<'_> {
         // Et l'on oublie ce qui a expiré — une annonce dont la connexion est
         // tombée sans qu'on l'apprenne n'a personne pour la retirer.
         self.vivier.oublier_les_expirees(instant());
+        // **CÔTÉ ANNUAIRE LOCAL, ON PUBLIE** ; côté racine, on oublie ce
+        // qu'aucun membre ne confirme plus (0.28.0).
+        self.publier();
+        self.balayer_l_etat_federe();
         self.balayer_les_codes();
         self.effacer_les_orphelins();
         // **LA VOIE ENTRE RACINES SUIT LE JOURNAL ICI** : c'est le seul
@@ -3661,6 +3804,8 @@ impl Application for Annuaire<'_> {
             preparateur: &self.preparateur,
             nouvelles_de,
             a_reveiller: &mut self.a_reveiller,
+            etat_federe: &mut self.etat_federe,
+            expiration_federee_us: self.expiration_federee_us,
         };
         if let Err(faute) = conducteur.on_readable(&mut Pont(connexion), &mut service, flux) {
             Self::condamner(connexion, &faute);

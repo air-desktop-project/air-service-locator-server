@@ -204,6 +204,33 @@ soixante envois par minute et par hôte, huit en vol. Le journal
 d'exploitation dit les points morts (`404`/`410`) et chaque refus des règles
 d'adresse.
 
+**Un annuaire LOCAL** (`docs/protocole.md` §3 ter, **servi depuis 0.28.0**) :
+le même binaire, chez vous, inscrit auprès des racines (`--register`, puis
+l'acceptation d'un administrateur des racines) et à qui vous avez confié un ou
+plusieurs de vos domaines. Il fédère vers chaque racine :
+
+```sh
+cargo run -p asl-server -- … \
+    --identity-key /etc/asl-server/identite.key \
+    --federation nitrogen.air-desktop.org:6630 \
+    --federation argon.air-desktop.org:6630 \
+    --federation-ca /etc/asl-server/racine.crt
+```
+
+`--identity-key` est la clé que les racines ont acceptée à l'inscription ;
+`--federation` se donne une fois par racine ; `--federation-ca` est l'autorité
+de leur certificat.
+
+**C'est lui qui ouvre** : aucun port entrant n'est nécessaire pour cette voie.
+Il reçoit des racines les machines de ses domaines, authentifie leurs daemons,
+et rend aux racines l'état de leurs services — toutes les dix secondes, et dès
+qu'un daemon arrive ou s'en va. Les racines le tiennent **en mémoire
+seulement**, le servent à qui peut `localiser`, et l'oublient trente secondes
+après le dernier rapport. Une machine d'un domaine confié qui s'annonce à une
+racine reçoit `421`, avec l'annuaire et son adresse déclarée. Un port entrant
+(UDP 6630 vers l'adresse publique) n'est utile que pour les daemons hors de la
+maison.
+
 Les quatre vont ensemble. Sans `--identity-key`, la racine tourne seule et le
 dit au démarrage. Chacune ouvre une connexion sortante vers l'autre et y **tire
 sans fin** ce que l'autre a écrit ; une écriture faite chez l'une est chez
@@ -334,7 +361,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.27.0_amd64.deb
+sudo dpkg -i asl-server_0.28.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :

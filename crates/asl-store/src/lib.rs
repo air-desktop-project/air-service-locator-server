@@ -72,6 +72,7 @@ use redb::{
 mod annuaires;
 mod domaines;
 mod droits;
+mod federation;
 mod groupes;
 
 pub use annuaires::{
@@ -1029,6 +1030,9 @@ impl Entrepot {
             ecriture.open_table(annuaires::REFUS)?;
             ecriture.open_table(annuaires::RETRAITS)?;
             ecriture.open_table(annuaires::HEBERGEMENTS)?;
+            // Et les machines qu'un annuaire local reçoit des racines
+            // (0.28.0) : une table neuve, vide partout ailleurs.
+            ecriture.open_table(federation::MACHINES_FEDEREES)?;
             ecriture.open_table(droits::DROITS_PAR_GROUPE)?;
             ecriture.open_table(droits::DROITS_ACCORDES)?;
             ecriture.open_table(droits::DROITS_PAR_ELEMENT)?;
@@ -1843,10 +1847,18 @@ impl Entrepot {
     /// # Errors
     ///
     /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    ///
+    /// **Celles de cet annuaire, puis celles qu'il a reçues des racines**
+    /// (0.28.0) : un annuaire local n'a que les secondes, une racine que les
+    /// premières — voir `federation.rs`.
     pub fn machine(&self, quelle: Identifiant) -> Result<Option<Machine>, Faute> {
         let lecture = self.base.begin_read()?;
         let machines = lecture.open_table(MACHINES)?;
-        match machines.get(clef(quelle).as_slice())? {
+        if let Some(trouve) = machines.get(clef(quelle).as_slice())? {
+            return Ok(Some(Machine::lire(trouve.value())?));
+        }
+        let federees = lecture.open_table(federation::MACHINES_FEDEREES)?;
+        match federees.get(clef(quelle).as_slice())? {
             Some(trouve) => Ok(Some(Machine::lire(trouve.value())?)),
             None => Ok(None),
         }
@@ -4717,10 +4729,18 @@ fn appliquer_service(
     let clef_nom = clef_de_nom(enregistrement.machine, enregistrement.nom.octets());
     // **UN SERVICE D'UNE MACHINE QU'ON N'A PAS NE SE DÉCLARE PAS** : les
     // services partent avec la machine, et la machine avec son compte (§3.2).
+    //
+    // **Ou qu'on a reçue des racines** (0.28.0) : entre les deux membres d'un
+    // annuaire local, un service vient d'une machine que chacun tient de sa
+    // propre voie, jamais de sa table des machines.
     if ecriture
         .open_table(MACHINES)?
         .get(clef(enregistrement.machine).as_slice())?
         .is_none()
+        && ecriture
+            .open_table(federation::MACHINES_FEDEREES)?
+            .get(clef(enregistrement.machine).as_slice())?
+            .is_none()
     {
         return Ok(());
     }

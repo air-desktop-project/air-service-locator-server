@@ -456,9 +456,15 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         // prouve les deux identités, et applique ce qu'il a écrit. Ce qu'elle
         // ferme ici — une clé révoquée, une annonce retirée — remonte par un
         // canal que la boucle draine (§3.3).
+        //
+        // **UN SEUL CANAL DE FERMETURES** : `Annuaire::fermetures` remplace le
+        // précédent à chaque appel, et le tireur comme les fédérateurs y
+        // déposent — on le crée une fois, et chacun en tient un clone.
+        let fermetures = (reglages.pair.is_some() || reglages.federation.is_some())
+            .then(|| application.fermetures());
         let tireur = match (&reglages.pair, &identite) {
             (Some(pair), Some(_)) => {
-                let fermetures = application.fermetures();
+                let fermetures = fermetures.clone().expect("créé avec le pair");
                 // La tâche possède sa propre clé d'identité : on la relit du
                 // fichier plutôt que de la partager avec la voie servie.
                 let chemin_identite = reglages
@@ -489,6 +495,48 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
             _ => None,
         };
 
+        // **LES FÉDÉRATEURS : CET ANNUAIRE EST LOCAL** (`protocole.md` §3 ter,
+        // 0.28.0). Une tâche par racine : elle ouvre, prouve notre clé
+        // d'identité, tire les machines de nos domaines et pousse l'état de
+        // leurs services — que la boucle publie pour elles.
+        let mut federateurs = Vec::new();
+        if let Some(federation) = &reglages.federation {
+            let chemin_identite = reglages
+                .identite
+                .as_ref()
+                .expect("--federation exige --identity-key");
+            let racines_pem = std::fs::read(&federation.ca)
+                .map_err(|quoi| format!("--federation-ca {} : {quoi}", federation.ca.display()))?;
+            let publies = Arc::new(asl_loop_tokio::ServicesPublies::nouvelle());
+            application.publier_l_etat_dans(Arc::clone(&publies));
+            eprintln!(
+                "asl-server : annuaire LOCAL — fédère vers {} racine(s) : {}.",
+                federation.racines.len(),
+                federation.racines.join(", ")
+            );
+            for adresse in &federation.racines {
+                let federateur = asl_loop_tokio::Federateur {
+                    entrepot: Arc::clone(&entrepot),
+                    adresse: adresse.clone(),
+                    racines_pem: racines_pem.clone(),
+                    identite: identite::lire_secrete(chemin_identite)?,
+                    keepalive_us: reglages.keepalive_s.saturating_mul(1_000_000),
+                    idle_us: reglages.inactivite_us(),
+                    cadence_ms: asl_loop_tokio::federation::CADENCE_MS,
+                    publies: Arc::clone(&publies),
+                    fermetures: fermetures.clone().expect("créé avec la fédération"),
+                    alea: Box::new(|| {
+                        entropie::un_identifiant()
+                            .map(|octets| u16::from_be_bytes([octets[0], octets[1]]))
+                            .unwrap_or(0)
+                    }),
+                    journal: Box::new(|ligne| eprintln!("asl-server : {ligne}")),
+                    plafond_recul_ms: reglages.keepalive_s.saturating_mul(1_000).max(1),
+                };
+                federateurs.push(tokio::spawn(federateur.federer_sans_fin()));
+            }
+        }
+
         let comptes = servir_quic(
             socket,
             tls,
@@ -505,6 +553,9 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(reveilleur) = reveilleur {
             reveilleur.abort();
+        }
+        for federateur in federateurs {
+            federateur.abort();
         }
         eprintln!(
             "asl-server : arrêté. {} connexions acceptées, {} refusées, \
