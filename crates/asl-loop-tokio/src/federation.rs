@@ -89,6 +89,10 @@ struct Tenue {
 pub struct EtatFedere {
     /// `machine ‖ nom` → membre → ce qu'il en a dit.
     tenus: HashMap<Vec<u8>, HashMap<Identifiant, Tenue>>,
+    /// Ce que chaque membre a rapporté la dernière fois — `(entrées,
+    /// vivantes)` —, pour que le journal ne dise un rapport qu'à la première
+    /// fois et quand il change.
+    derniers_rapports: HashMap<Identifiant, (usize, usize)>,
 }
 
 /// Ce qu'une racine rend d'un service fédéré.
@@ -180,6 +184,17 @@ impl EtatFedere {
     #[must_use]
     pub fn combien(&self) -> usize {
         self.tenus.len()
+    }
+
+    /// Note ce qu'un membre vient de rapporter ; rend `true` si c'est la
+    /// première fois, ou si le compte a changé — ce que le journal doit dire.
+    pub fn noter_un_rapport(
+        &mut self,
+        membre: Identifiant,
+        entrees: usize,
+        vivantes: usize,
+    ) -> bool {
+        self.derniers_rapports.insert(membre, (entrees, vivantes)) != Some((entrees, vivantes))
     }
 }
 
@@ -399,18 +414,32 @@ impl Federateur {
         let cadence_us = self.cadence_ms.saturating_mul(1_000);
         let mut prochaine = 0_u64;
         let mut version_poussee = None;
+        // **CE QUI A ÉTÉ DIT AU JOURNAL**, pour ne le redire que s'il change :
+        // la cadence est de dix secondes, et un journal qui répète la même
+        // ligne six fois par minute noie celle qui compte.
+        let mut machines_dites = None;
+        let mut etat_dit = None;
         loop {
             let maintenant = maintenant();
             let version = self.publies.version();
             if maintenant >= prochaine {
-                self.tirer_les_machines(&mut connexion).await?;
-                self.pousser_l_etat(&mut connexion).await?;
+                let machines = self.tirer_les_machines(&mut connexion).await?;
+                if machines_dites != Some(machines) {
+                    (self.journal)(format!(
+                        "fédération vers {} : {machines} machine(s) de nos domaines reçue(s)",
+                        self.adresse
+                    ));
+                    machines_dites = Some(machines);
+                }
+                let pousse = self.pousser_l_etat(&mut connexion).await?;
+                self.dire_l_etat(&mut etat_dit, pousse);
                 version_poussee = Some(version);
                 prochaine = maintenant.saturating_add(cadence_us);
             } else if version_poussee != Some(version) {
                 // **UN CHANGEMENT PART TOUT DE SUITE** : un daemon qui arrive ou
                 // s'en va se voit aux racines dans le tour, pas à la cadence.
-                self.pousser_l_etat(&mut connexion).await?;
+                let pousse = self.pousser_l_etat(&mut connexion).await?;
+                self.dire_l_etat(&mut etat_dit, pousse);
                 version_poussee = Some(version);
             }
             connexion.entretenir(200).await?;
@@ -420,8 +449,23 @@ impl Federateur {
         }
     }
 
-    /// Tire toutes les parts des machines de nos domaines, et les range.
-    async fn tirer_les_machines(&self, connexion: &mut Connexion) -> Result<(), Faute> {
+    /// Dit au journal ce qui vient d'être poussé, si cela a changé depuis la
+    /// dernière fois : `(services, vivants)`.
+    fn dire_l_etat(&self, dit: &mut Option<(usize, usize)>, pousse: (usize, usize)) {
+        if *dit != Some(pousse) {
+            let (services, vivants) = pousse;
+            (self.journal)(format!(
+                "fédération vers {} : état poussé — {services} service(s), dont {vivants} \
+                 vivant(s), accepté (204)",
+                self.adresse
+            ));
+            *dit = Some(pousse);
+        }
+    }
+
+    /// Tire toutes les parts des machines de nos domaines, et les range ;
+    /// rend combien il y en a.
+    async fn tirer_les_machines(&self, connexion: &mut Connexion) -> Result<usize, Faute> {
         let mut machines = Vec::new();
         loop {
             let chemin = format!("/v1/federation/machines?apres={}", machines.len());
@@ -446,7 +490,7 @@ impl Federateur {
         for sortie in sorties {
             self.fermetures.fermer(sortie);
         }
-        Ok(())
+        Ok(machines.len())
     }
 
     /// Publie où l'on nous joint — **à chaque ouverture** : une adresse qui a
@@ -467,9 +511,16 @@ impl Federateur {
         }
     }
 
-    /// Pousse l'état publié, part après part.
-    async fn pousser_l_etat(&self, connexion: &mut Connexion) -> Result<(), Faute> {
+    /// Pousse l'état publié, part après part ; rend `(services, vivants)`.
+    async fn pousser_l_etat(&self, connexion: &mut Connexion) -> Result<(usize, usize), Faute> {
         let (_, publies) = self.publies.lire();
+        let compte = (
+            publies.len(),
+            publies
+                .iter()
+                .filter(|service| service.reponse.is_some())
+                .count(),
+        );
         for corps in corps_d_etat(&publies) {
             let reponse = connexion
                 .requete(
@@ -484,7 +535,7 @@ impl Federateur {
                 autre => return Err(Faute::Statut(autre)),
             }
         }
-        Ok(())
+        Ok(compte)
     }
 }
 
@@ -543,6 +594,16 @@ mod essais {
         assert_eq!(etat.combien(), 1);
         etat.oublier_les_perimes(5_000, 1_000);
         assert_eq!(etat.combien(), 0);
+    }
+
+    #[test]
+    fn un_rapport_ne_se_dit_qu_a_la_premiere_fois_et_quand_il_change() {
+        let mut etat = EtatFedere::nouveau();
+        let membre = id(Genre::Annuaire, 1);
+        assert!(etat.noter_un_rapport(membre, 1, 1));
+        assert!(!etat.noter_un_rapport(membre, 1, 1));
+        assert!(etat.noter_un_rapport(membre, 1, 0));
+        assert!(etat.noter_un_rapport(id(Genre::Annuaire, 2), 1, 0));
     }
 
     #[test]

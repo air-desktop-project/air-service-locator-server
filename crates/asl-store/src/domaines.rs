@@ -17,7 +17,7 @@ use asl_id::Identifiant;
 use asl_registre::{
     ALIAS_DE_DOMAINE_RANGE_OCTETS, ALIAS_DE_MACHINE_RANGE_OCTETS, AliasDeDomaine,
     AliasDeDomaineRange, AliasDeMachine, AliasDeMachineRange, DOMAINE_OCTETS, Domaine, Estampille,
-    Operation, Provenance, RATTACHEMENT_OCTETS, Rattachement, premier_domaine,
+    Operation, Provenance, RATTACHEMENT_OCTETS, Rattachement, domaine_racine, premier_domaine,
 };
 use redb::{ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
@@ -946,7 +946,11 @@ impl Entrepot {
         alias: Option<AliasDeDomaine>,
     ) -> Result<bool, Faute> {
         let ecriture = self.base.begin_write()?;
-        if vivant_dans_l_ecriture(&ecriture, domaine)?.is_none() {
+        // **LE DOMAINE RACINE N'EST ÉCRIT NULLE PART** (décision 43) : il se
+        // calcule. Il porte pourtant un alias comme les autres — c'est le
+        // verbe qui décide qui peut le poser (ses administrateurs) ; ici, on
+        // ne refuse que ce qui n'existe pas.
+        if domaine != domaine_racine() && vivant_dans_l_ecriture(&ecriture, domaine)?.is_none() {
             return Ok(false);
         }
         let estampille = estampiller(&ecriture, self.racine)?;
@@ -990,7 +994,8 @@ impl Entrepot {
         for entree in par_alias.range(debut.as_slice()..fin.as_slice())? {
             let (_, domaine) = entree?;
             let quel = depuis_clef(domaine.value())?;
-            if vivant_dans(&index, &domaines, quel)?.is_some() {
+            // Le domaine racine, calculé, n'a pas de rangée : son alias suffit.
+            if quel == domaine_racine() || vivant_dans(&index, &domaines, quel)?.is_some() {
                 trouves.push(quel);
             }
         }

@@ -3830,6 +3830,37 @@ mod domaines {
     }
 
     #[test]
+    fn le_domaine_racine_porte_un_alias_et_se_cherche_par_lui() {
+        // **LE DOMAINE RACINE N'A PAS DE RANGÉE** (décision 43) : il se
+        // calcule. Il porte pourtant un alias — vu le 27/09 : « R » refusé
+        // en 404 à un administrateur des racines.
+        let (base, chemin) = entrepot("domaine-racine-alias");
+        let racine = asl_registre::domaine_racine();
+        assert!(base.domaine(racine).expect("lisible").is_none());
+        assert!(
+            base.poser_alias_de_domaine(racine, Some(alias("R")))
+                .expect("posé")
+        );
+        assert_eq!(
+            base.domaines_par_alias(&clef("R")).expect("lisible"),
+            vec![racine]
+        );
+        assert_eq!(
+            base.alias_de_domaine(racine)
+                .expect("lisible")
+                .map(|quoi| quoi.texte().to_owned()),
+            Some("R".to_owned())
+        );
+        // Un domaine inconnu, lui, reste refusé.
+        assert!(
+            !base
+                .poser_alias_de_domaine(un(Genre::Domaine, 7), Some(alias("R")))
+                .expect("lisible")
+        );
+        let _ = std::fs::remove_file(&chemin);
+    }
+
+    #[test]
     fn l_alias_se_pose_se_cherche_se_remplace_et_part_avec_son_domaine() {
         let (base, chemin) = entrepot("domaines-alias");
         let c = un(Genre::Utilisateur, 1);

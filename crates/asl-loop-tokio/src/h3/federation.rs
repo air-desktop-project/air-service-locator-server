@@ -109,6 +109,20 @@ impl Service<'_> {
         for entree in &lues {
             self.etat_federe.ranger(lu.membre, entree, maintenant);
         }
+        let vivantes = lues
+            .iter()
+            .filter(|entree| entree.reponse.is_some())
+            .count();
+        if self
+            .etat_federe
+            .noter_un_rapport(lu.membre, lues.len(), vivantes)
+        {
+            (self.voie.journal)(&format!(
+                "fédération : {} rapporte {} service(s), dont {vivantes} vivant(s) — accepté",
+                lu.membre,
+                lues.len()
+            ));
+        }
         Trouvaille::Fait
     }
 

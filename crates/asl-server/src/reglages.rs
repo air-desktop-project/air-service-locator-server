@@ -541,19 +541,19 @@ asl-server — an air-service-locator service directory.
                             identity key, then exit
   --new-operator-key <path> write a new OPERATOR key there (0600) and its
                             `<path>.pub`, print what to put where, then exit
-  --invite --directory <host:port> --ca <path> --operator-secret <path>
+  --invite --directory <host:port>[=<n-…>] --ca <path> --operator-secret <path>
                             ask that RUNNING directory for an invitation code,
                             print it on stdout — once —, then exit
-  --add-admin <u-…> --directory <host:port> --ca <path> --operator-secret <path>
+  --add-admin <u-…> --directory <host:port>[=<n-…>] --ca <path> --operator-secret <path>
                             name that account an administrator of the roots on
                             that RUNNING directory, then exit
-  --remove-admin <u-…> --directory <host:port> --ca <path> --operator-secret <path>
+  --remove-admin <u-…> --directory <host:port>[=<n-…>] --ca <path> --operator-secret <path>
                             remove it, then exit
-  --register <code> --directory <host:port> --ca <path> --identity-key <path>
+  --register <code> --directory <host:port>[=<n-…>] --ca <path> --identity-key <path>
                             present this LOCAL directory to a RUNNING root with
                             the registration code the app gave, print the
                             state of its registration, then exit
-  --registration-status --directory <host:port> --ca <path> --identity-key <path>
+  --registration-status --directory <host:port>[=<n-…>] --ca <path> --identity-key <path>
                             print the state of this local directory's
                             registration, then exit
   --forget <u-…> --store <path> [--identity-key <path>]
