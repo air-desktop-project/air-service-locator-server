@@ -7237,6 +7237,9 @@ async fn la_federation_de_bout_en_bout() {
     assert!(
         corps.contains(n_speedy.texte().as_str())
             && corps.contains(r#""adresses":["[2001:db8::51]:6630","192.0.2.51:6630"]"#)
+            && identite_de_chaque_adresse(&corps)
+                .iter()
+                .all(|(_, identite)| identite == n_speedy.texte().as_str())
             && !corps.contains("speedy.maison"),
         "le `421` rend les locateurs publiés, pas l'adresse déclarée : {corps}"
     );
@@ -7432,6 +7435,23 @@ async fn la_federation_de_bout_en_bout() {
         corps.contains("[2001:db8::51]:6630") && corps.contains("helium.maison:6630"),
         "{corps}"
     );
+    // **CHAQUE ADRESSE AVEC L'IDENTITÉ DE SON MEMBRE** (décision 59) : les deux
+    // locateurs de speedy sous speedy, l'adresse d'helium sous helium — c'est
+    // la clé d'helium qu'un client doit trouver au bout de la sienne.
+    let face_a_face = identite_de_chaque_adresse(&corps);
+    assert_eq!(
+        face_a_face.len(),
+        3,
+        "deux locateurs de speedy, l'adresse d'helium : {corps}"
+    );
+    for (adresse, identite) in &face_a_face {
+        let attendue = if adresse == "helium.maison:6630" {
+            n_helium
+        } else {
+            n_speedy
+        };
+        assert_eq!(identite, attendue.texte().as_str(), "{adresse} : {corps}");
+    }
 
     // Speedy s'arrête ; le daemon se replie sur helium.
     speedy_local.arreter().await;
@@ -7612,4 +7632,28 @@ async fn un_annuaire_sans_chaine_ne_presente_que_son_identite() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
+}
+
+/// Chaque adresse d'un `421`, et l'identité écrite en face (décision 59) :
+/// `adresses` et `identites` se lisent ensemble, rang par rang.
+fn identite_de_chaque_adresse(corps: &str) -> Vec<(String, String)> {
+    let entre = |debut: &str, fin: &str| -> String {
+        let depart = corps
+            .find(debut)
+            .map_or(0, |i| i.saturating_add(debut.len()));
+        let reste = &corps[depart..];
+        reste[..reste.find(fin).unwrap_or(reste.len())].to_owned()
+    };
+    // Une adresse IPv6 porte ses crochets : la liste finit à `"]`, pas au
+    // premier `]`.
+    let adresses: Vec<String> = entre("\"adresses\":[\"", "\"]")
+        .split("\",\"")
+        .map(str::to_owned)
+        .collect();
+    let identites: Vec<String> = entre("\"identites\":\"", "\"")
+        .split(' ')
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(adresses.len(), identites.len(), "{corps}");
+    adresses.into_iter().zip(identites).collect()
 }

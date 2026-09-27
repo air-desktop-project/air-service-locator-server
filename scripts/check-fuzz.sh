@@ -105,6 +105,7 @@ fuzz_asl_attest_objet attestation
 fuzz_asl_apple_verifier apple
 fuzz_asl_keystore keystore
 fuzz_asl_reveil reveil
+fuzz_asl_racines racines
 TABLE
 )
 

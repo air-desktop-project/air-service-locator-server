@@ -247,9 +247,12 @@ impl ServerCertVerifier for Verificateur {
         // **UN SEUL MAILLON, LA BONNE CLÉ.** Rien d'autre n'est lu : ni nom, ni
         // date, ni émetteur (décision 54). Une chaîne de deux n'est pas un
         // certificat d'identité, quelle que soit la clé de sa tête.
-        if intermediaires.is_empty()
-            && let Ok(cle) = asl_cle::cle_du_certificat(certificat)
-            && self.identites.contains(&identifiant_de_racine(&cle))
+        if asl_racines::identite_attendue(
+            1_usize.saturating_add(intermediaires.len()),
+            certificat,
+            &self.identites,
+        )
+        .is_some()
         {
             self.retenir(Forme::Identite);
             return Ok(ServerCertVerified::assertion());

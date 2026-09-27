@@ -151,21 +151,32 @@ impl Service<'_> {
             .entrepot
             .annuaires_du_compte(proprietaire, maintenant().saturating_div(1_000))
             .ok()?;
-        // **LES ADRESSES SONT DE L'ASCII SANS GUILLEMET NI BARRE** — la règle
-        // d'`asl_registre::Adresse` à la déclaration : elles se posent telles
-        // quelles dans le JSON.
-        let adresses: Vec<String> = membres
+        // **CHAQUE ADRESSE AVEC L'IDENTITÉ DE SON MEMBRE** (décision 59) : le
+        // second d'une paire a sa clé, et c'est elle qu'un client doit trouver
+        // au bout. Les adresses sont de l'ASCII sans guillemet ni barre — la
+        // règle d'`asl_registre::Adresse` à la déclaration —, elles se posent
+        // telles quelles dans le JSON.
+        let adresses: Vec<(Adresse, Identifiant)> = membres
             .iter()
             .filter(|lu| lu.annuaire == annuaire && lu.etat == EtatDInscription::Acceptee)
-            .flat_map(|lu| lu.ou_joindre())
-            .map(|adresse| format!("\"{}\"", adresse.texte()))
+            .flat_map(|lu| {
+                lu.ou_joindre()
+                    .into_iter()
+                    .map(move |adresse| (adresse, lu.membre))
+            })
             .collect();
-        Some(
-            format!(
-                "{{\"annuaire\":\"{annuaire}\",\"adresses\":[{}]}}",
-                adresses.join(",")
-            )
-            .into_bytes(),
-        )
+        let textes: Vec<(&str, Identifiant)> = adresses
+            .iter()
+            .map(|(adresse, membre)| (adresse.texte(), *membre))
+            .collect();
+        let mut corps = vec![0_u8; 256_usize.saturating_add(textes.len().saturating_mul(300))];
+        let combien = asl_api::annuaire::RenvoiRendu {
+            annuaire,
+            adresses: &textes,
+        }
+        .encoder(&mut corps)
+        .ok()?;
+        corps.truncate(combien);
+        Some(corps)
     }
 }
