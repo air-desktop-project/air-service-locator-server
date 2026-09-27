@@ -3084,12 +3084,35 @@ mod domaines {
                 .ends_with(",\"groupes\":[],\"machines\":[]}")
         );
 
-        let combien = DomaineTrouve { domaine: d }.encoder(&mut sortie).unwrap();
+        let combien = DomaineTrouve {
+            domaine: d,
+            autorite: None,
+        }
+        .encoder(&mut sortie)
+        .unwrap();
         assert_eq!(
             core::str::from_utf8(&sortie[..combien]).unwrap(),
             format!(
                 "{{\"domaine\":\"{}\",\"autorite\":\"racines\"}}",
                 d.texte().as_str()
+            )
+        );
+
+        // **CONFIÉ À UN ANNUAIRE LOCAL, C'EST LUI QUI FAIT AUTORITÉ** — et
+        // non plus « racines » écrit en dur, comme jusqu'à 0.28.0.
+        let local = Identifiant::depuis_entropie(Genre::Annuaire, [0x4E; 16]);
+        let combien = DomaineTrouve {
+            domaine: d,
+            autorite: Some(local),
+        }
+        .encoder(&mut sortie)
+        .unwrap();
+        assert_eq!(
+            core::str::from_utf8(&sortie[..combien]).unwrap(),
+            format!(
+                "{{\"domaine\":\"{}\",\"autorite\":\"{}\"}}",
+                d.texte().as_str(),
+                local.texte().as_str()
             )
         );
 
@@ -3106,7 +3129,11 @@ mod domaines {
             Err(Erreur::TamponTropPetit)
         );
         assert_eq!(
-            DomaineTrouve { domaine: d }.encoder(&mut court),
+            DomaineTrouve {
+                domaine: d,
+                autorite: None,
+            }
+            .encoder(&mut court),
             Err(Erreur::TamponTropPetit)
         );
     }
