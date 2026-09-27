@@ -139,7 +139,11 @@ impl Service<'_> {
             .into_iter()
             .filter_map(|domaine| {
                 let mut sortie = alloc_reponse();
-                let combien = asl_api::domaine::DomaineTrouve { domaine }
+                // **L'AUTORITÉ SE LIT COMME `heberge_par`** : par le même
+                // chemin, pour que la recherche et `GET /v1/domaines` ne se
+                // contredisent jamais sur un même domaine.
+                let autorite = self.entrepot.hebergeur_de_domaine(domaine).ok()?;
+                let combien = asl_api::domaine::DomaineTrouve { domaine, autorite }
                     .encoder(&mut sortie)
                     .ok()?;
                 sortie.truncate(combien);

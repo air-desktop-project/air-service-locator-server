@@ -367,14 +367,26 @@ impl DomaineDetaille<'_> {
     }
 }
 
-/// Un domaine trouvé par son alias : `{"domaine":"d-…","autorite":"racines"}`.
+/// Un domaine trouvé par son alias : `{"domaine":"d-…","autorite":"racines"|"n-…"}`.
 ///
 /// **Ni propriétaire, ni machine** (`protocole.md` §2.2) : savoir qu'un
 /// domaine « Maison » existe n'ouvre rien.
+///
+/// # `autorite` SE LIT, ELLE NE S'ÉCRIT PAS EN DUR
+///
+/// Jusqu'à 0.28.0, ce champ valait toujours `racines`, même pour un domaine
+/// confié à un annuaire local — or c'est précisément ce que la recherche
+/// promet de dire : **qui fait autorité** (`protocole.md` §2.2). Il porte
+/// désormais la même valeur que `heberge_par` de [`DomaineRendu`], lue par le
+/// même chemin (`hebergeur_de_domaine`) : les deux verbes ne peuvent plus se
+/// contredire sur un même domaine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DomaineTrouve {
     /// Le domaine.
     pub domaine: Identifiant,
+    /// L'annuaire local qui l'héberge, ou `None` pour les racines — comme
+    /// [`DomaineRendu::heberge_par`].
+    pub autorite: Option<Identifiant>,
 }
 
 impl DomaineTrouve {
@@ -388,7 +400,10 @@ impl DomaineTrouve {
         ecrivain.pousser(b"{\"domaine\":\"");
         ecrivain.pousser(self.domaine.texte().as_str().as_bytes());
         ecrivain.pousser(b"\",\"autorite\":\"");
-        ecrivain.pousser(HEBERGE_PAR_LES_RACINES.as_bytes());
+        match self.autorite {
+            Some(annuaire) => ecrivain.pousser(annuaire.texte().as_str().as_bytes()),
+            None => ecrivain.pousser(HEBERGE_PAR_LES_RACINES.as_bytes()),
+        }
         ecrivain.pousser(b"\"}");
         ecrivain.achever()
     }

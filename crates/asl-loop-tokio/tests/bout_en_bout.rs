@@ -6829,18 +6829,44 @@ async fn un_annuaire_local_s_inscrit_est_tranche_et_heberge_les_domaines_de_son_
     let (_, etat) = se_presenter(&racine, adresse, &helium, None).await;
     assert!(etat.contains("\"etat\":\"refusée\""), "{etat}");
 
+    // ── LA RECHERCHE DIT QUI FAIT AUTORITÉ, COMME `heberge_par` ─────────────
+    // Jusqu'à 0.28.0, `autorite` valait « racines » écrit en dur, même pour un
+    // domaine confié : la recherche contredisait `GET /v1/domaines`.
+    let alias_a = format!("/v1/domaines/{}/alias", domaine_a.texte().as_str());
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            36,
+            alias_a.as_bytes(),
+            br#"{"alias":"Dictateur"}"#
+        )
+        .await,
+        b"204"
+    );
+    let (statut, trouves) = lire_json(&mut carole, 24, b"/v1/domaines?alias=Dictateur").await;
+    assert_eq!(statut, b"200");
+    assert!(
+        trouves.contains(&format!("\"autorite\":\"{}\"", n_speedy.texte().as_str())),
+        "un domaine confié est trouvé sous son annuaire local : {trouves}"
+    );
+
     // ── LE RETRAIT : L'ANNUAIRE ENTIER, ET SON DOMAINE REVIENT ──────────────
     let cible_speedy = format!("/v1/annuaires/{}", n_speedy.texte().as_str());
     assert_eq!(
-        retirer(&mut carole, 24, cible_speedy.as_bytes()).await,
+        retirer(&mut carole, 28, cible_speedy.as_bytes()).await,
         b"404"
     );
     assert_eq!(
-        retirer(&mut alice, 36, cible_speedy.as_bytes()).await,
+        retirer(&mut alice, 40, cible_speedy.as_bytes()).await,
         b"204"
     );
-    let (_, liste) = lire_json(&mut alice, 40, b"/v1/domaines").await;
+    let (_, liste) = lire_json(&mut alice, 44, b"/v1/domaines").await;
     assert!(liste.contains("\"heberge_par\":\"racines\""), "{liste}");
+    let (_, trouves) = lire_json(&mut carole, 32, b"/v1/domaines?alias=Dictateur").await;
+    assert!(
+        trouves.contains("\"autorite\":\"racines\""),
+        "rendu aux racines, la recherche le dit aussi : {trouves}"
+    );
     let (_, etat) = se_presenter(&racine, adresse, &helium, None).await;
     assert!(
         etat.contains("\"etat\":\"retirée\""),
