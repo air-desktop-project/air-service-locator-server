@@ -282,7 +282,15 @@ impl Service<'_> {
         let Some(compte) = self.compte_de_la_connexion() else {
             return Trouvaille::Rien;
         };
-        if self.domaine_gere(compte, domaine).is_none() {
+        // **LE DOMAINE RACINE N'A PAS DE RANGÉE** (décision 43) : `domaine_gere`
+        // ne le trouve pas. Ses administrateurs — le groupe des
+        // administrateurs des racines — y posent un alias comme ailleurs.
+        let gere = if domaine == asl_registre::domaine_racine() {
+            self.entrepot.administre(compte, domaine).unwrap_or(false)
+        } else {
+            self.domaine_gere(compte, domaine).is_some()
+        };
+        if !gere {
             return Trouvaille::Rien;
         }
         match self.entrepot.poser_alias_de_domaine(domaine, alias) {

@@ -630,6 +630,44 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
     })
 }
 
+/// Le locateur d'un geste d'exploitant (`--invite`, `--add-admin`,
+/// `--register`…) et ce qu'on croit au bout : `<locateur>=<n-…>` dit
+/// l'identité attendue, comme `--federation` ; un locateur seul se reconnaît
+/// dans la liste embarquée des racines, ou se croit par l'autorité d'hier.
+fn geste_vers(
+    texte: &str,
+    autorite: Option<&std::path::Path>,
+    drapeau: &str,
+) -> Result<(String, Confiance), String> {
+    if let Some((adresse, identite)) = texte.split_once('=') {
+        let identite = asl_id::Identifiant::analyser(identite)
+            .ok()
+            .filter(|quoi| quoi.genre() == asl_id::Genre::Annuaire)
+            .ok_or_else(|| {
+                format!("{texte} : « {identite} » n'est pas un identifiant d'annuaire (n-…)")
+            })?;
+        let pem = autorite
+            .map(|chemin| {
+                std::fs::read(chemin)
+                    .map_err(|quoi| format!("{drapeau} {} : {quoi}", chemin.display()))
+            })
+            .transpose()?;
+        return Ok((
+            adresse.to_owned(),
+            Confiance::par_identifiants(&[identite]).avec_autorite(pem),
+        ));
+    }
+    Ok((
+        texte.to_owned(),
+        confiance_vers(
+            texte,
+            asl_loop_tokio::racines::identites_du_locateur(texte),
+            autorite,
+            drapeau,
+        )?,
+    ))
+}
+
 /// Ce qu'on croit de l'annuaire au bout de ce locateur (`protocole.md` §0) :
 /// ces identités, et l'autorité d'hier en repli si elle est réglée.
 ///
@@ -737,12 +775,7 @@ fn nouvelle_cle_d_exploitant(chemin: &std::path::Path) -> Result<(), Box<dyn std
 /// L'échéance va sur la sortie d'erreur, pour qu'un `asl-server --invite …
 /// | pbcopy` ne copie que le code.
 fn inviter(invite: &Invite) -> Result<(), Box<dyn std::error::Error>> {
-    let racines = confiance_vers(
-        &invite.annuaire,
-        asl_loop_tokio::racines::identites_du_locateur(&invite.annuaire),
-        invite.ca.as_deref(),
-        "--ca",
-    )?;
+    let (adresse, racines) = geste_vers(&invite.annuaire, invite.ca.as_deref(), "--ca")?;
     let secrete = identite::lire_secrete(&invite.secrete)?;
 
     // Un geste ne dure qu'un aller-retour : un fil suffit, là où l'annuaire
@@ -752,9 +785,7 @@ fn inviter(invite: &Invite) -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let invitation = execution
         .block_on(asl_loop_tokio::exploitant::emettre(
-            &invite.annuaire,
-            &racines,
-            &secrete,
+            &adresse, &racines, &secrete,
         ))
         .map_err(|quoi| format!("{} : {quoi}", invite.annuaire))?;
 
@@ -770,19 +801,14 @@ fn inviter(invite: &Invite) -> Result<(), Box<dyn std::error::Error>> {
 /// le dit, et s'arrête — le geste d'[`inviter`], sans secret à imprimer.
 fn administrer(administration: &Administration) -> Result<(), Box<dyn std::error::Error>> {
     let joindre = &administration.joindre;
-    let racines = confiance_vers(
-        &joindre.annuaire,
-        asl_loop_tokio::racines::identites_du_locateur(&joindre.annuaire),
-        joindre.ca.as_deref(),
-        "--ca",
-    )?;
+    let (adresse, racines) = geste_vers(&joindre.annuaire, joindre.ca.as_deref(), "--ca")?;
     let secrete = identite::lire_secrete(&joindre.secrete)?;
     let execution = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     execution
         .block_on(asl_loop_tokio::exploitant::changer_les_administrateurs(
-            &joindre.annuaire,
+            &adresse,
             &racines,
             &secrete,
             administration.compte,
@@ -797,7 +823,7 @@ fn administrer(administration: &Administration) -> Result<(), Box<dyn std::error
         } else {
             "retiré des administrateurs des racines"
         },
-        joindre.annuaire,
+        adresse,
     );
     Ok(())
 }
@@ -809,25 +835,20 @@ fn administrer(administration: &Administration) -> Result<(), Box<dyn std::error
 /// `refusée`, `retirée`. Le reste — le `n-…` de la clé, l'annuaire — sur la
 /// sortie d'erreur.
 fn inscrire(inscription: &Inscription) -> Result<(), Box<dyn std::error::Error>> {
-    let racines = confiance_vers(
-        &inscription.racine,
-        asl_loop_tokio::racines::identites_du_locateur(&inscription.racine),
-        inscription.ca.as_deref(),
-        "--ca",
-    )?;
+    let (adresse, racines) = geste_vers(&inscription.racine, inscription.ca.as_deref(), "--ca")?;
     let identite_secrete = identite::lire_secrete(&inscription.identite)?;
     let execution = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let lu = match &inscription.code {
         Some(code) => execution.block_on(asl_loop_tokio::inscription::presenter(
-            &inscription.racine,
+            &adresse,
             &racines,
             &identite_secrete,
             code,
         )),
         None => execution.block_on(asl_loop_tokio::inscription::relire(
-            &inscription.racine,
+            &adresse,
             &racines,
             &identite_secrete,
         )),
