@@ -214,6 +214,12 @@ struct ClesDeLExploitant {
     /// Où rendre à l'essai l'entrepôt que la boucle sert — pour un
     /// fédérateur qui y range, ou pour vérifier ce qui n'y est pas écrit.
     entrepot_partage: Option<tokio::sync::oneshot::Sender<Arc<Entrepot>>>,
+    /// La clé d'identité dont l'annuaire présente le CERTIFICAT D'IDENTITÉ à
+    /// la poignée de main (décisions 53, 58) — en plus de sa chaîne d'hier,
+    /// ou seul avec [`Self::sans_chaine`].
+    presenter: Option<&'static asl_cle::CleSecrete>,
+    /// Ne présenter QUE le certificat d'identité : pas de chaîne d'hier.
+    sans_chaine: bool,
 }
 
 #[allow(
@@ -238,7 +244,14 @@ async fn lever_complet(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<Comptes>,
 ) {
-    let tls = Arc::new(configuration_tls(chaine, cle).expect("une configuration TLS"));
+    let tls = Arc::new(match cles.presenter {
+        Some(identite) => asl_loop_tokio::configuration_d_annuaire(
+            Some(identite),
+            (!cles.sans_chaine).then_some((chaine, cle)),
+        )
+        .expect("une configuration TLS"),
+        None => configuration_tls(chaine, cle).expect("une configuration TLS"),
+    });
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("une socket");
@@ -6898,7 +6911,7 @@ struct AnnuaireLocal {
 /// d'identité, et rafraîchit tout à cette cadence.
 async fn lever_un_annuaire_local(
     nom: &str,
-    racine_des_racines: &[u8],
+    confiance: asl_loop_tokio::Confiance,
     vers: SocketAddr,
     identite: asl_cle::CleSecrete,
     cadence_ms: u64,
@@ -6929,7 +6942,7 @@ async fn lever_un_annuaire_local(
     let federateur = asl_loop_tokio::Federateur {
         entrepot: Arc::clone(&entrepot_local),
         adresse: format!("127.0.0.1:{}", vers.port()),
-        racines_pem: racine_des_racines.to_vec(),
+        confiance,
         identite,
         keepalive_us: 1_000_000,
         idle_us: 30_000_000,
@@ -7047,6 +7060,11 @@ async fn la_federation_de_bout_en_bout() {
     let (base, fichier) = entrepot("federation");
     let exploitant_cle = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
     let (rendre_entrepot, entrepot_racine) = tokio::sync::oneshot::channel();
+    // **LA RACINE PRÉSENTE LES DEUX FORMES** (décision 58) : sa chaîne d'hier
+    // aux clients qui visent un nom, son certificat d'identité à qui vise une
+    // adresse.
+    let identite_racine: &'static asl_cle::CleSecrete =
+        Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie([0x0F; 32])));
     // **TROIS SECONDES D'EXPIRATION** au lieu de trente : l'essai voit tomber
     // un service sans attendre la demi-minute du produit.
     let (adresse, dire_stop, tache) = lever_complet(
@@ -7061,6 +7079,7 @@ async fn la_federation_de_bout_en_bout() {
             exploitant: Some(exploitant_cle.publique()),
             expiration_federee_us: Some(3_000_000),
             entrepot_partage: Some(rendre_entrepot),
+            presenter: Some(identite_racine),
             ..ClesDeLExploitant::default()
         },
     )
@@ -7172,8 +7191,30 @@ async fn la_federation_de_bout_en_bout() {
 
     // ── L'ANNUAIRE LOCAL SE LÈVE, ET REÇOIT LA MACHINE DE SON DOMAINE ───────
     let speedy_local =
-        lever_un_annuaire_local("federation-speedy", &racine, adresse, speedy, 200).await;
+        // **SPEEDY FÉDÈRE SOUS LA SEULE IDENTITÉ DE LA RACINE** (décision 53) :
+        // aucune autorité, un locateur IP, la clé attendue.
+        lever_un_annuaire_local(
+            "federation-speedy",
+            asl_loop_tokio::Confiance::par_identite(&[identite_racine.publique()]),
+            adresse,
+            speedy,
+            200,
+        )
+        .await;
     speedy_local.attendre_la_machine(machine_d).await;
+    // **LA VOIE S'EST OUVERTE SOUS LA SEULE IDENTITÉ** — et le journal le dit.
+    let ouverte_par_cle = format!(
+        "fédération vers 127.0.0.1:{} ouverte : clé prouvée (TLS : identité par la clé)",
+        adresse.port()
+    );
+    assert!(
+        JOURNAL
+            .lock()
+            .expect("le journal n'est pas empoisonné")
+            .iter()
+            .any(|ligne| ligne == &ouverte_par_cle),
+        "speedy devait croire la racine par sa clé"
+    );
     assert!(
         !speedy_local
             .entrepot
@@ -7314,8 +7355,29 @@ async fn la_federation_de_bout_en_bout() {
     .await;
     assert_eq!(statut, b"204");
     let helium_local =
-        lever_un_annuaire_local("federation-helium", &racine, adresse, helium, 200).await;
+        // **HELIUM, SOUS LA FORME D'HIER** (décision 58) : l'autorité et le
+        // nom. La même racine croit les deux.
+        lever_un_annuaire_local(
+            "federation-helium",
+            asl_loop_tokio::Confiance::par_autorite(racine.clone()).pour_le_nom("localhost"),
+            adresse,
+            helium,
+            200,
+        )
+        .await;
     helium_local.attendre_la_machine(machine_d).await;
+    let ouverte_d_hier = format!(
+        "fédération vers 127.0.0.1:{} ouverte : clé prouvée (TLS : autorité et nom (forme d'hier))",
+        adresse.port()
+    );
+    assert!(
+        JOURNAL
+            .lock()
+            .expect("le journal n'est pas empoisonné")
+            .iter()
+            .any(|ligne| ligne == &ouverte_d_hier),
+        "helium devait croire la chaîne d'hier, pour le nom `localhost`"
+    );
 
     // Speedy s'arrête ; le daemon se replie sur helium.
     speedy_local.arreter().await;
@@ -7361,4 +7423,139 @@ async fn la_federation_de_bout_en_bout() {
     let _ = tache.await;
     let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
+}
+
+// ── L'IDENTITÉ PAR LA CLÉ (décisions 53 à 58) ──────────────────────────────
+
+#[tokio::test]
+async fn une_racine_en_transition_sert_les_deux_formes_et_chacune_est_crue() {
+    // **C'EST LA DÉCISION 58, SUR UNE VRAIE SOCKET** : la même racine présente
+    // sa chaîne d'hier à qui envoie un nom (SNI), et son certificat d'identité
+    // à qui vise une adresse. Un client de chaque forme la croit ; un client
+    // qui attend une AUTRE clé ne la croit pas.
+    let (_autorite, racine, chaine, cle) = materiel("identite-deux-formes");
+    let (base, _fichier) = entrepot("identite-deux-formes");
+    let identite: &'static asl_cle::CleSecrete =
+        Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie([0x61; 32])));
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            presenter: Some(identite),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+    let locateur = format!("127.0.0.1:{}", adresse.port());
+
+    // La forme nouvelle : une adresse, une clé.
+    assert_eq!(
+        asl_loop_tokio::confiance::sonder(
+            &locateur,
+            &asl_loop_tokio::Confiance::par_identite(&[identite.publique()]),
+        )
+        .await
+        .expect("la racine est crue par sa clé"),
+        asl_loop_tokio::Forme::Identite
+    );
+    // La forme d'hier : une autorité, un nom qui part en SNI.
+    assert_eq!(
+        asl_loop_tokio::confiance::sonder(
+            &locateur,
+            &asl_loop_tokio::Confiance::par_autorite(racine.clone()).pour_le_nom("localhost"),
+        )
+        .await
+        .expect("la racine est crue par sa chaîne d'hier"),
+        asl_loop_tokio::Forme::Autorite
+    );
+    // Les deux ensemble, et un nom : la chaîne d'hier sert, jugée par l'autorité.
+    assert_eq!(
+        asl_loop_tokio::confiance::sonder(
+            &locateur,
+            &asl_loop_tokio::Confiance::par_identite(&[identite.publique()])
+                .avec_autorite(Some(racine.clone()))
+                .pour_le_nom("localhost"),
+        )
+        .await
+        .expect("crue en repli"),
+        asl_loop_tokio::Forme::Autorite
+    );
+    // **UNE AUTRE CLÉ N'EST PAS LA RACINE.**
+    let autre = asl_cle::CleSecrete::depuis_entropie([0x62; 32]);
+    assert!(
+        asl_loop_tokio::confiance::sonder(
+            &locateur,
+            &asl_loop_tokio::Confiance::par_identite(&[autre.publique()]),
+        )
+        .await
+        .is_err(),
+        "une racine qui ne tient pas la clé attendue ne doit pas être crue"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+}
+
+#[tokio::test]
+async fn un_annuaire_sans_chaine_ne_presente_que_son_identite() {
+    // **LE CAS DE SPEEDY** : un annuaire qui n'a jamais eu d'autorité. Sa clé
+    // suffit ; une autorité, même la bonne, ne le reconnaît pas.
+    let (_autorite, racine, chaine, cle) = materiel("identite-seule");
+    let (base, _fichier) = entrepot("identite-seule");
+    let identite: &'static asl_cle::CleSecrete =
+        Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie([0x63; 32])));
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            presenter: Some(identite),
+            sans_chaine: true,
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+    let locateur = format!("127.0.0.1:{}", adresse.port());
+    assert_eq!(
+        asl_loop_tokio::confiance::sonder(
+            &locateur,
+            &asl_loop_tokio::Confiance::par_identite(&[identite.publique()]),
+        )
+        .await
+        .expect("cru par sa clé"),
+        asl_loop_tokio::Forme::Identite
+    );
+    // Même en envoyant un nom : il n'a que son identité à montrer.
+    assert_eq!(
+        asl_loop_tokio::confiance::sonder(
+            &locateur,
+            &asl_loop_tokio::Confiance::par_identite(&[identite.publique()])
+                .avec_autorite(Some(racine.clone()))
+                .pour_le_nom("localhost"),
+        )
+        .await
+        .expect("cru par sa clé, même avec un nom"),
+        asl_loop_tokio::Forme::Identite
+    );
+    assert!(
+        asl_loop_tokio::confiance::sonder(
+            &locateur,
+            &asl_loop_tokio::Confiance::par_autorite(racine).pour_le_nom("localhost"),
+        )
+        .await
+        .is_err(),
+        "sans chaîne, une autorité ne reconnaît pas l'annuaire"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
 }

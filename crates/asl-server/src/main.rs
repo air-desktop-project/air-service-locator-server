@@ -39,8 +39,8 @@ use std::sync::Arc;
 
 use asl_loop_tokio::h3::Voie;
 use asl_loop_tokio::{
-    Annuaire, EtatDeLaVoie, Tireur, configuration_tls, refuser_root, reveil::Reveilleur,
-    servir_quic,
+    Annuaire, Confiance, EtatDeLaVoie, Tireur, configuration_d_annuaire, refuser_root,
+    reveil::Reveilleur, servir_quic,
 };
 use asl_store::{Entrepot, RACINE_SANS_IDENTITE};
 
@@ -106,6 +106,21 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
             return Err("--new-identity-key attend un chemin".into());
         };
         return nouvelle_identite(std::path::Path::new(chemin));
+    }
+    // **LE CERTIFICAT D'IDENTITÉ D'UNE CLÉ QU'ON A DÉJÀ** (décision 55) : il
+    // se déduit d'elle, on l'imprime en PEM, on s'arrête. Pour l'inspecter, ou
+    // pour une clé frappée avant 0.29.0 — le démarrage, lui, le refrappe seul.
+    if let Some(rang) = arguments
+        .iter()
+        .position(|quoi| quoi == "--identity-certificate")
+    {
+        let Some(chemin) = arguments.get(rang.saturating_add(1)) else {
+            eprint!("{USAGE}");
+            return Err("--identity-certificate attend le chemin d'une clé d'identité".into());
+        };
+        let secrete = identite::lire_secrete(std::path::Path::new(chemin))?;
+        print!("{}", identite::certificat_pem(&secrete));
+        return Ok(());
     }
     // **FRAPPER LA CLÉ DE L'EXPLOITANT EST LE MÊME GESTE**, et volontairement
     // le même code : une paire Ed25519, la privée en 0600, la publique à
@@ -216,9 +231,28 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?;
 
     let entrepot = Arc::new(Entrepot::ouvrir(&reglages.entrepot, racine)?);
-    let chaine = std::fs::read(&reglages.certificat)?;
-    let cle = std::fs::read(&reglages.cle)?;
-    let tls = Arc::new(configuration_tls(&chaine, &cle)?);
+    // **CE QUE L'ANNUAIRE PRÉSENTE À LA POIGNÉE DE MAIN** (décisions 53, 55,
+    // 58) : son certificat d'identité, frappé ici depuis la clé d'identité —
+    // aucun fichier à tenir, aucune date à renouveler — et, tant que les
+    // clients d'hier existent, la chaîne d'hier pour qui vise un nom.
+    let chaine = reglages
+        .tls
+        .as_ref()
+        .map(|tls| {
+            Ok::<_, std::io::Error>((std::fs::read(&tls.certificat)?, std::fs::read(&tls.cle)?))
+        })
+        .transpose()?;
+    let tls = Arc::new(configuration_d_annuaire(
+        identite.as_ref(),
+        chaine
+            .as_ref()
+            .map(|(certificat, cle)| (certificat.as_slice(), cle.as_slice())),
+    )?);
+    let presente = match (identite.is_some(), chaine.is_some()) {
+        (true, true) => "son certificat d'identité, et la chaîne d'hier à qui vise un nom",
+        (true, false) => "son certificat d'identité seul",
+        _ => "la chaîne d'hier seule — AUCUNE identité : réglez --identity-key",
+    };
     let socket = socket::ecouter(reglages.port)?;
     let ou = socket.local_addr()?;
 
@@ -228,6 +262,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
 
     execution.block_on(async move {
         let socket = tokio::net::UdpSocket::from_std(socket)?;
+        eprintln!("asl-server : TLS — l'annuaire présente {presente} (décisions 53, 58).");
         eprintln!(
             "asl-server : écoute sur {ou} (double pile), entrepôt {}, \
              bail {} s / {} s, rétention {} jours",
@@ -474,7 +509,12 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                 let tireur = Tireur {
                     entrepot: Arc::clone(&entrepot),
                     adresse: pair.adresse.clone(),
-                    racines_pem: std::fs::read(&pair.ca)?,
+                    confiance: confiance_vers(
+                        &pair.adresse,
+                        vec![cle_du_pair.expect("la clé du pair est lue avec le pair")],
+                        pair.ca.as_deref(),
+                        "--peer-ca",
+                    )?,
                     identite: identite::lire_secrete(chemin_identite)?,
                     cle_du_pair: cle_du_pair.expect("la clé du pair est lue avec le pair"),
                     keepalive_us: reglages.keepalive_s.saturating_mul(1_000_000),
@@ -505,20 +545,43 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                 .identite
                 .as_ref()
                 .expect("--federation exige --identity-key");
-            let racines_pem = std::fs::read(&federation.ca)
-                .map_err(|quoi| format!("--federation-ca {} : {quoi}", federation.ca.display()))?;
             let publies = Arc::new(asl_loop_tokio::ServicesPublies::nouvelle());
             application.publier_l_etat_dans(Arc::clone(&publies));
             eprintln!(
                 "asl-server : annuaire LOCAL — fédère vers {} racine(s) : {}.",
                 federation.racines.len(),
-                federation.racines.join(", ")
+                federation
+                    .racines
+                    .iter()
+                    .map(|cible| cible.adresse.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
-            for adresse in &federation.racines {
+            for cible in &federation.racines {
+                let adresse = &cible.adresse;
                 let federateur = asl_loop_tokio::Federateur {
                     entrepot: Arc::clone(&entrepot),
                     adresse: adresse.clone(),
-                    racines_pem: racines_pem.clone(),
+                    confiance: match cible.identite {
+                        // `<locateur>=<n-…>` : l'identité est dite.
+                        Some(identite) => Confiance::par_identifiants(&[identite]).avec_autorite(
+                            federation
+                                .ca
+                                .as_deref()
+                                .map(|chemin| {
+                                    std::fs::read(chemin).map_err(|quoi| {
+                                        format!("--federation-ca {} : {quoi}", chemin.display())
+                                    })
+                                })
+                                .transpose()?,
+                        ),
+                        None => confiance_vers(
+                            adresse,
+                            asl_loop_tokio::racines::identites_du_locateur(adresse),
+                            federation.ca.as_deref(),
+                            "--federation-ca",
+                        )?,
+                    },
                     identite: identite::lire_secrete(chemin_identite)?,
                     keepalive_us: reglages.keepalive_s.saturating_mul(1_000_000),
                     idle_us: reglages.inactivite_us(),
@@ -566,6 +629,31 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
     })
 }
 
+/// Ce qu'on croit de l'annuaire au bout de ce locateur (`protocole.md` §0) :
+/// ces identités, et l'autorité d'hier en repli si elle est réglée.
+///
+/// **Rien à croire est une faute de démarrage**, dite avec le locateur : un
+/// locateur hors de la liste embarquée sans autorité ne désigne personne.
+fn confiance_vers(
+    locateur: &str,
+    identites: Vec<asl_cle::ClePublique>,
+    autorite: Option<&std::path::Path>,
+    drapeau: &str,
+) -> Result<Confiance, String> {
+    let pem = autorite
+        .map(|chemin| {
+            std::fs::read(chemin).map_err(|quoi| format!("{drapeau} {} : {quoi}", chemin.display()))
+        })
+        .transpose()?;
+    if identites.is_empty() && pem.is_none() {
+        return Err(format!(
+            "{locateur} : aucune identité connue — ce n'est pas un locateur de la liste \
+             embarquée des racines — et pas d'autorité ({drapeau}) : rien à croire"
+        ));
+    }
+    Ok(Confiance::par_identite(&identites).avec_autorite(pem))
+}
+
 /// Lit les racines d'attestation Android, fichier par fichier.
 ///
 /// Chaque fichier est nommé dans sa faute : un exploitant qui a posé trois PEM
@@ -592,11 +680,12 @@ fn racines_android(chemins: &[std::path::PathBuf]) -> Result<Vec<Vec<u8>>, Strin
 fn nouvelle_identite(chemin: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let publique = identite::generer(chemin)?;
     println!(
-        "clé privée   : {} (0600)\nclé publique : {} — {}\nidentifiant  : {}",
+        "clé privée   : {} (0600)\nclé publique : {} — {}\nidentifiant  : {}\ncertificat   : {} (d'identité, auto-signé — décision 55)",
         chemin.display(),
         identite::chemin_public(chemin).display(),
         identite::en_hexadecimal(&publique.octets()),
         asl_cle::identifiant_de_racine(&publique),
+        identite::chemin_certificat(chemin).display(),
     );
     Ok(())
 }
@@ -647,8 +736,12 @@ fn nouvelle_cle_d_exploitant(chemin: &std::path::Path) -> Result<(), Box<dyn std
 /// L'échéance va sur la sortie d'erreur, pour qu'un `asl-server --invite …
 /// | pbcopy` ne copie que le code.
 fn inviter(invite: &Invite) -> Result<(), Box<dyn std::error::Error>> {
-    let racines =
-        std::fs::read(&invite.ca).map_err(|quoi| format!("{} : {quoi}", invite.ca.display()))?;
+    let racines = confiance_vers(
+        &invite.annuaire,
+        asl_loop_tokio::racines::identites_du_locateur(&invite.annuaire),
+        invite.ca.as_deref(),
+        "--ca",
+    )?;
     let secrete = identite::lire_secrete(&invite.secrete)?;
 
     // Un geste ne dure qu'un aller-retour : un fil suffit, là où l'annuaire
@@ -676,8 +769,12 @@ fn inviter(invite: &Invite) -> Result<(), Box<dyn std::error::Error>> {
 /// le dit, et s'arrête — le geste d'[`inviter`], sans secret à imprimer.
 fn administrer(administration: &Administration) -> Result<(), Box<dyn std::error::Error>> {
     let joindre = &administration.joindre;
-    let racines =
-        std::fs::read(&joindre.ca).map_err(|quoi| format!("{} : {quoi}", joindre.ca.display()))?;
+    let racines = confiance_vers(
+        &joindre.annuaire,
+        asl_loop_tokio::racines::identites_du_locateur(&joindre.annuaire),
+        joindre.ca.as_deref(),
+        "--ca",
+    )?;
     let secrete = identite::lire_secrete(&joindre.secrete)?;
     let execution = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -711,8 +808,12 @@ fn administrer(administration: &Administration) -> Result<(), Box<dyn std::error
 /// `refusée`, `retirée`. Le reste — le `n-…` de la clé, l'annuaire — sur la
 /// sortie d'erreur.
 fn inscrire(inscription: &Inscription) -> Result<(), Box<dyn std::error::Error>> {
-    let racines = std::fs::read(&inscription.ca)
-        .map_err(|quoi| format!("{} : {quoi}", inscription.ca.display()))?;
+    let racines = confiance_vers(
+        &inscription.racine,
+        asl_loop_tokio::racines::identites_du_locateur(&inscription.racine),
+        inscription.ca.as_deref(),
+        "--ca",
+    )?;
     let identite_secrete = identite::lire_secrete(&inscription.identite)?;
     let execution = tokio::runtime::Builder::new_current_thread()
         .enable_all()

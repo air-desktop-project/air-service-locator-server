@@ -31,10 +31,11 @@ use asl_proto::PORT_PAR_DEFAUT;
 pub struct Reglages {
     /// Le fichier de l'entrepôt.
     pub entrepot: PathBuf,
-    /// La chaîne de certificats, en PEM.
-    pub certificat: PathBuf,
-    /// La clé privée, en PEM.
-    pub cle: PathBuf,
+    /// La chaîne de certificats d'hier et sa clé, en PEM (`--certificate`,
+    /// `--key`) — **facultatives depuis 0.29.0** (décision 55) : un annuaire
+    /// qui a une clé d'identité présente son certificat d'identité, frappé au
+    /// démarrage ; la chaîne ne sert plus qu'aux clients d'hier (décision 58).
+    pub tls: Option<ReglageTls>,
     /// Le port d'écoute.
     pub port: u16,
     /// Combien de connexions vivent en même temps, au plus.
@@ -166,13 +167,26 @@ pub struct Reglages {
 /// Les racines vers lesquelles un annuaire local fédère.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReglageFederation {
-    /// Chaque racine : `hôte:port`. **Chacune reçoit sa voie** : l'état des
-    /// services ne se réplique pas entre racines, et une racine qu'on ne joint
-    /// pas ne sait rien de nos services.
-    pub racines: Vec<String>,
-    /// L'autorité qui valide leur certificat TLS, en PEM — le `racine.crt`
-    /// que les clients épinglent.
-    pub ca: PathBuf,
+    /// Chaque racine : un locateur `hôte:port`, et l'identité `n-…` qu'on
+    /// doit y trouver si elle est dite (`--federation <locateur>=<n-…>`,
+    /// décision 58). **Chacune reçoit sa voie** : l'état des services ne se
+    /// réplique pas entre racines, et une racine qu'on ne joint pas ne sait
+    /// rien de nos services.
+    pub racines: Vec<CibleFederee>,
+    /// L'autorité d'hier qui valide leur certificat TLS, en PEM —
+    /// **facultative depuis 0.29.0** : sans elle, chaque racine doit être un
+    /// locateur de la liste embarquée, dont on attend la clé (décision 56).
+    pub ca: Option<PathBuf>,
+}
+
+/// Une racine vers laquelle un annuaire local fédère.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CibleFederee {
+    /// Où la joindre : `hôte:port` — un locateur, sans valeur de confiance.
+    pub adresse: String,
+    /// Qui l'on doit y trouver, si c'est dit ; sinon, la liste embarquée des
+    /// racines dit qui se trouve au bout de ce locateur (décision 56).
+    pub identite: Option<asl_id::Identifiant>,
 }
 
 /// Le geste `--forget` : effacer CE compte, hors ligne, et s'arrêter.
@@ -208,9 +222,10 @@ pub struct Oubli {
 pub struct Invite {
     /// Où joindre l'annuaire : `hôte:port`, une adresse IPv6 entre crochets.
     pub annuaire: String,
-    /// L'autorité qui valide le certificat TLS de l'annuaire, en PEM — celle
-    /// que le client épingle, le `racine.crt` de la cérémonie.
-    pub ca: PathBuf,
+    /// L'autorité d'hier qui valide le certificat TLS de l'annuaire, en PEM —
+    /// **facultative depuis 0.29.0** : sans elle, `--directory` doit être un
+    /// locateur de la liste embarquée des racines (décision 56).
+    pub ca: Option<PathBuf>,
     /// La clé PRIVÉE de l'exploitant, trente-deux octets bruts : celle dont
     /// l'annuaire épingle la publique par `--operator-key`.
     pub secrete: PathBuf,
@@ -246,12 +261,22 @@ pub struct Administration {
 pub struct Inscription {
     /// Où joindre une racine : `hôte:port`.
     pub racine: String,
-    /// L'autorité qui valide le certificat TLS de la racine, en PEM.
-    pub ca: PathBuf,
+    /// L'autorité d'hier qui valide le certificat TLS de la racine, en PEM —
+    /// facultative, comme pour `--invite`.
+    pub ca: Option<PathBuf>,
     /// La clé d'identité de cet annuaire local.
     pub identite: PathBuf,
     /// Le code que l'application a donné — ou rien : relire l'état.
     pub code: Option<String>,
+}
+
+/// La chaîne de certificats d'hier, et sa clé.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReglageTls {
+    /// La chaîne, en PEM (`--certificate`).
+    pub certificat: PathBuf,
+    /// La clé privée, en PEM (`--key`).
+    pub cle: PathBuf,
 }
 
 /// L'autre racine, telle qu'on la joint et telle qu'on la reconnaît.
@@ -263,22 +288,12 @@ pub struct ReglagePair {
     /// Le fichier de sa clé d'identité publique (`--peer-key`) : ce contre quoi
     /// sa preuve de racine se vérifie, et l'ancre réelle (§2.2).
     pub cle: PathBuf,
-    /// L'autorité qui valide le CERTIFICAT TLS du pair (`--peer-ca`), en PEM.
-    ///
-    /// # POURQUOI IL FAUT CELUI-CI, EN PLUS DE LA CLÉ D'IDENTITÉ
-    ///
-    /// La clé d'identité (`--peer-key`) est l'ancre de l'AUTHENTIFICATION : le
-    /// pair prouve la clé qu'on tient de lui, liée au canal, et un tiers au bon
-    /// certificat n'est pas une racine (§2.2). Mais pour OUVRIR la connexion
-    /// TLS, le tireur doit valider le certificat que le pair présente — et la
-    /// chaîne qu'un serveur montre (`--certificate`) ne porte pas la racine qui
-    /// l'a signée (voir `scripts/ca.sh`). C'est cette racine-là, le
-    /// `racine.crt` de la cérémonie — celui-là même que le client épingle.
-    ///
-    /// **`docs/replication.md` §8 n'en parlait pas**, et l'ajoute cette PR : une
-    /// adresse ne suffit pas à monter une poignée de main sûre, il y faut de
-    /// quoi valider le certificat d'en face.
-    pub ca: PathBuf,
+    /// L'autorité d'hier qui valide le CERTIFICAT TLS du pair (`--peer-ca`),
+    /// en PEM — **facultative depuis 0.29.0** : la poignée de main attend la
+    /// clé d'identité du pair (`--peer-key`, décision 53), et l'autorité ne
+    /// sert plus qu'en repli tant qu'il présente sa chaîne d'hier
+    /// (décision 58).
+    pub ca: Option<PathBuf>,
 }
 
 /// De quoi vérifier une attestation Apple App Attest.
@@ -353,6 +368,8 @@ pub enum Faute {
     FederationSansIdentite,
     /// `--forget` a reçu autre chose qu'un identifiant de compte `u-…`.
     CompteInvalide(String),
+    /// `--federation <locateur>=<…>` dont l'identité n'est pas un `n-…`.
+    AnnuaireInvalide(String),
     /// Un drapeau de l'ancienne grammaire, en français, qui a son
     /// équivalent en anglais.
     ///
@@ -433,6 +450,11 @@ impl core::fmt::Display for Faute {
                 sortie,
                 "--forget attend l'identifiant d'un compte, `u-` et 26 caractères, et non « {quoi} »"
             ),
+            Self::AnnuaireInvalide(quoi) => write!(
+                sortie,
+                "--federation <locateur>=<n-…> attend l'identifiant d'un annuaire, `n-` et \
+                 26 caractères, et non « {quoi} »"
+            ),
             Self::Manque(quoi) => write!(sortie, "il manque {quoi}"),
             Self::Ancien { ancien, nouveau } => {
                 write!(sortie, "{ancien} n'existe plus : {nouveau}")
@@ -455,8 +477,9 @@ pub const USAGE: &str = "\
 asl-server — an air-service-locator service directory.
 
   --store        <path>     the store file                       (required)
-  --certificate  <path>     the certificate chain, PEM           (required)
-  --key          <path>     the private key, PEM                 (required)
+  --certificate  <path>     yesterday's certificate chain, PEM   (with --key;
+                            optional with --identity-key)
+  --key          <path>     its private key, PEM                 (with --certificate)
   --port         <number>   the listening port                   (default: 6630)
   --connections  <number>   concurrent connections, at most      (default: 1024)
   --idle         <seconds>  the idle timeout announced to peers  (default: 30)
@@ -472,7 +495,9 @@ asl-server — an air-service-locator service directory.
   --identity-key <path>     this root's Ed25519 identity key, 32 raw bytes
   --peer         <host:port> the other root                      (with --peer-key)
   --peer-key     <path>     the other root's public identity key, 32 raw bytes
-  --peer-ca      <path>     the CA that validates the peer's TLS cert, PEM
+  --peer-ca      <path>     yesterday's CA for the peer's TLS cert, PEM — a
+                            fallback during the transition; the peer is trusted
+                            by its identity key (--peer-key)
   --operator-key <path>     the operator's public Ed25519 key, 32 raw bytes;
                             its signature opens POST /v1/invitations and
                             POST/DELETE /v1/administrateurs
@@ -481,15 +506,23 @@ asl-server — an air-service-locator service directory.
                             (default: 86400, one day; one week at most)
   --orphans      <days>     erase an account once ALL its devices have been
                             revoked for that many days; 0 = never (default: 30)
-  --federation   <host:port> a root this LOCAL directory federates to; repeat it
-                            for each root (with --federation-ca and
-                            --identity-key); without it, this is a root
-  --federation-ca <path>    the CA that validates the roots' TLS certs, PEM
+  --federation   <host:port>[=<n-…>]
+                            a root this LOCAL directory federates to, and the
+                            identity to find there; repeat it for each root
+                            (with --identity-key); without `=<n-…>`, the
+                            locator must be in the embedded roots list (or
+                            --federation-ca given); without it, this is a root
+  --federation-ca <path>    yesterday's CA for the roots' TLS certs, PEM — a
+                            fallback during the transition
   --push-roots   <path>     the CAs that validate push servers' TLS certs, PEM
                             — typically /etc/ssl/certs/ca-certificates.crt;
                             without it, NO notification is ever sent
-  --new-identity-key <path> write a new identity key there (0600), print the
-                            public key and the `n-…` it gives, then exit
+  --new-identity-key <path> write a new identity key there (0600), its
+                            `<path>.pub` and its identity certificate
+                            `<path>.crt`, print the `n-…` it gives, then exit
+  --identity-certificate <path>
+                            print the identity certificate (PEM) of that
+                            identity key, then exit
   --new-operator-key <path> write a new OPERATOR key there (0600) and its
                             `<path>.pub`, print what to put where, then exit
   --invite --directory <host:port> --ca <path> --operator-secret <path>
@@ -534,6 +567,15 @@ lives. The code it prints is worth ONE account, lives `--invitation-ttl`
 (a day by default, a week at most), and is NEVER shown again: the directory
 keeps only its fingerprint. It goes on stdout, alone, so that piping it copies
 nothing else; how long it lives goes on stderr.
+
+TRUST IS BY KEY, NOT BY NAME (C20: asl works WITHOUT DNS). A directory with an
+`--identity-key` presents a certificate SELF-SIGNED by that key, minted at
+start; a client accepts it when the key is the one it expects — the peer's
+`--peer-key`, a root of the embedded list — and the handshake proves it. Names,
+dates and authorities are not judged. `--certificate`/`--key` and every
+`--…-ca` only serve yesterday's clients during the transition: a client that
+aims at an ADDRESS gets the identity certificate, one that sends a name (SNI)
+gets yesterday's chain. `--directory`, `--peer` and `--federation` are locators.
 
 The socket is DUAL-STACK: IPv6 first, IPv4 accepted on the same socket.
 The directory REFUSES to start as root — it needs no privilege at all.
@@ -616,7 +658,7 @@ impl Reglages {
         let mut exploitant: Option<PathBuf> = None;
         let mut invitation_ttl_s = INVITATION_TTL_DEFAUT_S;
         let mut racines_de_poussee: Option<PathBuf> = None;
-        let mut federation_racines: Vec<String> = Vec::new();
+        let mut federation_racines: Vec<CibleFederee> = Vec::new();
         let mut federation_ca: Option<PathBuf> = None;
 
         let mut arguments = arguments.into_iter();
@@ -667,7 +709,7 @@ impl Reglages {
                 "--operator-key" => exploitant = Some(PathBuf::from(valeur()?.as_ref())),
                 "--invitation-ttl" => invitation_ttl_s = nombre(drapeau, valeur()?.as_ref())?,
                 "--push-roots" => racines_de_poussee = Some(PathBuf::from(valeur()?.as_ref())),
-                "--federation" => federation_racines.push(adresse_de_pair(valeur()?.as_ref())?),
+                "--federation" => federation_racines.push(cible_federee(valeur()?.as_ref())?),
                 "--federation-ca" => federation_ca = Some(PathBuf::from(valeur()?.as_ref())),
                 autre => {
                     return Err(match ancien(autre) {
@@ -680,8 +722,16 @@ impl Reglages {
 
         Ok(Self {
             entrepot: entrepot.ok_or(Faute::Manque("--store"))?,
-            certificat: certificat.ok_or(Faute::Manque("--certificate"))?,
-            cle: cle.ok_or(Faute::Manque("--key"))?,
+            // **LES DEUX ENSEMBLE, OU AUCUN — ET ALORS UNE IDENTITÉ.** Une
+            // chaîne sans sa clé ne se présente pas ; sans chaîne ni identité,
+            // l'annuaire n'aurait rien à montrer à la poignée de main.
+            tls: match (certificat, cle) {
+                (Some(certificat), Some(cle)) => Some(ReglageTls { certificat, cle }),
+                (None, None) if identite.is_some() => None,
+                (None, None) => return Err(Faute::Manque("--certificate")),
+                (Some(_), None) => return Err(Faute::Manque("--key")),
+                (None, Some(_)) => return Err(Faute::Manque("--certificate")),
+            },
             port,
             connexions_max,
             inactivite_s,
@@ -720,7 +770,7 @@ impl Reglages {
             // n'est pas une racine, une clé seule ne se joint pas, une autorité
             // seule ne dit qui joindre, et sans identité on ne prouve rien.
             pair: match (pair_adresse, pair_cle, pair_ca) {
-                (Some(adresse), Some(cle), Some(ca)) => {
+                (Some(adresse), Some(cle), ca) => {
                     if identite.is_none() {
                         return Err(Faute::PairSansIdentite);
                     }
@@ -733,7 +783,7 @@ impl Reglages {
             // joint pas en sûreté, une autorité sans racine ne dit qui joindre,
             // et sans identité l'annuaire local ne prouve rien.
             federation: match (federation_racines.is_empty(), federation_ca) {
-                (false, Some(ca)) => {
+                (false, ca) => {
                     if identite.is_none() {
                         return Err(Faute::FederationSansIdentite);
                     }
@@ -743,7 +793,7 @@ impl Reglages {
                     })
                 }
                 (true, None) => None,
-                _ => return Err(Faute::FederationIncomplete),
+                (true, Some(_)) => return Err(Faute::FederationIncomplete),
             },
             identite,
             orphelins_jours,
@@ -859,11 +909,11 @@ impl Reglages {
                 .transpose()
         };
         let annuaire = valeur_de("--directory")?.ok_or(Faute::Manque("--directory"))?;
-        let ca = valeur_de("--ca")?.ok_or(Faute::Manque("--ca"))?;
+        let ca = valeur_de("--ca")?.map(PathBuf::from);
         let secrete = valeur_de("--operator-secret")?.ok_or(Faute::Manque("--operator-secret"))?;
         Ok(Some(Invite {
             annuaire,
-            ca: PathBuf::from(ca),
+            ca,
             secrete: PathBuf::from(secrete),
         }))
     }
@@ -912,12 +962,12 @@ impl Reglages {
                 .transpose()
         };
         let annuaire = valeur_de("--directory")?.ok_or(Faute::Manque("--directory"))?;
-        let ca = valeur_de("--ca")?.ok_or(Faute::Manque("--ca"))?;
+        let ca = valeur_de("--ca")?.map(PathBuf::from);
         let secrete = valeur_de("--operator-secret")?.ok_or(Faute::Manque("--operator-secret"))?;
         Ok(Some(Administration {
             joindre: Invite {
                 annuaire,
-                ca: PathBuf::from(ca),
+                ca,
                 secrete: PathBuf::from(secrete),
             },
             compte,
@@ -953,11 +1003,11 @@ impl Reglages {
         };
         let code = valeur_de("--register")?;
         let racine = valeur_de("--directory")?.ok_or(Faute::Manque("--directory"))?;
-        let ca = valeur_de("--ca")?.ok_or(Faute::Manque("--ca"))?;
+        let ca = valeur_de("--ca")?.map(PathBuf::from);
         let identite = valeur_de("--identity-key")?.ok_or(Faute::Manque("--identity-key"))?;
         Ok(Some(Inscription {
             racine,
-            ca: PathBuf::from(ca),
+            ca,
             identite: PathBuf::from(identite),
             code,
         }))
@@ -1040,6 +1090,26 @@ fn adresse_de_pair(donnee: &str) -> Result<String, Faute> {
     Ok(donnee.to_owned())
 }
 
+/// Lit `<locateur>` ou `<locateur>=<n-…>` — une racine vers laquelle
+/// fédérer, et qui l'on doit y trouver (décision 58).
+fn cible_federee(donnee: &str) -> Result<CibleFederee, Faute> {
+    match donnee.split_once('=') {
+        Some((adresse, identite)) => Ok(CibleFederee {
+            adresse: adresse_de_pair(adresse)?,
+            identite: Some(
+                asl_id::Identifiant::analyser(identite)
+                    .ok()
+                    .filter(|quoi| quoi.genre() == asl_id::Genre::Annuaire)
+                    .ok_or_else(|| Faute::AnnuaireInvalide(identite.to_owned()))?,
+            ),
+        }),
+        None => Ok(CibleFederee {
+            adresse: adresse_de_pair(donnee)?,
+            identite: None,
+        }),
+    }
+}
+
 /// Lit une empreinte SHA-256 en hexadécimal — 64 chiffres, comme `apksigner
 /// verify --print-certs` l'imprime, avec ou sans deux-points entre les octets.
 fn empreinte(donnee: &str) -> Result<[u8; 32], Faute> {
@@ -1067,8 +1137,8 @@ fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute
 #[cfg(test)]
 mod tests {
     use super::{
-        Administration, Faute, Invite, Oubli, ReglageAndroid, ReglageApple, ReglageFederation,
-        ReglagePair, Reglages,
+        Administration, CibleFederee, Faute, Invite, Oubli, ReglageAndroid, ReglageApple,
+        ReglageFederation, ReglagePair, ReglageTls, Reglages,
     };
 
     /// Les quatre réglages obligatoires, et rien d'autre.
@@ -1363,6 +1433,37 @@ mod tests {
     }
 
     #[test]
+    fn une_identite_suffit_sans_certificat_ni_cle() {
+        // **Décision 55** : un annuaire qui a une clé d'identité présente son
+        // certificat d'identité, frappé au démarrage ; la chaîne d'hier et sa
+        // clé deviennent facultatives. Sans identité ni chaîne, rien à
+        // présenter : c'est `--certificate` qui manque, comme hier.
+        let sans_tls = |ajouts: &[&str]| {
+            let mut arguments: Vec<String> = ["--store", "/a", "--attestation", "optional"]
+                .iter()
+                .map(|quoi| (*quoi).to_owned())
+                .collect();
+            arguments.extend(ajouts.iter().map(|quoi| (*quoi).to_owned()));
+            Reglages::depuis(arguments)
+        };
+        assert_eq!(
+            sans_tls(&["--identity-key", "/id"]).map(|lus| lus.tls),
+            Ok(None)
+        );
+        assert_eq!(
+            sans_tls(&[]).map(|_| ()),
+            Err(Faute::Manque("--certificate"))
+        );
+        assert_eq!(
+            Reglages::depuis(minimum()).map(|lus| lus.tls),
+            Ok(Some(ReglageTls {
+                certificat: std::path::PathBuf::from("/b"),
+                cle: std::path::PathBuf::from("/c"),
+            }))
+        );
+    }
+
+    #[test]
     fn un_drapeau_inconnu_est_nomme() {
         let mut avec = minimum();
         avec.push("--jesaispas".to_owned());
@@ -1495,7 +1596,7 @@ mod tests {
             Some(ReglagePair {
                 adresse: "argon.air-desktop.org:6630".to_owned(),
                 cle: std::path::PathBuf::from("/argon.pub"),
-                ca: std::path::PathBuf::from("/racine.crt"),
+                ca: Some(std::path::PathBuf::from("/racine.crt")),
             })
         );
 
@@ -1503,6 +1604,8 @@ mod tests {
             Reglages::depuis(avec(&["--identity-key", "/id", "--peer", "argon:6630"])).map(|_| ()),
             Err(Faute::PairIncomplet)
         );
+        // **`--peer-ca` EST FACULTATIF DEPUIS 0.29.0** (décision 53) : la clé
+        // d'identité du pair suffit à le croire ; l'autorité n'est qu'un repli.
         assert_eq!(
             Reglages::depuis(avec(&[
                 "--identity-key",
@@ -1512,7 +1615,12 @@ mod tests {
                 "--peer-key",
                 "/argon.pub",
             ]))
-            .map(|_| ()),
+            .map(|lus| lus.pair.map(|pair| pair.ca)),
+            Ok(Some(None))
+        );
+        assert_eq!(
+            Reglages::depuis(avec(&["--identity-key", "/id", "--peer-ca", "/racine.crt"]))
+                .map(|_| ()),
             Err(Faute::PairIncomplet)
         );
         assert_eq!(
@@ -1553,15 +1661,53 @@ mod tests {
             lus,
             Ok(Some(ReglageFederation {
                 racines: vec![
-                    "nitrogen.air-desktop.org:6630".to_owned(),
-                    "[2001:41d0:20a:900::1d32]:6630".to_owned(),
+                    CibleFederee {
+                        adresse: "nitrogen.air-desktop.org:6630".to_owned(),
+                        identite: None,
+                    },
+                    CibleFederee {
+                        adresse: "[2001:41d0:20a:900::1d32]:6630".to_owned(),
+                        identite: None,
+                    },
                 ],
-                ca: std::path::PathBuf::from("/racine.crt"),
+                ca: Some(std::path::PathBuf::from("/racine.crt")),
             }))
         );
+        // `<locateur>=<n-…>` : l'identité attendue, dite (décision 58).
+        let identite = asl_id::Identifiant::depuis_entropie(asl_id::Genre::Annuaire, [7; 16]);
         assert_eq!(
-            Reglages::depuis(avec(&["--identity-key", "/id", "--federation", "a:1"])).map(|_| ()),
-            Err(Faute::FederationIncomplete)
+            Reglages::depuis(avec(&[
+                "--identity-key",
+                "/id",
+                "--federation",
+                &format!("127.0.0.1:7000={}", identite.texte()),
+            ]))
+            .map(|lus| lus.federation.map(|federation| federation.racines)),
+            Ok(Some(vec![CibleFederee {
+                adresse: "127.0.0.1:7000".to_owned(),
+                identite: Some(identite),
+            }]))
+        );
+        for mauvais in [
+            "127.0.0.1:7000=u-0000000000000000000000000G",
+            "127.0.0.1:7000=x",
+        ] {
+            assert!(matches!(
+                Reglages::depuis(avec(&["--identity-key", "/id", "--federation", mauvais])),
+                Err(Faute::AnnuaireInvalide(_))
+            ));
+        }
+        assert!(
+            !Faute::AnnuaireInvalide("x".to_owned())
+                .to_string()
+                .is_empty()
+        );
+        // Sans autorité, c'est permis : chaque racine doit alors être un
+        // locateur de la liste embarquée — ce que le démarrage vérifie.
+        assert_eq!(
+            Reglages::depuis(avec(&["--identity-key", "/id", "--federation", "a:1"]))
+                .map(|lus| lus.federation.and_then(|federation| federation.ca)),
+            Ok(None)
         );
         assert_eq!(
             Reglages::depuis(avec(&["--federation-ca", "/racine.crt"])).map(|_| ()),
@@ -1702,7 +1848,7 @@ mod tests {
             Reglages::geste_d_inscription(&presenter),
             Ok(Some(Inscription {
                 racine: "banc:6630".to_owned(),
-                ca: "/c".into(),
+                ca: Some("/c".into()),
                 identite: "/i".into(),
                 code: Some("01234-56789".to_owned()),
             }))
@@ -1724,16 +1870,6 @@ mod tests {
                     "--registration-status",
                     "--ca",
                     "/c",
-                    "--identity-key",
-                    "/i",
-                ],
-            ),
-            (
-                "--ca",
-                vec![
-                    "--registration-status",
-                    "--directory",
-                    "b:1",
                     "--identity-key",
                     "/i",
                 ],
@@ -1770,7 +1906,7 @@ mod tests {
                 Ok(Some(Administration {
                     joindre: Invite {
                         annuaire: "banc:6630".to_owned(),
-                        ca: std::path::PathBuf::from("/c"),
+                        ca: Some(std::path::PathBuf::from("/c")),
                         secrete: std::path::PathBuf::from("/k"),
                     },
                     compte,
@@ -1823,21 +1959,31 @@ mod tests {
             ]),
             Ok(Some(Invite {
                 annuaire: "banc:6630".to_owned(),
-                ca: std::path::PathBuf::from("/c"),
+                ca: Some(std::path::PathBuf::from("/c")),
                 secrete: std::path::PathBuf::from("/k"),
             }))
         );
 
-        // **AUCUN DES TROIS N'A DE DÉFAUT**, et l'absent est nommé : deviner
-        // une racine, une autorité ou une clé serait deviner à qui l'on parle.
+        // **`--ca` EST FACULTATIF DEPUIS 0.29.0** : sans lui, `--directory`
+        // doit être un locateur de la liste embarquée, dont on attend la clé
+        // (décision 56) — ce que le geste vérifie avant de se connecter.
+        assert_eq!(
+            Reglages::geste_d_invitation(&[
+                "--invite",
+                "--directory",
+                "b:1",
+                "--operator-secret",
+                "/k",
+            ])
+            .map(|geste| geste.and_then(|invite| invite.ca)),
+            Ok(None)
+        );
+        // Les deux autres n'ont pas de défaut, et l'absent est nommé :
+        // deviner une racine ou une clé serait deviner à qui l'on parle.
         for (arguments, manque) in [
             (
                 vec!["--invite", "--ca", "/c", "--operator-secret", "/k"],
                 "--directory",
-            ),
-            (
-                vec!["--invite", "--directory", "b:1", "--operator-secret", "/k"],
-                "--ca",
             ),
             (
                 vec!["--invite", "--directory", "b:1", "--ca", "/c"],

@@ -274,11 +274,11 @@ lire la clé.
 - **L'issue 3 de §2 (renumérotation) devient naturelle.** Ce qui est épinglé
   est la clé : une racine qui change d'hébergeur publie ses nouveaux locateurs,
   et le client qui l'a jointe une fois par l'ancien les apprend sur une
-  connexion déjà vérifiée par clé (décision 56, proposé). Les issues 1
+  connexion déjà vérifiée par clé (décision 56). Les issues 1
   (allocation à nous) et 2 (ancrer sur les noms) ne sont plus nécessaires ; la
   première reste un confort, la seconde est abandonnée.
 - **Un annuaire local change d'adresse sans rien redéclarer** : il publie
-  lui-même ses locateurs sur sa voie (décision 57, proposé), et le `421` suit.
+  lui-même ses locateurs sur sa voie (décision 57), et le `421` suit.
 - **La preuve de possession à la couche HTTP ne disparaît pas.** Les défis
   (`POST /v1/defi`, genre `n`, `POST /v1/pair/preuve`) prouvent déjà l'identité
   au-dessus de TLS ; TLS la prouve maintenant AUSSI au-dessous. Les deux

@@ -92,10 +92,18 @@ Group=asl-server
 # **L'ANNUAIRE REFUSE DE TOURNER EN ROOT** (C8), et le vérifie lui-même avant
 # de lire quoi que ce soit. Ces deux lignes sont la ceinture ; son refus est
 # les bretelles.
+#
+# **LA CHAÎNE D'HIER EST UN RÉGLAGE, PLUS UNE LIGNE FIXE** (0.29.0, décisions
+# 55 et 58). Par défaut, `$ASL_TLS` la donne comme avant — une racine d'hier
+# redémarre à l'identique. Un annuaire qui n'a que son identité (un annuaire
+# local, ou une racine qui a fini sa transition) la vide par un drop-in :
+#   [Service]
+#   Environment=ASL_TLS=
+# Non cité, comme les autres : vide, l'argument disparaît.
+Environment="ASL_TLS=--certificate /etc/asl-server/certificat.pem --key /etc/asl-server/cle.pem"
 ExecStart=/usr/bin/asl-server \
     --store /var/lib/asl-server/annuaire.redb \
-    --certificate /etc/asl-server/certificat.pem \
-    --key /etc/asl-server/cle.pem \
+    $ASL_TLS \
     --attestation $ASL_ATTESTATION \
     $ASL_ANDROID \
     $ASL_POUSSEE \

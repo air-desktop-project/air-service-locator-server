@@ -47,6 +47,7 @@
 //! L'entrepôt. `asl-session` route et refuse correctement ; tout ce qui se route
 //! rend `501`, parce qu'aucune ressource de cette API ne se sert sans état.
 
+pub mod confiance;
 pub mod exploitant;
 pub mod federation;
 pub mod h3;
@@ -54,11 +55,13 @@ pub mod inscription;
 pub mod pont;
 pub mod privileges;
 pub mod quic;
+pub mod racines;
 pub mod reveil;
 pub mod sonde;
 pub mod tireur;
 pub mod vivier;
 
+pub use confiance::{Confiance, Forme, configuration_d_annuaire};
 pub use federation::{EtatFedere, Federateur, ServicesPublies};
 #[cfg(feature = "porte-d-essai")]
 pub use h3::PanneDInstantane;

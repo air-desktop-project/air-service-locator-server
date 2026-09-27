@@ -210,16 +210,26 @@ l'acceptation d'un administrateur des racines) et à qui vous avez confié un ou
 plusieurs de vos domaines. Il fédère vers chaque racine :
 
 ```sh
-cargo run -p asl-server -- … \
+cargo run -p asl-server -- --store … --attestation optional \
     --identity-key /etc/asl-server/identite.key \
-    --federation nitrogen.air-desktop.org:6630 \
-    --federation argon.air-desktop.org:6630 \
-    --federation-ca /etc/asl-server/racine.crt
+    --federation '[2001:41d0:20a:900::1dd4]:6630' \
+    --federation '[2001:41d0:20a:900::1d32]:6630'
 ```
 
-`--identity-key` est la clé que les racines ont acceptée à l'inscription ;
-`--federation` se donne une fois par racine ; `--federation-ca` est l'autorité
-de leur certificat.
+**Ni certificat, ni autorité, ni nom DNS** (0.29.0, C20 : ASL fonctionne sans
+DNS). `--identity-key` est la clé que les racines ont acceptée à
+l'inscription : l'annuaire présente le certificat qu'elle signe elle-même,
+frappé au démarrage. `--federation` se donne une fois par racine, par un
+**locateur** — une adresse de la liste embarquée des racines, dont on attend
+la clé ; `--federation <locateur>=<n-…>` dit l'identité d'un locateur hors de
+la liste. `--federation-ca` (l'autorité d'hier) ne sert plus qu'aux racines
+qui n'ont pas fini leur transition (décision 58).
+
+**Une racine en transition** garde `--certificate`/`--key` : elle sert sa
+chaîne d'hier à qui la vise par un nom (SNI), et son certificat d'identité à
+qui vise une adresse. `--peer-ca` devient facultatif : le pair est cru par
+`--peer-key`. `asl-server --identity-certificate <clé>` imprime le certificat
+d'identité d'une clé (`openssl x509 -noout -text` pour l'inspecter).
 
 **C'est lui qui ouvre** : aucun port entrant n'est nécessaire pour cette voie.
 Il reçoit des racines les machines de ses domaines, authentifie leurs daemons,
@@ -361,7 +371,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.28.2_amd64.deb
+sudo dpkg -i asl-server_0.29.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
