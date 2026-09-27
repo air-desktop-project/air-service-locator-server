@@ -40,6 +40,7 @@ use asl_id::{Genre, Identifiant};
 
 mod domaine;
 mod droit;
+mod federation;
 mod groupe;
 mod inscription;
 
@@ -52,6 +53,10 @@ pub use domaine::{
     alias_de_compte, nom_d_hote, premier_domaine,
 };
 pub use droit::{DROIT_OCTETS, Droit, Droits};
+pub use federation::{
+    ENTREE_D_ETAT_OCTETS_MAX, ENTREE_D_ETAT_OCTETS_MIN, EntreeDEtat, MACHINE_FEDEREE_OCTETS,
+    MachineFederee, REPONSE_FEDEREE_OCTETS_MAX,
+};
 pub use groupe::{
     ADHESION_OCTETS, Adhesion, ETIQUETTE_DOMAINE_RACINE, GROUPE_OCTETS, Groupe,
     MARQUE_DE_GROUPE_OCTETS, MarqueDeGroupe, SEPARATEUR_DOMAINE_RACINE,

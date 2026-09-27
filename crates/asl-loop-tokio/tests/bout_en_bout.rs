@@ -207,6 +207,13 @@ struct ClesDeLExploitant {
     /// Où rendre à l'essai ce par quoi le tireur nomme ce qu'il faut fermer
     /// — l'essai tient alors le rôle du tireur.
     fermetures: Option<tokio::sync::oneshot::Sender<asl_loop_tokio::Fermetures>>,
+    /// Côté annuaire local : où la boucle publie l'état de ses services.
+    publies: Option<Arc<asl_loop_tokio::ServicesPublies>>,
+    /// Côté racine : combien de temps croire un rapport d'annuaire local.
+    expiration_federee_us: Option<u64>,
+    /// Où rendre à l'essai l'entrepôt que la boucle sert — pour un
+    /// fédérateur qui y range, ou pour vérifier ce qui n'y est pas écrit.
+    entrepot_partage: Option<tokio::sync::oneshot::Sender<Arc<Entrepot>>>,
 }
 
 #[allow(
@@ -279,6 +286,15 @@ async fn lever_complet(
         }
         if let Some(rendre) = cles.fermetures {
             let _ = rendre.send(application.fermetures());
+        }
+        if let Some(publies) = cles.publies {
+            application.publier_l_etat_dans(publies);
+        }
+        if let Some(delai) = cles.expiration_federee_us {
+            application.expirer_l_etat_federe_apres(delai);
+        }
+        if let Some(rendre) = cles.entrepot_partage {
+            let _ = rendre.send(Arc::clone(&entrepot));
         }
         let arret = async {
             let _ = entendre_stop.await;
@@ -6831,6 +6847,490 @@ async fn un_annuaire_local_s_inscrit_est_tranche_et_heberge_les_domaines_de_son_
         "le second part avec son titulaire : {etat}"
     );
 
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+// ── LA FÉDÉRATION (0.28.0) ──────────────────────────────────────────────────
+
+/// Un annuaire local levé : son adresse, l'autorité de son certificat, de
+/// quoi l'arrêter, sa boucle, son fédérateur, et son entrepôt.
+struct AnnuaireLocal {
+    adresse: SocketAddr,
+    racine: Vec<u8>,
+    autorite: PathBuf,
+    fichier: PathBuf,
+    dire_stop: tokio::sync::oneshot::Sender<()>,
+    tache: tokio::task::JoinHandle<Comptes>,
+    federateur: tokio::task::JoinHandle<()>,
+    entrepot: Arc<Entrepot>,
+}
+
+/// Lève un annuaire local qui fédère vers cette racine, avec cette clé
+/// d'identité, et rafraîchit tout à cette cadence.
+async fn lever_un_annuaire_local(
+    nom: &str,
+    racine_des_racines: &[u8],
+    vers: SocketAddr,
+    identite: asl_cle::CleSecrete,
+    cadence_ms: u64,
+) -> AnnuaireLocal {
+    let (autorite, racine, chaine, cle) = materiel(nom);
+    let (base, fichier) = entrepot(nom);
+    let publies = Arc::new(asl_loop_tokio::ServicesPublies::nouvelle());
+    let (rendre_fermetures, fermetures) = tokio::sync::oneshot::channel();
+    let (rendre_entrepot, entrepot_local) = tokio::sync::oneshot::channel();
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            publies: Some(Arc::clone(&publies)),
+            fermetures: Some(rendre_fermetures),
+            entrepot_partage: Some(rendre_entrepot),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+    let fermetures = fermetures.await.expect("les fermetures");
+    let entrepot_local = entrepot_local.await.expect("l'entrepôt");
+    let federateur = asl_loop_tokio::Federateur {
+        entrepot: Arc::clone(&entrepot_local),
+        adresse: format!("127.0.0.1:{}", vers.port()),
+        racines_pem: racine_des_racines.to_vec(),
+        identite,
+        keepalive_us: 1_000_000,
+        idle_us: 30_000_000,
+        cadence_ms,
+        publies,
+        fermetures,
+        alea: Box::new(|| 0),
+        journal: Box::new(|ligne| journaliser(&ligne)),
+        plafond_recul_ms: 200,
+    };
+    AnnuaireLocal {
+        adresse,
+        racine,
+        autorite,
+        fichier,
+        dire_stop,
+        tache,
+        federateur: tokio::spawn(federateur.federer_sans_fin()),
+        entrepot: entrepot_local,
+    }
+}
+
+impl AnnuaireLocal {
+    /// Attend que les racines lui aient transmis cette machine.
+    async fn attendre_la_machine(&self, machine: Identifiant) {
+        for _ in 0..100_u32 {
+            if self
+                .entrepot
+                .machines_federees()
+                .expect("les machines reçues")
+                .iter()
+                .any(|(quelle, _)| *quelle == machine)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("les racines n'ont pas transmis {machine}");
+    }
+
+    /// L'arrête tout entier.
+    async fn arreter(self) {
+        self.federateur.abort();
+        let _ = self.dire_stop.send(());
+        let _ = self.tache.await;
+        let _ = std::fs::remove_dir_all(&self.autorite);
+        let _ = std::fs::remove_file(&self.fichier);
+    }
+}
+
+/// Un daemon s'authentifie sur cette connexion et annonce `depot` ; le statut
+/// et le corps.
+async fn annoncer_depot(
+    daemon: &mut ams_quic_client::Client,
+    machine: Identifiant,
+    secrete: &asl_cle::CleSecrete,
+) -> (Vec<u8>, String) {
+    authentifier(daemon, machine, secrete, 0, 4).await;
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}]}}"#,
+        machine.texte()
+    );
+    let (statut, rendu) = poster(
+        daemon,
+        8,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    (statut, String::from_utf8_lossy(&rendu).into_owned())
+}
+
+/// Déclare une machine de ce compte, l'enrôle avec cette clé, et rend son
+/// identifiant.
+async fn machine_du_compte(
+    appareil: &mut ams_quic_client::Client,
+    flux: u64,
+    racine: &[u8],
+    adresse: SocketAddr,
+    corps: &[u8],
+    secrete: &asl_cle::CleSecrete,
+) -> Identifiant {
+    let (statut, rendu) = poster(appareil, flux, b"/v1/machines", corps, b"application/json").await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let mut machine = connecter(racine, adresse).await;
+    enroler(&mut machine, 0, &valeur_json(&rendu, "code"), secrete).await
+}
+
+/// Cherche `depot` sur cette machine, depuis ce chercheur déjà authentifié,
+/// jusqu'à obtenir ce statut ; rend le temps qu'il a fallu et le corps.
+async fn chercher_jusqu_a(
+    chercheur: &mut ams_quic_client::Client,
+    flux: &mut u64,
+    machine: Identifiant,
+    voulu: &[u8],
+    patience: std::time::Duration,
+) -> Option<(std::time::Duration, String)> {
+    let cible = format!("/v1/ou/{}/depot", machine.texte());
+    let depart = std::time::Instant::now();
+    while depart.elapsed() < patience {
+        let (statut, corps) = lire_json(chercheur, *flux, cible.as_bytes()).await;
+        *flux = flux.saturating_add(4);
+        if statut == voulu {
+            return Some((depart.elapsed(), corps));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    None
+}
+
+#[tokio::test]
+async fn la_federation_de_bout_en_bout() {
+    let (autorite, racine, chaine, cle) = materiel("federation");
+    let (base, fichier) = entrepot("federation");
+    let exploitant_cle = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
+    let (rendre_entrepot, entrepot_racine) = tokio::sync::oneshot::channel();
+    // **TROIS SECONDES D'EXPIRATION** au lieu de trente : l'essai voit tomber
+    // un service sans attendre la demi-minute du produit.
+    let (adresse, dire_stop, tache) = lever_complet(
+        &chaine,
+        &cle,
+        base,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            exploitant: Some(exploitant_cle.publique()),
+            expiration_federee_us: Some(3_000_000),
+            entrepot_partage: Some(rendre_entrepot),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+    let entrepot_racine = entrepot_racine.await.expect("l'entrepôt de la racine");
+
+    // ── LES COMPTES : ALICE POSSÈDE, BOB ADMINISTRE LES RACINES, CAROLE RIEN ─
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA1).await;
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, _, _) = creer_un_compte(&mut bob, 0, 0xB1).await;
+    let mut carole = connecter(&racine, adresse).await;
+    let _ = creer_un_compte(&mut carole, 0, 0xC1).await;
+    let mut exploitant = connecter(&racine, adresse).await;
+    let liaison = liaison_du_client(&exploitant);
+    let defi = tirer_le_defi(&mut exploitant, 0).await;
+    let (statut, _) = poster(
+        &mut exploitant,
+        4,
+        b"/v1/administrateurs",
+        &corps_d_exploitant(&exploitant_cle, &defi, &liaison, Some(compte_b)),
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+
+    // ── SPEEDY : DÉCLARÉ, PRÉSENTÉ, ACCEPTÉ ; LE DOMAINE LUI EST CONFIÉ ─────
+    let (statut, rendu) = poster(
+        &mut alice,
+        8,
+        b"/v1/annuaires",
+        br#"{"adresse":"speedy.maison:6630"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    let speedy = asl_cle::CleSecrete::depuis_entropie([0x51; 32]);
+    let n_speedy = asl_cle::identifiant_de_racine(&speedy.publique());
+    let (statut, _) = se_presenter(
+        &racine,
+        adresse,
+        &speedy,
+        Some(&valeur_json(&rendu, "code")),
+    )
+    .await;
+    assert_eq!(statut, b"200");
+    let (statut, _) = poster(
+        &mut bob,
+        8,
+        format!("/v1/inscriptions/{}/decision", n_speedy.texte()).as_bytes(),
+        br#"{"accepte":true}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+    let domaine_a = asl_registre::premier_domaine(compte_a);
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            12,
+            format!("/v1/domaines/{}/hebergeur", domaine_a.texte()).as_bytes(),
+            format!("{{\"annuaire\":\"{}\"}}", n_speedy.texte()).as_bytes(),
+        )
+        .await,
+        b"204"
+    );
+
+    // ── LES MACHINES : CELLE QUI SERT, RANGÉE ; CELLES QUI CHERCHENT ────────
+    let cle_d = asl_cle::CleSecrete::depuis_entropie([0xD1; 32]);
+    let machine_d = machine_du_compte(
+        &mut alice,
+        16,
+        &racine,
+        adresse,
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        &cle_d,
+    )
+    .await;
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            20,
+            format!("/v1/machines/{}/domaine", machine_d.texte()).as_bytes(),
+            format!("{{\"domaine\":\"{}\"}}", domaine_a.texte()).as_bytes(),
+        )
+        .await,
+        b"204"
+    );
+    let cle_l = asl_cle::CleSecrete::depuis_entropie([0xD2; 32]);
+    let machine_l = machine_du_compte(
+        &mut alice,
+        24,
+        &racine,
+        adresse,
+        br#"{"nom":"portable","capacites":["lecture"]}"#,
+        &cle_l,
+    )
+    .await;
+    let cle_c = asl_cle::CleSecrete::depuis_entropie([0xD3; 32]);
+    let machine_c = machine_du_compte(
+        &mut carole,
+        8,
+        &racine,
+        adresse,
+        br#"{"nom":"intrus","capacites":["lecture"]}"#,
+        &cle_c,
+    )
+    .await;
+
+    // ── L'ANNUAIRE LOCAL SE LÈVE, ET REÇOIT LA MACHINE DE SON DOMAINE ───────
+    let speedy_local =
+        lever_un_annuaire_local("federation-speedy", &racine, adresse, speedy, 200).await;
+    speedy_local.attendre_la_machine(machine_d).await;
+    assert!(
+        !speedy_local
+            .entrepot
+            .machines_federees()
+            .expect("les machines reçues")
+            .iter()
+            .any(|(quelle, _)| *quelle == machine_l || *quelle == machine_c),
+        "seules les machines de ses domaines lui sont transmises"
+    );
+
+    // ── À LA RACINE, LA MACHINE EST RENVOYÉE CHEZ ELLE : `421` ──────────────
+    let mut daemon = connecter(&racine, adresse).await;
+    let (statut, corps) = annoncer_depot(&mut daemon, machine_d, &cle_d).await;
+    assert_eq!(statut, b"421", "{corps}");
+    assert!(
+        corps.contains(n_speedy.texte().as_str()) && corps.contains("speedy.maison:6630"),
+        "{corps}"
+    );
+
+    // ── CHEZ ELLE, ELLE ANNONCE ; PAR LA RACINE, ON LA TROUVE ───────────────
+    let mut chercheur = connecter(&racine, adresse).await;
+    authentifier(&mut chercheur, machine_l, &cle_l, 0, 4).await;
+    let mut flux = 8_u64;
+    let mut daemon = connecter(&speedy_local.racine, speedy_local.adresse).await;
+    let annonce_faite = std::time::Instant::now();
+    let (statut, corps) = annoncer_depot(&mut daemon, machine_d, &cle_d).await;
+    assert_eq!(statut, b"200", "{corps}");
+    let (latence, trouve) = chercher_jusqu_a(
+        &mut chercheur,
+        &mut flux,
+        machine_d,
+        b"200",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("le service annoncé à l'annuaire local se trouve par la racine");
+    assert!(trouve.contains("49152"), "{trouve}");
+    eprintln!(
+        "fédération : annoncé chez l'annuaire local, trouvé par la racine en {:?} ({:?} \
+         depuis le début de l'annonce)",
+        latence,
+        annonce_faite.elapsed()
+    );
+
+    // Qui n'a pas le droit de localiser ne trouve rien.
+    let mut intrus = connecter(&racine, adresse).await;
+    authentifier(&mut intrus, machine_c, &cle_c, 0, 4).await;
+    let (statut, _) = lire_json(
+        &mut intrus,
+        8,
+        format!("/v1/ou/{}/depot", machine_d.texte()).as_bytes(),
+    )
+    .await;
+    assert_eq!(statut, b"404", "sans droit, un service fédéré n'existe pas");
+
+    // **RIEN DE L'ÉTAT FÉDÉRÉ N'EST ÉCRIT DANS L'ENTREPÔT DES RACINES** (C13).
+    assert!(
+        entrepot_racine
+            .service_par_nom(machine_d, "depot")
+            .expect("une lecture")
+            .is_none(),
+        "le service vit chez l'annuaire local, et nulle part sur le disque des racines"
+    );
+    assert!(
+        entrepot_racine
+            .services_de_machine(machine_d)
+            .expect("les services")
+            .is_empty()
+    );
+
+    // ── LA CLÉ DE L'ANNUAIRE LOCAL N'OUVRE PAS LA VOIE ENTRE RACINES, ET IL ─
+    // ── N'EST CRU QUE SUR SES DOMAINES (C11) ────────────────────────────────
+    let speedy_brut = asl_cle::CleSecrete::depuis_entropie([0x51; 32]);
+    let mut brut = connecter(&racine, adresse).await;
+    prouver_la_racine(&mut brut, &speedy_brut, 0, 4).await;
+    let (statut, _) = lire_json(&mut brut, 8, b"/v1/pair/operations?apres=0").await;
+    assert_eq!(statut, b"401", "un annuaire local n'est pas l'autre racine");
+    let mut entree = [0_u8; 64];
+    let etrangere = asl_registre::EntreeDEtat {
+        service: Identifiant::depuis_entropie(Genre::Service, [0x99; 16]),
+        machine: machine_c,
+        nom: asl_registre::NomRange::nouveau("depot").expect("un nom"),
+        reponse: None,
+    };
+    let n = etrangere.ecrire(&mut entree).expect("une entrée");
+    let (statut, _) = poster(
+        &mut brut,
+        12,
+        b"/v1/federation/etat",
+        &entree[..n],
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(
+        statut, b"403",
+        "une machine hors de ses domaines refuse le rapport"
+    );
+    assert!(
+        JOURNAL
+            .lock()
+            .expect("le journal")
+            .iter()
+            .any(|ligne| ligne.contains("C11") && ligne.contains(machine_c.texte().as_str())),
+        "le refus se journalise"
+    );
+    // Une machine, même accréditée, n'atteint pas la voie de l'annuaire local.
+    let (statut, _) = lire_json(&mut chercheur, flux, b"/v1/federation/machines?apres=0").await;
+    flux = flux.saturating_add(4);
+    assert_eq!(statut, b"401");
+
+    // ── LA PAIRE : HELIUM, ACCEPTÉ ; SPEEDY TOMBE, HELIUM PORTE ─────────────
+    let (statut, rendu) = poster(
+        &mut alice,
+        28,
+        format!("/v1/annuaires/{}/membres", n_speedy.texte()).as_bytes(),
+        br#"{"adresse":"helium.maison:6630"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    let helium = asl_cle::CleSecrete::depuis_entropie([0x53; 32]);
+    let n_helium = asl_cle::identifiant_de_racine(&helium.publique());
+    let (statut, _) = se_presenter(
+        &racine,
+        adresse,
+        &helium,
+        Some(&valeur_json(&rendu, "code")),
+    )
+    .await;
+    assert_eq!(statut, b"200");
+    let (statut, _) = poster(
+        &mut bob,
+        12,
+        format!("/v1/inscriptions/{}/decision", n_helium.texte()).as_bytes(),
+        br#"{"accepte":true}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+    let helium_local =
+        lever_un_annuaire_local("federation-helium", &racine, adresse, helium, 200).await;
+    helium_local.attendre_la_machine(machine_d).await;
+
+    // Speedy s'arrête ; le daemon se replie sur helium.
+    speedy_local.arreter().await;
+    let mut daemon = connecter(&helium_local.racine, helium_local.adresse).await;
+    let (statut, corps) = annoncer_depot(&mut daemon, machine_d, &cle_d).await;
+    assert_eq!(statut, b"200", "{corps}");
+    // Au-delà de l'expiration de ce que speedy disait, helium porte seul.
+    tokio::time::sleep(std::time::Duration::from_millis(3_500)).await;
+    let (_, trouve) = chercher_jusqu_a(
+        &mut chercheur,
+        &mut flux,
+        machine_d,
+        b"200",
+        std::time::Duration::from_secs(2),
+    )
+    .await
+    .expect("le second membre porte le service quand le premier est tombé");
+    assert!(trouve.contains("49152"), "{trouve}");
+
+    // ── HELIUM SE TAIT : EN MOINS DE L'EXPIRATION, PLUS RIEN ────────────────
+    helium_local.federateur.abort();
+    let tait = std::time::Instant::now();
+    let (apres, _) = chercher_jusqu_a(
+        &mut chercheur,
+        &mut flux,
+        machine_d,
+        b"404",
+        std::time::Duration::from_secs(6),
+    )
+    .await
+    .expect("un annuaire local qui se tait ne fait plus rien vivre aux racines");
+    assert!(
+        apres <= std::time::Duration::from_millis(4_000),
+        "le service doit tomber dans l'expiration : {apres:?}"
+    );
+    eprintln!(
+        "fédération : l'annuaire local s'est tu, le service est tombé en {:?}",
+        tait.elapsed()
+    );
+
+    helium_local.arreter().await;
     let _ = dire_stop.send(());
     let _ = tache.await;
     let _ = std::fs::remove_dir_all(&autorite);

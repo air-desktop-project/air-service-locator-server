@@ -455,7 +455,11 @@ et la contrainte le borne ainsi :
 
 - **En mémoire seulement, comme un bail.** Jamais dans l'entrepôt : le schéma
   d'`asl-registre` n'a pas de colonne pour elle, et c'est le contrôle de cette
-  contrainte. Elle tombe quand la voie de l'annuaire local tombe.
+  contrainte — `asl-registre` sait ÉCRIRE une entrée d'état pour le fil
+  (`EntreeDEtat`, 0.28.0), mais l'entrepôt n'a aucune table où la ranger, et
+  l'essai de bout en bout vérifie qu'aucun service fédéré n'y apparaît. Elle
+  tombe quand plus aucun membre ne la confirme : trente secondes au plus après
+  son dernier rapport (décision 52).
 - **Pas répliquée entre racines** : chacune la reçoit de l'annuaire local
   (`replication.md` §1).
 - **Servie aux seuls comptes autorisés** (C10), et journalisée comme toute

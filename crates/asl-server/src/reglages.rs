@@ -151,6 +151,28 @@ pub struct Reglages {
     /// `--android-roots` (C19) : un fichier que l'exploitant désigne, jamais
     /// un magasin lu en silence.
     pub racines_de_poussee: Option<PathBuf>,
+    /// **Cet annuaire est un annuaire LOCAL** : les racines vers lesquelles il
+    /// fédère (`--federation`, répétable) et l'autorité qui valide leur
+    /// certificat (`--federation-ca`) — `docs/protocole.md` §3 ter, 0.28.0.
+    ///
+    /// **Sans ces réglages, il est une racine**, et ne fédère vers personne.
+    /// Avec eux, il ouvre une voie vers chacune, prouve sa clé d'identité
+    /// (`--identity-key`, obligatoire alors), tire les machines de ses
+    /// domaines et pousse l'état de leurs services. C'est l'annuaire local
+    /// qui ouvre : aucun port entrant n'est nécessaire pour cette voie.
+    pub federation: Option<ReglageFederation>,
+}
+
+/// Les racines vers lesquelles un annuaire local fédère.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReglageFederation {
+    /// Chaque racine : `hôte:port`. **Chacune reçoit sa voie** : l'état des
+    /// services ne se réplique pas entre racines, et une racine qu'on ne joint
+    /// pas ne sait rien de nos services.
+    pub racines: Vec<String>,
+    /// L'autorité qui valide leur certificat TLS, en PEM — le `racine.crt`
+    /// que les clients épinglent.
+    pub ca: PathBuf,
 }
 
 /// Le geste `--forget` : effacer CE compte, hors ligne, et s'arrêter.
@@ -324,6 +346,11 @@ pub enum Faute {
     PairSansIdentite,
     /// `--peer` n'a pas la forme `hôte:port`.
     PairInvalide(String),
+    /// `--federation` sans `--federation-ca`, ou l'inverse.
+    FederationIncomplete,
+    /// `--federation` sans `--identity-key` : un annuaire local sans identité
+    /// ne peut rien prouver aux racines.
+    FederationSansIdentite,
     /// `--forget` a reçu autre chose qu'un identifiant de compte `u-…`.
     CompteInvalide(String),
     /// Un drapeau de l'ancienne grammaire, en français, qui a son
@@ -396,6 +423,12 @@ impl core::fmt::Display for Faute {
                 sortie,
                 "--peer attend `hôte:port` (une adresse IPv6 entre crochets), et non « {quoi} »"
             ),
+            Self::FederationIncomplete => sortie
+                .write_str("--federation et --federation-ca se donnent ensemble, ou pas du tout"),
+            Self::FederationSansIdentite => sortie.write_str(
+                "--federation demande --identity-key : c'est la clé que les racines ont \
+                 acceptée à l'inscription (docs/protocole.md §3 ter)",
+            ),
             Self::CompteInvalide(quoi) => write!(
                 sortie,
                 "--forget attend l'identifiant d'un compte, `u-` et 26 caractères, et non « {quoi} »"
@@ -448,6 +481,10 @@ asl-server — an air-service-locator service directory.
                             (default: 86400, one day; one week at most)
   --orphans      <days>     erase an account once ALL its devices have been
                             revoked for that many days; 0 = never (default: 30)
+  --federation   <host:port> a root this LOCAL directory federates to; repeat it
+                            for each root (with --federation-ca and
+                            --identity-key); without it, this is a root
+  --federation-ca <path>    the CA that validates the roots' TLS certs, PEM
   --push-roots   <path>     the CAs that validate push servers' TLS certs, PEM
                             — typically /etc/ssl/certs/ca-certificates.crt;
                             without it, NO notification is ever sent
@@ -579,6 +616,8 @@ impl Reglages {
         let mut exploitant: Option<PathBuf> = None;
         let mut invitation_ttl_s = INVITATION_TTL_DEFAUT_S;
         let mut racines_de_poussee: Option<PathBuf> = None;
+        let mut federation_racines: Vec<String> = Vec::new();
+        let mut federation_ca: Option<PathBuf> = None;
 
         let mut arguments = arguments.into_iter();
         while let Some(drapeau) = arguments.next() {
@@ -628,6 +667,8 @@ impl Reglages {
                 "--operator-key" => exploitant = Some(PathBuf::from(valeur()?.as_ref())),
                 "--invitation-ttl" => invitation_ttl_s = nombre(drapeau, valeur()?.as_ref())?,
                 "--push-roots" => racines_de_poussee = Some(PathBuf::from(valeur()?.as_ref())),
+                "--federation" => federation_racines.push(adresse_de_pair(valeur()?.as_ref())?),
+                "--federation-ca" => federation_ca = Some(PathBuf::from(valeur()?.as_ref())),
                 autre => {
                     return Err(match ancien(autre) {
                         Some((ancien, nouveau)) => Faute::Ancien { ancien, nouveau },
@@ -687,6 +728,22 @@ impl Reglages {
                 }
                 (None, None, None) => None,
                 _ => return Err(Faute::PairIncomplet),
+            },
+            // **ILS VONT ENSEMBLE AUSSI** : une racine sans autorité ne se
+            // joint pas en sûreté, une autorité sans racine ne dit qui joindre,
+            // et sans identité l'annuaire local ne prouve rien.
+            federation: match (federation_racines.is_empty(), federation_ca) {
+                (false, Some(ca)) => {
+                    if identite.is_none() {
+                        return Err(Faute::FederationSansIdentite);
+                    }
+                    Some(ReglageFederation {
+                        racines: federation_racines,
+                        ca,
+                    })
+                }
+                (true, None) => None,
+                _ => return Err(Faute::FederationIncomplete),
             },
             identite,
             orphelins_jours,
@@ -1010,7 +1067,8 @@ fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute
 #[cfg(test)]
 mod tests {
     use super::{
-        Administration, Faute, Invite, Oubli, ReglageAndroid, ReglageApple, ReglagePair, Reglages,
+        Administration, Faute, Invite, Oubli, ReglageAndroid, ReglageApple, ReglageFederation,
+        ReglagePair, Reglages,
     };
 
     /// Les quatre réglages obligatoires, et rien d'autre.
@@ -1470,6 +1528,51 @@ mod tests {
             Err(Faute::PairSansIdentite)
         );
         for faute in [Faute::PairIncomplet, Faute::PairSansIdentite] {
+            assert!(!faute.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn un_annuaire_local_federe_vers_ses_racines_avec_une_autorite_et_une_identite() {
+        assert_eq!(
+            Reglages::depuis(minimum()).map(|lus| lus.federation),
+            Ok(None)
+        );
+        let lus = Reglages::depuis(avec(&[
+            "--identity-key",
+            "/id",
+            "--federation",
+            "nitrogen.air-desktop.org:6630",
+            "--federation",
+            "[2001:41d0:20a:900::1d32]:6630",
+            "--federation-ca",
+            "/racine.crt",
+        ]))
+        .map(|lus| lus.federation);
+        assert_eq!(
+            lus,
+            Ok(Some(ReglageFederation {
+                racines: vec![
+                    "nitrogen.air-desktop.org:6630".to_owned(),
+                    "[2001:41d0:20a:900::1d32]:6630".to_owned(),
+                ],
+                ca: std::path::PathBuf::from("/racine.crt"),
+            }))
+        );
+        assert_eq!(
+            Reglages::depuis(avec(&["--identity-key", "/id", "--federation", "a:1"])).map(|_| ()),
+            Err(Faute::FederationIncomplete)
+        );
+        assert_eq!(
+            Reglages::depuis(avec(&["--federation-ca", "/racine.crt"])).map(|_| ()),
+            Err(Faute::FederationIncomplete)
+        );
+        assert_eq!(
+            Reglages::depuis(avec(&["--federation", "a:1", "--federation-ca", "/r"])).map(|_| ()),
+            Err(Faute::FederationSansIdentite)
+        );
+        assert!(Reglages::depuis(avec(&["--federation", "pas une adresse"])).is_err());
+        for faute in [Faute::FederationIncomplete, Faute::FederationSansIdentite] {
             assert!(!faute.to_string().is_empty());
         }
     }

@@ -633,14 +633,14 @@ impl std::error::Error for Faute {}
 /// du module. Le compteur d'essais SATURE : après soixante-quatre échecs, un
 /// décalage non saturé rendrait un délai nul, et la reprise deviendrait la
 /// boucle serrée qu'elle existe pour éviter.
-struct Reprise {
+pub(crate) struct Reprise {
     plafond_ms: u64,
     essais: u32,
 }
 
 impl Reprise {
     /// Une reprise plafonnée à cette cadence.
-    const fn nouvelle(plafond_ms: u64) -> Self {
+    pub(crate) const fn nouvelle(plafond_ms: u64) -> Self {
         Self {
             plafond_ms,
             essais: 0,
@@ -648,7 +648,7 @@ impl Reprise {
     }
 
     /// Le délai avant le prochain essai, en millisecondes — jamais nul.
-    fn prochain_delai(&mut self, alea: u16) -> u64 {
+    pub(crate) fn prochain_delai(&mut self, alea: u16) -> u64 {
         let brut = RECUL_INITIAL_MS
             .checked_shl(self.essais)
             .unwrap_or(u64::MAX)
@@ -669,12 +669,12 @@ impl Reprise {
     }
 
     /// La session a abouti : le recul repart de zéro.
-    const fn reussite(&mut self) {
+    pub(crate) const fn reussite(&mut self) {
         self.essais = 0;
     }
 
     /// Le nombre d'échecs consécutifs.
-    const fn essais(&self) -> u32 {
+    pub(crate) const fn essais(&self) -> u32 {
         self.essais
     }
 }
@@ -777,7 +777,7 @@ impl Connexion {
     }
 
     /// La connexion est-elle encore là ?
-    fn vivante(&self) -> bool {
+    pub(crate) fn vivante(&self) -> bool {
         !self.quic.is_closed()
     }
 
@@ -842,7 +842,7 @@ impl Connexion {
     }
 
     /// Reçoit, fait lire les flux, réémet — un tour de maintien.
-    async fn entretenir(&mut self, attente_ms: u64) -> Result<(), Faute> {
+    pub(crate) async fn entretenir(&mut self, attente_ms: u64) -> Result<(), Faute> {
         self.recevoir(attente_ms).await?;
         self.lire_les_flux()?;
         self.emettre().await
@@ -939,7 +939,10 @@ impl Connexion {
     }
 
     /// Prouve NOTRE identité de racine — comme une machine, un genre `n` (§2.2).
-    async fn prouver_notre_racine(&mut self, identite: &CleSecrete) -> Result<(), Faute> {
+    pub(crate) async fn prouver_notre_racine(
+        &mut self,
+        identite: &CleSecrete,
+    ) -> Result<(), Faute> {
         let defi = self.defi().await?;
         let racine = identifiant_de_racine(&identite.publique());
         let signature = identite

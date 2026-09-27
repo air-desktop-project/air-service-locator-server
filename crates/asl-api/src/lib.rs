@@ -147,6 +147,18 @@ pub enum Exigence {
     /// satisfait est ce qui la ferme à tout le reste — et il n'y a qu'une
     /// clé qui la satisfasse, celle de `--peer-key`.
     Racine,
+    /// **Un annuaire local inscrit et accepté**, qui a prouvé sa clé
+    /// d'identité — le même genre `n` sur `POST /v1/defi`, mais une clé qui
+    /// vient des inscriptions acceptées, jamais de `--peer-key`
+    /// (`protocole.md` §3 ter, 0.28.0).
+    ///
+    /// # ELLE NE SE CONFOND PAS AVEC [`Exigence::Racine`]
+    ///
+    /// La voie entre racines transporte TOUT ; celle-ci ne porte que les
+    /// machines des domaines que cet annuaire héberge, et l'état de leurs
+    /// services. Une clé d'annuaire local qui ouvrirait `/v1/pair/…` lirait
+    /// l'annuaire entier : les deux exigences restent disjointes.
+    AnnuaireLocal,
     /// **Rien.** Sept ressources, plus `/v1/defi` qui produit la preuve, et
     /// chacune pour une raison écrite — voir [`Ressource::exigence`].
     Aucune,
@@ -599,6 +611,20 @@ pub enum Ressource<'a> {
         /// Le domaine visé.
         domaine: Identifiant,
     },
+    /// `/v1/federation/machines?apres=<rang>` — **les machines rattachées aux
+    /// domaines que l'annuaire local qui demande héberge** (`protocole.md`
+    /// §3 ter, 0.28.0) : chacune en `asl_registre::MachineFederee`, à la
+    /// suite, rangées par identifiant, à partir du rang `apres`. Une part au
+    /// plus par réponse ; l'annuaire local redemande depuis le rang suivant
+    /// tant que la part est pleine.
+    FederationMachines {
+        /// Combien de machines, dans l'ordre, sont déjà reçues.
+        apres: u64,
+    },
+    /// `/v1/federation/etat` — **l'état des services de l'annuaire local qui
+    /// poste** : des entrées d'état à la suite, sans enveloppe. Chaque entrée
+    /// remplace celle du même service venue du même membre.
+    FederationEtat,
     /// `/v1/replication` — **l'état de la voie entre racines, vu d'ici**
     /// (`replication.md` §8) : le pair, la voie ouverte ou coupée, notre
     /// compteur, et jusqu'où l'on a appliqué ce que le pair a écrit — ou
@@ -632,7 +658,8 @@ impl Ressource<'_> {
             | Self::InscriptionAnnuaire
             | Self::EtatAnnuaire
             | Self::MembresAnnuaire { .. }
-            | Self::DecisionInscription { .. } => &[Methode::Post],
+            | Self::DecisionInscription { .. }
+            | Self::FederationEtat => &[Methode::Post],
             Self::Utilisateur { .. }
             | Self::MachinesUtilisateur { .. }
             | Self::Moi
@@ -652,6 +679,7 @@ impl Ressource<'_> {
             | Self::RechercheDomaines { .. }
             | Self::Groupes
             | Self::Inscriptions
+            | Self::FederationMachines { .. }
             | Self::Replication => &[Methode::Get],
             Self::PairPreuve => &[Methode::Post],
             Self::Appareil { .. }
@@ -743,6 +771,7 @@ impl Ressource<'_> {
             Self::PairPreuve | Self::PairOperations { .. } | Self::PairInstantane => {
                 Exigence::Racine
             }
+            Self::FederationMachines { .. } | Self::FederationEtat => Exigence::AnnuaireLocal,
             _ => Exigence::Appareil,
         }
     }
@@ -986,7 +1015,8 @@ fn service_de_la_requete(requete: &[u8]) -> Result<NomService<'_>, Erreur> {
     NomService::analyser(texte).map_err(|_| Erreur::NomInvalide)
 }
 
-/// Le compteur que porte la chaîne de requête, pour `/v1/pair/operations`.
+/// Le compteur que porte la chaîne de requête, pour `/v1/pair/operations` et
+/// `/v1/federation/machines`.
 ///
 /// **Un seul paramètre, `apres`, et une seule écriture par nombre** : des
 /// chiffres décimaux, sans signe, sans zéro de tête — `apres=007` serait une
@@ -1165,6 +1195,10 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
             apres: compteur_de_la_requete(requete)?,
         }),
         ["v1", "pair", "instantane"] => Ok(Ressource::PairInstantane),
+        ["v1", "federation", "machines"] => Ok(Ressource::FederationMachines {
+            apres: compteur_de_la_requete(requete)?,
+        }),
+        ["v1", "federation", "etat"] => Ok(Ressource::FederationEtat),
         _ => Err(Erreur::RessourceInconnue),
     }
 }

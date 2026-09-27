@@ -272,7 +272,7 @@ domaine « air-desktop-dictator », helium le seconde.
 **Chaque membre ouvre SA voie vers chaque racine** (`protocole.md` §3 ter), et
 reporte les services que **lui** voit — un daemon s'annonce à l'un des deux, pas
 aux deux. Les racines tiennent l'état de chaque service **par membre**, en
-mémoire (§5.4) ; **proposé** : un service est vivant tant qu'au moins un membre
+mémoire (§5.4) ; **décidé** (2026-09-27, Thierry ; décision 52) : un service est vivant tant qu'au moins un membre
 le dit vivant, et son adresse et son port sont ceux du dernier rapport vivant
 reçu **par cette racine** — l'état vivant ne se réplique pas entre racines, et
 chacune tranche avec ce qu'elle reçoit. Un membre qui se tait ne fait tomber
@@ -684,7 +684,7 @@ Rassemblé, plutôt que dispersé.
 6. **Le passage d'un domaine des racines vers un annuaire local, et retour**
    (2026-09-26). Pendant la bascule, les daemons s'annoncent encore à
    l'ancien hébergeur : ils apparaissent `parti` jusqu'à ce qu'ils se
-   ré-annoncent au nouveau. **Proposé (2026-09-27)** : une racine qui reçoit
+   ré-annoncent au nouveau. **Décidé (2026-09-27, Thierry), codé en 0.28.0** : une racine qui reçoit
    l'annonce d'une machine dont le domaine est confié à un annuaire local la
    **refuse en `421`** (« mauvais destinataire », RFC 9110) en donnant
    l'adresse déclarée de l'annuaire ; le daemon la suit, comme une redirection.
@@ -693,7 +693,7 @@ Rassemblé, plutôt que dispersé.
 7. **Ce qui se passe quand l'annuaire local disparaît** — éteint, cassé,
    jamais revenu. Ses services apparaissent `parti` dès que sa voie tombe ; au
    bout de combien de temps ses domaines reviennent-ils d'eux-mêmes aux
-   racines, et le faut-il ? **Proposé (2026-09-27)** : ce qu'un membre
+   racines, et le faut-il ? **Décidé (2026-09-27, Thierry)** : ce qu'un membre
    rapportait tombe **quand sa voie tombe** — au plus l'inactivité de la
    connexion, trente secondes, comme un bail (`modele.md` §4.1) ; avec une
    paire, seulement ce que ce membre-là était seul à dire. **Les domaines ne
@@ -701,23 +701,26 @@ Rassemblé, plutôt que dispersé.
    (`DELETE /v1/domaines/{d}/hebergeur`) ; une panne longue n'est pas une
    décision, et un domaine qui changerait d'hébergeur tout seul ferait
    basculer ses daemons sans que personne l'ait voulu.
-8. **La latence acceptable de « vivant »** propagé par un annuaire local :
-   combien de temps un service mort peut-il être servi comme vivant par les
-   racines ? Elle dépend du keepalive entre daemon et annuaire local, puis
-   entre annuaire local et racines.
+8. ~~**La latence acceptable de « vivant »** propagé par un annuaire local~~
+   — **tranchée par le code (0.28.0, décision 52)** : un daemon qui s'en va
+   se dit à la racine dans le tour, parce que l'annuaire local pousse tout
+   changement tout de suite ; un annuaire local qui se TAIT fait tomber ce
+   qu'il disait au bout de l'expiration d'un rapport, trente secondes. Reste
+   le cas du daemon muet sans fermer : c'est le bail entre lui et l'annuaire
+   local (`modele.md` §4.1), trente secondes de plus au pire.
 9. **IPv4 derrière un NAT** (§5.4) : l'adresse qu'un annuaire local transmet
    n'est joignable que si la traversée est résolue (`modele.md` §6.3).
    **Précisé (2026-09-27)** : la voie entre l'annuaire local et les racines
    **n'exige aucun port entrant** — c'est l'annuaire qui ouvre. Un port entrant
    (UDP 6630 sur la box, en IPv6 vers l'adresse publique de chaque membre)
    n'est nécessaire que pour les daemons de ses domaines qui sont **hors de la
-   maison** : ce sont eux qui doivent joindre l'annuaire. **Proposé** :
+   maison** : ce sont eux qui doivent joindre l'annuaire. **Décidé (2026-09-27, Thierry)** :
    l'adresse que le propriétaire déclare (`POST /v1/annuaires`) est celle que
    ces daemons emploient ; les racines ne s'en servent que pour la dire (le
    `421` de la question 6).
 10. **Le certificat de l'annuaire local.** Les daemons de la maison le
     joignent en TLS : sous quelle autorité, et comment ils l'épinglent — sans
-    appeler de tiers (C19). **Proposé (2026-09-27)** : une **autorité propre au
+    appeler de tiers (C19). **Décidé (2026-09-27, Thierry)** : une **autorité propre au
     propriétaire**, un fichier qu'il frappe une fois chez lui, qui signe le
     certificat de chaque membre (le même nom pour les deux, pour qu'un daemon
     bascule de l'un à l'autre sans rien changer) et que ses daemons épinglent

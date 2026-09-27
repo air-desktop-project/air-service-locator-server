@@ -1411,3 +1411,61 @@ fn les_chemins_des_annuaires_locaux_designent_leurs_ressources() {
     );
     assert!(!resoudre(Methode::Post, b"/v1/inscriptions").unwrap().sert);
 }
+
+// ── La voie de l'annuaire local (`protocole.md` §3 ter, 0.28.0) ─────────────
+
+#[test]
+fn la_voie_de_l_annuaire_local_se_route_et_exige_un_annuaire_local() {
+    // **UNE EXIGENCE À PART** : ni celle de la voie entre racines, ni celle
+    // d'une machine — ce qu'elle ouvre est borné par les domaines de cet
+    // annuaire.
+    assert_eq!(
+        resoudre_get("/v1/federation/machines?apres=44").unwrap(),
+        Ressource::FederationMachines { apres: 44 }
+    );
+    assert_eq!(
+        resoudre(Methode::Post, b"/v1/federation/etat")
+            .unwrap()
+            .ressource,
+        Ressource::FederationEtat
+    );
+    for (methode, cible) in [
+        (Methode::Get, &b"/v1/federation/machines?apres=0"[..]),
+        (Methode::Post, b"/v1/federation/etat"),
+    ] {
+        let resolu = resoudre(methode, cible).unwrap();
+        assert!(resolu.sert);
+        assert_eq!(resolu.exigence, Exigence::AnnuaireLocal);
+        assert_ne!(resolu.exigence, Exigence::Racine);
+    }
+    assert!(
+        !resoudre(Methode::Post, b"/v1/federation/machines?apres=0")
+            .unwrap()
+            .sert
+    );
+    assert!(!resoudre(Methode::Get, b"/v1/federation/etat").unwrap().sert);
+    assert_eq!(
+        Ressource::FederationMachines { apres: 0 }.verbes(),
+        &[Methode::Get]
+    );
+    assert_eq!(Ressource::FederationEtat.verbes(), &[Methode::Post]);
+    // Le rang a la grammaire du curseur des opérations : une seule écriture.
+    for requete in ["", "apres=", "apres=01", "rang=1"] {
+        assert_eq!(
+            resoudre_get(&format!("/v1/federation/machines?{requete}")),
+            Err(Erreur::RequeteInvalide),
+            "{requete}"
+        );
+    }
+    for cible in [
+        "/v1/federation",
+        "/v1/federation/autre",
+        "/v1/federation/etat/x",
+    ] {
+        assert_eq!(
+            resoudre_get(cible),
+            Err(Erreur::RessourceInconnue),
+            "{cible}"
+        );
+    }
+}

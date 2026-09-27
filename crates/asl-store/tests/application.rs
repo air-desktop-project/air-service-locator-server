@@ -2928,3 +2928,79 @@ fn un_code_d_inscription_expire_ne_sert_qu_une_cle_et_un_annuaire_n_a_qu_un_seco
     );
     let _ = std::fs::remove_file(&chemin);
 }
+
+// ── Les machines reçues des racines (0.28.0) ────────────────────────────────
+
+#[test]
+fn les_machines_federees_se_remplacent_en_bloc_et_portent_les_services_d_une_paire() {
+    let (base, fichier) = entrepot("machines-federees");
+    let proprietaire = un(Genre::Utilisateur, 1);
+    let (m1, m2) = (un(Genre::Machine, 1), un(Genre::Machine, 2));
+    let federee = |quelle: Identifiant, texte: &str| asl_registre::MachineFederee {
+        machine: quelle,
+        enregistrement: machine(est(pair(), 3), proprietaire, texte),
+    };
+
+    // Rien n'est à personne ici, et le service d'une machine inconnue ne se
+    // range pas.
+    let service_de_m1 = |compteur| Cadre::Operation {
+        estampille: est(pair(), compteur),
+        operation: Operation::Service {
+            service: un(Genre::Service, 7),
+            enregistrement: service(est(pair(), compteur), m1, "depot"),
+        },
+    };
+    let _ = base.appliquer(pair(), &service_de_m1(10), false);
+    assert!(
+        base.service(un(Genre::Service, 7))
+            .expect("une lecture")
+            .is_none()
+    );
+
+    // Reçues : elles se lisent comme des machines.
+    let sorties = base
+        .ranger_les_machines_federees(&[federee(m1, "grenier"), federee(m2, "cave")])
+        .expect("rangées");
+    assert!(sorties.is_empty());
+    assert_eq!(
+        base.machine(m1).expect("une lecture").map(|lue| lue.nom),
+        Some(nom("grenier"))
+    );
+    assert_eq!(base.machines_federees().expect("les reçues").len(), 2);
+
+    // L'autre membre de la paire rapporte un service de m1 : il se range.
+    let _ = base.appliquer(pair(), &service_de_m1(11), false);
+    assert!(
+        base.service(un(Genre::Service, 7))
+            .expect("une lecture")
+            .is_some()
+    );
+
+    // Le remplacement en bloc : m2 sort, et c'est dit ; m1 est mis à jour.
+    let sorties = base
+        .ranger_les_machines_federees(&[federee(m1, "grenier-2")])
+        .expect("rangées");
+    assert_eq!(sorties, vec![m2]);
+    assert!(base.machine(m2).expect("une lecture").is_none());
+    assert_eq!(
+        base.machine(m1).expect("une lecture").map(|lue| lue.nom),
+        Some(nom("grenier-2"))
+    );
+
+    // **ELLES NE PARTENT PAS DANS L'INSTANTANÉ** : chaque membre tire les
+    // siennes des racines.
+    assert!(
+        base.instantane()
+            .expect("un instantané")
+            .iter()
+            .filter_map(|octets| Cadre::lire(octets).ok())
+            .all(|(cadre, _)| !matches!(
+                cadre,
+                Cadre::Operation {
+                    operation: Operation::Machine { .. },
+                    ..
+                }
+            ))
+    );
+    let _ = std::fs::remove_file(&fichier);
+}

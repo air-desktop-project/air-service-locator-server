@@ -89,8 +89,9 @@ use asl_registre::{
     nom_d_hote, sans_dates,
 };
 use asl_registre::{
-    ADRESSE_OCTETS_MAX, Adresse, HEBERGEMENT_OCTETS, Hebergement, INSCRIPTION_OCTETS, Inscription,
-    MARQUE_D_INSCRIPTION_OCTETS, MarqueDInscription, PRESENTATION_OCTETS, Presentation,
+    ADRESSE_OCTETS_MAX, Adresse, EntreeDEtat, HEBERGEMENT_OCTETS, Hebergement, INSCRIPTION_OCTETS,
+    Inscription, MACHINE_FEDEREE_OCTETS, MARQUE_D_INSCRIPTION_OCTETS, MachineFederee,
+    MarqueDInscription, PRESENTATION_OCTETS, Presentation,
 };
 
 /// Ce qu'on soumet.
@@ -170,6 +171,10 @@ struct Entree {
     marque_d_inscription: [u8; MARQUE_D_INSCRIPTION_OCTETS],
     /// Les octets d'un hébergement.
     hebergement: [u8; HEBERGEMENT_OCTETS],
+    /// Les octets d'une machine fédérée (0.28.0).
+    machine_federee: [u8; MACHINE_FEDEREE_OCTETS],
+    /// Les octets d'une entrée d'état fédéré — et ce qui la suit.
+    entree_d_etat: Vec<u8>,
 }
 
 /// Une faute d'enregistrement est toujours l'une des cinq, et jamais une
@@ -682,6 +687,35 @@ fuzz_target!(|entree: Entree| {
                 "un hébergement relu ne se réécrit pas"
             );
         }
+        Err(faute) => nommee(faute),
+    }
+    // ── LA FÉDÉRATION (0.28.0) ──────────────────────────────────────────────
+    match MachineFederee::lire(&entree.machine_federee) {
+        Ok(federee) => {
+            let mut refait = [0_u8; MACHINE_FEDEREE_OCTETS];
+            federee.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.machine_federee,
+                "une machine fédérée relue ne se réécrit pas"
+            );
+        }
+        Err(faute) => nommee(faute),
+    }
+    // Une entrée d'état se lit dans une TRANCHE : elle peut être tronquée,
+    // et un nom vide se refuse. Ce qui se lit se réécrit à l'identique, et
+    // n'occupe que ce qu'elle dit.
+    match EntreeDEtat::lire(&entree.entree_d_etat) {
+        Ok((lue, occupe)) => {
+            assert!(occupe <= entree.entree_d_etat.len() && occupe == lue.octets());
+            let mut refait = vec![0_u8; occupe];
+            assert_eq!(lue.ecrire(&mut refait), Ok(occupe));
+            assert_eq!(
+                refait.as_slice(),
+                &entree.entree_d_etat[..occupe],
+                "une entrée d'état relue ne se réécrit pas"
+            );
+        }
+        Err(Faute::Tronquee { .. } | Faute::Vide) => {}
         Err(faute) => nommee(faute),
     }
     // Le même texte, comme adresse : ce qui se prend est de l'ASCII

@@ -2034,8 +2034,31 @@ POST /v1/federation/etat         SANS FIN, dans l'autre sens — ses services :
 la présentation et la relecture de l'état, **sans** le `POST /v1/defi` de
 genre `n` — le corps porte la clé et sa preuve de possession, comme un
 enrôlement, et l'on n'a pas eu à ouvrir une seconde manière de prouver une
-clé. La voie elle-même, `federation/machines` et `federation/etat`, est la
-PR 4.
+clé.
+
+**Ce que la 0.28.0 sert : la voie** (`replication.md` décision 52), avec un
+écart. **Pas de flux sans fin** : la pile QUIC ne relève jamais la fenêtre
+d'un flux, et un flux montant que le client écrirait sans fin s'y tairait.
+Deux verbes courts, que l'annuaire local répète à sa cadence et dès que ce
+qu'il sert change :
+
+```
+POST /v1/defi                    genre `n` ‖ n-… ‖ signature — sa clé, comme une racine
+GET  /v1/federation/machines?apres=<rang>
+        200  des MachineFederee à la suite : n-… (17) ‖ enregistrement Machine
+             de l'entrepôt — taille fixe, rangées par identifiant, une part au
+             plus ; pleine, on redemande depuis le rang suivant
+POST /v1/federation/etat         des EntreeDEtat à la suite, huit kibioctets au plus :
+             s-… (17) ‖ m-… (17) ‖ longueur du nom (1) ‖ nom ‖ vivant (1)
+             [‖ longueur (2, gros-boutiste) ‖ réponse d'annonce, 4 096 au plus]
+        204  rangé ; 403 une entrée hors de ses domaines (C11), rien n'est rangé ;
+        404  l'inscription n'est plus acceptée
+```
+
+La réponse d'annonce est **l'objet que `GET /v1/ou` rend**, encodé par
+l'annuaire local : les racines le rendent tel quel à qui peut le localiser.
+Et une racine qui reçoit l'annonce d'une machine d'un domaine confié répond
+**`421`** avec `{"annuaire":"n-…","adresses":["hôte:port",…]}`.
 
 **L'exigence est nouvelle** : une clé d'identité `n-…` **inscrite et
 acceptée**, pas celle de `--peer-key`. Une racine qui reçoit un `POST /v1/defi`
@@ -2055,7 +2078,9 @@ deux parlent pour le même annuaire, et tiennent l'état par membre. Entre eux,
 les deux membres se répliquent comme deux racines (§3 bis, `--peer`).
 
 **Côté annuaire local** : un `asl-server` qui reçoit `--federation
-<hôte:port>` (l'alias des racines, ou les deux noms) et sa clé d'identité ; il
+<hôte:port>` — **une fois par racine** (0.28.0 : chacune sa voie, puisque
+l'état ne se réplique pas entre elles) —, `--federation-ca` pour leur
+certificat, et sa clé d'identité (`--identity-key`) ; il
 authentifie les annonces des daemons de ses domaines avec les clés que
 `GET /v1/federation/machines` lui transmet, et reporte leur état. Il n'a
 **aucun compte** : ses domaines appartiennent à des comptes qui vivent aux
