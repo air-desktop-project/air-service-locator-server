@@ -885,3 +885,35 @@ qui est aussi le repli partout. C'est le prix de C19 le plus visible pour un
 utilisateur : un iPhone n'apprend une autorisation qu'en ouvrant l'app. APNs
 reste une porte **nommée, non écrite** : si un exploitant la voulait, elle
 serait son choix et désactivée par défaut, comme l'attestation.
+
+## C20 — ASL fonctionne sans DNS
+
+**Posée le 2026-09-27 par Thierry** : « ASL doit pouvoir fonctionner SANS DNS.
+Ce service REMPLACE le DNS classique : la différence est qu'il est HORS de
+contrôle des structures classiques : un utilisateur crée ses domaines SANS
+l'avis de qui que ce soit, les enregistre, les maintient, les déploie sur ses
+machines, et résout ensuite des noms/alias sans dépendre de qui que ce soit.
+Dès lors qu'il dispose d'un compte, il dispose de l'accès aux ressources
+propagées par ce service. »
+
+- **Le cœur ne résout aucun nom DNS pour décider de quoi que ce soit.** Joindre
+  une racine, la croire, créer un compte, enrôler une machine, s'annoncer,
+  résoudre un service, fédérer un annuaire local : tout cela marche avec des
+  adresses et des clés, sans résolveur.
+- **La confiance repose sur les clés, jamais sur les noms.** Un annuaire se
+  prouve par sa clé d'identité `n-…`, dans la poignée de main TLS
+  (`annuaires.md` §2 quater, décision 53) comme au-dessus (les défis). Aucune
+  autorité de certification, publique ou privée, n'entre dans la décision.
+- **Les noms DNS restent permis comme locateurs**, et seulement ainsi : un nom
+  est un moyen de joindre, qu'on peut omettre ; son absence ne bloque rien.
+- **La périphérie, nommée** : ce qui touche au DNS HORS du cœur et n'engage
+  pas le service — les réveils UnifiedPush vers le serveur de poussée que
+  l'utilisateur a choisi (souvent `ntfy.sh` ; une notification manquée se
+  rattrape à la relecture, `protocole.md` §2.2), le téléchargement des
+  applications et des paquets, et tout nom qu'un utilisateur publie pour son
+  confort. L'attestation Android n'en dépend pas : ses racines sont des
+  fichiers (C19).
+- **Ce que cette contrainte ne promet pas** : que les ancres ne changent
+  jamais. Les locateurs des racines sont des adresses d'hébergeur ; ce qui ne
+  change pas, ce sont leurs clés, et les nouveaux locateurs s'apprennent sur une
+  connexion vérifiée par clé (décision 56).

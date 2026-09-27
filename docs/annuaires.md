@@ -150,6 +150,10 @@ aucune n'est gratuite :
    signe la mise à jour », ce qui est au moins une question qu'on sait traiter —
    les clés publiques, elles, sont déjà l'ancre véritable.
 
+**Depuis le 2026-09-27, la poignée de main TLS elle-même s'appuie sur ces
+clés** (§2 quater) : l'issue 3 devient la voie retenue, et l'issue 2 est
+abandonnée.
+
 **Ce qui est épinglé dans le code reste les CLÉS**, et c'est ce qui rend les
 trois issues envisageables plutôt qu'urgentes : une adresse qui change ne trahit
 personne tant que la signature ne suit pas.
@@ -184,6 +188,109 @@ pour une raison précise : un compte ne pourrait plus changer d'annuaire sans
 changer d'identifiant, et un identifiant est ce qu'on a transmis à ses amis par
 SMS. **Ce n'est pas une décision fermée** — elle mérite d'être rouverte le jour
 où le coût de l'index se mesurera.
+
+## 2 quater. L'identité par la clé — ASL sans DNS
+
+**Décidé le 2026-09-27 (Thierry)**, dans ses mots :
+
+> « ASL doit pouvoir fonctionner SANS DNS. Ce service REMPLACE le DNS
+> classique : la différence est qu'il est HORS de contrôle des structures
+> classiques : un utilisateur crée ses domaines SANS l'avis de qui que ce soit,
+> les enregistre, les maintient, les déploie sur ses machines, et résout
+> ensuite des noms/alias sans dépendre de qui que ce soit. Dès lors qu'il
+> dispose d'un compte, il dispose de l'accès aux ressources propagées par ce
+> service. »
+
+Et sa question : les certificats doivent-ils reposer sur le nom DNS, ou sur
+les identifiants ASL ? **Sur les identifiants.** C'est la contrainte C20
+(`contraintes.md`) et les décisions 53 à 58 (`replication.md`).
+
+### Ce qui dépendait encore du DNS, et le principe qu'on appliquait à moitié
+
+§2 posait déjà la bonne règle — « ce qui est épinglé, ce sont les CLÉS
+PUBLIQUES des racines, et l'adresse n'est qu'un moyen de les joindre » —, et
+l'identifiant `n-…` d'un annuaire se DÉDUIT déjà de sa clé d'identité
+(`modele.md` §2.7). Mais la poignée de main TLS, elle, jugeait encore un
+**nom** sous une **autorité** : le client exigeait un certificat qui remonte à
+une racine PEM (`--roots`, `--ca`, `--peer-ca`, `--federation-ca`) et qui porte
+le nom demandé (`nitrogen.air-desktop.org`). D'où, à la première mise en
+service d'un annuaire local, une autorité TLS à frapper pour la maison et un
+enregistrement DNS à publier : exactement la dépendance que le produit refuse.
+
+### La règle : on joint une ADRESSE, on attend une IDENTITÉ
+
+1. **L'identité d'un annuaire EST sa clé d'identité Ed25519** — celle d'où se
+   déduit son `n-…`. Racine ou annuaire local, il présente en TLS un
+   **certificat auto-signé par cette clé**. Il n'y a ni autorité, ni nom jugé,
+   ni date jugée.
+2. **Le client vérifie deux choses, et rien d'autre** : que la clé publique du
+   certificat se déduit en l'identifiant `n-…` qu'il attend (la dérivation de
+   `modele.md` §2.7), et la signature de la poignée de main TLS 1.3, qui prouve
+   la possession de cette clé. Un certificat valide sous n'importe quelle
+   autorité, pour n'importe quel nom, qui ne porte pas LA clé attendue, n'est
+   pas l'annuaire.
+3. **Les adresses ne sont que des locateurs.** Une IPv6, une IPv4, ou un nom
+   DNS si l'on en a un : le client s'en sert pour joindre, jamais pour croire.
+   Une adresse qui change ne trahit personne ; une adresse détournée ne sert à
+   rien à qui n'a pas la clé.
+4. **Où le client apprend l'identité attendue** :
+   - les **racines** : une liste embarquée dans le logiciel et les
+     applications, `{n-…, clé, locateurs}` pour chacune (§2 : c'est l'ancre, et
+     elle l'était déjà) ;
+   - un **annuaire local** : par les racines — le `421` porte déjà son `n-…`
+     et les adresses de ses membres (`protocole.md` §3 ter) ; et les
+     applications le lisent dans `GET /v1/annuaires` et `heberge_par`. La
+     chaîne de confiance est donc : clé de racine épinglée → racine vérifiée →
+     identité de l'annuaire local qu'elle nomme ;
+   - le **pair** d'une racine : `--peer-key`, qui existe depuis 0.7.0.
+5. **Le DNS reste permis — comme locateur.** `asl-root.air-desktop.org`,
+   `nitrogen.air-desktop.org`, `speedy.air-desktop.org` sont des commodités ;
+   aucune n'entre dans la décision de croire, et l'absence de résolveur ne
+   bloque rien : les locateurs embarqués sont des adresses.
+
+### Pourquoi un certificat auto-signé, et pas des clés brutes (RFC 7250)
+
+RFC 7250 ferait voyager la clé seule, sans enveloppe X.509 — c'est ce qu'on
+veut dire. **La pile ne le porte pas** : ni `ams-tls` ni `ams-quic-tls` ne
+négocient `server_certificate_type` (vérifié le 2026-09-27 dans
+`air-mail-server` à `6f0ea51`), et C15 interdit de réécrire la pile. Un
+certificat auto-signé, lui, passe partout où un certificat passe : même
+`ServerConfig` (`ams_tls::quic_server_config` accepte une chaîne d'un seul
+certificat Ed25519 — les racines présentent déjà de l'Ed25519), même
+`ClientConfig`, et **un vérificateur propre à ASL** branché par
+`rustls::ClientConfig::…dangerous().with_custom_certificate_verifier(…)` —
+ASL construit déjà lui-même ses configurations clientes (`configuration_tls`
+dans `asl-client-tokio` et dans le tireur d'`asl-loop-tokio`), et
+`ams_quic_tls::Connection::connect` prend un `Arc<ClientConfig>`. C'est ce
+qu'`air-mail-server` fait déjà pour DANE (`ams_tls::relay::dane_config`, le
+vérificateur `Dane`) : une ancre qui n'est pas une autorité, sans toucher à la
+pile. L'enveloppe X.509 n'est qu'un emballage que le vérificateur ouvre pour
+lire la clé.
+
+### Ce que ça règle, et ce que ça ne règle pas
+
+- **Plus d'autorité TLS à tenir**, ni pour les racines ni pour les maisons.
+  Plus de certificat à renouveler : la validité n'est pas jugée (décision 54).
+- **L'issue 3 de §2 (renumérotation) devient naturelle.** Ce qui est épinglé
+  est la clé : une racine qui change d'hébergeur publie ses nouveaux locateurs,
+  et le client qui l'a jointe une fois par l'ancien les apprend sur une
+  connexion déjà vérifiée par clé (décision 56, proposé). Les issues 1
+  (allocation à nous) et 2 (ancrer sur les noms) ne sont plus nécessaires ; la
+  première reste un confort, la seconde est abandonnée.
+- **Un annuaire local change d'adresse sans rien redéclarer** : il publie
+  lui-même ses locateurs sur sa voie (décision 57, proposé), et le `421` suit.
+- **La preuve de possession à la couche HTTP ne disparaît pas.** Les défis
+  (`POST /v1/defi`, genre `n`, `POST /v1/pair/preuve`) prouvent déjà l'identité
+  au-dessus de TLS ; TLS la prouve maintenant AUSSI au-dessous. Les deux
+  restent : le défi lie la preuve au canal (`protocole.md` §2.1 bis), et un
+  client qui n'attendrait qu'un annuaire sans savoir lequel (un premier
+  contact par locateur) garde la preuve HTTP comme juge.
+- **Hors du cœur, des dépendances au DNS restent, et sont nommées** (C20) :
+  les réveils UnifiedPush vers `ntfy.sh` (périphérie : une notification
+  manquée se rattrape à la relecture), le téléchargement des applications, et
+  tout nom qu'un utilisateur choisit de publier. Ce qui ne doit JAMAIS en
+  dépendre : joindre une racine, la croire, s'enrôler, s'annoncer, résoudre,
+  fédérer.
 
 ---
 
@@ -718,7 +825,16 @@ Rassemblé, plutôt que dispersé.
    l'adresse que le propriétaire déclare (`POST /v1/annuaires`) est celle que
    ces daemons emploient ; les racines ne s'en servent que pour la dire (le
    `421` de la question 6).
-10. **Le certificat de l'annuaire local.** Les daemons de la maison le
+10. **Le certificat de l'annuaire local.** **Renversé le 2026-09-27 (Thierry,
+    décision 53)** : il est **auto-signé par la clé d'identité `n-…` du membre**,
+    et les daemons l'attendent par cet identifiant, que le `421` leur donne
+    (§2 quater). Ce qui était décidé le matin même, et pourquoi on en change :
+    une autorité propre au propriétaire, un fichier frappé une fois chez lui,
+    épinglée par `--roots` — mais elle exigeait un NOM dans chaque certificat,
+    donc un DNS, et « ASL doit pouvoir fonctionner SANS DNS ». L'argument
+    « pas la clé `n-…`, qui ne tourne pas » tombe avec le modèle : la clé qui
+    ne tourne pas est justement ce qu'on veut épingler.
+    ~~**Le certificat de l'annuaire local.** Les daemons de la maison le
     joignent en TLS : sous quelle autorité, et comment ils l'épinglent — sans
     appeler de tiers (C19). **Décidé (2026-09-27, Thierry)** : une **autorité propre au
     propriétaire**, un fichier qu'il frappe une fois chez lui, qui signe le
@@ -729,7 +845,7 @@ Rassemblé, plutôt que dispersé.
     maisons de tout le monde, ce qui ferait d'elles l'autorité de noms
     qu'elles ne tiennent pas. Et **pas la clé `n-…`** : elle prouve l'annuaire
     aux racines, elle ne tourne pas, et la garder distincte du TLS est la règle
-    des racines (`modele.md` §2.7).
+    des racines (`modele.md` §2.7).~~
 13. **Le paquet pour les deux architectures.** Un membre peut être un PC ou
     un Raspberry Pi — helium est `aarch64`, sous Ubuntu 26.04. **Le paquet
     `asl-server` doit exister en `amd64` ET en `arm64`** avant qu'une paire
