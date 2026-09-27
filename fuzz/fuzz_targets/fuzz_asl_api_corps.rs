@@ -38,10 +38,10 @@
 //!    (2026-09-27) : un groupe, un élément domaine, machine ou service, au
 //!    moins un droit connu, une étiquette aux règles d'un nom — et elle se
 //!    relit à l'identique une fois réécrite.
-//! 5. **UN ALIAS ACCEPTÉ RESTE DE L'ASCII GRAPHIQUE.** C'est la propriété qui
-//!    sépare une CLÉ d'un texte d'affichage : l'alias se cherche, se compare, et
-//!    repart dans un chemin — deux écritures d'une même valeur feraient croire à
-//!    deux comptes qu'ils la possèdent chacun.
+//! 5. **UN ALIAS DE COMPTE ACCEPTÉ EST DU TEXTE LIBRE BORNÉ** (0.26.0,
+//!    décision 46) : non vide, au plus deux cent cinquante-cinq octets bruts, sans
+//!    guillemet, barre oblique inverse ni contrôle. L'unicité de sa forme — le
+//!    NFC — est tenue par `asl-registre`, pas par ce cadrage.
 
 #![no_main]
 
@@ -238,13 +238,14 @@ fuzz_target!(|octets: &[u8]| {
     }
 
     if let Ok(demande) = DemandeAlias::decoder(octets) {
-        // **UN ALIAS EST UNE CLÉ, ET SA GRAMMAIRE EST ÉTROITE.** Vérifié sur ce
-        // qui est RENDU : c'est de là que `GET /v1/alias/{alias}` repartira, et
-        // un alias accepté ici doit pouvoir se remettre dans un chemin.
-        let texte = demande.alias.as_str();
+        // Du texte libre, que l'encodeur réécrit sans échappement.
+        let texte = demande.alias;
+        assert!(!texte.is_empty() && texte.len() <= ALIAS_BRUT_MAX);
         assert!(
-            texte.bytes().all(|o| o.is_ascii_graphic()),
-            "un alias accepté porte autre chose que de l'ASCII graphique : {texte:?}"
+            texte
+                .chars()
+                .all(|c| c != '"' && c != '\\' && !c.is_control() && !invisible(c)),
+            "un alias accepté porte un caractère refusé : {texte:?}"
         );
 
         let mut sortie = [0_u8; CORPS_MAX];
@@ -332,6 +333,15 @@ fuzz_target!(|octets: &[u8]| {
             .encoder(&mut sortie)
             .expect("ce qui a été compris se réécrit");
         let ecrit = &sortie[..combien];
+        // L'alias rendu (0.26.0) : sous les mêmes règles que le nom.
+        if let Some(alias) = machine.alias {
+            assert!(!alias.is_empty() && alias.len() <= asl_api::corps::ALIAS_DE_MACHINE_MAX);
+            assert!(
+                alias
+                    .chars()
+                    .all(|c| c != '"' && c != '\\' && !c.is_control() && !invisible(c))
+            );
+        }
         let relue = MachineRendue::decoder(ecrit).expect("ce qu'on écrit se relit");
         assert_eq!(relue, machine, "l'aller-retour a changé la machine");
         let mut encore = [0_u8; CORPS_MAX];

@@ -422,6 +422,13 @@ pub enum Ressource<'a> {
         /// L'alias demandé.
         alias: Alias<'a>,
     },
+    /// `/v1/alias?alias=…` — la même résolution, pour un alias que le chemin
+    /// ne sait pas porter : de l'UTF-8, pourcent-encodé (0.26.0). Le chemin
+    /// reste la forme d'un alias ASCII, celle des applications d'avant.
+    RechercheAlias {
+        /// L'alias cherché, encodé, vérifié.
+        alias: crate::domaine::AliasCherche<'a>,
+    },
     /// `/v1/expositions` — ce qui est exposé de moi, relation par relation.
     Expositions,
     /// `/v1/expositions/{n}` — m'en retirer.
@@ -474,7 +481,7 @@ pub enum Ressource<'a> {
     /// `/v1/domaines?alias=…` — **chercher un domaine par son alias**.
     ///
     /// Une LISTE, toujours : l'alias de domaine n'est pas unique. Correspondance
-    /// exacte après NFC et pliage de casse, que `asl-registre` calcule.
+    /// exacte après NFC, **sensible à la casse** (0.26.0, décision 45).
     RechercheDomaines {
         /// L'alias cherché, encodé, vérifié.
         alias: crate::domaine::AliasCherche<'a>,
@@ -488,6 +495,12 @@ pub enum Ressource<'a> {
     AliasDomaine {
         /// Le domaine visé.
         domaine: Identifiant,
+    },
+    /// `/v1/machines/{m}/alias` — poser ou retirer l'alias d'une machine
+    /// (0.26.0).
+    AliasMachine {
+        /// La machine visée.
+        machine: Identifiant,
     },
     /// `/v1/machines/{m}/domaine` — ranger MA machine dans un domaine, ou l'en
     /// sortir.
@@ -583,6 +596,7 @@ impl Ressource<'_> {
             | Self::ServicesMachine { .. }
             | Self::Expositions
             | Self::AliasResolu { .. }
+            | Self::RechercheAlias { .. }
             | Self::Ou { .. }
             | Self::OuParNom { .. }
             | Self::PairOperations { .. }
@@ -601,7 +615,7 @@ impl Ressource<'_> {
             | Self::Administrateur { .. } => &[Methode::Delete],
             Self::PousseeAppareil { .. } | Self::DescriptionAppareil { .. } => &[Methode::Put],
             Self::Domaine { .. } => &[Methode::Get, Methode::Delete],
-            Self::AliasDomaine { .. } | Self::DomaineMachine { .. } => {
+            Self::AliasDomaine { .. } | Self::DomaineMachine { .. } | Self::AliasMachine { .. } => {
                 &[Methode::Put, Methode::Delete]
             }
             Self::Machine { .. } => &[Methode::Patch],
@@ -662,6 +676,7 @@ impl Ressource<'_> {
             | Self::Administrateur { .. }
             | Self::Enrolement
             | Self::AliasResolu { .. }
+            | Self::RechercheAlias { .. }
             | Self::Vu
             | Self::Version
             | Self::Utilisateur { .. } => Exigence::Aucune,
@@ -700,9 +715,12 @@ pub struct Resolu<'a> {
 ///
 /// # L'ALPHABET, ET LA RÈGLE QUI L'A FAIT CHOISIR
 ///
-/// Minuscules ASCII, chiffres, `-`, `_`, `.` — le même que celui d'un nom de
-/// service, et pour la même raison : il voyage dans une URL, et tout ce qui
-/// demanderait un encodage ouvrirait deux écritures du même alias.
+/// Lettres ASCII — **dans les deux casses** depuis 0.26.0 : l'alias de compte
+/// est sensible à la casse (décision 46) —, chiffres, `-`, `_`, `.`. C'est la
+/// forme qui voyage dans le CHEMIN sans encodage ; un alias de compte en UTF-8
+/// hors de cet alphabet se résout par `/v1/alias?alias=…`, pourcent-encodé
+/// ([`Ressource::RechercheAlias`]). Les deux formes désignent la même chose :
+/// c'est `asl-registre` qui range l'alias, en NFC.
 ///
 /// # ET IL NE PEUT PAS RESSEMBLER À UN IDENTIFIANT
 ///
@@ -731,9 +749,7 @@ impl<'a> Alias<'a> {
             });
         }
         for (position, &octet) in octets.iter().enumerate() {
-            let permis = octet.is_ascii_lowercase()
-                || octet.is_ascii_digit()
-                || matches!(octet, b'-' | b'_' | b'.');
+            let permis = octet.is_ascii_alphanumeric() || matches!(octet, b'-' | b'_' | b'.');
             if !permis {
                 return Err(Erreur::AliasSymboleInvalide { position });
             }
@@ -989,6 +1005,9 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "machines", machine, "domaine"] => Ok(Ressource::DomaineMachine {
             machine: identifiant(machine, Genre::Machine)?,
         }),
+        ["v1", "machines", machine, "alias"] => Ok(Ressource::AliasMachine {
+            machine: identifiant(machine, Genre::Machine)?,
+        }),
         // **LA CHAÎNE DE REQUÊTE DÉCIDE DE LA RESSOURCE** : vide, ce sont mes
         // domaines ; `alias=…`, une recherche. Tout autre paramètre est refusé
         // plutôt qu'ignoré — même règle que `/v1/ou`.
@@ -1038,7 +1057,17 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "autorisations", autorisation] => Ok(Ressource::Autorisation {
             autorisation: identifiant(autorisation, Genre::Autorisation)?,
         }),
-        ["v1", "alias"] => Ok(Ressource::Alias),
+        // **LA CHAÎNE DE REQUÊTE DÉCIDE**, comme pour `/v1/domaines` : vide,
+        // c'est mon alias ; `alias=…`, une résolution.
+        ["v1", "alias"] => {
+            if requete.is_empty() {
+                Ok(Ressource::Alias)
+            } else {
+                Ok(Ressource::RechercheAlias {
+                    alias: crate::domaine::AliasCherche::depuis_requete(requete)?,
+                })
+            }
+        }
         ["v1", "alias", alias] => Ok(Ressource::AliasResolu {
             alias: Alias::analyser(alias)?,
         }),

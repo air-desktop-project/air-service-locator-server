@@ -1006,6 +1006,8 @@ impl Entrepot {
             ecriture.open_table(domaines::DOMAINES_PAR_ALIAS)?;
             ecriture.open_table(domaines::RATTACHEMENTS)?;
             ecriture.open_table(domaines::MACHINES_PAR_DOMAINE)?;
+            // Et l'alias des machines (0.26.0) : une table neuve.
+            ecriture.open_table(domaines::ALIAS_DE_MACHINES)?;
             // Et les groupes (2026-09-27) : cinq tables neuves, de même.
             ecriture.open_table(groupes::GROUPES)?;
             ecriture.open_table(groupes::GROUPES_PAR_RATTACHE)?;
@@ -1029,6 +1031,9 @@ impl Entrepot {
             // AVANT le ré-estampillage, qui le passe sous l'identité réelle
             // avec le reste s'il y a lieu.
             premiers_domaines = domaines::reprendre_les_premiers_domaines(&ecriture)?;
+            // **L'INDEX DES ALIAS DE DOMAINE PASSE À LA CLÉ EXACTE** (décision
+            // 45) : une fois, depuis les alias rangés, qui ne changent pas.
+            domaines::reindexer_les_alias_de_domaines(&ecriture)?;
             // **LES GROUPES DÉDUITS DES COMPTES ET DES DOMAINES D'HIER**
             // (`docs/modele.md` §2.12) : de même, une fois, avant le
             // ré-estampillage.
@@ -3763,6 +3768,7 @@ fn effacer_dans(
             index.remove(clef_index.as_slice())?;
             machines.remove(clef_machine.as_slice())?;
             domaines::oublier_le_rattachement(ecriture, quelle)?;
+            domaines::oublier_l_alias_de_machine(ecriture, quelle)?;
             if let Some(empreinte) = codes_par_machine.remove(clef_machine.as_slice())? {
                 codes.remove(empreinte.value())?;
                 retrait.codes = retrait.codes.saturating_add(1);
@@ -3848,6 +3854,7 @@ fn provenance_de(operation: &Operation) -> Option<Provenance> {
         Operation::Domaine { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::DomaineAlias { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::MachineDomaine { enregistrement, .. } => Some(enregistrement.provenance),
+        Operation::MachineAlias { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Groupe { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::Droit { enregistrement, .. } => Some(enregistrement.provenance),
         Operation::DomaineSupprime { .. }
@@ -3991,6 +3998,10 @@ fn appliquer_dans(
             machine,
             enregistrement,
         } => domaines::appliquer_machine_domaine(ecriture, *machine, enregistrement),
+        Operation::MachineAlias {
+            machine,
+            enregistrement,
+        } => domaines::appliquer_machine_alias(ecriture, *machine, enregistrement),
         Operation::Groupe {
             groupe,
             enregistrement,
@@ -5183,6 +5194,12 @@ impl Reestampillable for asl_registre::AliasDeDomaineRange {
     }
 }
 
+impl Reestampillable for asl_registre::AliasDeMachineRange {
+    fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
+        reestampiller_les_champs!(self, de, vers, estampille)
+    }
+}
+
 impl Reestampillable for asl_registre::Rattachement {
     fn reestampiller(&mut self, de: Identifiant, vers: Identifiant) -> bool {
         reestampiller_les_champs!(self, de, vers, estampille)
@@ -5205,6 +5222,7 @@ impl Reestampillable for Operation {
             Self::Domaine { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::DomaineAlias { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::MachineDomaine { enregistrement, .. } => enregistrement.reestampiller(de, vers),
+            Self::MachineAlias { enregistrement, .. } => enregistrement.reestampiller(de, vers),
             Self::Groupe { enregistrement, .. } => {
                 let avant = *enregistrement;
                 enregistrement.estampille = sous(avant.estampille, de, vers);
@@ -5411,6 +5429,17 @@ fn reestampiller(
             domaines::ALIAS_DE_DOMAINES,
             asl_registre::AliasDeDomaineRange::lire,
             asl_registre::AliasDeDomaineRange::ecrire,
+            de,
+            vers,
+        )?
+        .len(),
+    );
+    combien = combien.saturating_add(
+        reestampiller_table(
+            ecriture,
+            domaines::ALIAS_DE_MACHINES,
+            asl_registre::AliasDeMachineRange::lire,
+            asl_registre::AliasDeMachineRange::ecrire,
             de,
             vers,
         )?
@@ -5626,6 +5655,62 @@ mod essais {
             let _ = std::fs::remove_file(&ou);
         }
         assert_eq!(enregistrements[0], enregistrements[1]);
+    }
+
+    #[test]
+    fn l_index_des_alias_de_domaine_passe_a_la_clef_exacte_une_fois() {
+        // **Décision 45** : une base d'avant 0.26.0 rangeait dans l'index la
+        // clé PLIÉE. On la simule — l'entrée pliée à la place de l'exacte, et
+        // la marque retirée —, et la reprise refait l'index depuis les alias
+        // rangés, qui n'ont pas changé.
+        let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0x61; 16]);
+        let domaine = Identifiant::depuis_entropie(Genre::Domaine, [0x62; 16]);
+        let maison = asl_registre::AliasDeDomaine::nouveau("Maison").expect("un alias");
+        let pliee = asl_registre::AliasDeDomaine::nouveau("maison").expect("un alias");
+        let ou = chemin("alias-exacts");
+        {
+            let base = Entrepot::ouvrir(&ou, racine()).expect("neuve");
+            base.creer_compte(compte, Provenance::Ici, None)
+                .expect("écrit");
+            assert!(
+                base.creer_domaine(domaine, compte, Some(maison))
+                    .expect("créé")
+            );
+        }
+        {
+            let base = Database::open(&ou).expect("ouvrable");
+            let ecriture = base.begin_write().expect("écrivable");
+            {
+                let mut index = ecriture
+                    .open_table(super::domaines::DOMAINES_PAR_ALIAS)
+                    .expect("l'index");
+                let exacte = [&[6_u8][..], b"Maison", &super::clef(domaine)].concat();
+                assert!(index.remove(exacte.as_slice()).expect("retirée").is_some());
+                let ancienne = [&[6_u8][..], b"maison", &super::clef(domaine)].concat();
+                index
+                    .insert(ancienne.as_slice(), super::clef(domaine).as_slice())
+                    .expect("posée");
+                let mut table = ecriture.open_table(RACINE).expect("la table racine");
+                table
+                    .remove(super::domaines::CLEF_DES_ALIAS_EXACTS)
+                    .expect("retirée");
+            }
+            ecriture.commit().expect("commis");
+        }
+        let reprise = Entrepot::ouvrir(&ou, racine()).expect("rouvrable");
+        assert_eq!(
+            reprise.domaines_par_alias(&maison).expect("lisible"),
+            vec![domaine]
+        );
+        assert!(
+            reprise
+                .domaines_par_alias(&pliee)
+                .expect("lisible")
+                .is_empty(),
+            "l'entrée pliée d'hier est partie"
+        );
+        drop(reprise);
+        let _ = std::fs::remove_file(&ou);
     }
 
     #[test]

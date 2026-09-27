@@ -41,13 +41,14 @@ use asl_id::{Genre, Identifiant};
 mod domaine;
 mod droit;
 mod groupe;
-mod plis;
 
 pub use domaine::{
-    ALIAS_DE_DOMAINE_BRUT_MAX, ALIAS_DE_DOMAINE_OCTETS_MAX, ALIAS_DE_DOMAINE_RANGE_OCTETS,
-    AliasDeDomaine, AliasDeDomaineRange, CLEF_DE_RECHERCHE_OCTETS_MAX, ClefDeRecherche,
-    DOMAINE_OCTETS, Domaine, RATTACHEMENT_OCTETS, Rattachement, SEPARATEUR_PREMIER_DOMAINE,
-    UNICODE, premier_domaine,
+    ALIAS_DE_COMPTE_BRUT_MAX, ALIAS_DE_COMPTE_OCTETS_MIN, ALIAS_DE_DOMAINE_BRUT_MAX,
+    ALIAS_DE_DOMAINE_OCTETS_MAX, ALIAS_DE_DOMAINE_RANGE_OCTETS, ALIAS_DE_MACHINE_BRUT_MAX,
+    ALIAS_DE_MACHINE_OCTETS_MAX, ALIAS_DE_MACHINE_RANGE_OCTETS, AliasDeDomaine,
+    AliasDeDomaineRange, AliasDeMachine, AliasDeMachineRange, AliasNfc, DOMAINE_OCTETS, Domaine,
+    NOM_D_HOTE_OCTETS_MAX, RATTACHEMENT_OCTETS, Rattachement, SEPARATEUR_PREMIER_DOMAINE, UNICODE,
+    alias_de_compte, nom_d_hote, premier_domaine,
 };
 pub use droit::{DROIT_OCTETS, Droit, Droits};
 pub use groupe::{
@@ -183,6 +184,11 @@ pub enum Faute {
     /// Relu du disque ou reçu d'un pair, il ne se range pas : deux formes
     /// d'une même chaîne ne se trouveraient pas l'une l'autre.
     NonNormalise,
+    /// Un texte qui a la bonne longueur et les bons caractères, mais pas la
+    /// forme que sa règle exige : un alias de compte de moins de trois octets
+    /// ou qui ressemble à un identifiant, un nom de machine qui ne peut pas
+    /// servir de nom d'hôte (0.26.0).
+    Forme,
 }
 
 // ── Écrire sans ouvrir de branche ───────────────────────────────────────────
@@ -3006,6 +3012,14 @@ pub enum Operation {
         /// L'enregistrement.
         enregistrement: Rattachement,
     },
+    /// L'alias d'une machine posé ou retiré (`docs/replication.md` §5.2,
+    /// 0.26.0). Le plus récent.
+    MachineAlias {
+        /// La machine.
+        machine: Identifiant,
+        /// L'enregistrement.
+        enregistrement: AliasDeMachineRange,
+    },
     /// Un groupe créé dans un domaine (`docs/replication.md` §5.2,
     /// 2026-09-26). **Insérer si absent**, l'étiquette au plus récent. Le
     /// groupe d'administrateurs d'un domaine et le groupe personnel d'un
@@ -3080,7 +3094,8 @@ pub enum Operation {
 /// `machine-domaine` de vingt et un à vingt-quatre (2026-09-26) ; `groupe`,
 /// `groupe-etiquette`, `groupe-membre`, `groupe-membre-retire` et
 /// `groupe-supprime` de vingt-cinq à vingt-neuf (2026-09-27) ; `droit` et
-/// `droit-retire` trente et trente et un (2026-09-27).
+/// `droit-retire` trente et trente et un (2026-09-27) ; `machine-alias`
+/// trente-deux (0.26.0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenreOperation {
     /// `compte`.
@@ -3143,12 +3158,14 @@ pub enum GenreOperation {
     Droit,
     /// `droit-retire`.
     DroitRetire,
+    /// `machine-alias`.
+    MachineAlias,
 }
 
 impl GenreOperation {
-    /// Les trente, dans l'ordre de `replication.md` §5.2 — et l'ordre de
-    /// leurs étiquettes, de 1 à 14, puis 16 à 31 (voir l'en-tête du type).
-    pub const TOUS: [Self; 30] = [
+    /// Les trente et un, dans l'ordre de `replication.md` §5.2 — et l'ordre
+    /// de leurs étiquettes, de 1 à 14, puis 16 à 32 (voir l'en-tête du type).
+    pub const TOUS: [Self; 31] = [
         Self::Compte,
         Self::Alias,
         Self::Appareil,
@@ -3179,6 +3196,7 @@ impl GenreOperation {
         Self::GroupeSupprime,
         Self::Droit,
         Self::DroitRetire,
+        Self::MachineAlias,
     ];
 
     /// Son étiquette, en tête du cadre.
@@ -3215,6 +3233,7 @@ impl GenreOperation {
             Self::GroupeSupprime => 29,
             Self::Droit => 30,
             Self::DroitRetire => 31,
+            Self::MachineAlias => 32,
         }
     }
 
@@ -3256,6 +3275,7 @@ impl GenreOperation {
             29 => Self::GroupeSupprime,
             30 => Self::Droit,
             31 => Self::DroitRetire,
+            32 => Self::MachineAlias,
             lue => return Err(Faute::Etiquette { lue }),
         })
     }
@@ -3290,6 +3310,7 @@ impl GenreOperation {
             Self::Domaine => IDENTIFIANT_OCTETS + DOMAINE_OCTETS,
             Self::DomaineSupprime => IDENTIFIANT_OCTETS,
             Self::DomaineAlias => IDENTIFIANT_OCTETS + ALIAS_DE_DOMAINE_RANGE_OCTETS,
+            Self::MachineAlias => IDENTIFIANT_OCTETS + ALIAS_DE_MACHINE_RANGE_OCTETS,
             Self::MachineDomaine => IDENTIFIANT_OCTETS + RATTACHEMENT_OCTETS,
             Self::Groupe => IDENTIFIANT_OCTETS + GROUPE_OCTETS,
             Self::GroupeEtiquette => IDENTIFIANT_OCTETS + 1 + NOM_OCTETS_MAX,
@@ -3340,6 +3361,7 @@ impl Operation {
             Self::Domaine { .. } => GenreOperation::Domaine,
             Self::DomaineSupprime { .. } => GenreOperation::DomaineSupprime,
             Self::DomaineAlias { .. } => GenreOperation::DomaineAlias,
+            Self::MachineAlias { .. } => GenreOperation::MachineAlias,
             Self::MachineDomaine { .. } => GenreOperation::MachineDomaine,
             Self::Groupe { .. } => GenreOperation::Groupe,
             Self::GroupeEtiquette { .. } => GenreOperation::GroupeEtiquette,
@@ -3601,6 +3623,18 @@ impl Operation {
             } => {
                 ecrire_identifiant(*domaine, charge);
                 let mut octets = [0_u8; ALIAS_DE_DOMAINE_RANGE_OCTETS];
+                enregistrement.ecrire(&mut octets);
+                poser(
+                    charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
+                    &octets,
+                );
+            }
+            Self::MachineAlias {
+                machine,
+                enregistrement,
+            } => {
+                ecrire_identifiant(*machine, charge);
+                let mut octets = [0_u8; ALIAS_DE_MACHINE_RANGE_OCTETS];
                 enregistrement.ecrire(&mut octets);
                 poser(
                     charge.get_mut(IDENTIFIANT_OCTETS..).unwrap_or_default(),
@@ -3889,6 +3923,10 @@ impl Operation {
             GenreOperation::DomaineAlias => Self::DomaineAlias {
                 domaine: lire_identifiant(charge, Genre::Domaine)?,
                 enregistrement: AliasDeDomaineRange::lire(&copie(apres_identifiant))?,
+            },
+            GenreOperation::MachineAlias => Self::MachineAlias {
+                machine: lire_identifiant(charge, Genre::Machine)?,
+                enregistrement: AliasDeMachineRange::lire(&copie(apres_identifiant))?,
             },
             GenreOperation::MachineDomaine => Self::MachineDomaine {
                 machine: lire_identifiant(charge, Genre::Machine)?,
@@ -6189,7 +6227,7 @@ mod tests {
     // ── Les opérations ──────────────────────────────────────────────────────
 
     /// Une opération de chaque genre, dans l'ordre de `replication.md` §5.2.
-    fn une_de_chaque() -> [Operation; 30] {
+    fn une_de_chaque() -> [Operation; 31] {
         [
             Operation::Compte {
                 compte: un(Genre::Utilisateur, 1),
@@ -6347,6 +6385,14 @@ mod tests {
             Operation::DroitRetire {
                 droit: un(Genre::Autorisation, 8),
             },
+            Operation::MachineAlias {
+                machine: un(Genre::Machine, 3),
+                enregistrement: super::AliasDeMachineRange {
+                    provenance: Provenance::Ici,
+                    estampille: e(14),
+                    alias: Some(super::AliasDeMachine::nouveau("Grenier.maison.Local").unwrap()),
+                },
+            },
         ]
     }
 
@@ -6374,6 +6420,7 @@ mod tests {
                 GenreOperation::GroupeSupprime => 29,
                 GenreOperation::Droit => 30,
                 GenreOperation::DroitRetire => 31,
+                GenreOperation::MachineAlias => 32,
                 _ => rang + 1,
             };
             assert_eq!(
@@ -6467,10 +6514,10 @@ mod tests {
 
     #[test]
     fn un_genre_inconnu_est_refuse_zero_compris() {
-        // Quinze est le cadre de fin, trente-deux le premier au-delà du
-        // dernier genre (`droit-retire` tient trente et un) : aucun des deux
+        // Quinze est le cadre de fin, trente-trois le premier au-delà du
+        // dernier genre (`machine-alias` tient trente-deux) : aucun des deux
         // n'est une opération.
-        for lue in [0_u8, 15, 32, 200] {
+        for lue in [0_u8, 15, 33, 200] {
             let mut octets = [0_u8; OPERATION_OCTETS_MAX];
             octets[0] = lue;
             assert_eq!(Operation::lire(&octets), Err(Faute::Etiquette { lue }));
@@ -6652,6 +6699,7 @@ mod tests {
             Genre::Ensemble,
             Genre::Autorisation,
             Genre::Autorisation,
+            Genre::Machine,
         ]) {
             let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
             operation.ecrire(e(1), &mut sortie);
@@ -6685,7 +6733,7 @@ mod tests {
 
     #[test]
     fn les_operations_des_groupes_verifient_ce_qui_suit_le_groupe() {
-        let [.., _, etiquette, membre, retire, _, _, _] = une_de_chaque();
+        let [.., _, etiquette, membre, retire, _, _, _, _] = une_de_chaque();
         // Le compte d'une adhésion est un compte, et rien d'autre.
         for operation in [membre, retire] {
             let mut sortie = [0_u8; OPERATION_OCTETS_MAX];
@@ -6738,6 +6786,7 @@ mod tests {
                 | Operation::Autorisation { .. }
                 | Operation::Domaine { .. }
                 | Operation::DomaineAlias { .. }
+                | Operation::MachineAlias { .. }
                 | Operation::MachineDomaine { .. }
                 | Operation::Groupe { .. } => OPERATION_ENTETE_OCTETS + IDENTIFIANT_OCTETS,
                 Operation::Enrolement { .. } => OPERATION_ENTETE_OCTETS + EMPREINTE_OCTETS,

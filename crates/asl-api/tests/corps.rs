@@ -600,7 +600,7 @@ fn une_machine_de_lecture_seule_se_reecrit_sans_virgule_orpheline() {
 fn un_alias_se_lit_et_se_reecrit_a_l_identique() {
     let octets = br#"{"alias":"thierry"}"#;
     let lue = DemandeAlias::decoder(octets).expect("il se lit");
-    assert_eq!(lue.alias.as_str(), "thierry");
+    assert_eq!(lue.alias, "thierry");
 
     let mut sortie = [0_u8; CORPS_MAX];
     let combien = lue.encoder(&mut sortie).expect("il se réécrit");
@@ -608,38 +608,28 @@ fn un_alias_se_lit_et_se_reecrit_a_l_identique() {
 }
 
 #[test]
-fn un_alias_reste_une_cle_et_refuse_ce_qu_un_nom_accepte() {
-    // **LA DIFFÉRENCE AVEC LE NOM D'UNE MACHINE EST TOUT LE PROPOS.** Un alias
-    // se CHERCHE : deux écritures d'une même valeur feraient croire à deux
-    // comptes qu'ils la possèdent chacun. Le non-ASCII y est donc refusé, là où
-    // un nom d'affichage l'accepte.
-    for texte in [
-        "Thérèse",
-        "屋根裏",
-        "THIERRY",
-        "ab",
-        "a".repeat(33).as_str(),
-    ] {
+fn un_alias_est_du_texte_libre_que_le_registre_normalisera() {
+    // **Décision 46 (0.26.0)** : l'alias de compte est de l'UTF-8 sensible à
+    // la casse. Ce cadrage ne fait que le lire brut ; sa forme — NFC, trois
+    // à trente-deux octets, pas un `u-…` — est vérifiée par `asl-registre`.
+    for texte in ["Thérèse", "屋根裏", "THIERRY", "ab"] {
         let corps = format!(r#"{{"alias":"{texte}"}}"#);
-        assert!(
-            DemandeAlias::decoder(corps.as_bytes()).is_err(),
-            "{texte:?} devrait être refusé"
+        assert_eq!(
+            DemandeAlias::decoder(corps.as_bytes()).map(|lue| lue.alias),
+            Ok(texte),
+            "{texte:?}"
         );
     }
-}
-
-#[test]
-fn un_alias_qui_ressemble_a_un_identifiant_est_refuse() {
-    // Sinon `GET /v1/alias/{alias}` et `GET /v1/utilisateurs/{u}` se
-    // confondraient à l'œil, et l'alias servirait à imiter un identifiant.
-    let corps = format!(
-        r#"{{"alias":"{}"}}"#,
-        un(Genre::Utilisateur).texte().as_str().to_lowercase()
-    );
+    // Le texte brut a sa borne, et le vide est refusé ici.
+    let long = format!(r#"{{"alias":"{}"}}"#, "a".repeat(256));
     assert!(matches!(
-        DemandeAlias::decoder(corps.as_bytes()),
-        Err(Erreur::IdentifiantInvalide { .. })
+        DemandeAlias::decoder(long.as_bytes()),
+        Err(Erreur::NomTropLong { obtenue: 256 })
     ));
+    assert_eq!(
+        DemandeAlias::decoder(br#"{"alias":""}"#),
+        Err(Erreur::NomVide)
+    );
 }
 
 #[test]
@@ -1526,6 +1516,7 @@ fn une_machine_rendue(nom: &str, capacites: Capacites, enrolee: bool) -> Machine
     MachineRendue {
         machine: Identifiant::depuis_entropie(Genre::Machine, [0x44; 16]),
         nom,
+        alias: None,
         capacites,
         enrolee,
     }
@@ -1563,6 +1554,77 @@ fn une_machine_rendue_fait_l_aller_et_le_retour() {
                 assert_eq!(encoder_machine(&apres), octets, "écriture non canonique");
             }
         }
+    }
+}
+
+#[test]
+fn l_alias_d_une_machine_se_rend_quand_il_existe_et_se_relit() {
+    // 0.26.0 : un champ de plus, absent quand la machine n'en a pas — un
+    // lecteur d'hier lit donc toujours l'objet d'hier.
+    let sans = une_machine_rendue("grenier", Capacites::default(), true);
+    let octets = encoder_machine(&sans);
+    assert!(!core::str::from_utf8(&octets).unwrap().contains("alias"));
+    let avec = MachineRendue {
+        alias: Some("Le Grenier — NAS.maison"),
+        ..sans
+    };
+    let octets = encoder_machine(&avec);
+    let texte = core::str::from_utf8(&octets).unwrap();
+    assert!(
+        texte.contains(r#","nom":"grenier","alias":"Le Grenier — NAS.maison","capacites""#),
+        "{texte}"
+    );
+    assert_eq!(MachineRendue::decoder(&octets), Ok(avec));
+
+    let vue = MachineVue {
+        alias: Some("Salon"),
+        ..une_machine_vue("nas")
+    };
+    let octets = encoder_vue(&vue);
+    assert!(
+        core::str::from_utf8(&octets)
+            .unwrap()
+            .ends_with(r#","nom":"nas","alias":"Salon"}"#)
+    );
+    assert_eq!(MachineVue::decoder(&octets), Ok(vue));
+    // Un alias vide, ou plus long qu'un nom complet, ne se relit pas.
+    let m = Identifiant::depuis_entropie(Genre::Machine, [0x66; 16]);
+    let vide = format!(
+        r#"{{"machine":"{}","nom":"n","alias":""}}"#,
+        m.texte().as_str()
+    );
+    assert_eq!(MachineVue::decoder(vide.as_bytes()), Err(Erreur::NomVide));
+    let long = format!(
+        r#"{{"machine":"{}","nom":"n","alias":"{}"}}"#,
+        m.texte().as_str(),
+        "a".repeat(254)
+    );
+    assert_eq!(
+        MachineVue::decoder(long.as_bytes()),
+        Err(Erreur::NomTropLong { obtenue: 254 })
+    );
+    // Deux fois le même champ : refusé, dans les deux objets.
+    let deux_fois = format!(
+        r#"{{"machine":"{}","nom":"n","alias":"a","alias":"b"}}"#,
+        m.texte().as_str()
+    );
+    assert!(MachineVue::decoder(deux_fois.as_bytes()).is_err());
+    let rendue_deux_fois = format!(
+        r#"{{"machine":"{}","nom":"n","alias":"a","alias":"b","capacites":[],"cle":"attendue"}}"#,
+        m.texte().as_str()
+    );
+    assert!(MachineRendue::decoder(rendue_deux_fois.as_bytes()).is_err());
+    // Un alias rendu vide, ou qui porte un échappement : refusé aussi dans
+    // l'objet du propriétaire.
+    for alias in ["", "a\\\"b"] {
+        let rendue = format!(
+            r#"{{"machine":"{}","nom":"n","alias":"{alias}","capacites":[],"cle":"attendue"}}"#,
+            m.texte().as_str()
+        );
+        assert!(
+            MachineRendue::decoder(rendue.as_bytes()).is_err(),
+            "{rendue}"
+        );
     }
 }
 
@@ -1791,6 +1853,7 @@ fn une_machine_vue(nom: &str) -> MachineVue<'_> {
     MachineVue {
         machine: Identifiant::depuis_entropie(Genre::Machine, [0x66; 16]),
         nom,
+        alias: None,
     }
 }
 
@@ -2944,11 +3007,13 @@ mod domaines {
                 machine: m,
                 proprietaire: u,
                 nom: Some("grenier"),
+                alias: Some("Le grenier"),
             },
             MachineDeDomaine {
                 machine: m,
                 proprietaire: u,
                 nom: None,
+                alias: None,
             },
         ];
         let e = Identifiant::depuis_entropie(Genre::Ensemble, [5; 16]);
@@ -2985,7 +3050,7 @@ mod domaines {
         );
         assert!(
             texte.ends_with(&format!(
-                ",\"machines\":[{{\"machine\":\"{m}\",\"proprietaire\":\"{u}\",\"nom\":\"grenier\"}},\
+                ",\"machines\":[{{\"machine\":\"{m}\",\"proprietaire\":\"{u}\",\"nom\":\"grenier\",\"alias\":\"Le grenier\"}},\
                  {{\"machine\":\"{m}\",\"proprietaire\":\"{u}\"}}]}}",
                 m = m.texte().as_str(),
                 u = u.texte().as_str()

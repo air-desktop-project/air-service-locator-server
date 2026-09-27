@@ -842,7 +842,7 @@ impl Service<'_> {
                 plateforme,
                 attestation,
             } => self.attester_un_appareil(*appareil, preuve, *plateforme, attestation),
-            Besoin::CreerMachine { nom, capacites } => self.creer_une_machine(nom, *capacites),
+            Besoin::CreerMachine { nom, capacites } => self.creer_une_machine(*nom, *capacites),
             Besoin::ModifierMachine {
                 machine,
                 nom,
@@ -876,14 +876,14 @@ impl Service<'_> {
             Besoin::RevoquerAutorisation { autorisation } => {
                 self.revoquer_une_autorisation(*autorisation)
             }
-            Besoin::PoserAlias { alias } => self.poser_l_alias(Some(alias)),
+            Besoin::PoserAlias { alias } => self.poser_l_alias(Some(*alias)),
             Besoin::RetirerAlias => self.poser_l_alias(None),
             Besoin::EffacerMonCompte => self.effacer_mon_compte(),
 
             // ── LES DOMAINES (`h3/domaines.rs`) ─────────────────────────
             Besoin::MesDomaines => self.rassembler_mes_domaines(),
             Besoin::CreerDomaine { alias } => self.creer_un_domaine(*alias),
-            Besoin::ChercherDomaines { clef } => self.chercher_des_domaines(clef),
+            Besoin::ChercherDomaines { alias } => self.chercher_des_domaines(alias),
             Besoin::LireDomaine { domaine } => self.lire_un_domaine(*domaine),
             Besoin::SupprimerDomaine { domaine } => self.supprimer_un_domaine(*domaine),
             Besoin::PoserAliasDeDomaine { domaine, alias } => {
@@ -891,6 +891,9 @@ impl Service<'_> {
             }
             Besoin::RattacherMachine { machine, domaine } => {
                 self.rattacher_une_machine(*machine, *domaine)
+            }
+            Besoin::PoserAliasDeMachine { machine, alias } => {
+                self.poser_l_alias_de_machine(*machine, *alias)
             }
 
             // ── LES GROUPES (`h3/groupes.rs`) ───────────────────────────
@@ -956,7 +959,11 @@ impl Service<'_> {
                 Err(_) => Trouvaille::Rien,
             },
 
-            Besoin::CompteParAlias(alias) => match self.entrepot.compte_par_alias(alias) {
+            Besoin::CompteParAlias(alias) => match core::str::from_utf8(alias.octets())
+                .ok()
+                .map(|texte| self.entrepot.compte_par_alias(texte))
+                .unwrap_or(Ok(None))
+            {
                 Ok(Some(qui)) => match self.entrepot.compte(qui) {
                     Ok(Some(compte)) => Trouvaille::Compte {
                         qui,
@@ -1406,17 +1413,17 @@ impl Service<'_> {
     }
 
     /// Déclare une machine, et émet son premier code d'enrôlement.
-    fn creer_une_machine(&self, nom: &str, capacites: asl_api::corps::Capacites) -> Trouvaille {
+    fn creer_une_machine(
+        &self,
+        nom: asl_registre::NomRange,
+        capacites: asl_api::corps::Capacites,
+    ) -> Trouvaille {
         let (Some(compte), Some(machine)) = (
             self.compte_de_la_connexion(),
             self.un_identifiant(asl_id::Genre::Machine),
         ) else {
             return Trouvaille::Rien;
         };
-        let Ok(nom) = asl_registre::NomRange::nouveau(nom) else {
-            return Trouvaille::Rien;
-        };
-
         // **SANS CLÉ**, et c'est l'état d'une machine déclarée : la clé
         // arrivera avec le code, générée sur place.
         if self
@@ -1461,7 +1468,7 @@ impl Service<'_> {
     fn modifier_une_machine(
         &mut self,
         machine: Identifiant,
-        nom: Option<&str>,
+        nom: Option<asl_registre::NomRange>,
         capacites: Option<asl_api::corps::Capacites>,
     ) -> Trouvaille {
         let (Some(compte), Ok(Some(rangee))) = (
@@ -1478,13 +1485,6 @@ impl Service<'_> {
             return Trouvaille::Rien;
         }
 
-        let nom = match nom {
-            Some(texte) => match asl_registre::NomRange::nouveau(texte) {
-                Ok(range) => Some(range),
-                Err(_) => return Trouvaille::Rien,
-            },
-            None => None,
-        };
         let capacites = capacites.map(|demandees| asl_registre::Capacites {
             annonce: demandees.annonce,
             lecture: demandees.lecture,
@@ -1704,9 +1704,11 @@ impl Service<'_> {
             .into_iter()
             .filter_map(|(quelle, machine)| {
                 let nom = core::str::from_utf8(machine.nom.octets()).ok()?;
+                let alias = self.entrepot.alias_de_machine(quelle).ok().flatten();
                 let vue = asl_api::corps::MachineVue {
                     machine: quelle,
                     nom,
+                    alias: alias.as_ref().map(asl_registre::AliasDeMachine::texte),
                 };
                 let mut encodee = alloc_reponse();
                 let combien = vue.encoder(&mut encodee).ok()?;
@@ -2056,18 +2058,11 @@ impl Service<'_> {
     /// un alias déjà pris est refusé. Écrire un chemin à part pour le retrait
     /// aurait dédoublé cette mise d'accord — et c'est la copie qu'on oublie qui
     /// laisse un index désignant un compte qui n'a plus cet alias.
-    fn poser_l_alias(&self, alias: Option<&str>) -> Trouvaille {
+    fn poser_l_alias(&self, alias: Option<asl_registre::AliasRange>) -> Trouvaille {
         let (Some(compte),) = (self.compte_de_la_connexion(),) else {
             return Trouvaille::Rien;
         };
-        let range = match alias {
-            Some(texte) => match asl_registre::AliasRange::nouveau(texte) {
-                Ok(range) => Some(range),
-                Err(_) => return Trouvaille::Rien,
-            },
-            None => None,
-        };
-        match self.entrepot.reclamer_alias(compte, range) {
+        match self.entrepot.reclamer_alias(compte, alias) {
             Ok(true) => Trouvaille::Fait,
             Err(asl_store::Faute::AliasPris) => Trouvaille::Conflit,
             Ok(false) | Err(_) => Trouvaille::Rien,
@@ -2432,9 +2427,11 @@ impl Service<'_> {
                 // (`Lecteur::texte_libre`) ; un octet corrompu ne panique pas —
                 // la machine est simplement omise.
                 let nom = core::str::from_utf8(machine.nom.octets()).ok()?;
+                let alias = self.entrepot.alias_de_machine(quelle).ok().flatten();
                 let rendue = asl_api::corps::MachineRendue {
                     machine: quelle,
                     nom,
+                    alias: alias.as_ref().map(asl_registre::AliasDeMachine::texte),
                     capacites: asl_api::corps::Capacites {
                         annonce: machine.annonce,
                         lecture: machine.lecture,

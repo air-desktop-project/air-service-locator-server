@@ -15,9 +15,9 @@
 
 use asl_id::Identifiant;
 use asl_registre::{
-    ALIAS_DE_DOMAINE_RANGE_OCTETS, AliasDeDomaine, AliasDeDomaineRange, ClefDeRecherche,
-    DOMAINE_OCTETS, Domaine, Estampille, Operation, Provenance, RATTACHEMENT_OCTETS, Rattachement,
-    premier_domaine,
+    ALIAS_DE_DOMAINE_RANGE_OCTETS, ALIAS_DE_MACHINE_RANGE_OCTETS, AliasDeDomaine,
+    AliasDeDomaineRange, AliasDeMachine, AliasDeMachineRange, DOMAINE_OCTETS, Domaine, Estampille,
+    Operation, Provenance, RATTACHEMENT_OCTETS, Rattachement, premier_domaine,
 };
 use redb::{ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
@@ -60,6 +60,19 @@ pub(crate) const RATTACHEMENTS: TableDefinition<'_, &[u8], &[u8; RATTACHEMENT_OC
 pub(crate) const MACHINES_PAR_DOMAINE: TableDefinition<'_, &[u8], &[u8]> =
     TableDefinition::new("machines-par-domaine");
 
+/// Les alias de machine, par machine (0.26.0) : la dernière pose ou le
+/// dernier retrait. Une machine sans entrée n'a pas d'alias.
+pub(crate) const ALIAS_DE_MACHINES: TableDefinition<
+    '_,
+    &[u8],
+    &[u8; ALIAS_DE_MACHINE_RANGE_OCTETS],
+> = TableDefinition::new("alias-de-machines");
+
+/// La clé de la reprise de l'index des alias de domaine, dans la table de la
+/// racine : posée une fois, quand l'index est passé de la clé pliée à la clé
+/// exacte (0.26.0, décision 45).
+pub(crate) const CLEF_DES_ALIAS_EXACTS: &str = "alias-de-domaine-exacts";
+
 /// La clé de la reprise des premiers domaines, dans la table de la racine :
 /// posée une fois, quand chaque compte a reçu le sien.
 pub(crate) const CLEF_DES_PREMIERS_DOMAINES: &str = "premiers-domaines";
@@ -78,19 +91,19 @@ pub enum SuppressionDeDomaine {
 
 // ── Les clés ────────────────────────────────────────────────────────────────
 
-/// La clé de l'index des alias : la longueur de la clé pliée, la clé, le
-/// domaine.
-fn clef_d_alias(recherche: &ClefDeRecherche, domaine: Identifiant) -> Vec<u8> {
+/// La clé de l'index des alias : la longueur de l'alias rangé, ses octets —
+/// **exacts, sensibles à la casse** (décision 45) —, le domaine.
+fn clef_d_alias(recherche: &AliasDeDomaine, domaine: Identifiant) -> Vec<u8> {
     let mut composee = prefixe_d_alias(recherche);
     composee.extend_from_slice(&clef(domaine));
     composee
 }
 
-/// Ce par quoi commencent toutes les entrées d'une même clé pliée.
-fn prefixe_d_alias(recherche: &ClefDeRecherche) -> Vec<u8> {
+/// Ce par quoi commencent toutes les entrées d'un même alias.
+fn prefixe_d_alias(recherche: &AliasDeDomaine) -> Vec<u8> {
     let octets = recherche.octets();
     let mut prefixe = Vec::with_capacity(octets.len().saturating_add(1));
-    // Cent vingt-huit octets au plus : la longueur tient sur un octet.
+    // Soixante-quatre octets au plus : la longueur tient sur un octet.
     prefixe.push(u8::try_from(octets.len()).unwrap_or(u8::MAX));
     prefixe.extend_from_slice(octets);
     prefixe
@@ -318,6 +331,56 @@ pub(crate) fn reprendre_les_premiers_domaines(ecriture: &WriteTransaction) -> Re
     Ok(combien)
 }
 
+/// **La reprise de l'index des alias de domaine** (0.26.0, décision 45) :
+/// jusqu'à 0.25.0, l'index rangeait la clé PLIÉE ; il range désormais
+/// l'alias exact. Les alias eux-mêmes ne changent pas — ils ont toujours été
+/// rangés tels qu'ils ont été posés, en NFC, la casse gardée —, seul l'index
+/// se refait, depuis eux. Une fois, marquée dans la table de la racine ; rend
+/// combien d'entrées ont été réindexées.
+///
+/// **Rien ne voyage** : l'index est local à chaque racine, il ne se réplique
+/// pas, et chacune le refait de son côté depuis les mêmes alias. Le journal
+/// n'est pas touché.
+pub(crate) fn reindexer_les_alias_de_domaines(ecriture: &WriteTransaction) -> Result<usize, Faute> {
+    let fait = ecriture
+        .open_table(RACINE)?
+        .get(CLEF_DES_ALIAS_EXACTS)?
+        .is_some();
+    if fait {
+        return Ok(0);
+    }
+    {
+        let mut index = ecriture.open_table(DOMAINES_PAR_ALIAS)?;
+        let anciennes: Vec<Vec<u8>> = index
+            .iter()?
+            .map(|entree| entree.map(|(clef_index, _)| clef_index.value().to_vec()))
+            .collect::<Result<_, _>>()?;
+        for ancienne in &anciennes {
+            index.remove(ancienne.as_slice())?;
+        }
+    }
+    let mut poses = Vec::new();
+    for entree in ecriture.open_table(ALIAS_DE_DOMAINES)?.iter()? {
+        let (clef_domaine, valeur) = entree?;
+        if let Some(alias) = AliasDeDomaineRange::lire(valeur.value())?.alias {
+            poses.push((depuis_clef(clef_domaine.value())?, alias));
+        }
+    }
+    {
+        let mut index = ecriture.open_table(DOMAINES_PAR_ALIAS)?;
+        for (domaine, alias) in &poses {
+            index.insert(
+                clef_d_alias(alias, *domaine).as_slice(),
+                clef(*domaine).as_slice(),
+            )?;
+        }
+    }
+    ecriture
+        .open_table(RACINE)?
+        .insert(CLEF_DES_ALIAS_EXACTS, 1)?;
+    Ok(poses.len())
+}
+
 // ── L'alias ─────────────────────────────────────────────────────────────────
 
 /// L'alias posé de ce domaine, s'il y en a un rangé.
@@ -348,7 +411,7 @@ fn ranger_alias(
         .insert(clef(domaine).as_slice(), &octets)?;
     if let Some(alias) = &pose.alias {
         ecriture.open_table(DOMAINES_PAR_ALIAS)?.insert(
-            clef_d_alias(&alias.clef(), domaine).as_slice(),
+            clef_d_alias(alias, domaine).as_slice(),
             clef(domaine).as_slice(),
         )?;
     }
@@ -366,7 +429,7 @@ fn retirer_l_entree_d_alias(
     {
         ecriture
             .open_table(DOMAINES_PAR_ALIAS)?
-            .remove(clef_d_alias(&alias.clef(), domaine).as_slice())?;
+            .remove(clef_d_alias(&alias, domaine).as_slice())?;
     }
     Ok(())
 }
@@ -437,6 +500,48 @@ pub(crate) fn oublier_le_rattachement(
     }
     ecriture
         .open_table(RATTACHEMENTS)?
+        .remove(clef(machine).as_slice())?;
+    Ok(())
+}
+
+// ── L'alias d'une machine ───────────────────────────────────────────────────
+
+/// L'alias posé de cette machine, s'il y en a un rangé.
+fn alias_de_machine_dans(
+    ecriture: &WriteTransaction,
+    machine: Identifiant,
+) -> Result<Option<AliasDeMachineRange>, Faute> {
+    let table = ecriture.open_table(ALIAS_DE_MACHINES)?;
+    let lu = table.get(clef(machine).as_slice())?;
+    Ok(match lu {
+        Some(brut) => Some(AliasDeMachineRange::lire(brut.value())?),
+        None => None,
+    })
+}
+
+/// Range cet alias posé pour cette machine. Pas d'index : on ne cherche pas
+/// une machine par son alias (`docs/modele.md` §6).
+fn ranger_alias_de_machine(
+    ecriture: &WriteTransaction,
+    machine: Identifiant,
+    pose: &AliasDeMachineRange,
+) -> Result<(), Faute> {
+    let mut octets = [0_u8; ALIAS_DE_MACHINE_RANGE_OCTETS];
+    pose.ecrire(&mut octets);
+    ecriture
+        .open_table(ALIAS_DE_MACHINES)?
+        .insert(clef(machine).as_slice(), &octets)?;
+    Ok(())
+}
+
+/// Oublie l'alias de cette machine. C'est ce qu'on fait d'une machine qui
+/// part — effacée avec son compte.
+pub(crate) fn oublier_l_alias_de_machine(
+    ecriture: &WriteTransaction,
+    machine: Identifiant,
+) -> Result<(), Faute> {
+    ecriture
+        .open_table(ALIAS_DE_MACHINES)?
         .remove(clef(machine).as_slice())?;
     Ok(())
 }
@@ -597,6 +702,35 @@ pub(crate) fn appliquer_machine_domaine(
     )
 }
 
+/// `machine-alias` — le plus récent ; **ignoré pour une machine qu'on n'a
+/// pas** (effacée avec son compte), comme `machine-domaine`.
+pub(crate) fn appliquer_machine_alias(
+    ecriture: &WriteTransaction,
+    machine: Identifiant,
+    enregistrement: &AliasDeMachineRange,
+) -> Result<(), Faute> {
+    if ecriture
+        .open_table(MACHINES)?
+        .get(clef(machine).as_slice())?
+        .is_none()
+    {
+        return Ok(());
+    }
+    if alias_de_machine_dans(ecriture, machine)?
+        .is_some_and(|avant| avant.estampille >= enregistrement.estampille)
+    {
+        return Ok(());
+    }
+    ranger_alias_de_machine(
+        ecriture,
+        machine,
+        &AliasDeMachineRange {
+            provenance: Provenance::Ici,
+            ..*enregistrement
+        },
+    )
+}
+
 // ── L'instantané ────────────────────────────────────────────────────────────
 
 /// Ce que les domaines ajoutent à un instantané : **chaque domaine, puis
@@ -651,6 +785,21 @@ pub(crate) fn instantane_des_alias_et_rattachements(
             pose.estampille,
             &Operation::DomaineAlias {
                 domaine: depuis_clef(clef_domaine.value())?,
+                enregistrement: pose,
+            },
+        );
+    }
+    let alias_de_machines = lecture.open_table(ALIAS_DE_MACHINES)?;
+    for entree in alias_de_machines.iter()? {
+        let (clef_machine, valeur) = entree?;
+        let pose = AliasDeMachineRange::lire(valeur.value())?;
+        if pose.provenance != Provenance::Ici {
+            continue;
+        }
+        suite.ajouter(
+            pose.estampille,
+            &Operation::MachineAlias {
+                machine: depuis_clef(clef_machine.value())?,
                 enregistrement: pose,
             },
         );
@@ -820,14 +969,15 @@ impl Entrepot {
         Ok(true)
     }
 
-    /// Les domaines VIVANTS qui portent un alias de cette clé.
+    /// Les domaines VIVANTS qui portent exactement cet alias — en NFC, **la
+    /// casse comptant** (décision 45).
     ///
     /// # Errors
     ///
     /// [`Faute::Base`] ou [`Faute::Enregistrement`].
     pub fn domaines_par_alias(
         &self,
-        recherche: &ClefDeRecherche,
+        recherche: &AliasDeDomaine,
     ) -> Result<Vec<Identifiant>, Faute> {
         let lecture = self.base.begin_read()?;
         let par_alias = lecture.open_table(DOMAINES_PAR_ALIAS)?;
@@ -920,6 +1070,61 @@ impl Entrepot {
         )?;
         self.commettre_une_operation(ecriture, journalisee)?;
         Ok(true)
+    }
+
+    /// Pose — ou retire, avec `None` — l'alias de cette machine. Rend `false`
+    /// si la machine n'existe pas. **Les droits se jugent avant** : l'entrepôt
+    /// ne décide pas.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn poser_alias_de_machine(
+        &self,
+        machine: Identifiant,
+        alias: Option<AliasDeMachine>,
+    ) -> Result<bool, Faute> {
+        let ecriture = self.base.begin_write()?;
+        if ecriture
+            .open_table(MACHINES)?
+            .get(clef(machine).as_slice())?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let estampille = estampiller(&ecriture, self.racine)?;
+        let pose = AliasDeMachineRange {
+            provenance: Provenance::Ici,
+            estampille,
+            alias,
+        };
+        ranger_alias_de_machine(&ecriture, machine, &pose)?;
+        let journalisee = journaliser_l_operation(
+            &ecriture,
+            estampille,
+            Provenance::Ici,
+            &Operation::MachineAlias {
+                machine,
+                enregistrement: pose,
+            },
+        )?;
+        self.commettre_une_operation(ecriture, journalisee)?;
+        Ok(true)
+    }
+
+    /// L'alias de cette machine, s'il en a un.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn alias_de_machine(&self, machine: Identifiant) -> Result<Option<AliasDeMachine>, Faute> {
+        let lecture = self.base.begin_read()?;
+        let table = lecture.open_table(ALIAS_DE_MACHINES)?;
+        let lu = table.get(clef(machine).as_slice())?;
+        Ok(match lu {
+            Some(brut) => AliasDeMachineRange::lire(brut.value())?.alias,
+            None => None,
+        })
     }
 
     /// Le domaine VIVANT de cette machine, si elle en a un.
@@ -1062,5 +1267,19 @@ pub(crate) fn oublier_ce_qui_vient_de(
     for machine in &machines {
         oublier_le_rattachement(ecriture, *machine)?;
     }
-    Ok(combien.saturating_add(machines.len()))
+    combien = combien.saturating_add(machines.len());
+    let mut alias_de_machines = Vec::new();
+    for entree in ecriture.open_table(ALIAS_DE_MACHINES)?.iter()? {
+        let (clef_machine, valeur) = entree?;
+        if AliasDeMachineRange::lire(valeur.value())?
+            .provenance
+            .vient_de(annuaire)
+        {
+            alias_de_machines.push(depuis_clef(clef_machine.value())?);
+        }
+    }
+    for machine in &alias_de_machines {
+        oublier_l_alias_de_machine(ecriture, *machine)?;
+    }
+    Ok(combien.saturating_add(alias_de_machines.len()))
 }

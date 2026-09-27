@@ -102,6 +102,30 @@ qui ne l'enregistre pas n'est trouvable que par son identifiant, transmis de la
 main à la main — SMS, courriel, à voix haute. C'est le mode le plus discret, et
 il doit rester le défaut.
 
+**Sa forme, depuis 0.26.0** (`replication.md` décision 46, Thierry,
+2026-09-27) : **de l'UTF-8, sensible à la casse, rangé en NFC**, comme l'alias
+de domaine et l'alias de machine — « une machine comme un domaine, comme un
+compte dispose d'un alias : chaîne UTF-8 sensible à la casse ». Trois à
+trente-deux octets rangés, sans contrôle, forceur de sens d'écriture, marque
+d'ordre des octets, `"` ni `\`, et **un deuxième caractère qui n'est pas un
+tiret**, pour qu'il ne se confonde jamais avec un `u-…` dans le champ où l'on
+tape l'un ou l'autre. **Il reste UNIQUE** : c'est par lui qu'on retrouve
+quelqu'un. « Thierry » et « thierry » sont deux alias, que deux comptes peuvent
+tenir.
+
+~~Minuscules ASCII, chiffres, `-`, `_`, `.`~~ — la forme d'avant 0.26.0 : une
+CLÉ, et l'équivalence Unicode aurait fait qu'un même alias s'écrive de deux
+façons. **C'est le NFC qui règle désormais l'équivalence**, à l'écriture comme
+à la résolution ; les alias d'avant, tous en minuscules ASCII, sont déjà dans
+leur forme et ne changent pas.
+
+**Le coût, nommé : la ressemblance.** Unique et sensible à la casse, l'alias
+« Thierry » n'empêche plus « thierry » ; en UTF-8, il n'empêche pas non plus
+un sosie typographique (« Тhierry », dont le T est cyrillique). C'est le prix
+de l'UTF-8 pour une clé publique, et il est choisi : **l'application doit
+montrer l'identifiant `u-…` à côté de l'alias résolu**, et c'est l'identifiant
+qui fait foi. Voir §6.
+
 ### Effacer son compte — le geste, ce qui part, ce qui reste
 
 **Décidé le 2026-09-18.** Un compte s'ouvre depuis un appareil ; il se ferme
@@ -415,15 +439,41 @@ compte. Elle le prouve avec un secret, comme celle qui annonce.
 | Champ | Ce que c'est |
 |---|---|
 | `identifiant` | `m-` + 26 caractères. **Public.** |
-| `nom` | Libre, 1 à 64 **octets**. Pour l'humain, jamais pour la machine. |
+| `nom` | **Un nom d'hôte** depuis 0.26.0 (décision 47) : une étiquette RFC 1123 — lettres ASCII, chiffres, tiret, 1 à 63 octets, ni tiret en tête ni en queue —, **rangée en minuscules**. Il doit pouvoir servir de `hostname` à la machine. Les noms déclarés avant restent tels quels (voir plus bas). |
+| `alias` | **Facultatif**, depuis 0.26.0 (décision 47) : UTF-8, **sensible à la casse**, rangé en NFC, 1 à 253 octets — la longueur d'un nom de domaine complet, parce qu'il est fait pour pouvoir en servir —, aux règles de l'alias de domaine (§2.11). **Indépendant du nom et du domaine par définition** : il peut contenir tout autre chose qu'une composition « nom.domaine », et c'est voulu. **Non unique.** Posé et retiré par le propriétaire de la machine, et lui seul. |
 | `propriétaire` | Un utilisateur. **La machine le sait** : l'annuaire le lui rend à l'enrôlement et sur demande (`protocole.md` §2.0, §3), parce qu'une machine qui agit au nom d'un compte doit pouvoir dire lequel — à son exploitant comme à ses journaux. Identifiant public, comme le sien. |
 | `capacités` | `annonce`, `lecture`, ou les deux. Choisies à la déclaration, modifiables. |
 | `clé publique` | Ed25519, **ou rien**. Une machine déclarée n'en a pas encore : elle arrive à l'enrôlement, et la partie privée est générée SUR la machine et n'en sort jamais. |
 | `domaine` | Un `d-…`, **ou rien** (§2.11, 2026-09-26). Une machine est rattachée à **un seul** domaine à la fois, et seulement par son propriétaire — qui doit détenir le droit `rattacher` sur ce domaine (§2.13) ; on la déplace d'un domaine à l'autre. Les machines d'avant le domaine n'en ont pas, et n'en ont pas besoin : **le domaine n'est pas obligatoire.** |
 
-#### Le nom est le premier TEXTE LIBRE du produit, et c'est une décision
+#### Le nom : un nom d'hôte, et l'alias pour le reste (0.26.0)
 
-Il porte les accents, les idéogrammes et les émoji — tout l'UTF-8. Ailleurs, le
+**Décidé le 2026-09-27 (Thierry) : « je tiens à ce que pour une machine on
+garde un nom pouvant prétendre être utilisable comme le hostname d'une
+machine. Et je tiens à ce qu'un alias existe en plus pour permettre de se
+servir du contenu de cet alias comme un hostname FQDN : c'est volontaire que
+cet alias puisse par définition contenir tout autre chose qu'une composition
+d'une chaîne et le nom de la machine. »**
+
+- **Le nom est une étiquette RFC 1123**, rangée en minuscules : le DNS compare
+  les noms sans casse (RFC 4343), et « Grenier » et « grenier » sont le même
+  hôte. Ranger une forme, une seule, fait porter la règle à l'écriture, une
+  fois, plutôt qu'à chaque lecteur. Un nom qui ne pourrait pas servir de
+  `hostname` rend `400` à la déclaration comme au renommage.
+- **L'alias est du texte choisi**, en UTF-8 : c'est là que vont les accents,
+  les espaces, les majuscules, et un nom complet s'il le faut.
+- **Les noms déclarés avant 0.26.0 restent tels quels** (point à valider par
+  Thierry) : ils se relisent, se rendent et se répliquent sans changer — un
+  nom rangé n'est jamais revérifié à la relecture, faute de quoi une base
+  réelle cesserait de s'ouvrir. Seuls les nouveaux noms, et les renommages,
+  passent par la règle. Les dériver automatiquement (« Salle à manger » →
+  `salle-a-manger`) a été écarté : une translittération est une décision de
+  langue que l'annuaire n'a pas à prendre à la place du propriétaire.
+
+**Ce qui suit est le texte d'avant 0.26.0, gardé parce qu'il vaut désormais
+pour l'ALIAS de machine** (et pour les noms d'avant, qui restent) :
+
+~~Le nom est le premier TEXTE LIBRE du produit, et c'est une décision.~~ Il porte les accents, les idéogrammes et les émoji — tout l'UTF-8. Ailleurs, le
 cadrage refuse le non-ASCII, et pour une raison qui tient : `é` s'écrit de deux
 façons en Unicode, et **deux écritures d'une même valeur ouvrent la porte à ce
 que deux lecteurs n'en voient pas le même nombre.**
@@ -1001,7 +1051,7 @@ pas de file d'attente.
 |---|---|
 | **UTF-8 valide, 1 à 64 octets**, sans contrôle C0, DEL, C1, forceur de sens d'écriture ni marque d'ordre des octets | Les règles du nom de machine (§2.3), pour les mêmes raisons. |
 | **Rangé en forme normalisée NFC** | **Il se COMPARE**, contrairement au nom de machine : `é` s'écrit de deux façons, et deux écritures d'une même chaîne ne se trouveraient pas l'une l'autre. C'est exactement la raison que §2.3 donnait pour refuser le non-ASCII là où l'on compare — ici on l'accepte, et on normalise. |
-| **Recherche : correspondance EXACTE, après NFC et pliage de casse** | « maison » trouve « Maison ». Le pliage est le **pliage simple d'Unicode** (*simple case folding*, `CaseFolding.txt`, statuts C et S) : un caractère pour un caractère, la même table partout, sans dépendre d'une langue. Une règle locale — le `i` turc, qui ne se plie pas comme le nôtre — donnerait deux résultats à la même question selon la langue de celui qui la pose, et deux racines d'un même annuaire doivent répondre pareil. |
+| **Recherche : correspondance EXACTE, après NFC, SENSIBLE À LA CASSE** (0.26.0, décision 45) | « maison » ne trouve pas « Maison » : ce sont deux alias. ~~Pliage simple de casse d'Unicode~~ — la règle de 0.23.0 à 0.25.0, **renversée par Thierry le 2026-09-27** : un alias est une chaîne UTF-8 sensible à la casse, pour le domaine comme pour la machine et le compte. Le NFC reste : ce n'est pas une question de casse, c'est une question d'écriture. |
 | **La réponse est une LISTE** | Tous les domaines qui portent cet alias, chacun avec son `d-…` et l'annuaire `n-…` qui fait autorité sur lui. Aucun n'est « le bon » ; c'est à celui qui cherche de reconnaître le sien. |
 | **Réservée aux comptes authentifiés**, sans préfixe ni énumération | On ne trouve que ce dont on connaît déjà l'alias exact. Pas de recherche par début de chaîne, pas de liste des alias. |
 
@@ -1011,17 +1061,15 @@ de le poser : **« visible de tous les comptes »**. Ce que l'alias rend est un
 `d-…` et un `n-…` — **jamais le propriétaire, jamais une machine, jamais un
 service** : savoir qu'un domaine « Maison » existe n'ouvre aucune porte.
 
-**Ce que la normalisation coûte, nommé.** NFC et le pliage de casse demandent
-des tables Unicode, que l'étage 2 n'a pas aujourd'hui. Elles tiennent en Rust
-pur (C4) et sans entrée-sortie (C1) ; leur version doit être la même sur les
-deux racines et sur les annuaires locaux, sans quoi deux annuaires plieraient
-différemment un caractère récent. **La version d'Unicode est donc épinglée,
-comme la toolchain** (décidé le 2026-09-26, Thierry) : **Unicode 17.0.0**, fixée
-par la PR du socle (0.23.0) — le NFC d'`unicode-normalization`, épinglée à
-`=0.1.25`, et le pliage simple de `CaseFolding-17.0.0.txt`, en table engendrée
-par `scripts/plis-unicode.sh` et vérifiée à la même version par un essai.
-Chaque changement de version est une rupture qui se déploie sur les deux
-racines et les annuaires locaux ensemble.
+**Ce que la normalisation coûte, nommé.** Le NFC demande des tables Unicode,
+en Rust pur (C4) et sans entrée-sortie (C1) ; leur version doit être la même
+sur les deux racines et sur les annuaires locaux, sans quoi deux annuaires
+normaliseraient différemment un caractère récent. **La version d'Unicode est
+donc épinglée, comme la toolchain** (décidé le 2026-09-26, Thierry) : **Unicode
+17.0.0** — le NFC d'`unicode-normalization`, épinglée à `=0.1.25`. Chaque
+changement de version est une rupture qui se déploie sur les deux racines et
+les annuaires locaux ensemble. (La table de pliage de casse, engendrée par
+`scripts/plis-unicode.sh` de 0.23.0 à 0.25.0, est retirée avec la décision 45.)
 
 ### 2.12 Groupe
 
@@ -1411,6 +1459,16 @@ Un serveur qui croirait un booléen envoyé par le client ne vérifierait rien.
 ## 6. Ce qui n'est PAS décidé
 
 Nommé ici plutôt que supposé ailleurs.
+
+0. **Chercher une machine par son alias** (0.26.0). L'alias de machine est fait
+   pour pouvoir servir de nom complet, mais aucun verbe ne le résout encore :
+   qui le ferait, sous quel droit, et s'il faut un index (il n'est pas unique)
+   restent à trancher. **Les sosies d'alias de compte** (§2.1) : un alias
+   unique et sensible à la casse n'empêche ni « thierry » à côté de « Thierry »
+   ni un T cyrillique ; si cela devient un abus, une règle de confusables
+   (UTS #39) se discutera — elle coûterait une table de plus, épinglée.
+   **Les noms de machine d'avant 0.26.0** qui ne sont pas des noms d'hôte :
+   gardés tels quels (§2.3) — à valider par Thierry, ou à reprendre.
 
 1. **Les sous-comptes d'entreprise.** La v1 a un compte et plusieurs appareils
    enrôlés. Depuis le 2026-09-26, un domaine se gère à plusieurs par son groupe

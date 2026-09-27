@@ -736,14 +736,15 @@ l'empêcherait de comprendre.
 | `DELETE /v1/appareils/{a}` | Révoque. Un appareil ne peut pas se révoquer lui-même — sinon un téléphone volé et déverrouillé révoque les autres et confisque le compte. **Il est marqué, non effacé** : l'écran qu'on regarde après avoir perdu un téléphone doit montrer ce qu'on a retiré. La révocation du **dernier** appareil vivant ouvre le délai des orphelins (`modele.md` §2.1). |
 | `DELETE /v1/compte` | **Efface MON compte** — celui de la clé qui signe. Tout part dans une transaction : appareils, machines et services, autorisations dans les deux sens, alias libéré ; reste l'identifiant marqué effacé. `204`, puis l'annuaire ferme la connexion : la clé qui a demandé est révoquée. Voir ci-dessous. |
 | `POST /v1/invitations` | **Émet un code d'invitation**, sous la clé déclarée par `--operator-key`. Rend le code EN CLAIR, une fois — l'annuaire n'en garde que l'empreinte. N'existe que sous la posture `invitation` ; ailleurs, `404`. Voir ci-dessous. |
-| `POST /v1/machines` | Déclare une machine, avec son **nom** et ses **capacités** (`annonce`, `lecture`). **Rend un code d'enrôlement** — dix symboles, à usage unique, valable dix minutes. La machine n'a **pas encore de clé**. |
+| `POST /v1/machines` | Déclare une machine, avec son **nom** et ses **capacités** (`annonce`, `lecture`). **Le nom est un nom d'hôte** depuis 0.26.0 — étiquette RFC 1123, rangée en minuscules (`modele.md` §2.3) — sinon `400`. **Rend un code d'enrôlement** — dix symboles, à usage unique, valable dix minutes. La machine n'a **pas encore de clé**. |
 | `GET /v1/machines` | Les machines de MON compte : l'écran « Machines ». Chacune rend `machine`, `nom`, `capacites`, et `cle` (`enrolee` ou `attendue`). |
-| `PATCH /v1/machines/{m}` | Change le nom ou les capacités. **Ce qui est absent ne change pas** ; voir ci-dessous. |
+| `PATCH /v1/machines/{m}` | Change le nom ou les capacités. **Ce qui est absent ne change pas** ; voir ci-dessous. Un nouveau nom suit la règle du nom d'hôte. |
 | `POST /v1/machines/{m}/enrolement` | Émet un nouveau code, pour ré-enrôler une machine dont la clé a été révoquée ou perdue. **Le code précédent meurt à l'émission du suivant.** |
 | `DELETE /v1/machines/{m}/cle` | Révoque la clé. **Effet immédiat : connexions fermées, baux tombés** (voir ci-dessous). La machine reste — son nom, ses capacités, ses services ; elle perd le moyen de prouver qu'elle est elle. |
-| `PUT /v1/alias` | Enregistre ou change l'alias public. **La seule donnée que l'utilisateur nous confie.** Un alias déjà pris rend `409`, et non `403` : la demande est légitime, c'est l'état du monde qui s'y oppose. |
+| `PUT /v1/alias` | Enregistre ou change l'alias public : `{"alias":"Thierry"}`. **La seule donnée que l'utilisateur nous confie.** UTF-8, **sensible à la casse**, rangé en NFC, trois à trente-deux octets rangés, pas de tiret en deuxième caractère (`modele.md` §2.1, 0.26.0) — sinon `400`. Un alias déjà pris rend `409`, et non `403` : la demande est légitime, c'est l'état du monde qui s'y oppose. |
 | `DELETE /v1/alias` | Le retire. |
-| `GET /v1/alias/{alias}` | Rend l'identifiant, **et rien d'autre**. Public — c'est l'emploi de l'alias, et son coût (`modele.md` §2.1). |
+| `GET /v1/alias/{alias}` | Rend l'identifiant, **et rien d'autre**. Public — c'est l'emploi de l'alias, et son coût (`modele.md` §2.1). Le chemin porte un alias ASCII — lettres des deux casses, chiffres, `-`, `_`, `.` —, la forme des applications d'avant 0.26.0. |
+| `GET /v1/alias?alias=…` | **La même résolution pour un alias UTF-8** (0.26.0) : pourcent-encodé comme `GET /v1/domaines?alias=…`, rangé en NFC avant d'être cherché, **la casse comptant**. Public, comme la forme du chemin. `400` pour un alias qu'on n'aurait pas pu poser. |
 | `GET /v1/machines/{m}/services` | Les services, leurs candidats, leur état et la date de la dernière sonde. |
 | `GET /v1/vu` | **D'où l'annuaire voit cette connexion**, sans rien annoncer ni prouver. Voir ci-dessous. |
 | `GET /v1/version` | **La version de l'annuaire qui répond, et sa posture d'attestation**, `{"version": "0.2.0", "posture": "optional"}`, sans rien prouver. Voir ci-dessous. |
@@ -757,13 +758,15 @@ l'empêcherait de comprendre.
 | `DELETE /v1/expositions/{relation}` | **Retire mes enregistrements** de cette exposition. Portée : tout mon compte, ou telle machine. |
 | `POST /v1/domaines` | **Crée un domaine** à MON compte (2026-09-26, `modele.md` §2.11), alias facultatif : `{"alias":"Maison"}`. `201`, `{"domaine":"d-…"}`. Le premier est créé par `POST /v1/comptes`, dans sa transaction. |
 | `GET /v1/domaines` | **Les domaines que je possède et ceux où l'un de mes groupes tient un droit** (0.25.0 ; le propriétaire tient les quatre, le groupe d'administrateurs `["administrer","rattacher","voir"]`, le domaine racine `["administrer"]` à ses administrateurs) : `[{"domaine":"d-…","proprietaire":"u-…","alias":"Maison","heberge_par":"racines"\|"n-…","droits":["administrer","voir",…]}]` — `droits` est l'union de ce que je peux sur ce domaine (`modele.md` §2.13). Le domaine racine n'y figure que pour ses administrateurs. |
-| `GET /v1/domaines?alias=…` | **La recherche par alias** : correspondance exacte après NFC et pliage simple de casse ; `[{"domaine":"d-…","autorite":"racines"\|"n-…"}]`, **tous** ceux qui portent l'alias, et `[]` si aucun. Ni propriétaire, ni machine. Servie sur la voie appareil **et** sur la voie machine — tout compte authentifié —, jamais sans preuve. Voir ci-dessous. |
+| `GET /v1/domaines?alias=…` | **La recherche par alias** : correspondance exacte après NFC, **sensible à la casse** (0.26.0) ; `[{"domaine":"d-…","autorite":"racines"\|"n-…"}]`, **tous** ceux qui portent l'alias, et `[]` si aucun. Ni propriétaire, ni machine. Servie sur la voie appareil **et** sur la voie machine — tout compte authentifié —, jamais sans preuve. Voir ci-dessous. |
 | `GET /v1/domaines/{d}` | Le domaine, ses groupes, et les machines qui y sont rattachées — `m-…` et propriétaire ; le nom, pour mes machines **et** pour qui a `voir` sur le domaine. Qui tient un droit sur le domaine ; les autres, `404`. Les champs de `GET /v1/domaines` suivis de `"groupes":[{"groupe","domaine","etiquette"?,"sorte"}]` — **pour qui l'administre**, vide sinon — et `"machines":[…]` — **pour qui le voit** (`voir`, `localiser` ou `administrer`), vide sinon. Une machine n'y figure que si son propriétaire peut encore y ranger — il l'administre, ou tient `rattacher` (`modele.md` §2.11). Un domaine supprimé rend `404`. |
 | `PUT /v1/domaines/{d}/alias` | Pose ou change l'alias : `{"alias":"Maison"}`. `administrer`. **Jamais `409`** : l'alias de domaine n'est pas unique. `400` s'il n'est pas de l'UTF-8 admis (`modele.md` §2.11). |
 | `DELETE /v1/domaines/{d}/alias` | Le retire. |
 | ~~`PUT`/`DELETE /v1/domaines/{d}/delegues/{u}`~~ | **Retirés le 2026-09-26** : déléguer, c'est ajouter au groupe d'administrateurs (`POST /v1/groupes/{e}/membres`). |
 | `PUT /v1/machines/{m}/domaine` | **Rattache** MA machine : `{"domaine":"d-…"}` — un domaine où je tiens `rattacher` — reçu, ou emporté par `administrer` : propriétaire, groupe d'administrateurs, ou droit reçu. Une machine déjà rattachée est **déplacée**. `403` sans le droit ; `404` si la machine n'est pas à moi, ou si le domaine n'existe pas ou plus. |
 | `DELETE /v1/machines/{m}/domaine` | La détache : elle n'a plus de domaine. |
+| `PUT /v1/machines/{m}/alias` | **Pose l'alias** de MA machine (0.26.0) : `{"alias":"Le Grenier — NAS.maison"}` — UTF-8, sensible à la casse, rangé en NFC, 1 à 253 octets (`modele.md` §2.3). `204` ; `400` pour un alias qu'on ne peut pas ranger ; `404` si la machine n'est pas à moi. **Le propriétaire seul** : ranger une machine dans un domaine confie à ses administrateurs le droit de la partager (décision 40), pas de la renommer. |
+| `DELETE /v1/machines/{m}/alias` | Le retire. |
 | `DELETE /v1/domaines/{d}` | Supprime un domaine : ses machines détachées, son alias, ses groupes et les droits qui le visent retirés. **`409` si c'est mon dernier.** Propriétaire seulement ; le domaine racine ne se supprime pas. |
 | `POST /v1/annuaires` | **Déclare MON annuaire local** : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription — dix symboles, à usage unique, comme un code d'enrôlement. L'annuaire le présente aux racines avec sa clé d'identité (§3 ter) ; l'inscription est alors **en attente**. |
 | `GET /v1/annuaires` | Mes annuaires locaux et l'état de leur inscription : `attendue`, `en attente`, `acceptée`, `refusée`, `retirée`. |
@@ -1244,9 +1247,10 @@ libre, et une URL ne porte que de l'ASCII — `?alias=Maison%20%C3%A9t%C3%A9`.
 Chaque octet est `%HH` (l'une ou l'autre casse) ou un caractère ASCII
 graphique autre que `%`, `&`, `+`, `=` et `#` ; **`+` n'est pas une espace**
 — ce n'est pas un formulaire. C'est la seule chaîne de requête de l'API qui
-décode un pourcent : le chemin, lui, les refuse tous. Deux écritures du même
-alias cherchent la même clé, parce que ce qui est décodé est ensuite normalisé
-en NFC et plié. Un alias qu'on n'aurait pas pu poser rend `400`, et
+décode un pourcent — avec `GET /v1/alias?alias=…` depuis 0.26.0 : le chemin,
+lui, les refuse tous. Deux écritures du même alias cherchent la même chose,
+parce que ce qui est décodé est ensuite normalisé en NFC ; **la casse, elle,
+compte** (décision 45). Un alias qu'on n'aurait pas pu poser rend `400`, et
 `?alias=` seul aussi.
 
 **Une liste, toujours.** L'alias de domaine n'est pas unique : deux domaines
@@ -1259,7 +1263,7 @@ qu'un domaine « Maison » existe n'ouvre rien — la résolution reste gardée 
 les droits (§3, C10).
 
 **Ce qui la borne, et pourquoi c'est assez.** Correspondance **exacte**, après
-NFC et pliage simple de casse (`modele.md` §2.11) : pas de préfixe, pas de
+NFC, sensible à la casse (`modele.md` §2.11) : pas de préfixe, pas de
 joker, pas de liste de tous les alias. Et **jamais sans preuve** : la
 recherche exige une connexion authentifiée, appareil ou machine, contrairement
 à `GET /v1/alias/{alias}` qui est public. **L'alias de domaine devient ainsi la

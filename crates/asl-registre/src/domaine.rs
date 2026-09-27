@@ -19,7 +19,6 @@
 use asl_id::{Genre, Identifiant};
 use unicode_normalization::UnicodeNormalization as _;
 
-use crate::plis::PLIS;
 use crate::{
     Court, ESTAMPILLE_OCTETS, Estampille, Faute, IDENTIFIANT_OCTETS, PROVENANCE_OCTETS, Provenance,
     bourrage_nul, ecrire_identifiant, lire_identifiant, poser, poser_un,
@@ -62,57 +61,82 @@ pub fn premier_domaine(compte: Identifiant) -> Identifiant {
     Identifiant::depuis_entropie(Genre::Domaine, seize)
 }
 
-// ── L'alias de domaine ──────────────────────────────────────────────────────
+// ── Les alias : du texte UTF-8, en NFC, SENSIBLE À LA CASSE ─────────────────
 
 /// Ce qu'un alias de domaine occupe au plus, en octets UTF-8, APRÈS NFC.
 pub const ALIAS_DE_DOMAINE_OCTETS_MAX: usize = 64;
 
-/// Ce qu'une clé de recherche occupe au plus.
-///
-/// **Le pliage peut allonger** : un caractère de deux octets se plie parfois
-/// en un de trois (`Ⱥ`, U+023A, en `ⱥ`, U+2C65), jamais davantage — l'essai
-/// `un_pli_n_allonge_jamais_de_plus_d_un_octet` le tient sur toute la table.
-/// Soixante-quatre octets de caractères de deux octets donnent donc au plus
-/// quatre-vingt-seize ; cent vingt-huit laisse de la marge sans rien coûter.
-pub const CLEF_DE_RECHERCHE_OCTETS_MAX: usize = 128;
-
-/// Ce qu'un texte proposé comme alias peut faire AVANT le NFC.
+/// Ce qu'un texte proposé comme alias de domaine peut faire AVANT le NFC.
 ///
 /// La borne de soixante-quatre porte sur la forme rangée. Une forme
 /// décomposée peut être plus longue et se recomposer en dessous ; on la
 /// laisse entrer jusque-là, et c'est le résultat qui se mesure.
 pub const ALIAS_DE_DOMAINE_BRUT_MAX: usize = 255;
 
-/// La version d'Unicode du NFC et du pliage, épinglée (`docs/modele.md`
-/// §2.11, 2026-09-26).
-pub const UNICODE: (u8, u8, u8) = crate::plis::VERSION;
+/// Ce qu'un alias de machine occupe au plus, en octets UTF-8, APRÈS NFC :
+/// la longueur d'un nom de domaine complet (RFC 1035 §2.3.4, deux cent
+/// cinquante-trois caractères écrits), puisqu'il est fait pour pouvoir en
+/// servir (`docs/modele.md` §2.3, 2026-09-27).
+pub const ALIAS_DE_MACHINE_OCTETS_MAX: usize = 253;
 
-/// Un alias de domaine, **en forme normalisée NFC**, prêt à ranger.
+/// Ce qu'un texte proposé comme alias de machine peut faire AVANT le NFC.
 ///
-/// Les règles sont celles du nom de machine (`docs/modele.md` §2.3) — non
-/// vide, UTF-8, sans contrôle C0, DEL, C1, forceur de sens d'écriture ni
-/// marque d'ordre des octets —, plus deux : pas de `"` ni de `\`, que la
-/// grammaire JSON de l'API refuse déjà à l'entrée et qu'un pair ne doit pas
-/// pouvoir faire entrer par la réplication ; et la forme NFC.
+/// **Sous le corps d'une requête**, cinq cent douze octets
+/// (`asl_api::corps::CORPS_MAX`) : `{"alias": "…"}` doit y tenir.
+pub const ALIAS_DE_MACHINE_BRUT_MAX: usize = 480;
+
+/// La version d'Unicode du NFC, épinglée (`docs/modele.md` §2.11) : celle
+/// que la crate `unicode-normalization`, à version fixée, embarque.
+///
+/// **Il n'y a plus de table de pliage** (0.26.0, décision 45) : les alias
+/// sont sensibles à la casse, et seul le NFC reste à épingler.
+pub const UNICODE: (u8, u8, u8) = unicode_normalization::UNICODE_VERSION;
+
+/// Un texte UTF-8 **en forme normalisée NFC**, d'au plus `N` octets rangés,
+/// admis brut jusqu'à `BRUT` octets.
+///
+/// # UNE RÈGLE, TROIS ALIAS
+///
+/// L'alias de domaine, l'alias de machine et l'alias de compte sont trois
+/// textes différents par leur borne et par ce qu'on en fait — le premier se
+/// cherche, le deuxième sert de nom d'hôte, le troisième est unique —, et un
+/// seul par leur forme : non vide, UTF-8, NFC, **sensible à la casse**, sans
+/// contrôle C0, DEL, C1, forceur de sens d'écriture ni marque d'ordre des
+/// octets, sans `"` ni `\` que la grammaire JSON de l'API refuse et qu'un pair
+/// ne doit pas pouvoir faire entrer par la réplication. La règle vit une fois,
+/// ici.
+///
+/// # SENSIBLE À LA CASSE, ET C'EST UNE DÉCISION
+///
+/// `docs/replication.md`, décision 45 (Thierry, 2026-09-27) : « Maison » et
+/// « maison » sont deux alias. Le NFC reste — une même chaîne saisie
+/// composée ou décomposée est une seule chaîne ; ce n'est pas une question de
+/// casse, c'est une question d'écriture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AliasDeDomaine {
+pub struct AliasNfc<const N: usize, const BRUT: usize> {
     /// La forme rangée.
-    texte: Court<ALIAS_DE_DOMAINE_OCTETS_MAX>,
+    texte: Court<N>,
 }
 
-impl AliasDeDomaine {
+/// Un alias de domaine, prêt à ranger.
+pub type AliasDeDomaine = AliasNfc<ALIAS_DE_DOMAINE_OCTETS_MAX, ALIAS_DE_DOMAINE_BRUT_MAX>;
+
+/// Un alias de machine, prêt à ranger.
+pub type AliasDeMachine = AliasNfc<ALIAS_DE_MACHINE_OCTETS_MAX, ALIAS_DE_MACHINE_BRUT_MAX>;
+
+impl<const N: usize, const BRUT: usize> AliasNfc<N, BRUT> {
     /// Normalise ce texte en NFC, le vérifie, et le range.
     ///
     /// # Errors
     ///
     /// [`Faute::Vide`] s'il ne porte rien, [`Faute::NonImprimable`] sur un
     /// caractère refusé (la position est celle du caractère dans la forme
-    /// NFC, en octets), [`Faute::Longueur`] si la forme NFC dépasse
-    /// [`ALIAS_DE_DOMAINE_OCTETS_MAX`] octets — ou si le texte brut dépasse
-    /// [`ALIAS_DE_DOMAINE_BRUT_MAX`], avant même qu'on le normalise.
+    /// NFC, en octets), [`Faute::Longueur`] si la forme NFC dépasse `N`
+    /// octets — ou si le texte brut dépasse `BRUT`, avant même qu'on le
+    /// normalise.
     pub fn nouveau(texte: &str) -> Result<Self, Faute> {
-        let mut rangees = [0_u8; ALIAS_DE_DOMAINE_OCTETS_MAX];
-        let longueur = normaliser(texte, &mut rangees)?;
+        let mut rangees = [0_u8; N];
+        let longueur = normaliser(texte, BRUT, &mut rangees)?;
         Ok(Self {
             texte: Court {
                 octets: rangees,
@@ -135,25 +159,19 @@ impl AliasDeDomaine {
         core::str::from_utf8(self.octets()).unwrap_or_default()
     }
 
-    /// Sa clé de recherche : sa forme NFC, pliée.
-    #[must_use]
-    pub fn clef(&self) -> ClefDeRecherche {
-        plier(self.texte())
-    }
-
-    /// Écrit cet alias. Occupe `1 + ALIAS_DE_DOMAINE_OCTETS_MAX`.
+    /// Écrit cet alias. Occupe `1 + N`.
     fn ecrire(&self, sortie: &mut [u8]) {
         self.texte.ecrire(sortie);
     }
 
     /// Relit un alias rangé, et EXIGE sa forme canonique.
     ///
-    /// **La relecture repasse par [`AliasDeDomaine::nouveau`]** et compare :
-    /// un alias rangé qui ne serait pas son propre NFC, ou qui porterait un
+    /// **La relecture repasse par [`AliasNfc::nouveau`]** et compare : un
+    /// alias rangé qui ne serait pas son propre NFC, ou qui porterait un
     /// caractère refusé, n'est pas un alias — c'est une corruption, ou un pair
     /// qui a mal écrit.
     fn lire(octets: &[u8]) -> Result<Self, Faute> {
-        let lu = Court::<ALIAS_DE_DOMAINE_OCTETS_MAX>::lire(octets)?;
+        let lu = Court::<N>::lire(octets)?;
         let texte = core::str::from_utf8(lu.octets()).map_err(|_| Faute::NonNormalise)?;
         let refait = Self::nouveau(texte).map_err(|_| Faute::NonNormalise)?;
         if refait.octets() == lu.octets() {
@@ -164,43 +182,11 @@ impl AliasDeDomaine {
     }
 }
 
-/// Une clé de recherche d'alias : le NFC plié. C'est ce que l'index range, et
-/// ce qu'une recherche compare.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClefDeRecherche {
-    /// Les octets, dont seuls les premiers comptent.
-    octets: [u8; CLEF_DE_RECHERCHE_OCTETS_MAX],
-    /// Combien en comptent.
-    longueur: usize,
-}
-
-impl ClefDeRecherche {
-    /// La clé de ce qu'on cherche.
-    ///
-    /// **La même normalisation qu'à la pose** : ce qu'on tape passe par
-    /// [`AliasDeDomaine::nouveau`], puis se plie. Un texte qu'on n'aurait pas
-    /// pu poser ne trouve rien — et le dit, plutôt que de chercher une forme
-    /// qui ne peut pas exister.
-    ///
-    /// # Errors
-    ///
-    /// Celles d'[`AliasDeDomaine::nouveau`].
-    pub fn de(texte: &str) -> Result<Self, Faute> {
-        Ok(AliasDeDomaine::nouveau(texte)?.clef())
-    }
-
-    /// Ce qu'elle porte.
-    #[must_use]
-    pub fn octets(&self) -> &[u8] {
-        self.octets.get(..self.longueur).unwrap_or_default()
-    }
-}
-
-/// Ce caractère est-il refusé dans un alias de domaine ?
+/// Ce caractère est-il refusé dans un alias ?
 ///
-/// Les règles du nom de machine — contrôles C0 et DEL, C1, forceurs de sens
-/// d'écriture, marque d'ordre des octets —, et les deux caractères que la
-/// grammaire JSON de l'API refuse dans un texte libre.
+/// Les règles du nom de machine d'avant 0.26.0 — contrôles C0 et DEL, C1,
+/// forceurs de sens d'écriture, marque d'ordre des octets —, et les deux
+/// caractères que la grammaire JSON de l'API refuse dans un texte libre.
 const fn refuse(caractere: char) -> bool {
     matches!(
         caractere,
@@ -216,11 +202,15 @@ const fn refuse(caractere: char) -> bool {
 
 /// Met ce texte en NFC dans ce tableau, en vérifiant chaque caractère, et
 /// rend la longueur écrite.
-fn normaliser(texte: &str, sortie: &mut [u8; ALIAS_DE_DOMAINE_OCTETS_MAX]) -> Result<usize, Faute> {
-    if texte.len() > ALIAS_DE_DOMAINE_BRUT_MAX {
+fn normaliser<const N: usize>(
+    texte: &str,
+    brut_max: usize,
+    sortie: &mut [u8; N],
+) -> Result<usize, Faute> {
+    if texte.len() > brut_max {
         return Err(Faute::Longueur {
             annoncee: texte.len(),
-            maximum: ALIAS_DE_DOMAINE_BRUT_MAX,
+            maximum: brut_max,
         });
     }
     let mut longueur = 0_usize;
@@ -238,53 +228,102 @@ fn normaliser(texte: &str, sortie: &mut [u8; ALIAS_DE_DOMAINE_OCTETS_MAX]) -> Re
     if longueur == 0 {
         return Err(Faute::Vide);
     }
-    if longueur > ALIAS_DE_DOMAINE_OCTETS_MAX {
+    if longueur > N {
         return Err(Faute::Longueur {
             annoncee: longueur,
-            maximum: ALIAS_DE_DOMAINE_OCTETS_MAX,
+            maximum: N,
         });
     }
     Ok(longueur)
 }
 
-/// Plie ce texte, caractère par caractère, par le pliage SIMPLE d'Unicode.
+// ── L'alias de compte ───────────────────────────────────────────────────────
+
+/// Ce qu'un alias de compte fait au moins, en octets, après NFC.
+pub const ALIAS_DE_COMPTE_OCTETS_MIN: usize = 3;
+
+/// Ce qu'un texte proposé comme alias de compte peut faire AVANT le NFC.
+pub const ALIAS_DE_COMPTE_BRUT_MAX: usize = 255;
+
+/// Normalise et vérifie un alias de compte, et le rend prêt à ranger.
 ///
-/// Un caractère pour un caractère, la même table partout, sans dépendre d'une
-/// langue : le `I` se plie en `i` ici comme à Istanbul, et deux racines qui
-/// répondent à la même question répondent pareil (`docs/modele.md` §2.11).
-fn plier(texte: &str) -> ClefDeRecherche {
-    let mut clef = ClefDeRecherche {
-        octets: [0_u8; CLEF_DE_RECHERCHE_OCTETS_MAX],
-        longueur: 0,
-    };
-    for caractere in texte.chars() {
-        let plie = plier_un(caractere);
-        let mut tampon = [0_u8; 4];
-        let encode = plie.encode_utf8(&mut tampon).as_bytes();
-        poser(
-            clef.octets.get_mut(clef.longueur..).unwrap_or_default(),
-            encode,
-        );
-        // Borné par construction : un alias fait au plus soixante-quatre
-        // octets, et le pliage allonge d'un octet au plus par caractère.
-        clef.longueur = clef
-            .longueur
-            .saturating_add(encode.len())
-            .min(CLEF_DE_RECHERCHE_OCTETS_MAX);
+/// # UNIQUE, SENSIBLE À LA CASSE, ET QU'IL NE RESSEMBLE PAS À UN `u-…`
+///
+/// `docs/modele.md` §2.1 (0.26.0, décision 46) : la forme des autres alias —
+/// UTF-8, NFC, sensible à la casse —, entre trois et trente-deux octets
+/// rangés, **et un deuxième caractère qui n'est pas un tiret** : dans les
+/// applications, un utilisateur tape soit un identifiant, soit un alias, dans
+/// le même champ, et les deux formes ne doivent pas pouvoir se confondre.
+/// **Il reste UNIQUE** : c'est par lui qu'on retrouve quelqu'un. « Thierry »
+/// et « thierry » sont deux alias, que deux comptes peuvent tenir.
+///
+/// # Errors
+///
+/// Celles d'[`AliasNfc::nouveau`], et [`Faute::Forme`] pour un alias de
+/// moins de trois octets ou dont le deuxième caractère est un tiret.
+pub fn alias_de_compte(texte: &str) -> Result<crate::AliasRange, Faute> {
+    let alias = AliasNfc::<{ crate::ALIAS_OCTETS_MAX }, ALIAS_DE_COMPTE_BRUT_MAX>::nouveau(texte)?;
+    if alias.octets().len() < ALIAS_DE_COMPTE_OCTETS_MIN
+        || alias.texte().chars().nth(1) == Some('-')
+    {
+        return Err(Faute::Forme);
     }
-    clef
+    Ok(alias.texte)
 }
 
-/// Ce en quoi ce caractère se plie — lui-même, s'il ne se plie pas.
-fn plier_un(caractere: char) -> char {
-    let code = u32::from(caractere);
-    match PLIS.binary_search_by_key(&code, |&(de, _)| de) {
-        Ok(rang) => PLIS
-            .get(rang)
-            .and_then(|&(_, vers)| char::from_u32(vers))
-            .unwrap_or(caractere),
-        Err(_) => caractere,
+// ── Le nom de machine : un nom d'hôte ───────────────────────────────────────
+
+/// Ce qu'un nom de machine fait au plus : une étiquette DNS (RFC 1123 §2.1).
+pub const NOM_D_HOTE_OCTETS_MAX: usize = 63;
+
+/// Vérifie qu'un nom de machine peut servir de nom d'hôte, et le rend en
+/// minuscules.
+///
+/// # LA RÈGLE : UNE ÉTIQUETTE RFC 1123
+///
+/// `docs/modele.md` §2.3 (0.26.0, décision 47) : lettres ASCII, chiffres et
+/// tiret, un à soixante-trois octets, ni tiret en tête ni tiret en queue.
+/// C'est ce qu'accepte `hostname`, ce qu'un résolveur accepte comme
+/// étiquette, et ce qu'on peut écrire devant un domaine sans l'encoder.
+///
+/// # RANGÉ EN MINUSCULES
+///
+/// Le DNS compare les noms sans casse (RFC 4343) : « Grenier » et
+/// « grenier » sont le même hôte. Garder la casse saisie en comparant sans
+/// elle ferait porter la règle à chaque lecteur ; **ranger une forme, une
+/// seule**, la fait porter à l'écriture, une fois. L'alias de machine, lui,
+/// garde la casse : c'est du texte choisi, pas un nom d'hôte.
+///
+/// # Errors
+///
+/// [`Faute::Vide`] pour un nom vide, [`Faute::Longueur`] au-delà de
+/// soixante-trois octets, [`Faute::Forme`] pour tout le reste.
+pub fn nom_d_hote(texte: &str) -> Result<crate::NomRange, Faute> {
+    let octets = texte.as_bytes();
+    if octets.is_empty() {
+        return Err(Faute::Vide);
     }
+    if octets.len() > NOM_D_HOTE_OCTETS_MAX {
+        return Err(Faute::Longueur {
+            annoncee: octets.len(),
+            maximum: NOM_D_HOTE_OCTETS_MAX,
+        });
+    }
+    let admis = octets
+        .iter()
+        .all(|octet| octet.is_ascii_alphanumeric() || *octet == b'-');
+    if !admis || octets.first() == Some(&b'-') || octets.last() == Some(&b'-') {
+        return Err(Faute::Forme);
+    }
+    let mut minuscules = [0_u8; crate::NOM_OCTETS_MAX];
+    for (place, octet) in minuscules.iter_mut().zip(octets) {
+        *place = octet.to_ascii_lowercase();
+    }
+    // De l'ASCII, et au plus soixante-trois octets : les deux se tiennent.
+    crate::NomRange::nouveau(
+        core::str::from_utf8(minuscules.get(..octets.len()).unwrap_or_default())
+            .unwrap_or_default(),
+    )
 }
 
 // ── Le domaine ──────────────────────────────────────────────────────────────
@@ -385,7 +424,55 @@ impl Domaine {
     }
 }
 
-// ── L'alias posé d'un domaine ───────────────────────────────────────────────
+// ── L'alias posé d'un domaine, d'une machine ────────────────────────────────
+
+/// Écrit une pose d'alias — provenance, estampille, puis l'alias ou rien —
+/// dans cette sortie, qui a la taille de l'enregistrement.
+fn ecrire_une_pose<const N: usize, const BRUT: usize>(
+    provenance: Provenance,
+    estampille: Estampille,
+    alias: Option<&AliasNfc<N, BRUT>>,
+    sortie: &mut [u8],
+) {
+    sortie.fill(0);
+    provenance.ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
+    let apres_estampille = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+    estampille.ecrire(
+        sortie
+            .get_mut(PROVENANCE_OCTETS..apres_estampille)
+            .unwrap_or_default(),
+    );
+    if let Some(alias) = alias {
+        let reste = sortie.get_mut(apres_estampille..).unwrap_or_default();
+        poser_un(reste, 1);
+        alias.ecrire(reste.get_mut(1..).unwrap_or_default());
+    }
+}
+
+/// Relit ce qu'[`ecrire_une_pose`] a écrit.
+fn lire_une_pose<const N: usize, const BRUT: usize>(
+    octets: &[u8],
+) -> Result<(Provenance, Estampille, Option<AliasNfc<N, BRUT>>), Faute> {
+    let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+    let apres_estampille = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+    let estampille = Estampille::lire(
+        octets
+            .get(PROVENANCE_OCTETS..apres_estampille)
+            .unwrap_or_default(),
+    )?;
+    let reste = octets.get(apres_estampille..).unwrap_or_default();
+    let alias = match reste.first().copied().unwrap_or(0) {
+        0 => {
+            if !bourrage_nul(reste.get(1..).unwrap_or_default()) {
+                return Err(Faute::Bourrage);
+            }
+            None
+        }
+        1 => Some(AliasNfc::lire(reste.get(1..).unwrap_or_default())?),
+        lue => return Err(Faute::Etiquette { lue }),
+    };
+    Ok((provenance, estampille, alias))
+}
 
 /// Ce qu'un alias posé occupe.
 pub const ALIAS_DE_DOMAINE_RANGE_OCTETS: usize =
@@ -410,20 +497,12 @@ pub struct AliasDeDomaineRange {
 impl AliasDeDomaineRange {
     /// Écrit cet alias posé.
     pub fn ecrire(&self, sortie: &mut [u8; ALIAS_DE_DOMAINE_RANGE_OCTETS]) {
-        sortie.fill(0);
-        self.provenance
-            .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
-        let apres_estampille = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
-        self.estampille.ecrire(
-            sortie
-                .get_mut(PROVENANCE_OCTETS..apres_estampille)
-                .unwrap_or_default(),
+        ecrire_une_pose(
+            self.provenance,
+            self.estampille,
+            self.alias.as_ref(),
+            sortie,
         );
-        if let Some(alias) = &self.alias {
-            let reste = sortie.get_mut(apres_estampille..).unwrap_or_default();
-            poser_un(reste, 1);
-            alias.ecrire(reste.get_mut(1..).unwrap_or_default());
-        }
     }
 
     /// Relit un alias posé.
@@ -433,24 +512,58 @@ impl AliasDeDomaineRange {
     /// [`Faute`] si les octets ne forment pas un alias posé, et
     /// [`Faute::NonNormalise`] si l'alias n'est pas dans sa forme canonique.
     pub fn lire(octets: &[u8; ALIAS_DE_DOMAINE_RANGE_OCTETS]) -> Result<Self, Faute> {
-        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
-        let apres_estampille = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
-        let estampille = Estampille::lire(
-            octets
-                .get(PROVENANCE_OCTETS..apres_estampille)
-                .unwrap_or_default(),
-        )?;
-        let reste = octets.get(apres_estampille..).unwrap_or_default();
-        let alias = match reste.first().copied().unwrap_or(0) {
-            0 => {
-                if !bourrage_nul(reste.get(1..).unwrap_or_default()) {
-                    return Err(Faute::Bourrage);
-                }
-                None
-            }
-            1 => Some(AliasDeDomaine::lire(reste.get(1..).unwrap_or_default())?),
-            lue => return Err(Faute::Etiquette { lue }),
-        };
+        let (provenance, estampille, alias) = lire_une_pose(octets)?;
+        Ok(Self {
+            provenance,
+            estampille,
+            alias,
+        })
+    }
+}
+
+/// Ce que l'alias posé d'une machine occupe.
+pub const ALIAS_DE_MACHINE_RANGE_OCTETS: usize =
+    PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + 1 + 1 + ALIAS_DE_MACHINE_OCTETS_MAX;
+
+/// L'alias d'une machine, ou son retrait, avec son estampille
+/// (`docs/modele.md` §2.3, 0.26.0).
+///
+/// # UN CHAMP DE LA MACHINE, RANGÉ À PART — COMME LE RATTACHEMENT
+///
+/// L'enregistrement de machine a une taille que des bases réelles portent ;
+/// l'agrandir aurait été une reprise de format pour un champ que la plupart
+/// des machines n'ont pas. **Le plus récent gagne**, comme l'alias de
+/// domaine : il n'est pas unique, il se remplace, et son retrait garde son
+/// estampille.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AliasDeMachineRange {
+    /// D'où vient cet enregistrement.
+    pub provenance: Provenance,
+    /// La dernière pose ou le dernier retrait.
+    pub estampille: Estampille,
+    /// L'alias, ou rien s'il a été retiré.
+    pub alias: Option<AliasDeMachine>,
+}
+
+impl AliasDeMachineRange {
+    /// Écrit cet alias posé.
+    pub fn ecrire(&self, sortie: &mut [u8; ALIAS_DE_MACHINE_RANGE_OCTETS]) {
+        ecrire_une_pose(
+            self.provenance,
+            self.estampille,
+            self.alias.as_ref(),
+            sortie,
+        );
+    }
+
+    /// Relit un alias posé.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas un alias posé, et
+    /// [`Faute::NonNormalise`] si l'alias n'est pas dans sa forme canonique.
+    pub fn lire(octets: &[u8; ALIAS_DE_MACHINE_RANGE_OCTETS]) -> Result<Self, Faute> {
+        let (provenance, estampille, alias) = lire_une_pose(octets)?;
         Ok(Self {
             provenance,
             estampille,
@@ -552,8 +665,9 @@ mod tests {
 
     use super::{
         ALIAS_DE_DOMAINE_BRUT_MAX, ALIAS_DE_DOMAINE_OCTETS_MAX, ALIAS_DE_DOMAINE_RANGE_OCTETS,
-        AliasDeDomaine, AliasDeDomaineRange, CLEF_DE_RECHERCHE_OCTETS_MAX, ClefDeRecherche,
-        DOMAINE_OCTETS, Domaine, PLIS, RATTACHEMENT_OCTETS, Rattachement, UNICODE, plier_un,
+        ALIAS_DE_MACHINE_BRUT_MAX, ALIAS_DE_MACHINE_OCTETS_MAX, ALIAS_DE_MACHINE_RANGE_OCTETS,
+        AliasDeDomaine, AliasDeDomaineRange, AliasDeMachine, AliasDeMachineRange, DOMAINE_OCTETS,
+        Domaine, RATTACHEMENT_OCTETS, Rattachement, UNICODE, alias_de_compte, nom_d_hote,
         premier_domaine,
     };
     use crate::{
@@ -653,64 +767,138 @@ mod tests {
     }
 
     #[test]
-    fn la_recherche_plie_la_casse_sans_dependre_d_une_langue() {
+    fn un_alias_est_sensible_a_la_casse_mais_pas_a_l_ecriture() {
+        // Décision 45 : « Maison » et « maison » sont deux alias.
         let maison = AliasDeDomaine::nouveau("Maison").unwrap();
-        assert_eq!(maison.clef().octets(), b"maison");
-        assert_eq!(ClefDeRecherche::de("MAISON").unwrap(), maison.clef());
-        assert_eq!(ClefDeRecherche::de("maison").unwrap(), maison.clef());
-        // Le signe Kelvin se plie en « k » : trois octets devenus un.
-        assert_eq!(ClefDeRecherche::de("\u{212A}").unwrap().octets(), b"k");
-        // Le « I » se plie en « i », pas en « ı » : pas de règle turque.
-        assert_eq!(ClefDeRecherche::de("I").unwrap().octets(), b"i");
-        // Un pli qui allonge : « Ⱥ » (deux octets) devient « ⱥ » (trois).
+        assert_ne!(maison, AliasDeDomaine::nouveau("maison").unwrap());
+        assert_ne!(maison, AliasDeDomaine::nouveau("MAISON").unwrap());
+        // Le « ſ » long n'est pas un « s » : aucun pli (le pliage de casse
+        // l'aurait rabattu, le NFC le laisse).
         assert_eq!(
-            ClefDeRecherche::de("\u{023A}").unwrap().octets(),
-            "\u{2C65}".as_bytes()
+            AliasDeDomaine::nouveau("\u{017F}").unwrap().octets(),
+            "\u{017F}".as_bytes()
         );
-        // Le pliage SIMPLE : « ß » reste « ß », il ne devient pas « ss ».
-        assert_eq!(ClefDeRecherche::de("ß").unwrap().octets(), "ß".as_bytes());
-        // La normalisation vient avant le pli : « É » décomposé trouve « é ».
+        // Mais le NFC reste : « É » décomposé est « É » composé.
         assert_eq!(
-            ClefDeRecherche::de("E\u{0301}").unwrap(),
-            ClefDeRecherche::de("é").unwrap()
+            AliasDeDomaine::nouveau("E\u{0301}").unwrap(),
+            AliasDeDomaine::nouveau("É").unwrap()
         );
-        // Ce qu'on n'aurait pas pu poser ne se cherche pas.
-        assert_eq!(ClefDeRecherche::de(""), Err(Faute::Vide));
     }
 
     #[test]
-    fn la_plus_longue_clef_tient_dans_son_tableau() {
-        // Trente-deux « Ⱥ » : soixante-quatre octets rangés, quatre-vingt-seize
-        // pliés.
-        let alias = AliasDeDomaine::nouveau(&"\u{023A}".repeat(32)).unwrap();
-        assert_eq!(alias.octets().len(), ALIAS_DE_DOMAINE_OCTETS_MAX);
-        let clef = alias.clef();
-        assert_eq!(clef.octets().len(), 96);
-        assert!(clef.octets().len() <= CLEF_DE_RECHERCHE_OCTETS_MAX);
-    }
-
-    #[test]
-    fn la_table_est_triee_et_n_allonge_jamais_de_plus_d_un_octet() {
-        for paire in PLIS.windows(2) {
-            assert!(paire[0].0 < paire[1].0, "{paire:?}");
-        }
-        for (de, vers) in PLIS {
-            let de = char::from_u32(de).unwrap();
-            let vers = char::from_u32(vers).unwrap();
-            assert!(vers.len_utf8() <= de.len_utf8() + 1, "{de:?} → {vers:?}");
-            assert_eq!(plier_un(de), vers);
-        }
-        // Un caractère qui ne se plie pas reste lui-même.
-        assert_eq!(plier_un('a'), 'a');
-        assert_eq!(plier_un('€'), '€');
-    }
-
-    #[test]
-    fn la_version_d_unicode_est_la_meme_des_deux_cotes() {
-        // Le NFC d'`unicode-normalization` et la table du pli : une seule
-        // version, épinglée (`docs/modele.md` §2.11).
+    fn la_version_d_unicode_est_celle_du_nfc() {
+        // Il ne reste que le NFC à épingler (`docs/modele.md` §2.11).
         assert_eq!(UNICODE, unicode_normalization::UNICODE_VERSION);
         assert_eq!(UNICODE, (17, 0, 0));
+    }
+
+    // ── L'alias de machine ──────────────────────────────────────────────────
+
+    #[test]
+    fn un_alias_de_machine_tient_un_nom_complet_et_rien_de_plus() {
+        let fqdn = "a".repeat(ALIAS_DE_MACHINE_OCTETS_MAX);
+        assert_eq!(
+            AliasDeMachine::nouveau(&fqdn).unwrap().octets().len(),
+            ALIAS_DE_MACHINE_OCTETS_MAX
+        );
+        let trop = "a".repeat(ALIAS_DE_MACHINE_OCTETS_MAX + 1);
+        assert_eq!(
+            AliasDeMachine::nouveau(&trop),
+            Err(Faute::Longueur {
+                annoncee: ALIAS_DE_MACHINE_OCTETS_MAX + 1,
+                maximum: ALIAS_DE_MACHINE_OCTETS_MAX,
+            })
+        );
+        let brut = "a".repeat(ALIAS_DE_MACHINE_BRUT_MAX + 1);
+        assert_eq!(
+            AliasDeMachine::nouveau(&brut),
+            Err(Faute::Longueur {
+                annoncee: ALIAS_DE_MACHINE_BRUT_MAX + 1,
+                maximum: ALIAS_DE_MACHINE_BRUT_MAX,
+            })
+        );
+        // Tout autre chose qu'un « nom.domaine » : c'est voulu.
+        assert!(AliasDeMachine::nouveau("Le Grenier — serveur été").is_ok());
+        assert_eq!(
+            AliasDeMachine::nouveau("a\u{0000}"),
+            Err(Faute::NonImprimable { position: 1 })
+        );
+    }
+
+    #[test]
+    fn un_alias_de_machine_pose_fait_l_aller_retour() {
+        for alias in [
+            None,
+            Some(AliasDeMachine::nouveau("Grenier.Maison").unwrap()),
+        ] {
+            let pose = AliasDeMachineRange {
+                provenance: Provenance::Annuaire(un(Genre::Annuaire, 9)),
+                estampille: e(8),
+                alias,
+            };
+            let mut octets = [0_u8; ALIAS_DE_MACHINE_RANGE_OCTETS];
+            pose.ecrire(&mut octets);
+            assert_eq!(AliasDeMachineRange::lire(&octets), Ok(pose));
+        }
+    }
+
+    // ── L'alias de compte ───────────────────────────────────────────────────
+
+    #[test]
+    fn un_alias_de_compte_est_sensible_a_la_casse_et_ne_ressemble_pas_a_un_identifiant() {
+        // Décision 46 : « Thierry » et « thierry » sont deux alias.
+        let grand = alias_de_compte("Thierry").unwrap();
+        let petit = alias_de_compte("thierry").unwrap();
+        assert_ne!(grand, petit);
+        // En NFC, et de l'UTF-8.
+        assert_eq!(
+            alias_de_compte("Ame\u{0301}lie").unwrap().octets(),
+            "Amélie".as_bytes()
+        );
+        // Trop court, ou qui ressemble à un `u-…`.
+        assert_eq!(alias_de_compte("ab"), Err(Faute::Forme));
+        assert_eq!(alias_de_compte("u-thierry"), Err(Faute::Forme));
+        assert_eq!(alias_de_compte("é-a"), Err(Faute::Forme));
+        // Trente-deux octets rangés au plus.
+        assert!(alias_de_compte(&"a".repeat(32)).is_ok());
+        assert_eq!(
+            alias_de_compte(&"a".repeat(33)),
+            Err(Faute::Longueur {
+                annoncee: 33,
+                maximum: 32,
+            })
+        );
+        assert_eq!(alias_de_compte(""), Err(Faute::Vide));
+    }
+
+    // ── Le nom de machine ───────────────────────────────────────────────────
+
+    #[test]
+    fn un_nom_de_machine_est_une_etiquette_d_hote_rangee_en_minuscules() {
+        assert_eq!(nom_d_hote("grenier").unwrap().octets(), b"grenier");
+        assert_eq!(
+            nom_d_hote("Serveur-Cave2").unwrap().octets(),
+            b"serveur-cave2"
+        );
+        assert_eq!(nom_d_hote(&"a".repeat(63)).unwrap().longueur(), 63);
+        assert_eq!(nom_d_hote(""), Err(Faute::Vide));
+        assert_eq!(
+            nom_d_hote(&"a".repeat(64)),
+            Err(Faute::Longueur {
+                annoncee: 64,
+                maximum: 63,
+            })
+        );
+        for refuse in [
+            "-grenier",
+            "grenier-",
+            "le grenier",
+            "grenier.maison",
+            "été",
+            "a_b",
+        ] {
+            assert_eq!(nom_d_hote(refuse), Err(Faute::Forme), "{refuse:?}");
+        }
     }
 
     // ── Le domaine ──────────────────────────────────────────────────────────
