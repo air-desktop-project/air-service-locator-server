@@ -475,9 +475,15 @@ fn les_bornes_et_l_alphabet_de_l_alias() {
     }
     assert_eq!(ALIAS_MIN, 3);
 
+    // Décision 46 (0.26.0) : l'alias de compte est sensible à la casse, et
+    // la forme du chemin admet les majuscules ASCII.
     assert_eq!(
-        Alias::analyser("Thierry"),
-        Err(Erreur::AliasSymboleInvalide { position: 0 })
+        Alias::analyser("Thierry").map(|a| a.as_str()),
+        Ok("Thierry")
+    );
+    assert_eq!(
+        Alias::analyser("thérèse"),
+        Err(Erreur::AliasSymboleInvalide { position: 2 })
     );
     assert_eq!(
         Alias::analyser("thi erry"),
@@ -1038,6 +1044,36 @@ fn les_chemins_des_domaines_designent_leurs_ressources() {
             .unwrap()
             .sert
     );
+    // L'alias d'une machine (0.26.0) : poser, retirer, rien d'autre.
+    for methode in [Methode::Put, Methode::Delete] {
+        let chemin = format!("/v1/machines/{m}/alias");
+        let resolu = resoudre(methode, chemin.as_bytes()).unwrap();
+        assert!(
+            matches!(resolu.ressource, Ressource::AliasMachine { machine } if machine.genre() == Genre::Machine)
+        );
+        assert!(resolu.sert);
+        assert_eq!(resolu.exigence, Exigence::Appareil);
+    }
+    assert!(
+        !resoudre(Methode::Get, format!("/v1/machines/{m}/alias").as_bytes())
+            .unwrap()
+            .sert
+    );
+    // Un alias de compte en UTF-8 se résout par la requête, publiquement ;
+    // sans requête, `/v1/alias` reste mon alias.
+    let resolution = resoudre(Methode::Get, b"/v1/alias?alias=Th%C3%A9r%C3%A8se").unwrap();
+    assert_eq!(resolution.exigence, Exigence::Aucune);
+    assert!(resolution.sert);
+    let Ressource::RechercheAlias { alias } = resolution.ressource else {
+        panic!("une résolution : {:?}", resolution.ressource);
+    };
+    let mut tampon: asl_api::domaine::TamponDAlias = [0; asl_api::domaine::ALIAS_BRUT_MAX];
+    assert_eq!(alias.decoder(&mut tampon), "Thérèse");
+    assert!(!resoudre(Methode::Put, b"/v1/alias?alias=a").unwrap().sert);
+    assert_eq!(
+        resoudre(Methode::Put, b"/v1/alias").unwrap().ressource,
+        Ressource::Alias
+    );
 
     // Un identifiant d'un autre genre n'est pas un domaine.
     assert_eq!(
@@ -1252,4 +1288,33 @@ fn les_chemins_des_droits_designent_leurs_ressources() {
             attendu: Genre::Autorisation
         })
     );
+}
+
+#[test]
+fn les_ressources_sans_preuve_et_les_flux_disent_leurs_verbes() {
+    // Chaque alternative des tables de verbes et d'exigences est prise au
+    // moins une fois (C2) : l'émission d'une invitation, le flux des poussées.
+    let invitations = resoudre(Methode::Post, b"/v1/invitations").unwrap();
+    assert_eq!(invitations.ressource, Ressource::Invitations);
+    assert_eq!(invitations.exigence, Exigence::Aucune);
+    assert!(invitations.sert);
+    assert!(!resoudre(Methode::Get, b"/v1/invitations").unwrap().sert);
+    let poussees = resoudre(Methode::Get, b"/v1/poussees").unwrap();
+    assert_eq!(poussees.ressource, Ressource::Poussees);
+    assert!(poussees.sert);
+    assert!(!resoudre(Methode::Post, b"/v1/poussees").unwrap().sert);
+    // Un identifiant de machine mal formé, une requête d'alias mal formée :
+    // la faute du chemin, jamais une autre ressource.
+    assert!(resoudre(Methode::Put, b"/v1/machines/x-1/alias").is_err());
+    for refusee in [
+        &b"/v1/alias?alias="[..],
+        &b"/v1/alias?nom=a"[..],
+        &b"/v1/alias?alias=%ZZ"[..],
+    ] {
+        assert_eq!(
+            resoudre(Methode::Get, refusee).map(|r| r.ressource),
+            Err(Erreur::RequeteInvalide),
+            "{refusee:?}"
+        );
+    }
 }

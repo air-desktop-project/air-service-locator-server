@@ -5415,35 +5415,40 @@ async fn les_domaines_se_creent_se_cherchent_rangent_des_machines_et_gardent_le_
     .await;
     assert_eq!(statut, b"400");
 
-    // ── B : LE MÊME ALIAS, EN CAPITALES ─────────────────────────────────────
+    // ── B : LE MÊME ALIAS — ÉCRIT DÉCOMPOSÉ ─────────────────────────────────
     let mut bob = connecter(&racine, adresse).await;
     let (compte_b, _, _) = creer_un_compte(&mut bob, 0, 0xB1).await;
     let (statut, rendu) = poster(
         &mut bob,
         8,
         b"/v1/domaines",
-        "{\"alias\":\"MAISON ÉTÉ\"}".as_bytes(),
+        "{\"alias\":\"Maison e\u{301}te\u{301}\"}".as_bytes(),
         b"application/json",
     )
     .await;
     assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
     let maison_b = Identifiant::analyser(&valeur_json(&rendu, "domaine")).expect("un domaine");
 
-    // La recherche les rend tous les deux — une LISTE, sans propriétaire.
+    // La recherche les rend tous les deux — une LISTE, sans propriétaire :
+    // le NFC fait des deux écritures une seule.
     let (statut, trouves) =
-        lire_json(&mut bob, 12, b"/v1/domaines?alias=maison%20%C3%A9t%C3%A9").await;
+        lire_json(&mut bob, 12, b"/v1/domaines?alias=Maison%20%C3%A9t%C3%A9").await;
     assert_eq!(statut, b"200", "{trouves}");
     assert!(
         trouves.contains(maison_a.texte().as_str()) && trouves.contains(maison_b.texte().as_str()),
         "{trouves}"
     );
+    // **La casse compte** (décision 45) : « maison été » ne trouve rien.
+    let (statut, casse) =
+        lire_json(&mut bob, 16, b"/v1/domaines?alias=maison%20%C3%A9t%C3%A9").await;
+    assert_eq!((statut.as_slice(), casse.as_str()), (&b"200"[..], "[]"));
     assert!(trouves.contains("\"autorite\":\"racines\""), "{trouves}");
     assert!(
         !trouves.contains(compte_a.texte().as_str()) && !trouves.contains("proprietaire"),
         "une recherche ne rend ni propriétaire ni machine : {trouves}"
     );
     // Rien ne porte « Maisons » : une liste vide, et `200`.
-    let (statut, vide) = lire_json(&mut bob, 16, b"/v1/domaines?alias=Maisons").await;
+    let (statut, vide) = lire_json(&mut bob, 20, b"/v1/domaines?alias=Maisons").await;
     assert_eq!((statut.as_slice(), vide.as_str()), (&b"200"[..], "[]"));
     // Sans preuve, rien.
     assert_eq!(
@@ -5514,7 +5519,7 @@ async fn les_domaines_se_creent_se_cherchent_rangent_des_machines_et_gardent_le_
     assert_eq!(
         poser_json(
             &mut bob,
-            20,
+            24,
             cible_machine.as_bytes(),
             vers_maison_b.as_bytes()
         )
@@ -5600,6 +5605,130 @@ async fn les_domaines_se_creent_se_cherchent_rangent_des_machines_et_gardent_le_
         "un compte a toujours au moins un domaine"
     );
     let _ = compte_b;
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&fichier);
+}
+
+// ── Les alias et les noms (0.26.0, décisions 45 à 47) ───────────────────────
+
+#[tokio::test]
+async fn les_alias_sont_sensibles_a_la_casse_et_le_nom_d_une_machine_est_un_nom_d_hote() {
+    let (autorite, racine, chaine, cle) = materiel("alias-et-noms");
+    let (base, fichier) = entrepot("alias-et-noms");
+    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+
+    // ── L'ALIAS DE COMPTE : UNIQUE, MAIS « Thierry » N'EST PAS « thierry » ──
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA7).await;
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, _, _) = creer_un_compte(&mut bob, 0, 0xB7).await;
+    assert_eq!(
+        poser_json(&mut alice, 8, b"/v1/alias", br#"{"alias":"Thierry"}"#).await,
+        b"204"
+    );
+    assert_eq!(
+        poser_json(&mut bob, 8, b"/v1/alias", br#"{"alias":"thierry"}"#).await,
+        b"204",
+        "une autre casse est un autre alias"
+    );
+    let (statut, qui) = lire_json(&mut bob, 12, b"/v1/alias/Thierry").await;
+    assert_eq!(statut, b"200", "{qui}");
+    assert!(qui.contains(compte_a.texte().as_str()), "{qui}");
+    let (_, qui) = lire_json(&mut bob, 16, b"/v1/alias/thierry").await;
+    assert!(qui.contains(compte_b.texte().as_str()), "{qui}");
+    // De l'UTF-8, rangé en NFC, résolu par la requête — écrit décomposé.
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            12,
+            b"/v1/alias",
+            "{\"alias\":\"Thérèse\"}".as_bytes()
+        )
+        .await,
+        b"204"
+    );
+    let (statut, qui) = lire_json(&mut bob, 20, b"/v1/alias?alias=The%CC%81re%CC%80se").await;
+    assert_eq!(statut, b"200", "{qui}");
+    assert!(qui.contains(compte_a.texte().as_str()), "{qui}");
+    let (statut, _) = lire_json(&mut bob, 24, b"/v1/alias?alias=TH%C3%89R%C3%88SE").await;
+    assert_eq!(statut, b"404", "la casse compte");
+    // Un alias qui ressemble à un `u-…` ne se pose pas.
+    assert_eq!(
+        poser_json(&mut alice, 16, b"/v1/alias", br#"{"alias":"u-thierry"}"#).await,
+        b"400"
+    );
+
+    // ── LE NOM D'UNE MACHINE : UN NOM D'HÔTE, EN MINUSCULES ─────────────────
+    let (statut, _) = poster(
+        &mut alice,
+        20,
+        b"/v1/machines",
+        "{\"nom\":\"Salle à manger\",\"capacites\":[]}".as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"400", "un nom qui ne peut pas servir de hostname");
+    let (statut, rendu) = poster(
+        &mut alice,
+        24,
+        b"/v1/machines",
+        br#"{"nom":"Grenier","capacites":[]}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let machine = Identifiant::analyser(&valeur_json(&rendu, "machine")).expect("une machine");
+    let (_, liste) = lire_json(&mut alice, 28, b"/v1/machines").await;
+    assert!(liste.contains("\"nom\":\"grenier\""), "{liste}");
+    assert!(!liste.contains("\"alias\""), "{liste}");
+
+    // ── L'ALIAS D'UNE MACHINE : TOUT AUTRE CHOSE QU'UN NOM ──────────────────
+    let cible = format!("/v1/machines/{}/alias", machine.texte().as_str());
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            32,
+            cible.as_bytes(),
+            "{\"alias\":\"Le Grenier — NAS.maison\"}".as_bytes()
+        )
+        .await,
+        b"204"
+    );
+    let (_, liste) = lire_json(&mut alice, 36, b"/v1/machines").await;
+    assert!(
+        liste.contains("\"nom\":\"grenier\",\"alias\":\"Le Grenier — NAS.maison\""),
+        "{liste}"
+    );
+    // Rangée dans un domaine, elle garde son alias dans le détail.
+    let premier = asl_registre::premier_domaine(compte_a);
+    let vers = format!("{{\"domaine\":\"{}\"}}", premier.texte().as_str());
+    let rattacher = format!("/v1/machines/{}/domaine", machine.texte().as_str());
+    assert_eq!(
+        poser_json(&mut alice, 40, rattacher.as_bytes(), vers.as_bytes()).await,
+        b"204"
+    );
+    let detail = format!("/v1/domaines/{}", premier.texte().as_str());
+    let (_, detail) = lire_json(&mut alice, 44, detail.as_bytes()).await;
+    assert!(
+        detail.contains("\"alias\":\"Le Grenier — NAS.maison\""),
+        "{detail}"
+    );
+    // La machine d'un autre : `404`. Un alias vide : `400`.
+    assert_eq!(
+        poser_json(&mut bob, 28, cible.as_bytes(), br#"{"alias":"x"}"#).await,
+        b"404"
+    );
+    assert_eq!(
+        poser_json(&mut alice, 48, cible.as_bytes(), br#"{"alias":""}"#).await,
+        b"400"
+    );
+    // Retiré : il ne se rend plus.
+    assert_eq!(retirer(&mut alice, 52, cible.as_bytes()).await, b"204");
+    let (_, liste) = lire_json(&mut alice, 56, b"/v1/machines").await;
+    assert!(!liste.contains("\"alias\""), "{liste}");
 
     let _ = dire_stop.send(());
     let _ = tache.await;

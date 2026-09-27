@@ -77,15 +77,16 @@ use libfuzzer_sys::fuzz_target;
 
 use asl_id::{Genre, Identifiant};
 use asl_registre::{
-    ADHESION_OCTETS, ALIAS_DE_DOMAINE_OCTETS_MAX, ALIAS_DE_DOMAINE_RANGE_OCTETS, ALIAS_OCTETS_MAX,
-    APPAREIL_OCTETS, AUTORISATION_OCTETS, Adhesion, AliasDeDomaine, AliasDeDomaineRange,
-    AliasRange, Appareil, Attestation, Autorisation, CADRE_DE_FIN_OCTETS, COMPTE_OCTETS, Cadre,
-    Capacites, Cause, CleLiee, ClefDeRecherche, Compte, DESCRIPTION_OCTETS, DOMAINE_OCTETS,
-    DROIT_OCTETS, Description, Domaine, Droit, ENROLEMENT_OCTETS, ENTREE_OCTETS, ETIQUETTE_DE_FIN,
-    Effacement, Enrolement, EntreeJournal, Estampille, Faute, GROUPE_OCTETS, Groupe,
-    MACHINE_OCTETS, MARQUE_DE_GROUPE_OCTETS, Machine, MarqueDeGroupe, NOM_OCTETS_MAX, NomRange,
-    OPERATION_OCTETS_MAX, Operation, Portee, Provenance, RATTACHEMENT_OCTETS, Rattachement,
-    SERVICE_OCTETS, Service, Systeme, Verdict, sans_dates,
+    ADHESION_OCTETS, ALIAS_DE_DOMAINE_OCTETS_MAX, ALIAS_DE_DOMAINE_RANGE_OCTETS,
+    ALIAS_DE_MACHINE_RANGE_OCTETS, ALIAS_OCTETS_MAX, APPAREIL_OCTETS, AUTORISATION_OCTETS,
+    Adhesion, AliasDeDomaine, AliasDeDomaineRange, AliasDeMachineRange, AliasRange, Appareil,
+    Attestation, Autorisation, CADRE_DE_FIN_OCTETS, COMPTE_OCTETS, Cadre, Capacites, Cause,
+    CleLiee, Compte, DESCRIPTION_OCTETS, DOMAINE_OCTETS, DROIT_OCTETS, Description, Domaine, Droit,
+    ENROLEMENT_OCTETS, ENTREE_OCTETS, ETIQUETTE_DE_FIN, Effacement, Enrolement, EntreeJournal,
+    Estampille, Faute, GROUPE_OCTETS, Groupe, MACHINE_OCTETS, MARQUE_DE_GROUPE_OCTETS, Machine,
+    MarqueDeGroupe, NOM_OCTETS_MAX, NomRange, OPERATION_OCTETS_MAX, Operation, Portee, Provenance,
+    RATTACHEMENT_OCTETS, Rattachement, SERVICE_OCTETS, Service, Systeme, Verdict, alias_de_compte,
+    nom_d_hote, sans_dates,
 };
 
 /// Ce qu'on soumet.
@@ -143,6 +144,8 @@ struct Entree {
     alias_de_domaine: [u8; ALIAS_DE_DOMAINE_RANGE_OCTETS],
     /// Les octets d'un rattachement.
     rattachement: [u8; RATTACHEMENT_OCTETS],
+    /// Les octets d'un alias de machine posé (0.26.0).
+    alias_de_machine: [u8; ALIAS_DE_MACHINE_RANGE_OCTETS],
     /// Un texte quelconque, pour un alias de domaine.
     texte_de_domaine: String,
     /// Les octets d'un groupe.
@@ -537,6 +540,17 @@ fuzz_target!(|entree: Entree| {
         }
         Err(faute) => nommee(faute),
     }
+    match AliasDeMachineRange::lire(&entree.alias_de_machine) {
+        Ok(pose) => {
+            let mut refait = [0_u8; ALIAS_DE_MACHINE_RANGE_OCTETS];
+            pose.ecrire(&mut refait);
+            assert_eq!(
+                refait, entree.alias_de_machine,
+                "un alias de machine relu ne se réécrit pas"
+            );
+        }
+        Err(faute) => nommee(faute),
+    }
     // ── PROPRIÉTÉ 10 : les droits ───────────────────────────────────────────
     match Droit::lire(&entree.droit) {
         Ok(droit) => {
@@ -621,11 +635,22 @@ fuzz_target!(|entree: Entree| {
         let mut octets = [0_u8; ALIAS_DE_DOMAINE_RANGE_OCTETS];
         pose.ecrire(&mut octets);
         assert_eq!(AliasDeDomaineRange::lire(&octets), Ok(pose));
-        // La clé du texte est celle de l'alias.
-        assert_eq!(
-            ClefDeRecherche::de(&entree.texte_de_domaine),
-            Ok(alias.clef())
+    }
+    // Le même texte, comme alias de compte et comme nom d'hôte (0.26.0) : ni
+    // l'un ni l'autre ne panique, et ce qu'ils rangent se range à nouveau.
+    if let Ok(alias) = alias_de_compte(&entree.texte_de_domaine) {
+        let texte = core::str::from_utf8(alias.octets()).expect("de l'UTF-8");
+        assert_eq!(alias_de_compte(texte), Ok(alias));
+        assert!(alias.longueur() >= 3 && texte.chars().nth(1) != Some('-'));
+    }
+    if let Ok(nom) = nom_d_hote(&entree.texte_de_domaine) {
+        let texte = core::str::from_utf8(nom.octets()).expect("de l'ASCII");
+        assert!(
+            texte
+                .bytes()
+                .all(|o| o.is_ascii_lowercase() || o.is_ascii_digit() || o == b'-')
         );
+        assert_eq!(nom_d_hote(texte), Ok(nom));
     }
 
     // ── PROPRIÉTÉ 5 : une opération est un cadre, et le cadre se relit ─────

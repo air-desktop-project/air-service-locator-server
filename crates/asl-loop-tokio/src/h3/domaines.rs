@@ -17,7 +17,7 @@
 //! alias, ni machine, et ne se supprime pas.
 
 use asl_id::{Genre, Identifiant};
-use asl_registre::{AliasDeDomaine, ClefDeRecherche};
+use asl_registre::{AliasDeDomaine, AliasDeMachine};
 use asl_session::Trouvaille;
 use asl_store::SuppressionDeDomaine;
 
@@ -125,13 +125,13 @@ impl Service<'_> {
     /// `GET /v1/domaines?alias=…` — tous les domaines vivants qui portent cet
     /// alias. **Une liste, toujours**, et rien d'autre que l'identifiant et
     /// l'annuaire qui fait autorité : ni propriétaire, ni machine.
-    pub(super) fn chercher_des_domaines(&self, clef: &ClefDeRecherche) -> Trouvaille {
+    pub(super) fn chercher_des_domaines(&self, alias: &AliasDeDomaine) -> Trouvaille {
         // **TOUT COMPTE AUTHENTIFIÉ** : une connexion qui a prouvé une clé
         // révoquée depuis ne cherche plus rien.
         if self.compte_de_l_une_ou_l_autre_voie().is_none() {
             return Trouvaille::Rien;
         }
-        let Ok(trouves) = self.entrepot.domaines_par_alias(clef) else {
+        let Ok(trouves) = self.entrepot.domaines_par_alias(alias) else {
             return Trouvaille::Rien;
         };
         let elements = trouves
@@ -194,7 +194,11 @@ impl Service<'_> {
                 sorte: lu.sorte.nom(),
             })
             .collect();
-        let machines: Vec<(Identifiant, asl_registre::Machine)> = if voit {
+        let machines: Vec<(
+            Identifiant,
+            asl_registre::Machine,
+            Option<asl_registre::AliasDeMachine>,
+        )> = if voit {
             self.entrepot
                 .machines_du_domaine(domaine)
                 .unwrap_or_default()
@@ -204,7 +208,8 @@ impl Service<'_> {
         .into_iter()
         .filter_map(|machine| {
             let rangee = self.entrepot.machine(machine).ok().flatten()?;
-            Some((machine, rangee))
+            let alias = self.entrepot.alias_de_machine(machine).ok().flatten();
+            Some((machine, rangee, alias))
         })
         .collect();
         // **LE NOM, POUR QUI A `voir` SUR LE DOMAINE** — ses administrateurs,
@@ -213,11 +218,14 @@ impl Service<'_> {
         // (`protocole.md` §2.2).
         let vues: Vec<asl_api::domaine::MachineDeDomaine<'_>> = machines
             .iter()
-            .map(|(machine, rangee)| asl_api::domaine::MachineDeDomaine {
-                machine: *machine,
-                proprietaire: rangee.proprietaire,
-                nom: core::str::from_utf8(rangee.nom.octets()).ok(),
-            })
+            .map(
+                |(machine, rangee, alias)| asl_api::domaine::MachineDeDomaine {
+                    machine: *machine,
+                    proprietaire: rangee.proprietaire,
+                    nom: core::str::from_utf8(rangee.nom.octets()).ok(),
+                    alias: alias.as_ref().map(asl_registre::AliasDeMachine::texte),
+                },
+            )
             .collect();
         let detaille = asl_api::domaine::DomaineDetaille {
             domaine: asl_api::domaine::DomaineRendu {
@@ -314,6 +322,33 @@ impl Service<'_> {
             }
         }
         match self.entrepot.rattacher_machine(machine, domaine) {
+            Ok(true) => Trouvaille::Fait,
+            Ok(false) | Err(_) => Trouvaille::Rien,
+        }
+    }
+
+    /// `PUT` / `DELETE /v1/machines/{m}/alias` (0.26.0).
+    ///
+    /// **Le propriétaire de la machine, et lui seul** : l'alias dit comment
+    /// on la nomme, pas où elle est rangée, et ranger une machine dans un
+    /// domaine confie à ses administrateurs le droit de la PARTAGER
+    /// (décision 40), pas de la renommer. Pour tout autre compte, `404` —
+    /// dire « elle n'est pas à vous » confirmerait qu'elle existe.
+    pub(super) fn poser_l_alias_de_machine(
+        &self,
+        machine: Identifiant,
+        alias: Option<AliasDeMachine>,
+    ) -> Trouvaille {
+        let Some(compte) = self.compte_de_la_connexion() else {
+            return Trouvaille::Rien;
+        };
+        let Ok(Some(rangee)) = self.entrepot.machine(machine) else {
+            return Trouvaille::Rien;
+        };
+        if asl_auth::decider_gestion(compte, rangee.proprietaire) == asl_auth::Decision::Refuser {
+            return Trouvaille::Rien;
+        }
+        match self.entrepot.poser_alias_de_machine(machine, alias) {
             Ok(true) => Trouvaille::Fait,
             Ok(false) | Err(_) => Trouvaille::Rien,
         }

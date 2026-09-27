@@ -19,7 +19,7 @@ encore ».
 | C10 | Rien ne se lit sans autorisation nominative | `asl-auth` : la forme de la fonction, un essai et une cible de fuzz |
 | C11 | Un annuaire n'accepte d'un pair que ce dont ce pair est l'autorité | Essai — **à écrire** |
 | C12 | La surface publique d'`asl-client` traverse une ABI C, et elle est stable | `check-abi.sh` (dépôt client) |
-| C13 | Aucune donnée personnelle hébergée, hors les alias publics choisis (compte, domaine) ; l'état vivant des services fédérés en mémoire seulement | Revue, et **le schéma d'`asl-registre`** — une colonne qui n'existe pas ne se remplit pas |
+| C13 | Aucune donnée personnelle hébergée, hors les alias publics choisis (compte, domaine, machine) ; l'état vivant des services fédérés en mémoire seulement | Revue, et **le schéma d'`asl-registre`** — une colonne qui n'existe pas ne se remplit pas |
 | C14 | Aucune authentification par secret partagé — des clés, et rien d'autre | `asl-cle`, `asl-session` (défi + liaison), une cible de fuzz, et un essai de bout en bout |
 | C15 | La pile QUIC et HTTP/3 est celle d'`air-mail-server`, jamais réécrite | `check-pile.sh` : aucune pile tierce, et la greffe épinglée sur UN commit |
 | C16 | Une seule toolchain, celle d'Air, datée | `check-toolchain.sh` |
@@ -438,6 +438,15 @@ tous les comptes ». Il est **moins** que l'alias de compte : il n'est pas
 unique, il ne se lit qu'authentifié, et il ne rend qu'un `d-…` — jamais le
 propriétaire. Comme lui, c'est un texte que quelqu'un choisit ; « Maison
 Dupont » y serait un nom, et la phrase de l'application est ce qui le rappelle.
+
+**L'alias de machine est une troisième exception choisie** (0.26.0, décision
+47), de la même nature que le nom de machine qu'il complète : facultatif, posé
+par le propriétaire de la machine, du texte UTF-8 qu'il choisit — il peut
+porter un nom de personne comme un nom de domaine complet. Il est rendu à qui
+voit déjà la machine (son propriétaire, les droits `voir` et `localiser`), et
+à personne d'autre : **aucun verbe ne le cherche**. L'application doit le dire
+au moment de le poser, comme pour l'alias de domaine : il est visible de ceux
+qui voient la machine.
 
 **Les racines apprennent l'adresse IP, le port et l'état des services
 fédérés** — ce que l'hybride de `annuaires.md` §5.3 leur épargnait. Une adresse

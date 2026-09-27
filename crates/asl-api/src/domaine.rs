@@ -7,8 +7,8 @@
 //! Un alias de domaine est du texte libre UTF-8 : il passe par
 //! [`asl_proto::cadrage::Lecteur::texte_libre`], qui refuse ce que le cadrage
 //! JSON de ce dépôt ne sait pas porter — `"`, `\`, les contrôles, les
-//! forceurs de sens d'écriture. **Sa forme NFC, sa borne de soixante-quatre
-//! octets et sa clé de recherche vivent dans `asl-registre`**, une fois : la
+//! forceurs de sens d'écriture. **Sa forme NFC et sa borne de soixante-quatre
+//! octets vivent dans `asl-registre`**, une fois : la
 //! même règle doit tenir à la pose, à la relecture et à la réplication, et
 //! une seconde copie ici finirait par diverger. Cette grammaire-ci ne borne
 //! que le texte BRUT, à [`ALIAS_BRUT_MAX`] octets, avant toute
@@ -57,11 +57,19 @@ pub const DROITS_SUR_LE_DOMAINE_RACINE: [&str; 1] = ["administrer"];
 /// Lit un alias de domaine brut : une chaîne libre, non vide, au plus
 /// [`ALIAS_BRUT_MAX`] octets.
 fn lire_un_alias<'a>(lecteur: &mut Lecteur<'a>) -> Result<&'a str, Erreur> {
+    lire_un_alias_jusqu_a(lecteur, ALIAS_BRUT_MAX)
+}
+
+/// Lit un alias brut d'au plus `brut_max` octets.
+fn lire_un_alias_jusqu_a<'a>(
+    lecteur: &mut Lecteur<'a>,
+    brut_max: usize,
+) -> Result<&'a str, Erreur> {
     let texte = lecteur.texte_libre()?;
     if texte.is_empty() {
         return Err(Erreur::NomVide);
     }
-    if texte.len() > ALIAS_BRUT_MAX {
+    if texte.len() > brut_max {
         return Err(Erreur::NomTropLong {
             obtenue: texte.len(),
         });
@@ -144,6 +152,17 @@ impl<'a> PoseDAlias<'a> {
     ///
     /// Celles du cadrage, plus [`Erreur::NomVide`] et [`Erreur::NomTropLong`].
     pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
+        Self::decoder_jusqu_a(octets, ALIAS_BRUT_MAX)
+    }
+
+    /// Décode une pose d'alias dont le texte brut fait au plus `brut_max`
+    /// octets : c'est le corps de `PUT /v1/machines/{m}/alias` aussi
+    /// (0.26.0), dont l'alias est plus long qu'un alias de domaine.
+    ///
+    /// # Erreurs
+    ///
+    /// Celles de [`PoseDAlias::decoder`].
+    pub fn decoder_jusqu_a(octets: &'a [u8], brut_max: usize) -> Result<Self, Erreur> {
         borner(octets)?;
         let mut lecteur = Lecteur::nouveau(octets);
         lecteur.attendre(b'{', "un objet")?;
@@ -152,7 +171,7 @@ impl<'a> PoseDAlias<'a> {
             return Err(Erreur::ChampInconnu { position });
         }
         lecteur.attendre(b':', "deux-points")?;
-        let alias = lire_un_alias(&mut lecteur)?;
+        let alias = lire_un_alias_jusqu_a(&mut lecteur, brut_max)?;
         lecteur.attendre(b'}', "la fin de l'objet")?;
         lecteur.fin()?;
         Ok(Self { alias })
@@ -275,6 +294,9 @@ pub struct MachineDeDomaine<'a> {
     /// Son nom, quand le demandeur a droit de le voir ; absent sinon
     /// (`protocole.md` §2.2).
     pub nom: Option<&'a str>,
+    /// Son alias, sous la même condition que le nom, et s'il en a un
+    /// (0.26.0).
+    pub alias: Option<&'a str>,
 }
 
 impl MachineDeDomaine<'_> {
@@ -289,6 +311,11 @@ impl MachineDeDomaine<'_> {
         if let Some(nom) = self.nom {
             ecrivain.pousser(b",\"nom\":\"");
             ecrivain.pousser(nom.as_bytes());
+            ecrivain.pousser(b"\"");
+        }
+        if let Some(alias) = self.alias {
+            ecrivain.pousser(b",\"alias\":\"");
+            ecrivain.pousser(alias.as_bytes());
             ecrivain.pousser(b"\"");
         }
         ecrivain.pousser(b"}");
@@ -374,10 +401,12 @@ impl DomaineTrouve {
 /// seule écriture, et un encodage en ouvrirait deux. **Un alias de domaine
 /// n'a pas le choix** — c'est de l'UTF-8 libre, « Maison été », et une URL
 /// ne porte que de l'ASCII. Il arrive donc encodé, et se décode ici, octet
-/// par octet ; ce qu'il décode est ensuite normalisé par `asl-registre`, qui
-/// rend la même clé quelle que soit l'écriture reçue. Deux écritures du même
-/// alias ne désignent donc jamais deux choses différentes : elles cherchent
-/// la même.
+/// par octet ; ce qu'il décode est ensuite normalisé en NFC par
+/// `asl-registre`, qui rend la même forme quelle que soit l'écriture reçue —
+/// **la casse, elle, compte** (0.26.0, décision 45). Il sert aussi la
+/// résolution d'un alias de compte en UTF-8 (`/v1/alias?alias=…`). Deux
+/// écritures du même alias ne désignent donc jamais deux choses différentes :
+/// elles cherchent la même.
 ///
 /// **Il garde la forme encodée, pas le décodé** : la ressource est une
 /// valeur qu'on copie, et deux cent cinquante-cinq octets de plus dans

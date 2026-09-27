@@ -88,7 +88,7 @@ use asl_api::{Exigence, Ressource};
 use asl_cle::{CleAppareil, ClePublique, Defi, LiaisonDeCanal, Signature, SignatureAppareil};
 use asl_cle::{CodeEnrolement, TexteCode};
 use asl_id::{Genre, Identifiant};
-use asl_registre::{AliasDeDomaine, AliasRange, ClefDeRecherche, Droits, NomRange};
+use asl_registre::{AliasDeDomaine, AliasDeMachine, AliasRange, Droits, NomRange};
 
 /// **CE QU'UNE GRAMMAIRE ACCEPTE, L'AUTRE DOIT POUVOIR LE RANGER.**
 ///
@@ -117,6 +117,22 @@ const _: () = assert!(
 const _: () = assert!(
     asl_api::domaine::ALIAS_BRUT_MAX == asl_registre::ALIAS_DE_DOMAINE_BRUT_MAX,
     "l'alias de domaine brut ne se normalise pas : les bornes ont divergé"
+);
+
+// L'alias de machine rendu (0.26.0) et le brut qu'on accepte : les bornes du
+// cadrage et celles du registre sont les mêmes, ou un alias rangé ne se
+// relirait pas, ou un corps accepté ne se rangerait pas.
+const _: () = assert!(
+    asl_api::corps::ALIAS_DE_MACHINE_MAX == asl_registre::ALIAS_DE_MACHINE_OCTETS_MAX,
+    "l'alias de machine rendu doit avoir la borne de l'alias rangé"
+);
+const _: () = assert!(
+    asl_api::domaine::ALIAS_BRUT_MAX == asl_registre::ALIAS_DE_COMPTE_BRUT_MAX,
+    "l'alias de compte brut ne se normalise pas : les bornes ont divergé"
+);
+const _: () = assert!(
+    asl_registre::ALIAS_DE_MACHINE_BRUT_MAX < asl_api::corps::CORPS_MAX,
+    "un alias de machine brut doit tenir dans un corps de requête"
 );
 
 /// Ce qu'un corps de requête peut faire, en octets.
@@ -215,8 +231,9 @@ pub enum Besoin<'a> {
     },
     /// Le compte de cet identifiant.
     Compte(Identifiant),
-    /// Le compte qui porte cet alias.
-    CompteParAlias(&'a str),
+    /// Le compte qui porte cet alias — en NFC, tel que `asl-registre` le
+    /// range (0.26.0, décision 46).
+    CompteParAlias(AliasRange),
     /// Ce daemon annonce un service.
     ///
     /// # LE CORPS N'EST PAS DÉCODÉ ICI, ET C'EST DÉLIBÉRÉ
@@ -420,8 +437,9 @@ pub enum Besoin<'a> {
     },
     /// Déclarer une machine, et émettre son premier code d'enrôlement.
     CreerMachine {
-        /// Le nom que l'humain lui donne.
-        nom: &'a str,
+        /// Le nom que l'humain lui donne — un nom d'hôte, rangé en
+        /// minuscules (0.26.0, décision 47).
+        nom: NomRange,
         /// Ce qu'elle aura le droit de faire.
         capacites: Capacites,
     },
@@ -439,8 +457,9 @@ pub enum Besoin<'a> {
     ModifierMachine {
         /// La machine visée.
         machine: Identifiant,
-        /// Le nouveau nom, ou `None` pour le laisser.
-        nom: Option<&'a str>,
+        /// Le nouveau nom — un nom d'hôte, en minuscules —, ou `None` pour le
+        /// laisser.
+        nom: Option<NomRange>,
         /// Les nouvelles capacités, ou `None` pour les laisser.
         capacites: Option<Capacites>,
     },
@@ -546,8 +565,8 @@ pub enum Besoin<'a> {
     },
     /// Enregistrer ou changer l'alias public du compte.
     PoserAlias {
-        /// L'alias demandé, déjà validé.
-        alias: &'a str,
+        /// L'alias demandé, en NFC, sa forme vérifiée.
+        alias: AliasRange,
     },
     /// Retirer l'alias public du compte.
     RetirerAlias,
@@ -650,8 +669,8 @@ pub enum Besoin<'a> {
     },
     /// Chercher les domaines qui portent cet alias.
     ChercherDomaines {
-        /// La clé : l'alias cherché, normalisé et plié.
-        clef: ClefDeRecherche,
+        /// L'alias cherché, en NFC — **sensible à la casse** (décision 45).
+        alias: AliasDeDomaine,
     },
     /// Lire un domaine et ce qui y est rangé.
     LireDomaine {
@@ -672,6 +691,14 @@ pub enum Besoin<'a> {
         domaine: Identifiant,
         /// L'alias, en NFC, ou rien pour le retirer.
         alias: Option<AliasDeDomaine>,
+    },
+    /// Poser — ou retirer, avec `None` — l'alias d'une machine qu'on possède
+    /// (0.26.0).
+    PoserAliasDeMachine {
+        /// La machine visée.
+        machine: Identifiant,
+        /// L'alias, en NFC, ou rien pour le retirer.
+        alias: Option<AliasDeMachine>,
     },
     /// Ranger une machine dans un domaine — ou l'en sortir, avec `None`.
     RattacherMachine {
@@ -1390,7 +1417,24 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
     }
 
     match resolu.ressource {
-        Ressource::AliasResolu { alias } => Besoin::CompteParAlias(alias.as_str()),
+        // **L'ALIAS SE RANGE EN NFC AVANT QU'ON LE CHERCHE**, sous la même
+        // règle qu'à l'écriture : deux écritures d'un même alias trouvent le
+        // même compte, et ce qu'on n'aurait pas pu poser ne se cherche pas.
+        //
+        // La forme du chemin (`asl_api::Alias`) est un sous-ensemble strict de
+        // celle d'un alias de compte : ce qui l'a passée se range toujours, et
+        // le refus n'est là que pour ne pas le supposer.
+        Ressource::AliasResolu { alias } => asl_registre::alias_de_compte(alias.as_str()).map_or(
+            Besoin::Deja(StatusCode::BAD_REQUEST),
+            Besoin::CompteParAlias,
+        ),
+        Ressource::RechercheAlias { alias } => {
+            let mut tampon = [0_u8; asl_api::domaine::ALIAS_BRUT_MAX];
+            match asl_registre::alias_de_compte(alias.decoder(&mut tampon)) {
+                Ok(alias) => Besoin::CompteParAlias(alias),
+                Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+            }
+        }
         Ressource::Utilisateur { compte } => Besoin::Compte(compte),
         Ressource::MachinesUtilisateur { compte } => Besoin::MachinesDe { compte },
         Ressource::Moi => Besoin::Moi,
@@ -1422,18 +1466,26 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         Ressource::Machines => match methode {
             asl_api::Methode::Get => Besoin::MesMachines,
             _ => match DeclarationMachine::decoder(corps) {
-                Ok(demande) => Besoin::CreerMachine {
-                    nom: demande.nom,
-                    capacites: demande.capacites,
+                // **LE NOM EST UN NOM D'HÔTE** (0.26.0, décision 47) : un
+                // nom qui ne pourrait pas servir de `hostname` rend `400`.
+                Ok(demande) => match asl_registre::nom_d_hote(demande.nom) {
+                    Ok(nom) => Besoin::CreerMachine {
+                        nom,
+                        capacites: demande.capacites,
+                    },
+                    Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
                 },
                 Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
         },
         Ressource::Machine { machine } => match ModificationMachine::decoder(corps) {
-            Ok(demande) => Besoin::ModifierMachine {
-                machine,
-                nom: demande.nom,
-                capacites: demande.capacites,
+            Ok(demande) => match demande.nom.map(asl_registre::nom_d_hote).transpose() {
+                Ok(nom) => Besoin::ModifierMachine {
+                    machine,
+                    nom,
+                    capacites: demande.capacites,
+                },
+                Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
             Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
         },
@@ -1482,8 +1534,9 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         Ressource::Alias => match methode {
             asl_api::Methode::Delete => Besoin::RetirerAlias,
             _ => match DemandeAlias::decoder(corps) {
-                Ok(demande) => Besoin::PoserAlias {
-                    alias: demande.alias.as_str(),
+                Ok(demande) => match asl_registre::alias_de_compte(demande.alias) {
+                    Ok(alias) => Besoin::PoserAlias { alias },
+                    Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
                 },
                 Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             },
@@ -1506,8 +1559,8 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         },
         Ressource::RechercheDomaines { alias } => {
             let mut tampon = [0_u8; asl_api::domaine::ALIAS_BRUT_MAX];
-            match ClefDeRecherche::de(alias.decoder(&mut tampon)) {
-                Ok(clef) => Besoin::ChercherDomaines { clef },
+            match AliasDeDomaine::nouveau(alias.decoder(&mut tampon)) {
+                Ok(alias) => Besoin::ChercherDomaines { alias },
                 Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
             }
         }
@@ -1526,6 +1579,25 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
             {
                 Some(alias) => Besoin::PoserAliasDeDomaine {
                     domaine,
+                    alias: Some(alias),
+                },
+                None => Besoin::Deja(StatusCode::BAD_REQUEST),
+            },
+        },
+        Ressource::AliasMachine { machine } => match methode {
+            asl_api::Methode::Delete => Besoin::PoserAliasDeMachine {
+                machine,
+                alias: None,
+            },
+            _ => match asl_api::domaine::PoseDAlias::decoder_jusqu_a(
+                corps,
+                asl_registre::ALIAS_DE_MACHINE_BRUT_MAX,
+            )
+            .ok()
+            .and_then(|demande| AliasDeMachine::nouveau(demande.alias).ok())
+            {
+                Some(alias) => Besoin::PoserAliasDeMachine {
+                    machine,
                     alias: Some(alias),
                 },
                 None => Besoin::Deja(StatusCode::BAD_REQUEST),
@@ -2468,6 +2540,7 @@ pub fn repondre<'o>(
         | Besoin::RetirerAlias
         | Besoin::SupprimerDomaine { .. }
         | Besoin::PoserAliasDeDomaine { .. }
+        | Besoin::PoserAliasDeMachine { .. }
         | Besoin::RattacherMachine { .. }
         | Besoin::EtiqueterGroupe { .. }
         | Besoin::SupprimerGroupe { .. }
@@ -3533,7 +3606,7 @@ mod tests {
     fn un_alias_demande_le_compte_qui_le_porte() {
         assert_eq!(
             besoin(&session(), &tete(b"GET", b"/v1/alias/thierry"), b""),
-            Besoin::CompteParAlias("thierry")
+            Besoin::CompteParAlias(asl_registre::alias_de_compte("thierry").unwrap())
         );
     }
 
@@ -3622,7 +3695,7 @@ mod tests {
         let mut sortie = [0_u8; 256];
         for besoin in [
             Besoin::Compte(un_compte(1)),
-            Besoin::CompteParAlias("personne"),
+            Besoin::CompteParAlias(asl_registre::alias_de_compte("personne").unwrap()),
         ] {
             let reponse = repondre(
                 &mut session(),
@@ -3682,7 +3755,7 @@ mod tests {
         let mut sortie = [0_u8; 512];
         let reponse = repondre(
             &mut session(),
-            &Besoin::CompteParAlias("thierry"),
+            &Besoin::CompteParAlias(asl_registre::alias_de_compte("thierry").unwrap()),
             &Trouvaille::Compte {
                 qui,
                 alias: Some(AliasRange::nouveau("thierry").expect("il tient")),
@@ -4318,7 +4391,7 @@ mod resolution {
                 br#"{"nom":"grenier","capacites":[]}"#,
             ),
             Besoin::CreerMachine {
-                nom: "grenier",
+                nom: asl_registre::NomRange::nouveau("grenier").unwrap(),
                 capacites: asl_api::corps::Capacites::default(),
             }
         );
@@ -5359,12 +5432,12 @@ mod creations {
         assert!(matches!(
             quoi,
             Besoin::CreerMachine {
-                nom: "grenier",
+                nom,
                 capacites: asl_api::corps::Capacites {
                     annonce: true,
                     lecture: false
                 }
-            }
+            } if nom.octets() == b"grenier"
         ));
 
         let machine = un(Genre::Machine, 6);
@@ -6044,7 +6117,7 @@ mod creations {
             quoi,
             Besoin::ModifierMachine {
                 machine,
-                nom: Some("grenier"),
+                nom: Some(asl_registre::NomRange::nouveau("grenier").unwrap()),
                 capacites: None,
             }
         );
@@ -6648,7 +6721,9 @@ mod retraits {
                 &tete(b"PUT", b"/v1/alias"),
                 br#"{"alias":"thierry"}"#
             ),
-            Besoin::PoserAlias { alias: "thierry" }
+            Besoin::PoserAlias {
+                alias: asl_registre::alias_de_compte("thierry").unwrap()
+            }
         );
         assert_eq!(
             besoin(&session_d_appareil(), &tete(b"DELETE", b"/v1/alias"), b""),
@@ -6658,16 +6733,138 @@ mod retraits {
 
     #[test]
     fn un_alias_mal_forme_est_refuse_avant_toute_ecriture() {
+        // Décision 46 (0.26.0) : l'UTF-8 est admis, rangé en NFC — mais la
+        // forme d'un alias de compte reste vérifiée avant toute écriture.
         assert_eq!(
             besoin(
                 &session_d_appareil(),
                 &tete(b"PUT", b"/v1/alias"),
-                // Un alias est une CLÉ : le non-ASCII y est refusé, là où le nom
-                // d'une machine l'accepte.
-                "{\"alias\":\"Th\u{e9}r\u{e8}se\"}".as_bytes()
+                "{\"alias\":\"The\u{301}re\u{300}se\"}".as_bytes()
+            ),
+            Besoin::PoserAlias {
+                alias: asl_registre::alias_de_compte("Thérèse").unwrap()
+            }
+        );
+        for corps in [
+            &br#"{"alias":"ab"}"#[..],
+            &br#"{"alias":"u-thierry"}"#[..],
+            &br#"{"alias":"a\u0000b"}"#[..],
+        ] {
+            assert_eq!(
+                besoin(&session_d_appareil(), &tete(b"PUT", b"/v1/alias"), corps),
+                Besoin::Deja(StatusCode::BAD_REQUEST),
+                "{corps:?}"
+            );
+        }
+        // Et la résolution : même règle, par le chemin ou par la requête.
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"GET", b"/v1/alias?alias=Th%C3%A9r%C3%A8se"),
+                b""
+            ),
+            Besoin::CompteParAlias(asl_registre::alias_de_compte("Thérèse").unwrap())
+        );
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"GET", b"/v1/alias?alias=ab"),
+                b""
             ),
             Besoin::Deja(StatusCode::BAD_REQUEST)
         );
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"GET", b"/v1/alias/Thierry"),
+                b""
+            ),
+            Besoin::CompteParAlias(asl_registre::alias_de_compte("Thierry").unwrap())
+        );
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"GET", b"/v1/alias/u-thierry"),
+                b""
+            ),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+        // Le nom d'une machine est un nom d'hôte (décision 47).
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"POST", b"/v1/machines"),
+                br#"{"nom":"Grenier","capacites":[]}"#
+            ),
+            Besoin::CreerMachine {
+                nom: asl_registre::NomRange::nouveau("grenier").unwrap(),
+                capacites: asl_api::corps::Capacites::default(),
+            }
+        );
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"POST", b"/v1/machines"),
+                "{\"nom\":\"serveur \u{e9}t\u{e9}\",\"capacites\":[]}".as_bytes()
+            ),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn l_alias_d_une_machine_et_un_renommage_se_decident_avant_toute_ecriture() {
+        let machine = un(Genre::Machine, 6);
+        let cible = alloc::format!("/v1/machines/{}/alias", machine.texte().as_str());
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"PUT", cible.as_bytes()),
+                "{\"alias\":\"Le Grenier e\u{301}te\u{301}\"}".as_bytes()
+            ),
+            Besoin::PoserAliasDeMachine {
+                machine,
+                alias: Some(asl_registre::AliasDeMachine::nouveau("Le Grenier été").unwrap()),
+            }
+        );
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"DELETE", cible.as_bytes()),
+                b""
+            ),
+            Besoin::PoserAliasDeMachine {
+                machine,
+                alias: None,
+            }
+        );
+        for corps in [&br#"{"alias":""}"#[..], &br#"{"nom":"x"}"#[..], &b"[]"[..]] {
+            assert_eq!(
+                besoin(
+                    &session_d_appareil(),
+                    &tete(b"PUT", cible.as_bytes()),
+                    corps
+                ),
+                Besoin::Deja(StatusCode::BAD_REQUEST),
+                "{corps:?}"
+            );
+        }
+        // Un renommage suit la règle du nom d'hôte.
+        let renommer = alloc::format!("/v1/machines/{}", machine.texte().as_str());
+        assert_eq!(
+            besoin(
+                &session_d_appareil(),
+                &tete(b"PATCH", renommer.as_bytes()),
+                br#"{"nom":"le grenier"}"#
+            ),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+        // Et la réponse : `204`, ou le `404` de ce qui n'est pas à moi.
+        let quoi = Besoin::PoserAliasDeMachine {
+            machine,
+            alias: None,
+        };
+        assert_eq!(rendre(&quoi, &Trouvaille::Fait).0, StatusCode::NO_CONTENT);
+        assert_eq!(rendre(&quoi, &Trouvaille::Rien).0, StatusCode::NOT_FOUND);
     }
 
     #[test]
@@ -6675,7 +6872,9 @@ mod retraits {
         // `403` dirait « vous n'avez pas le droit », ce qui est faux — n'importe
         // qui a le droit de demander un alias. C'est un CONFLIT : la demande est
         // légitime, et l'état du monde s'y oppose.
-        let quoi = Besoin::PoserAlias { alias: "thierry" };
+        let quoi = Besoin::PoserAlias {
+            alias: asl_registre::alias_de_compte("thierry").unwrap(),
+        };
         let (statut, corps) = rendre(&quoi, &Trouvaille::Conflit);
         assert_eq!(statut, StatusCode::CONFLICT);
         assert!(corps.windows(3).any(|f| f == b"409"), "il porte son code");
@@ -7693,7 +7892,7 @@ mod domaines {
     use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
     use asl_cle::LiaisonDeCanal;
     use asl_id::{Genre, Identifiant};
-    use asl_registre::{AliasDeDomaine, ClefDeRecherche};
+    use asl_registre::AliasDeDomaine;
 
     use super::{Besoin, Session, Trouvaille, besoin, repondre};
 
@@ -7769,7 +7968,7 @@ mod domaines {
         assert_eq!(
             lire(&appareil, b"GET", b"/v1/domaines?alias=MAISON", b""),
             Besoin::ChercherDomaines {
-                clef: ClefDeRecherche::de("maison").unwrap()
+                alias: AliasDeDomaine::nouveau("MAISON").unwrap()
             }
         );
         assert_eq!(
@@ -7855,7 +8054,7 @@ mod domaines {
         assert_eq!(
             lire(&machine, b"GET", b"/v1/domaines?alias=Maison", b""),
             Besoin::ChercherDomaines {
-                clef: ClefDeRecherche::de("maison").unwrap()
+                alias: AliasDeDomaine::nouveau("Maison").unwrap()
             }
         );
         // Mais mes domaines, eux, sont l'affaire d'un appareil.
@@ -7872,7 +8071,7 @@ mod domaines {
         for quoi in [
             Besoin::MesDomaines,
             Besoin::ChercherDomaines {
-                clef: ClefDeRecherche::de("maison").unwrap(),
+                alias: AliasDeDomaine::nouveau("maison").unwrap(),
             },
         ] {
             let (statut, corps) = rendre(&quoi, &Trouvaille::Domaines(vec![b"{}".to_vec()]));

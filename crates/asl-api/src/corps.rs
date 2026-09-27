@@ -18,7 +18,6 @@
 //! Restent ceux qui portent des NOMS et des IDENTIFIANTS. Ceux-là se débogueront
 //! avec `curl`, et JSON est ce qu'il faut pour cela.
 
-use crate::Alias;
 use asl_id::{Genre, Identifiant};
 use asl_proto::Erreur;
 use asl_proto::cadrage::Lecteur;
@@ -1091,8 +1090,12 @@ pub struct MachineRendue<'a> {
     /// L'identifiant de la machine. **C'est lui qu'on passe à
     /// `PATCH /v1/machines/{m}` ou à `DELETE /v1/machines/{m}/cle`.**
     pub machine: Identifiant,
-    /// Le nom que son propriétaire lui a donné — du texte libre.
+    /// Le nom que son propriétaire lui a donné — un nom d'hôte depuis 0.26.0,
+    /// du texte libre pour les machines déclarées avant.
     pub nom: &'a str,
+    /// Son alias, s'il en a un (0.26.0) : du texte UTF-8, sensible à la casse,
+    /// indépendant du nom et du domaine.
+    pub alias: Option<&'a str>,
     /// Ce qu'elle a le droit de faire.
     pub capacites: Capacites,
     /// A-t-elle une clé ? `true` la rend « enrolee », `false` « attendue ».
@@ -1112,7 +1115,11 @@ impl<'a> MachineRendue<'a> {
     ///
     /// ```jsonc
     /// {"machine":"m-…","nom":"grenier","capacites":["annonce"],"cle":"enrolee"}
+    /// {"machine":"m-…","nom":"grenier","alias":"Le grenier","capacites":[],"cle":"attendue"}
     /// ```
+    ///
+    /// **`alias` n'apparaît que s'il existe** : un lecteur d'avant 0.26.0 ne
+    /// le connaît pas, et un objet sans lui reste l'objet d'hier.
     ///
     /// # Erreurs
     ///
@@ -1128,6 +1135,12 @@ impl<'a> MachineRendue<'a> {
         // caractères qu'un encodeur JSON aurait à échapper. Ce cadrage n'a donc
         // pas d'échappeur, exactement comme [`DeclarationMachine::encoder`].
         ecrivain.pousser(self.nom.as_bytes());
+        if let Some(alias) = self.alias {
+            // Sans échappement, pour la même raison : l'alias est entré par
+            // `texte_libre`, et `asl-registre` refuse `"` et `\`.
+            ecrivain.pousser(b"\",\"alias\":\"");
+            ecrivain.pousser(alias.as_bytes());
+        }
         ecrivain.pousser(b"\",\"capacites\":[");
         let mut deja = false;
         if self.capacites.annonce {
@@ -1167,6 +1180,7 @@ impl<'a> MachineRendue<'a> {
 
         let mut machine = None;
         let mut nom: Option<&str> = None;
+        let mut alias: Option<&str> = None;
         let mut capacites = None;
         let mut enrolee = None;
 
@@ -1194,6 +1208,11 @@ impl<'a> MachineRendue<'a> {
                     }
                     poser(&mut nom, texte, position)?;
                 }
+                "alias" => poser(
+                    &mut alias,
+                    lire_un_alias_de_machine(&mut lecteur)?,
+                    position,
+                )?,
                 "capacites" => poser(&mut capacites, decoder_capacites(&mut lecteur)?, position)?,
                 "cle" => {
                     let ou = lecteur.position();
@@ -1225,10 +1244,31 @@ impl<'a> MachineRendue<'a> {
         Ok(Self {
             machine: machine.ok_or(Erreur::ChampManquant { nom: "machine" })?,
             nom: nom.ok_or(Erreur::ChampManquant { nom: "nom" })?,
+            alias,
             capacites: capacites.ok_or(Erreur::ChampManquant { nom: "capacites" })?,
             enrolee: enrolee.ok_or(Erreur::ChampManquant { nom: "cle" })?,
         })
     }
+}
+
+/// Ce qu'un alias de machine rendu fait au plus, en octets : sa borne rangée
+/// (`asl_registre::ALIAS_DE_MACHINE_OCTETS_MAX`, que `asl-session` tient
+/// égale).
+pub const ALIAS_DE_MACHINE_MAX: usize = 253;
+
+/// Lit un alias de machine rendu : du texte libre, non vide, au plus
+/// [`ALIAS_DE_MACHINE_MAX`] octets.
+fn lire_un_alias_de_machine<'a>(lecteur: &mut Lecteur<'a>) -> Result<&'a str, Erreur> {
+    let texte = lecteur.texte_libre()?;
+    if texte.is_empty() {
+        return Err(Erreur::NomVide);
+    }
+    if texte.len() > ALIAS_DE_MACHINE_MAX {
+        return Err(Erreur::NomTropLong {
+            obtenue: texte.len(),
+        });
+    }
+    Ok(texte)
 }
 
 // ── Ce qu'une autorisation donne à voir : une machine ───────────────────────
@@ -1248,6 +1288,8 @@ pub struct MachineVue<'a> {
     pub machine: Identifiant,
     /// Son nom, du texte libre.
     pub nom: &'a str,
+    /// Son alias, s'il en a un (0.26.0).
+    pub alias: Option<&'a str>,
 }
 
 impl<'a> MachineVue<'a> {
@@ -1255,6 +1297,7 @@ impl<'a> MachineVue<'a> {
     ///
     /// ```jsonc
     /// {"machine":"m-…","nom":"grenier"}
+    /// {"machine":"m-…","nom":"grenier","alias":"Le grenier"}
     /// ```
     ///
     /// # Erreurs
@@ -1268,6 +1311,10 @@ impl<'a> MachineVue<'a> {
         // Sans échappement, comme [`MachineRendue::encoder`] : le nom est entré
         // par [`Lecteur::texte_libre`].
         ecrivain.pousser(self.nom.as_bytes());
+        if let Some(alias) = self.alias {
+            ecrivain.pousser(b"\",\"alias\":\"");
+            ecrivain.pousser(alias.as_bytes());
+        }
         ecrivain.pousser(b"\"}");
         ecrivain.achever()
     }
@@ -1286,6 +1333,7 @@ impl<'a> MachineVue<'a> {
 
         let mut machine = None;
         let mut nom: Option<&str> = None;
+        let mut alias: Option<&str> = None;
 
         loop {
             lecteur.sauter_blancs();
@@ -1300,6 +1348,11 @@ impl<'a> MachineVue<'a> {
                     position,
                 )?,
                 "nom" => poser(&mut nom, lire_modele(&mut lecteur)?, position)?,
+                "alias" => poser(
+                    &mut alias,
+                    lire_un_alias_de_machine(&mut lecteur)?,
+                    position,
+                )?,
                 _ => return Err(Erreur::ChampInconnu { position }),
             }
 
@@ -1316,6 +1369,7 @@ impl<'a> MachineVue<'a> {
         Ok(Self {
             machine: machine.ok_or(Erreur::ChampManquant { nom: "machine" })?,
             nom: nom.ok_or(Erreur::ChampManquant { nom: "nom" })?,
+            alias,
         })
     }
 }
@@ -1694,31 +1748,31 @@ const CHAMP_ALIAS: &str = "alias";
 /// main.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DemandeAlias<'a> {
-    /// L'alias demandé, déjà validé.
-    pub alias: Alias<'a>,
+    /// L'alias demandé, BRUT : `asl-registre` le range en NFC et vérifie sa
+    /// forme (`alias_de_compte`).
+    pub alias: &'a str,
 }
 
 impl<'a> DemandeAlias<'a> {
     /// Décode une demande d'alias.
     ///
     /// ```jsonc
-    /// {"alias": "thierry"}
+    /// {"alias": "Thierry"}
     /// ```
     ///
-    /// **Il passe par [`Lecteur::chaine`], et non par `texte_libre`.** Un alias
-    /// est une CLÉ — on le cherche, on le compare, il doit être unique. C'est
-    /// exactement le cas où l'équivalence Unicode ferait qu'un même alias
-    /// s'écrirait de deux façons, et que deux comptes croiraient chacun le
-    /// posséder.
+    /// # DU TEXTE LIBRE DEPUIS 0.26.0, ET L'ÉQUIVALENCE EST RÉGLÉE AILLEURS
+    ///
+    /// Jusqu'à 0.25.0, l'alias passait par [`Lecteur::chaine`] et l'alphabet
+    /// ASCII minuscule : un alias est une CLÉ, et l'équivalence Unicode aurait
+    /// fait qu'un même alias s'écrive de deux façons. **Décision 46** : il est
+    /// désormais de l'UTF-8 sensible à la casse — et c'est le NFC, appliqué
+    /// par `asl-registre` à l'écriture comme à la résolution, qui rend l'écriture
+    /// unique. Ce cadrage-ci ne borne que le texte brut, à
+    /// [`crate::domaine::ALIAS_BRUT_MAX`] octets.
     ///
     /// # Erreurs
     ///
-    /// Celles du cadrage, plus [`Erreur::IdentifiantInvalide`] quand l'alias ne
-    /// suit pas sa grammaire — voir [`Alias::analyser`]. **Cette faute-là ne dit
-    /// PAS laquelle des quatre règles a été enfreinte** : longueur, alphabet,
-    /// bord, ou ressemblance avec un identifiant. Le détail appartient à
-    /// [`crate::Erreur`], que le routage rend ; ce cadrage-ci ne fait que
-    /// refuser.
+    /// Celles du cadrage, plus [`Erreur::NomVide`] et [`Erreur::NomTropLong`].
     pub fn decoder(octets: &'a [u8]) -> Result<Self, Erreur> {
         if octets.len() > CORPS_MAX {
             return Err(Erreur::MessageTropLong {
@@ -1733,9 +1787,15 @@ impl<'a> DemandeAlias<'a> {
             return Err(Erreur::ChampInconnu { position });
         }
         lecteur.attendre(b':', "deux-points")?;
-        let position = lecteur.position();
-        let texte = lecteur.chaine()?;
-        let alias = Alias::analyser(texte).map_err(|_| Erreur::IdentifiantInvalide { position })?;
+        let alias = lecteur.texte_libre()?;
+        if alias.is_empty() {
+            return Err(Erreur::NomVide);
+        }
+        if alias.len() > crate::domaine::ALIAS_BRUT_MAX {
+            return Err(Erreur::NomTropLong {
+                obtenue: alias.len(),
+            });
+        }
 
         lecteur.attendre(b'}', "la fin de l'objet")?;
         lecteur.fin()?;
@@ -1750,7 +1810,7 @@ impl<'a> DemandeAlias<'a> {
     pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
         let mut ecrivain = asl_proto::cadrage::Ecrivain::nouveau(sortie);
         ecrivain.pousser(b"{\"alias\":\"");
-        ecrivain.pousser(self.alias.as_str().as_bytes());
+        ecrivain.pousser(self.alias.as_bytes());
         ecrivain.pousser(b"\"}");
         ecrivain.achever()
     }

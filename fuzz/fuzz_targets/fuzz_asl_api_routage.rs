@@ -102,23 +102,12 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::PairInstantane => "/v1/pair/instantane".to_owned(),
         Ressource::Replication => "/v1/replication".to_owned(),
         Ressource::Domaines => "/v1/domaines".to_owned(),
-        Ressource::RechercheDomaines { alias } => {
-            // Réencodé depuis le DÉCODÉ : `%HH` pour tout ce qui n'est pas
-            // ASCII graphique permis tel quel.
-            let mut tampon = [0_u8; asl_api::domaine::ALIAS_BRUT_MAX];
-            let mut chemin = "/v1/domaines?alias=".to_owned();
-            for octet in alias.decoder(&mut tampon).bytes() {
-                if octet.is_ascii_graphic() && !b"%&+=#".contains(&octet) {
-                    chemin.push(char::from(octet));
-                } else {
-                    chemin.push_str(&format!("%{octet:02X}"));
-                }
-            }
-            chemin
-        }
+        Ressource::RechercheDomaines { alias } => reencoder("/v1/domaines?alias=", alias),
+        Ressource::RechercheAlias { alias } => reencoder("/v1/alias?alias=", alias),
         Ressource::Domaine { domaine } => format!("/v1/domaines/{domaine}"),
         Ressource::AliasDomaine { domaine } => format!("/v1/domaines/{domaine}/alias"),
         Ressource::DomaineMachine { machine } => format!("/v1/machines/{machine}/domaine"),
+        Ressource::AliasMachine { machine } => format!("/v1/machines/{machine}/alias"),
         Ressource::Groupes => "/v1/groupes".to_owned(),
         Ressource::GroupesDomaine { domaine } => format!("/v1/domaines/{domaine}/groupes"),
         Ressource::Groupe { groupe } => format!("/v1/groupes/{groupe}"),
@@ -133,12 +122,32 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
     }
 }
 
+/// Réencode un alias cherché depuis le DÉCODÉ : `%HH` pour tout ce qui n'est
+/// pas ASCII graphique permis tel quel.
+fn reencoder(prefixe: &str, alias: &asl_api::domaine::AliasCherche<'_>) -> String {
+    let mut tampon = [0_u8; asl_api::domaine::ALIAS_BRUT_MAX];
+    let mut chemin = prefixe.to_owned();
+    for octet in alias.decoder(&mut tampon).bytes() {
+        if octet.is_ascii_graphic() && !b"%&+=#".contains(&octet) {
+            chemin.push(char::from(octet));
+        } else {
+            chemin.push_str(&format!("%{octet:02X}"));
+        }
+    }
+    chemin
+}
+
 /// Deux ressources désignent la même chose. L'alias cherché garde sa forme
 /// encodée, et deux écritures du même texte (`%41` et `A`) cherchent la même
 /// chose : on les compare décodées.
 fn meme(une: &Ressource<'_>, autre: &Ressource<'_>) -> bool {
     match (une, autre) {
         (Ressource::RechercheDomaines { alias: a }, Ressource::RechercheDomaines { alias: b }) => {
+            let mut ta = [0_u8; asl_api::domaine::ALIAS_BRUT_MAX];
+            let mut tb = [0_u8; asl_api::domaine::ALIAS_BRUT_MAX];
+            a.decoder(&mut ta) == b.decoder(&mut tb)
+        }
+        (Ressource::RechercheAlias { alias: a }, Ressource::RechercheAlias { alias: b }) => {
             let mut ta = [0_u8; asl_api::domaine::ALIAS_BRUT_MAX];
             let mut tb = [0_u8; asl_api::domaine::ALIAS_BRUT_MAX];
             a.decoder(&mut ta) == b.decoder(&mut tb)
@@ -246,6 +255,7 @@ fuzz_target!(|entree: Entree| {
                     | Ressource::Administrateurs
                     | Ressource::Administrateur { .. }
                     | Ressource::AliasResolu { .. }
+                    | Ressource::RechercheAlias { .. }
                     | Ressource::Utilisateur { .. }
             ),
             "une ressource inattendue n'exige rien : {ressource:?}"

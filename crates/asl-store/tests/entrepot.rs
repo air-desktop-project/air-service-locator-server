@@ -3740,7 +3740,7 @@ fn l_ecrit_ne_compte_que_nos_ecritures_et_survit_au_redemarrage() {
 mod domaines {
     use asl_id::{Genre, Identifiant};
     use asl_registre::{
-        AliasDeDomaine, Cadre, ClefDeRecherche, Operation, Provenance, premier_domaine,
+        AliasDeDomaine, AliasDeMachine, Cadre, Operation, Provenance, premier_domaine,
     };
     use asl_store::{Entrepot, Faute, SuppressionDeDomaine};
 
@@ -3750,8 +3750,10 @@ mod domaines {
         AliasDeDomaine::nouveau(texte).expect("un alias")
     }
 
-    fn clef(texte: &str) -> ClefDeRecherche {
-        ClefDeRecherche::de(texte).expect("une clé")
+    /// Ce qu'on cherche : l'alias exact, en NFC — la casse compte
+    /// (décision 45).
+    fn clef(texte: &str) -> AliasDeDomaine {
+        alias(texte)
     }
 
     fn vivants(base: &Entrepot, compte: Identifiant) -> Vec<Identifiant> {
@@ -3843,14 +3845,24 @@ mod domaines {
         // Un autre compte peut s'appeler pareil : l'alias n'est pas unique.
         let chez_l_autre = premier_domaine(autre);
         assert!(
-            base.poser_alias_de_domaine(chez_l_autre, Some(alias("MAISON")))
+            base.poser_alias_de_domaine(chez_l_autre, Some(alias("Maison")))
                 .expect("posé")
         );
-        let mut trouves = base.domaines_par_alias(&clef("maison")).expect("lisible");
+        let mut trouves = base.domaines_par_alias(&clef("Maison")).expect("lisible");
         trouves.sort();
         let mut attendus = vec![maison, chez_l_autre];
         attendus.sort();
         assert_eq!(trouves, attendus);
+        // **La casse compte** (décision 45) : « maison » et « MAISON » ne
+        // trouvent pas « Maison ».
+        for autre_casse in ["maison", "MAISON"] {
+            assert!(
+                base.domaines_par_alias(&clef(autre_casse))
+                    .expect("lisible")
+                    .is_empty(),
+                "{autre_casse}"
+            );
+        }
         // « maisons » ne trouve pas « maison » : la recherche est exacte.
         assert!(
             base.domaines_par_alias(&clef("maisons"))
@@ -3864,12 +3876,19 @@ mod domaines {
                 .expect("posé")
         );
         assert_eq!(
-            base.domaines_par_alias(&clef("maison")).expect("lisible"),
+            base.domaines_par_alias(&clef("Maison")).expect("lisible"),
             vec![chez_l_autre]
         );
+        // L'écriture décomposée trouve la composée : c'est le NFC.
         assert_eq!(
-            base.domaines_par_alias(&clef("ÉTÉ")).expect("lisible"),
+            base.domaines_par_alias(&clef("E\u{0301}te\u{0301}"))
+                .expect("lisible"),
             vec![maison]
+        );
+        assert!(
+            base.domaines_par_alias(&clef("ÉTÉ"))
+                .expect("lisible")
+                .is_empty()
         );
         assert_eq!(
             base.alias_de_domaine(maison)
@@ -3888,7 +3907,7 @@ mod domaines {
                 .is_none()
         );
         assert!(
-            base.domaines_par_alias(&clef("maison"))
+            base.domaines_par_alias(&clef("Maison"))
                 .expect("lisible")
                 .is_empty()
         );
@@ -3900,7 +3919,7 @@ mod domaines {
             SuppressionDeDomaine::Faite
         );
         assert!(
-            base.domaines_par_alias(&clef("été"))
+            base.domaines_par_alias(&clef("Été"))
                 .expect("lisible")
                 .is_empty()
         );
@@ -4034,7 +4053,7 @@ mod domaines {
         );
         assert_eq!(
             lecteur
-                .domaines_par_alias(&clef("bureau"))
+                .domaines_par_alias(&clef("Bureau"))
                 .expect("lisible"),
             vec![second]
         );
@@ -4083,7 +4102,7 @@ mod domaines {
         assert!(base.domaines_de_compte(c).expect("lisible").is_empty());
         assert!(base.domaine(chez_c).expect("lisible").is_none());
         assert!(
-            base.domaines_par_alias(&clef("atelier"))
+            base.domaines_par_alias(&clef("Atelier"))
                 .expect("lisible")
                 .is_empty()
         );
@@ -4095,6 +4114,128 @@ mod domaines {
         // Et le voisin garde son domaine.
         assert_eq!(vivants(&base, voisin), vec![premier_domaine(voisin)]);
         let _ = std::fs::remove_file(&chemin);
+    }
+
+    fn alias_de_machine(texte: &str) -> AliasDeMachine {
+        AliasDeMachine::nouveau(texte).expect("un alias de machine")
+    }
+
+    #[test]
+    fn l_alias_d_une_machine_se_pose_voyage_et_part_avec_elle() {
+        let (source, chemin_source) = entrepot("alias-machine-source");
+        let c = un(Genre::Utilisateur, 1);
+        source.creer_compte(c, Provenance::Ici, None).expect("créé");
+        let m = un(Genre::Machine, 1);
+        source
+            .creer_machine(m, Provenance::Ici, c, nom("grenier"), TOUT)
+            .expect("créée");
+        // Posé, rendu tel quel — la casse gardée, et rien qui le lie au nom.
+        assert!(
+            source
+                .poser_alias_de_machine(m, Some(alias_de_machine("Le Grenier.Maison")))
+                .expect("posé")
+        );
+        assert_eq!(
+            source.alias_de_machine(m).expect("lisible"),
+            Some(alias_de_machine("Le Grenier.Maison"))
+        );
+        // Une machine inconnue n'en reçoit pas.
+        assert!(
+            !source
+                .poser_alias_de_machine(un(Genre::Machine, 9), Some(alias_de_machine("x")))
+                .expect("lisible")
+        );
+        // Retiré, puis reposé : le plus récent.
+        assert!(source.poser_alias_de_machine(m, None).expect("retiré"));
+        assert_eq!(source.alias_de_machine(m).expect("lisible"), None);
+        assert!(
+            source
+                .poser_alias_de_machine(m, Some(alias_de_machine("NAS du salon")))
+                .expect("posé")
+        );
+        let journal = operations(&source, 0);
+        assert!(
+            matches!(
+                journal.last(),
+                Some((_, Operation::MachineAlias { machine, .. })) if *machine == m
+            ),
+            "{journal:?}"
+        );
+
+        // Par le journal, dans l'ordre : le lecteur finit sur le dernier.
+        let pair = Identifiant::depuis_entropie(Genre::Annuaire, [0xAD; 16]);
+        let chemin_lecteur = std::env::temp_dir().join(format!(
+            "asl-entrepot-{}-alias-machine-lecteur.redb",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&chemin_lecteur);
+        let lecteur = Entrepot::ouvrir(&chemin_lecteur, pair).expect("un entrepôt neuf");
+        let cadres: Vec<Cadre> = journal
+            .iter()
+            .map(|(estampille, operation)| Cadre::Operation {
+                estampille: *estampille,
+                operation: *operation,
+            })
+            .collect();
+        lecteur
+            .appliquer_la_suite(super::racine(), &cadres, false)
+            .expect("appliqué");
+        assert_eq!(
+            lecteur.alias_de_machine(m).expect("lisible"),
+            Some(alias_de_machine("NAS du salon"))
+        );
+        // Une pose plus ancienne, rejouée en retard, ne ressuscite rien.
+        let premiere = cadres
+            .iter()
+            .find(|cadre| {
+                matches!(
+                    cadre,
+                    Cadre::Operation {
+                        operation: Operation::MachineAlias { .. },
+                        ..
+                    }
+                )
+            })
+            .copied()
+            .expect("la première pose");
+        lecteur
+            .appliquer_la_suite(super::racine(), &[premiere], false)
+            .expect("appliqué");
+        assert_eq!(
+            lecteur.alias_de_machine(m).expect("lisible"),
+            Some(alias_de_machine("NAS du salon"))
+        );
+
+        // Par l'instantané, de même.
+        let chemin_instantane = std::env::temp_dir().join(format!(
+            "asl-entrepot-{}-alias-machine-instantane.redb",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&chemin_instantane);
+        let autre = Entrepot::ouvrir(&chemin_instantane, pair).expect("un entrepôt neuf");
+        let instantane: Vec<Cadre> = source
+            .instantane()
+            .expect("lisible")
+            .iter()
+            .map(|octets| Cadre::lire(octets).expect("un cadre").0)
+            .collect();
+        autre
+            .appliquer_la_suite(super::racine(), &instantane, true)
+            .expect("appliqué");
+        assert_eq!(
+            autre.alias_de_machine(m).expect("lisible"),
+            Some(alias_de_machine("NAS du salon"))
+        );
+
+        // L'effacement du compte emporte la machine, et son alias avec elle.
+        source
+            .effacer_compte(c, asl_registre::Cause::Titulaire, 1_790_000_000_000)
+            .expect("lisible")
+            .expect("le compte existe");
+        assert_eq!(source.alias_de_machine(m).expect("lisible"), None);
+        for chemin in [&chemin_source, &chemin_lecteur, &chemin_instantane] {
+            let _ = std::fs::remove_file(chemin);
+        }
     }
 
     #[test]
@@ -4157,13 +4298,13 @@ mod domaines {
         );
         assert_eq!(
             lecteur
-                .domaines_par_alias(&clef("atelier"))
+                .domaines_par_alias(&clef("Atelier"))
                 .expect("lisible"),
             vec![second]
         );
         assert!(
             lecteur
-                .domaines_par_alias(&clef("bureau"))
+                .domaines_par_alias(&clef("Bureau"))
                 .expect("lisible")
                 .is_empty()
         );

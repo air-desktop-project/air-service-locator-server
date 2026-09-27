@@ -483,6 +483,15 @@ fn alias_de_domaine(estampille: Estampille, texte: &str) -> asl_registre::AliasD
     }
 }
 
+/// Un alias de machine posé sous cette estampille.
+fn alias_de_machine(estampille: Estampille, texte: &str) -> asl_registre::AliasDeMachineRange {
+    asl_registre::AliasDeMachineRange {
+        provenance: Provenance::Ici,
+        estampille,
+        alias: Some(asl_registre::AliasDeMachine::nouveau(texte).expect("un alias")),
+    }
+}
+
 /// Un point de poussée sous cette estampille, vers ce chemin.
 fn point(estampille: Estampille, chemin: &str) -> PointDePoussee {
     PointDePoussee {
@@ -891,6 +900,22 @@ fn conflits() -> Vec<(Estampille, Operation)> {
             Operation::MachineDomaine {
                 machine: m3,
                 enregistrement: rattachement(est(autre(), 145), None),
+            },
+        ),
+        // L'alias d'une machine posé des deux côtés (0.26.0) : le plus récent,
+        // quel que soit l'ordre d'arrivée.
+        (
+            est(pair(), 146),
+            Operation::MachineAlias {
+                machine: m3,
+                enregistrement: alias_de_machine(est(pair(), 146), "Ancien"),
+            },
+        ),
+        (
+            est(autre(), 147),
+            Operation::MachineAlias {
+                machine: m3,
+                enregistrement: alias_de_machine(est(autre(), 147), "Récent"),
             },
         ),
         // ── Les groupes (2026-09-27) ────────────────────────────────────
@@ -1984,7 +2009,7 @@ fn les_domaines_convergent_vers_ce_que_les_regles_annoncent() {
         .collect();
     assert_eq!(marques, vec![est(autre(), 141)]);
     // L'alias posé des deux côtés : le plus récent, « Cave » — et la
-    // recherche le trouve, sans distinction de casse.
+    // recherche le trouve, sous sa casse et sous elle seule (décision 45).
     let p2 = asl_registre::premier_domaine(c2);
     assert_eq!(
         base.alias_de_domaine(p2)
@@ -1992,13 +2017,26 @@ fn les_domaines_convergent_vers_ce_que_les_regles_annoncent() {
             .map(|alias| alias.texte().to_owned()),
         Some("Cave".to_owned())
     );
-    let cave = asl_registre::ClefDeRecherche::de("CAVE").expect("une clé");
+    let cave = asl_registre::AliasDeDomaine::nouveau("Cave").expect("une clé");
     assert_eq!(base.domaines_par_alias(&cave).expect("lisible"), vec![p2]);
-    let maison = asl_registre::ClefDeRecherche::de("maison").expect("une clé");
+    let majuscules = asl_registre::AliasDeDomaine::nouveau("CAVE").expect("une clé");
+    assert!(
+        base.domaines_par_alias(&majuscules)
+            .expect("lisible")
+            .is_empty()
+    );
+    let maison = asl_registre::AliasDeDomaine::nouveau("Maison").expect("une clé");
     assert!(
         base.domaines_par_alias(&maison)
             .expect("lisible")
             .is_empty()
+    );
+    // m3 : l'alias le plus récent, « Récent ».
+    assert_eq!(
+        base.alias_de_machine(un(Genre::Machine, 3))
+            .expect("lisible")
+            .map(|alias| alias.texte().to_owned()),
+        Some("Récent".to_owned())
     );
     // m3, rangée puis sortie : sortie.
     assert_eq!(
