@@ -15,7 +15,7 @@
 
 use asl_cle::CleSecrete;
 
-use crate::tireur::{Connexion, Faute as FauteDeVoie, nom_tls, resoudre};
+use crate::tireur::{Connexion, Faute as FauteDeVoie, resoudre};
 
 /// Ce qui peut empêcher une inscription de se présenter ou de se relire.
 #[derive(Debug)]
@@ -92,7 +92,7 @@ const INACTIVITE_US: u64 = 30 * 1_000_000;
 /// [`Faute::Voie`] si la connexion échoue.
 pub async fn presenter(
     adresse: &str,
-    racines_pem: &[u8],
+    confiance: &crate::confiance::Confiance,
     identite: &CleSecrete,
     code: &str,
 ) -> Result<EtatLu, Faute> {
@@ -100,7 +100,7 @@ pub async fn presenter(
     let mut corps = code.texte().as_bytes().to_vec();
     poster(
         adresse,
-        racines_pem,
+        confiance,
         identite,
         b"/v1/annuaires/inscription",
         &mut corps,
@@ -116,13 +116,13 @@ pub async fn presenter(
 /// connexion échoue.
 pub async fn relire(
     adresse: &str,
-    racines_pem: &[u8],
+    confiance: &crate::confiance::Confiance,
     identite: &CleSecrete,
 ) -> Result<EtatLu, Faute> {
     let mut corps = Vec::new();
     poster(
         adresse,
-        racines_pem,
+        confiance,
         identite,
         b"/v1/annuaires/etat",
         &mut corps,
@@ -134,13 +134,13 @@ pub async fn relire(
 /// `corps ‖ clé ‖ preuve`, et lit la réponse.
 async fn poster(
     adresse: &str,
-    racines_pem: &[u8],
+    confiance: &crate::confiance::Confiance,
     identite: &CleSecrete,
     chemin: &[u8],
     corps: &mut Vec<u8>,
 ) -> Result<EtatLu, Faute> {
     let cible = resoudre(adresse).await.map_err(Faute::Voie)?;
-    let mut connexion = Connexion::ouvrir(cible, &nom_tls(adresse), racines_pem, INACTIVITE_US)
+    let mut connexion = Connexion::ouvrir(cible, adresse, confiance, INACTIVITE_US)
         .await
         .map_err(Faute::Voie)?;
     let defi = connexion.defi().await.map_err(Faute::Voie)?;

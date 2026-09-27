@@ -281,8 +281,10 @@ fn l_aide_sort_sans_erreur() {
 fn identite(quoi: &str) -> (PathBuf, PathBuf, CleSecrete, ClePublique) {
     let privee = std::env::temp_dir().join(format!("asl-bin-{}-{quoi}.key", std::process::id()));
     let publique = privee.with_extension("key.pub");
+    let certificat = privee.with_extension("key.crt");
     let _ = std::fs::remove_file(&privee);
     let _ = std::fs::remove_file(&publique);
+    let _ = std::fs::remove_file(&certificat);
     let sortie = Command::new(env!("CARGO_BIN_EXE_asl-server"))
         .arg("--new-identity-key")
         .arg(&privee)
@@ -310,6 +312,21 @@ fn identite(quoi: &str) -> (PathBuf, PathBuf, CleSecrete, ClePublique) {
         ClePublique::depuis_octets(octets).expect("un point valide")
     };
     assert_eq!(secrete.publique(), cle, "les deux fichiers vont ensemble");
+    // **LE CERTIFICAT D'IDENTITÉ EST ÉCRIT À CÔTÉ** (décision 55), et c'est
+    // celui que la clé frappe — le démarrage refrappe le même.
+    let pem = std::fs::read(&certificat).expect("le certificat est écrit à côté");
+    assert_eq!(
+        asl_loop_tokio::racines_depuis_pem(&pem).expect("un PEM"),
+        vec![asl_cle::certificat_d_identite(&secrete).to_vec()]
+    );
+    // Et `--identity-certificate` le réimprime, à l'identique.
+    let reimprime = Command::new(env!("CARGO_BIN_EXE_asl-server"))
+        .arg("--identity-certificate")
+        .arg(&privee)
+        .output()
+        .expect("le binaire se lance");
+    assert!(reimprime.status.success());
+    assert_eq!(reimprime.stdout, pem);
     // Et ce qui est imprimé est ce qu'on porte chez l'autre : l'identifiant
     // se déduit de la clé, et l'exploitant le compare à l'œil.
     let dit = String::from_utf8_lossy(&sortie.stdout);
@@ -2145,4 +2162,184 @@ async fn une_autre_cle_n_emet_rien_et_une_racine_sans_posture_non_plus() {
     let _ = std::fs::remove_file(&base);
     let _ = std::fs::remove_file(&base2);
     let _ = std::fs::remove_dir_all(&autorite);
+}
+
+// ── L'IDENTITÉ PAR LA CLÉ, SUR DEUX VRAIS BINAIRES (décisions 53, 55, 58) ──
+
+/// Lance le binaire SANS chaîne ni clé TLS — sa seule identité —, et rend
+/// l'adresse annoncée et son journal, ligne par ligne.
+///
+/// **C'est la forme d'un annuaire local, et d'une racine qui a fini sa
+/// transition** : `--certificate` et `--key` absents, le certificat d'identité
+/// frappé au démarrage depuis `--identity-key`.
+fn lancer_sans_chaine(
+    base: &Path,
+    en_plus: &[&str],
+) -> (
+    Child,
+    SocketAddr,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let mut enfant = Command::new(env!("CARGO_BIN_EXE_asl-server"))
+        .arg("--store")
+        .arg(base)
+        .args(["--port", "0"])
+        .args(["--attestation", "optional"])
+        .args(en_plus)
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("le binaire se lance");
+    let erreurs = enfant.stderr.take().expect("sa sortie d'erreur");
+    let mut lignes = BufReader::new(erreurs).lines();
+    let journal = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let annonce = lignes
+        .find_map(|ligne| {
+            let ligne = ligne.ok()?;
+            journal.lock().ok()?.push(ligne.clone());
+            let apres = ligne.split("écoute sur ").nth(1)?;
+            apres.split(' ').next()?.parse::<SocketAddr>().ok()
+        })
+        .expect("le serveur annonce son adresse avant de servir");
+    let suite = std::sync::Arc::clone(&journal);
+    let montrer = std::env::var_os("ASL_ESSAI_JOURNAL").is_some();
+    std::thread::spawn(move || {
+        for ligne in lignes.map_while(Result::ok) {
+            if montrer {
+                eprintln!("[{}] {ligne}", annonce.port());
+            }
+            if let Ok(mut journal) = suite.lock() {
+                journal.push(ligne);
+            }
+        }
+    });
+    (enfant, annonce, journal)
+}
+
+/// Le journal porte-t-il une ligne qui contient tous ces morceaux ?
+fn journal_dit(journal: &std::sync::Mutex<Vec<String>>, morceaux: &[&str]) -> bool {
+    journal.lock().is_ok_and(|lignes| {
+        lignes
+            .iter()
+            .any(|ligne| morceaux.iter().all(|morceau| ligne.contains(morceau)))
+    })
+}
+
+#[tokio::test]
+async fn deux_racines_se_repliquent_sous_leur_seule_identite() {
+    // **NI AUTORITÉ, NI CHAÎNE, NI NOM** (C20) : chaque racine présente le
+    // certificat que sa clé d'identité signe, et croit l'autre par `--peer-key`
+    // seule. Tout se fait sur 127.0.0.1 : aucun résolveur n'est consulté.
+    let (cle_nitrogen, pub_nitrogen, _sn, publique_nitrogen) = identite("cle-nitrogen");
+    let (cle_argon, pub_argon, _sa, publique_argon) = identite("cle-argon");
+    let (_cle_autre, pub_autre, _so, _po) = identite("cle-intrus");
+    let n_nitrogen = identifiant_de_racine(&publique_nitrogen);
+    let n_argon = identifiant_de_racine(&publique_argon);
+
+    let chemin = |quoi: &str| {
+        std::env::temp_dir().join(format!("asl-bin-{}-{quoi}.redb", std::process::id()))
+    };
+    let (base_nitrogen, base_argon, base_intrus) = (
+        chemin("cle-nitrogen"),
+        chemin("cle-argon"),
+        chemin("cle-intrus"),
+    );
+    for base in [&base_nitrogen, &base_argon, &base_intrus] {
+        let _ = std::fs::remove_file(base);
+    }
+    let thierry = Identifiant::depuis_entropie(Genre::Utilisateur, [0x19; 16]);
+    {
+        let entrepot = Entrepot::ouvrir(&base_nitrogen, n_nitrogen).expect("un entrepôt");
+        entrepot
+            .creer_compte(
+                thierry,
+                Provenance::Ici,
+                Some(AliasRange::nouveau("thierry").expect("il tient")),
+            )
+            .expect("le compte");
+    }
+
+    let (mut nitrogen, ou_nitrogen, journal_nitrogen) = lancer_sans_chaine(
+        &base_nitrogen,
+        &[
+            "--identity-key",
+            cle_nitrogen.to_str().expect("utf-8"),
+            "--peer-key",
+            pub_argon.to_str().expect("utf-8"),
+            "--peer",
+            "127.0.0.1:6630",
+        ],
+    );
+    assert!(
+        journal_dit(
+            &journal_nitrogen,
+            &["TLS", "son certificat d'identité seul"]
+        ),
+        "le démarrage dit ce que l'annuaire présente"
+    );
+    let vers_nitrogen = format!("127.0.0.1:{}", ou_nitrogen.port());
+    let (mut argon, _ou_argon, journal_argon) = lancer_sans_chaine(
+        &base_argon,
+        &[
+            "--identity-key",
+            cle_argon.to_str().expect("utf-8"),
+            "--peer-key",
+            pub_nitrogen.to_str().expect("utf-8"),
+            "--peer",
+            &vers_nitrogen,
+        ],
+    );
+    // **UN INTRUS** : la clé d'argon, mais une AUTRE clé attendue de nitrogen.
+    // Nitrogen présente la sienne ; l'intrus ne doit jamais ouvrir sa voie.
+    let (mut intrus, _ou_intrus, journal_intrus) = lancer_sans_chaine(
+        &base_intrus,
+        &[
+            "--identity-key",
+            cle_argon.to_str().expect("utf-8"),
+            "--peer-key",
+            pub_autre.to_str().expect("utf-8"),
+            "--peer",
+            &vers_nitrogen,
+        ],
+    );
+
+    // ── 1. ARGON OUVRE SA VOIE, ET DIT SOUS QUELLE FORME ────────────────────
+    let ouverte = [
+        vers_nitrogen.as_str(),
+        n_nitrogen.texte().as_str(),
+        "ouverte, prouvée dans les deux sens",
+        "TLS : identité par la clé",
+    ]
+    .map(str::to_owned);
+    attendre!("la voie d'argon, sous la seule identité", {
+        journal_dit(
+            &journal_argon,
+            &ouverte.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+    });
+
+    // ── 2. L'INTRUS NE L'OUVRE PAS : LA CLÉ N'EST PAS CELLE QU'IL ATTEND ────
+    attendre!("le refus de l'intrus", {
+        journal_dit(&journal_intrus, &[vers_nitrogen.as_str(), "pas ouverte"])
+    });
+    assert!(
+        !journal_dit(&journal_intrus, &["ouverte, prouvée dans les deux sens"]),
+        "une racine qui ne tient pas la clé attendue ne doit pas être crue"
+    );
+    eteindre(&mut intrus);
+
+    // ── 3. CE QUE NITROGEN TENAIT EST ARRIVÉ CHEZ ARGON ─────────────────────
+    attendre!("l'amorçage d'argon", {
+        journal_dit(&journal_nitrogen, &[n_argon.texte().as_str(), "tire"])
+    });
+    // Le flux applique en moins d'une seconde voie ouverte ; on éteint, puis on
+    // relit l'entrepôt d'argon — libéré par son processus.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    eteindre(&mut argon);
+    eteindre(&mut nitrogen);
+    let entrepot = Entrepot::ouvrir(&base_argon, n_argon).expect("l'entrepôt d'argon");
+    assert_eq!(
+        entrepot.compte_par_alias("thierry").expect("lisible"),
+        Some(thierry),
+        "le compte écrit chez nitrogen est chez argon"
+    );
 }

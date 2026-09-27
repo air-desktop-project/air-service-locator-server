@@ -36,7 +36,7 @@ use asl_registre::{EntreeDEtat, MACHINE_FEDEREE_OCTETS, MachineFederee, NomRange
 use asl_store::Entrepot;
 
 use crate::quic::maintenant;
-use crate::tireur::{Connexion, Faute, Reprise, nom_tls, resoudre};
+use crate::tireur::{Connexion, Faute, Reprise, resoudre};
 
 /// Combien de temps une racine croit un rapport qu'aucun membre ne
 /// confirme : trente secondes (décidé le 2026-09-27, Thierry).
@@ -312,8 +312,10 @@ pub struct Federateur {
     pub entrepot: Arc<Entrepot>,
     /// La racine — `hôte:port`.
     pub adresse: String,
-    /// Les certificats d'autorité, en PEM, qui valident la racine.
-    pub racines_pem: Vec<u8>,
+    /// Ce qu'on croit de la racine : son identité (liste embarquée,
+    /// décision 56), et l'autorité d'hier en repli tant que `--federation-ca`
+    /// est réglé (décision 58).
+    pub confiance: crate::confiance::Confiance,
     /// La clé d'identité de cet annuaire.
     pub identite: CleSecrete,
     /// La cadence de maintien de la connexion, en microsecondes.
@@ -366,21 +368,17 @@ impl Federateur {
     /// chaque changement, jusqu'à ce que la connexion tombe.
     async fn une_session(&self) -> Result<(), Faute> {
         let cible = resoudre(&self.adresse).await?;
-        let mut connexion = Connexion::ouvrir(
-            cible,
-            &nom_tls(&self.adresse),
-            &self.racines_pem,
-            self.idle_us,
-        )
-        .await?;
+        let mut connexion =
+            Connexion::ouvrir(cible, &self.adresse, &self.confiance, self.idle_us).await?;
         connexion.maintenir(self.keepalive_us);
         // **LA MÊME PREUVE QU'UNE RACINE** — genre `n`, notre clé
         // d'identité : c'est la racine qui sait, de ses inscriptions, que
         // cette clé est celle d'un annuaire local accepté.
         connexion.prouver_notre_racine(&self.identite).await?;
         (self.journal)(format!(
-            "fédération vers {} ouverte : clé prouvée",
-            self.adresse
+            "fédération vers {} ouverte : clé prouvée ({})",
+            self.adresse,
+            connexion.forme_dite(),
         ));
 
         let cadence_us = self.cadence_ms.saturating_mul(1_000);

@@ -152,9 +152,10 @@ pub struct Tireur {
     pub entrepot: Arc<Entrepot>,
     /// L'adresse du pair, telle que l'exploitant l'a réglée — `hôte:port`.
     pub adresse: String,
-    /// Les certificats d'autorité, en PEM, qui valident le certificat TLS du
-    /// pair.
-    pub racines_pem: Vec<u8>,
+    /// Ce qu'on croit du pair à la poignée de main : sa clé d'identité
+    /// (`--peer-key`), et l'autorité d'hier en repli tant que `--peer-ca` est
+    /// réglé (décision 58).
+    pub confiance: crate::confiance::Confiance,
     /// Notre clé d'identité : c'est elle qui signe la preuve de genre `n`.
     pub identite: CleSecrete,
     /// La clé d'identité du pair (`--peer-key`) : la preuve qu'il rend se
@@ -231,7 +232,7 @@ impl Tireur {
     async fn une_session(&self, pair: Identifiant) -> Result<(), Faute> {
         let cible = self.resoudre().await?;
         let mut connexion =
-            Connexion::ouvrir(cible, &self.nom_tls(), &self.racines_pem, self.idle_us).await?;
+            Connexion::ouvrir(cible, &self.adresse, &self.confiance, self.idle_us).await?;
         connexion.maintenir(self.keepalive_us);
 
         // Premier temps : nous prouvons NOTRE identité de racine, comme une
@@ -247,16 +248,12 @@ impl Tireur {
             .await?;
         self.etat.poser(true);
         (self.journal)(format!(
-            "voie vers {} ({pair}) ouverte, prouvée dans les deux sens — état : ouverte",
-            self.adresse
+            "voie vers {} ({pair}) ouverte, prouvée dans les deux sens — état : ouverte ({})",
+            self.adresse,
+            connexion.forme_dite(),
         ));
 
         self.tirer(&mut connexion, pair).await
-    }
-
-    /// Le nom du certificat qu'on exige du pair : la part `hôte` de l'adresse.
-    fn nom_tls(&self) -> String {
-        nom_tls(&self.adresse)
     }
 
     /// Résout l'adresse du pair — à chaque session, car le DNS peut bouger.
@@ -723,19 +720,25 @@ pub(crate) struct Connexion {
     h3: Http3Client,
     pub(crate) liaison: LiaisonDeCanal,
     autorite: String,
+    /// La forme sous laquelle le serveur a été cru (décision 58).
+    retenue: crate::confiance::Retenue,
 }
 
 impl Connexion {
     /// Ouvre une connexion et mène la poignée de main au bout.
+    ///
+    /// **`adresse` est un locateur, `confiance` dit qui l'on doit trouver au
+    /// bout** (`protocole.md` §0) : l'identité attendue, ou l'autorité d'hier
+    /// pendant la transition.
     pub(crate) async fn ouvrir(
         cible: SocketAddr,
-        nom: &str,
-        racines: &[u8],
+        adresse: &str,
+        confiance: &crate::confiance::Confiance,
         idle_us: u64,
     ) -> Result<Self, Faute> {
-        let config = configuration_tls(racines)?;
-        let serveur = rustls::pki_types::ServerName::try_from(nom.to_owned())
-            .map_err(|_| Faute::Tls(format!("`{nom}` n'est pas un nom de serveur")))?;
+        let (config, retenue) = crate::confiance::configuration_cliente(confiance)?;
+        let serveur = crate::confiance::nom_de_serveur(confiance, adresse, cible)?;
+        let nom = nom_tls(adresse);
 
         // Une socket de la même famille que la cible : se lier en IPv4 pour
         // joindre de l'IPv6 échoue au premier envoi.
@@ -765,10 +768,24 @@ impl Connexion {
             quic,
             h3: Http3Client::new(),
             liaison: LiaisonDeCanal::depuis_octets([0; asl_cle::LIAISON_OCTETS]),
-            autorite: nom.to_owned(),
+            autorite: nom,
+            retenue,
         };
         connexion.poignee_de_main().await?;
         Ok(connexion)
+    }
+
+    /// La forme sous laquelle le serveur a été cru, pour le journal.
+    pub(crate) fn forme(&self) -> Option<crate::confiance::Forme> {
+        self.retenue.lock().ok().and_then(|forme| *forme)
+    }
+
+    /// La même, dite en toutes lettres.
+    pub(crate) fn forme_dite(&self) -> String {
+        self.forme().map_or_else(
+            || "TLS : forme inconnue".to_owned(),
+            |forme| forme.to_string(),
+        )
     }
 
     /// La cadence de maintien : c'est elle qui tient le mapping ouvert (§2.3).
@@ -1064,31 +1081,6 @@ impl Transport for PontTireur<'_> {
     fn recv_state(&self, flux: StreamId) -> Option<RecvState> {
         self.0.recv_state(flux)
     }
-}
-
-/// Monte la configuration TLS cliente : les racines qui valident le pair, et
-/// l'ALPN `h3` posée ici pour qu'on ne puisse pas l'oublier (§3.1 de RFC 9114).
-fn configuration_tls(racines: &[u8]) -> Result<Arc<rustls::ClientConfig>, Faute> {
-    use rustls::pki_types::pem::PemObject as _;
-
-    let mut magasin = rustls::RootCertStore::empty();
-    for der in rustls::pki_types::CertificateDer::pem_slice_iter(racines) {
-        let der = der.map_err(|quoi| Faute::Tls(format!("certificat illisible : {quoi}")))?;
-        magasin
-            .add(der)
-            .map_err(|quoi| Faute::Tls(format!("racine refusée : {quoi}")))?;
-    }
-    if magasin.is_empty() {
-        return Err(Faute::Tls("aucune racine à qui faire confiance".to_owned()));
-    }
-    let mut config =
-        rustls::ClientConfig::builder_with_provider(Arc::new(ams_tls::provider_quic()))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|quoi| Faute::Tls(format!("TLS 1.3 : {quoi}")))?
-            .with_root_certificates(magasin)
-            .with_no_client_auth();
-    config.alpn_protocols = ams_tls::alpn_h3();
-    Ok(Arc::new(config))
 }
 
 /// Seize octets d'amorce pour les identifiants de connexion.

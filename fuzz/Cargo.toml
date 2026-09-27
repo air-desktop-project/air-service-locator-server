@@ -194,6 +194,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_asl_cle_certificat"
+path = "fuzz_targets/fuzz_asl_cle_certificat.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_asl_session_reponse"
 path = "fuzz_targets/fuzz_asl_session_reponse.rs"
 test = false

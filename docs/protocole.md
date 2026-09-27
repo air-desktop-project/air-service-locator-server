@@ -74,8 +74,8 @@ TLS 1.3 juge l'identité, jamais le locateur.
   sa clé d'identité Ed25519**, d'un seul maillon, présenté par
   `ams_tls::quic_server_config` comme aujourd'hui. Le produire ne demande
   aucune dépendance de plus (C4) : un gabarit DER fixe, une clé, une signature
-  (décision 55, proposé : à `--new-identity-key`, et à chaque démarrage si le
-  fichier manque).
+  (décision 55 : `<clé>.crt` à `--new-identity-key`, `--identity-certificate
+  <clé>` pour l'imprimer, et le démarrage le frappe en mémoire — 0.29.0).
 - **Côté client** (daemon, application, racine qui tire, annuaire local qui
   fédère) : un vérificateur propre à ASL, branché par
   `with_custom_certificate_verifier` sur la `ClientConfig` qu'ASL construit
@@ -88,8 +88,9 @@ TLS 1.3 juge l'identité, jamais le locateur.
   a un) ; il ne décide de rien.
 - **Les réglages** : là où l'on donnait une autorité PEM, on donne une
   identité attendue — `--peer-key` pour le pair (déjà), le `n-…` de chaque
-  racine pour `--federation` (décision 58, proposé : `--federation
-  <locateur>=<n-…>`), et une liste embarquée pour `asl` et les applications.
+  racine pour `--federation` (décision 58 : `--federation
+  <locateur>=<n-…>`, ou un locateur de la liste embarquée — 0.29.0), et une
+  liste embarquée pour `asl` et les applications.
   Les réglages PEM (`--roots`, `--ca`, `--peer-ca`, `--federation-ca`) vivent
   le temps de la transition (décision 58), puis disparaissent au cran majeur.
 
@@ -2123,7 +2124,7 @@ l'état ne se réplique pas entre elles) —, `--federation-ca` pour leur
 certificat (**jusqu'à la bascule de la décision 58** : ensuite, le `n-…` de
 chaque racine, attendu dans la poignée de main — §0, « Qui l'on croit »), et
 sa clé d'identité (`--identity-key`) ; il publie aussi **ses propres
-locateurs** (décision 57, proposé : `PUT /v1/federation/locateurs`), pour
+locateurs** (décision 57 : `PUT /v1/federation/locateurs`), pour
 qu'un préfixe IPv6 qui change chez un particulier ne demande rien à personne ; il
 authentifie les annonces des daemons de ses domaines avec les clés que
 `GET /v1/federation/machines` lui transmet, et reporte leur état. Il n'a

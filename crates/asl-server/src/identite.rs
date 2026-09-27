@@ -125,7 +125,12 @@ pub fn lire_publique(chemin: &Path) -> Result<ClePublique, Faute> {
 }
 
 /// Frappe une clé d'identité neuve : la privée dans `chemin` (0600), la
-/// publique dans `<chemin>.pub`, et rend la publique.
+/// publique dans `<chemin>.pub`, son certificat d'identité dans
+/// `<chemin>.crt` (décision 55), et rend la publique.
+///
+/// **Le certificat n'est qu'une commodité** : le démarrage le refrappe en
+/// mémoire depuis la clé, octet pour octet (Ed25519 est déterministe). Le
+/// fichier sert à qui veut l'inspecter (`openssl x509 -in … -noout -text`).
 ///
 /// **L'entropie vient du noyau** (`entropie`), comme pour un défi : une clé
 /// tirée d'ailleurs serait une clé qu'on devine.
@@ -136,7 +141,12 @@ pub fn lire_publique(chemin: &Path) -> Result<ClePublique, Faute> {
 /// [`Faute::Fichier`].
 pub fn generer(chemin: &Path) -> Result<ClePublique, Faute> {
     let publique_chemin = chemin_public(chemin);
-    for fichier in [chemin, publique_chemin.as_path()] {
+    let certificat_chemin = chemin_certificat(chemin);
+    for fichier in [
+        chemin,
+        publique_chemin.as_path(),
+        certificat_chemin.as_path(),
+    ] {
         if fichier.exists() {
             return Err(Faute::Existe {
                 chemin: fichier.display().to_string(),
@@ -149,6 +159,11 @@ pub fn generer(chemin: &Path) -> Result<ClePublique, Faute> {
 
     ecrire(chemin, graine.octets(), 0o600)?;
     ecrire(&publique_chemin, &publique.octets(), 0o644)?;
+    ecrire(
+        &certificat_chemin,
+        certificat_pem(&secrete).as_bytes(),
+        0o644,
+    )?;
     Ok(publique)
 }
 
@@ -195,6 +210,47 @@ pub fn chemin_public(chemin: &Path) -> std::path::PathBuf {
     })
 }
 
+/// Le chemin du certificat d'identité frappé à côté de cette clé privée.
+#[must_use]
+pub fn chemin_certificat(chemin: &Path) -> std::path::PathBuf {
+    chemin.with_extension(match chemin.extension() {
+        Some(extension) => format!("{}.crt", extension.to_string_lossy()),
+        None => "crt".to_owned(),
+    })
+}
+
+/// Le certificat d'identité de cette clé, en PEM (RFC 7468).
+#[must_use]
+pub fn certificat_pem(cle: &CleSecrete) -> String {
+    let der = asl_cle::certificat_d_identite(cle);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for ligne in base64(&der).as_bytes().chunks(64) {
+        pem.push_str(&String::from_utf8_lossy(ligne));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
+}
+
+/// Base64, alphabet standard, avec bourrage (RFC 4648 §4) — pour le PEM, et
+/// rien d'autre : trois cents octets ne valent pas une dépendance.
+fn base64(octets: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut sortie = String::with_capacity(octets.len().div_ceil(3).saturating_mul(4));
+    for groupe in octets.chunks(3) {
+        let a = u32::from(groupe[0]);
+        let b = u32::from(groupe.get(1).copied().unwrap_or(0));
+        let c = u32::from(groupe.get(2).copied().unwrap_or(0));
+        let n = (a << 16) | (b << 8) | c;
+        let signe = |decalage: u32| char::from(ALPHABET[((n >> decalage) & 0x3f) as usize]);
+        sortie.push(signe(18));
+        sortie.push(signe(12));
+        sortie.push(if groupe.len() > 1 { signe(6) } else { '=' });
+        sortie.push(if groupe.len() > 2 { signe(0) } else { '=' });
+    }
+    sortie
+}
+
 /// Les octets d'une clé publique, en hexadécimal — pour l'œil et le journal.
 #[must_use]
 pub fn en_hexadecimal(octets: &[u8]) -> String {
@@ -203,7 +259,10 @@ pub fn en_hexadecimal(octets: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Faute, chemin_public, en_hexadecimal, generer, lire_publique, lire_secrete};
+    use super::{
+        Faute, base64, certificat_pem, chemin_certificat, chemin_public, en_hexadecimal, generer,
+        lire_publique, lire_secrete,
+    };
 
     fn temporaire(quoi: &str) -> std::path::PathBuf {
         let chemin =
@@ -297,5 +356,37 @@ mod tests {
         ] {
             assert!(!faute.to_string().is_empty());
         }
+    }
+
+    #[test]
+    fn base64_suit_la_rfc_4648_et_le_pem_relit_le_certificat() {
+        // Les vecteurs de RFC 4648 §10.
+        for (clair, attendu) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(clair.as_bytes()), attendu, "{clair}");
+        }
+        // Le PEM se relit par `rustls` en le certificat frappé.
+        let secrete = asl_cle::CleSecrete::depuis_entropie([0x21; 32]);
+        let pem = certificat_pem(&secrete);
+        let relus = asl_loop_tokio::racines_depuis_pem(pem.as_bytes()).expect("un certificat PEM");
+        assert_eq!(
+            relus,
+            vec![asl_cle::certificat_d_identite(&secrete).to_vec()]
+        );
+        assert_eq!(
+            chemin_certificat(std::path::Path::new("/etc/asl-server/identite.key")),
+            std::path::PathBuf::from("/etc/asl-server/identite.key.crt")
+        );
+        assert_eq!(
+            chemin_certificat(std::path::Path::new("/etc/asl-server/identite")),
+            std::path::PathBuf::from("/etc/asl-server/identite.crt")
+        );
     }
 }

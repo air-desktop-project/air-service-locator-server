@@ -67,6 +67,7 @@
 #![no_std]
 
 mod appareil;
+mod certificat;
 
 pub use appareil::{
     CLE_APPAREIL_OCTETS, CLE_SECRETE_APPAREIL_OCTETS, CleAppareil, CleSecreteAppareil,
@@ -74,6 +75,11 @@ pub use appareil::{
     MESSAGE_ATTESTATION_OCTETS, MESSAGE_POSSESSION_APPAREIL_OCTETS, SIGNATURE_APPAREIL_OCTETS,
     SignatureAppareil, message_d_attestation, message_d_attestation_de_cle,
     message_de_possession_appareil,
+};
+
+pub use certificat::{
+    CERTIFICAT_D_IDENTITE_OCTETS, CLE_PKCS8_OCTETS, certificat_d_identite, cle_du_certificat,
+    cle_pkcs8,
 };
 
 use asl_id::{Genre, Identifiant};
@@ -378,6 +384,10 @@ pub enum Faute {
     /// N'arrive qu'aux clés secrètes P-256 : Ed25519 accepte n'importe quels
     /// trente-deux octets, P-256 refuse zéro et ce qui dépasse l'ordre.
     CleSecreteInvalide,
+    /// Un certificat X.509 qu'on ne sait pas lire, ou dont la clé n'est pas
+    /// Ed25519 ([`cle_du_certificat`]) : ce n'est pas un certificat
+    /// d'identité d'annuaire.
+    CertificatIllisible,
 }
 
 /// La clé publique d'une machine, telle que l'annuaire la connaît.
