@@ -3337,8 +3337,11 @@ mod groupes {
 mod annuaires {
     use asl_api::annuaire::{
         DecisionDInscription, DeclarationDAnnuaire, Hebergeur, InscriptionRendue,
+        LOCATEURS_CORPS_MAX, LOCATEURS_DE_RACINE_MAX, LOCATEURS_MAX, ListeDeRacines,
+        PublicationDeLocateurs, RACINES_MAX, RacineRendue,
     };
     use asl_id::{Genre, Identifiant};
+    use asl_proto::Erreur;
 
     fn un(genre: Genre, graine: u8) -> Identifiant {
         Identifiant::depuis_entropie(genre, [graine; 16])
@@ -3414,6 +3417,7 @@ mod annuaires {
             proprietaire: Some(u),
             etat: "en attente",
             adresse: "speedy:6630",
+            locateurs: &[],
             expire_a: None,
         };
         let combien = entiere.encoder(&mut sortie).unwrap();
@@ -3434,6 +3438,7 @@ mod annuaires {
             proprietaire: None,
             etat: "attendue",
             adresse: "speedy:6630",
+            locateurs: &[],
             expire_a: Some(1_790_000_000_000),
         };
         let combien = attendue.encoder(&mut sortie).unwrap();
@@ -3474,5 +3479,252 @@ mod annuaires {
         );
         let mut petit = [0_u8; 4];
         assert!(entiere.encoder(&mut petit).is_err());
+    }
+
+    #[test]
+    fn une_publication_de_locateurs_porte_de_zero_a_quatre_chaines() {
+        let vide = PublicationDeLocateurs::decoder(br#"{"locateurs":[]}"#).unwrap();
+        assert!(vide.locateurs().is_empty());
+        let deux = PublicationDeLocateurs::decoder(
+            br#"{ "locateurs" : [ "[2001:db8::7]:6630" , "192.0.2.7:6630" ] }"#,
+        )
+        .unwrap();
+        assert_eq!(deux.locateurs(), ["[2001:db8::7]:6630", "192.0.2.7:6630"]);
+        let quatre = br#"{"locateurs":["a:1","b:2","c:3","d:4"]}"#;
+        assert_eq!(
+            PublicationDeLocateurs::decoder(quatre)
+                .unwrap()
+                .locateurs()
+                .len(),
+            LOCATEURS_MAX
+        );
+        assert_eq!(
+            PublicationDeLocateurs::decoder(br#"{"locateurs":["a:1","b:2","c:3","d:4","e:5"]}"#),
+            Err(Erreur::TropDElements { obtenu: 5 })
+        );
+        for mauvais in [
+            &br#"{"locateurs":"a:1"}"#[..],
+            br#"{"locateurs":["a:1""b:2"]}"#,
+            br#"{"locateurs":["a:1",]}"#,
+            br#"{"locateurs":[1]}"#,
+            br#"{"locateurs":["a:1"],}"#,
+            br#"{"locateurs":["a:1"]"#,
+            br#"{"adresse":["a:1"]}"#,
+            br#"{"locateurs":["a:1"]} x"#,
+        ] {
+            assert!(
+                PublicationDeLocateurs::decoder(mauvais).is_err(),
+                "{}",
+                String::from_utf8_lossy(mauvais)
+            );
+        }
+    }
+
+    #[test]
+    fn une_inscription_rendue_porte_ses_locateurs_quand_il_y_en_a() {
+        let n = un(Genre::Annuaire, 1);
+        let mut sortie = [0_u8; 512];
+        let rendue = InscriptionRendue {
+            membre: Some(n),
+            annuaire: Some(n),
+            proprietaire: None,
+            etat: "acceptée",
+            adresse: "speedy:6630",
+            locateurs: &["[2001:db8::7]:6630", "192.0.2.7:6630"],
+            expire_a: None,
+        };
+        let combien = rendue.encoder(&mut sortie).unwrap();
+        assert!(core::str::from_utf8(&sortie[..combien]).unwrap().ends_with(
+            "\"adresse\":\"speedy:6630\",\
+                     \"locateurs\":[\"[2001:db8::7]:6630\",\"192.0.2.7:6630\"]}"
+        ));
+    }
+
+    #[test]
+    fn une_racine_rendue_dit_son_identite_sa_cle_et_ses_locateurs() {
+        let n = un(Genre::Annuaire, 1);
+        let mut cle = [0_u8; 32];
+        cle[0] = 0x0f;
+        cle[31] = 0xa0;
+        let racine = RacineRendue {
+            annuaire: n,
+            cle,
+            locateurs: &["[2001:db8::1]:6630", "nitrogen.air-desktop.org:6630"],
+        };
+        let mut sortie = [0_u8; 512];
+        let combien = racine.encoder(&mut sortie).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&sortie[..combien]).unwrap(),
+            format!(
+                "{{\"annuaire\":\"{}\",\"cle\":\"0f{}a0\",\
+                 \"locateurs\":[\"[2001:db8::1]:6630\",\"nitrogen.air-desktop.org:6630\"]}}",
+                n.texte().as_str(),
+                "00".repeat(30)
+            )
+        );
+        let sans = RacineRendue {
+            locateurs: &[],
+            ..racine
+        };
+        let combien = sans.encoder(&mut sortie).unwrap();
+        assert!(
+            core::str::from_utf8(&sortie[..combien])
+                .unwrap()
+                .ends_with("\"locateurs\":[]}")
+        );
+        let mut petit = [0_u8; 8];
+        assert!(racine.encoder(&mut petit).is_err());
+    }
+
+    /// Une liste de racines encodée comme l'annuaire la rend.
+    fn liste(racines: &[RacineRendue<'_>]) -> Vec<u8> {
+        let mut sortie = b"[".to_vec();
+        for (rang, racine) in racines.iter().enumerate() {
+            if rang > 0 {
+                sortie.push(b',');
+            }
+            let mut tampon = [0_u8; 2048];
+            let combien = racine.encoder(&mut tampon).unwrap();
+            sortie.extend_from_slice(&tampon[..combien]);
+        }
+        sortie.push(b']');
+        sortie
+    }
+
+    #[test]
+    fn une_liste_de_racines_se_relit_telle_qu_encodee() {
+        let (n1, n2) = (un(Genre::Annuaire, 1), un(Genre::Annuaire, 2));
+        let mut cle = [0_u8; 32];
+        for (rang, octet) in cle.iter_mut().enumerate() {
+            *octet = u8::try_from(rang * 8).unwrap();
+        }
+        let premiere = RacineRendue {
+            annuaire: n1,
+            cle,
+            locateurs: &["[2001:db8::1]:6630", "192.0.2.1:6630"],
+        };
+        let seconde = RacineRendue {
+            annuaire: n2,
+            cle: [0xAB; 32],
+            locateurs: &[],
+        };
+        let octets = liste(&[premiere, seconde]);
+        let lue = ListeDeRacines::decoder(&octets).unwrap();
+        let racines: Vec<_> = lue.racines().collect();
+        assert_eq!(racines.len(), 2);
+        assert_eq!(racines[0].annuaire, n1);
+        assert_eq!(racines[0].cle, cle);
+        assert_eq!(racines[0].locateurs(), premiere.locateurs);
+        assert_eq!(racines[1].annuaire, n2);
+        assert_eq!(racines[1].cle, [0xAB; 32]);
+        assert!(racines[1].locateurs().is_empty());
+        // Des blancs, et des majuscules dans la clé.
+        let espacee = format!(
+            "[ {{ \"annuaire\" : \"{}\" , \"cle\" : \"{}\" , \"locateurs\" : [ \"a:1\" ] }} ]",
+            n1.texte().as_str(),
+            "AB".repeat(32)
+        );
+        let lue = ListeDeRacines::decoder(espacee.as_bytes()).unwrap();
+        assert_eq!(lue.racines().next().unwrap().cle, [0xAB; 32]);
+        // Quatre, oui ; cinq, non.
+        let quatre = liste(&[seconde; RACINES_MAX]);
+        assert_eq!(
+            ListeDeRacines::decoder(&quatre).unwrap().racines().count(),
+            RACINES_MAX
+        );
+        assert_eq!(
+            ListeDeRacines::decoder(&liste(&[seconde; RACINES_MAX + 1])),
+            Err(Erreur::TropDElements {
+                obtenu: RACINES_MAX + 1
+            })
+        );
+        let neuf = ["a:1"; LOCATEURS_DE_RACINE_MAX + 1];
+        let trop = RacineRendue {
+            locateurs: &neuf,
+            ..seconde
+        };
+        assert!(matches!(
+            ListeDeRacines::decoder(&liste(&[trop])),
+            Err(Erreur::TropDElements { .. })
+        ));
+    }
+
+    #[test]
+    fn une_liste_de_racines_de_travers_est_refusee() {
+        let n = un(Genre::Annuaire, 1).texte();
+        let u = un(Genre::Utilisateur, 1).texte();
+        let bonne = "ab".repeat(32);
+        let racine = |annuaire: &str, cle: &str| {
+            format!(r#"{{"annuaire":"{annuaire}","cle":"{cle}","locateurs":[]}}"#)
+        };
+        let mauvaises = [
+            "[]".to_owned(),
+            format!("[{}", racine(n.as_str(), &bonne)),
+            format!("[{}] x", racine(n.as_str(), &bonne)),
+            racine(n.as_str(), &bonne),
+            format!("[{}]", racine(u.as_str(), &bonne)),
+            format!("[{}]", racine(n.as_str(), &"ab".repeat(31))),
+            format!(
+                "[{}]",
+                racine(n.as_str(), &format!("{}zz", "ab".repeat(31)))
+            ),
+            format!("[{}]", racine(n.as_str(), &format!("{}a", "ab".repeat(31)))),
+            format!(
+                r#"[{{"annuaire":"{}" "cle":"{bonne}","locateurs":[]}}]"#,
+                n.as_str()
+            ),
+            format!(
+                r#"[{{"annuaire":"{}","clef":"{bonne}","locateurs":[]}}]"#,
+                n.as_str()
+            ),
+            format!(
+                r#"[{{"annuaire":"{}","cle":"{bonne}" "locateurs":[]}}]"#,
+                n.as_str()
+            ),
+            format!(
+                r#"[{{"annuaire":"{}","cle":"{bonne}","locateurs":[],}}]"#,
+                n.as_str()
+            ),
+            format!(
+                r#"[{{"annuaire":"{}","cle":1,"locateurs":[]}}]"#,
+                n.as_str()
+            ),
+            format!(
+                r#"[{{"annuair":"{}","cle":"{bonne}","locateurs":[]}}]"#,
+                n.as_str()
+            ),
+            format!(r#"[{{"annuaire":1,"cle":"{bonne}","locateurs":[]}}]"#),
+            format!(
+                r#"[{{"annuaire":"{}","cle":"{bonne}","locateur":[]}}]"#,
+                n.as_str()
+            ),
+            format!("[{}]", racine(n.as_str(), &format!("{}é", "ab".repeat(31)))),
+            format!("[{}]{}", racine(n.as_str(), &bonne), " ".repeat(4_096)),
+        ];
+        for mauvaise in &mauvaises {
+            assert!(
+                ListeDeRacines::decoder(mauvaise.as_bytes()).is_err(),
+                "{mauvaise}"
+            );
+        }
+    }
+
+    #[test]
+    fn une_publication_admet_quatre_locateurs_de_la_plus_grande_longueur() {
+        let long = format!("{}:6630", "a".repeat(250));
+        let corps = format!(r#"{{"locateurs":["{long}","{long}","{long}","{long}"]}}"#);
+        assert!(corps.len() <= LOCATEURS_CORPS_MAX);
+        assert_eq!(
+            PublicationDeLocateurs::decoder(corps.as_bytes())
+                .unwrap()
+                .locateurs()
+                .len(),
+            4
+        );
+        let trop_long = vec![b' '; LOCATEURS_CORPS_MAX + 1];
+        assert!(matches!(
+            PublicationDeLocateurs::decoder(&trop_long),
+            Err(Erreur::MessageTropLong { .. })
+        ));
     }
 }

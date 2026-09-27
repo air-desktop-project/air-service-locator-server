@@ -102,6 +102,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::PairInstantane => "/v1/pair/instantane".to_owned(),
         Ressource::FederationMachines { apres } => format!("/v1/federation/machines?apres={apres}"),
         Ressource::FederationEtat => "/v1/federation/etat".to_owned(),
+        Ressource::FederationLocateurs => "/v1/federation/locateurs".to_owned(),
         Ressource::Replication => "/v1/replication".to_owned(),
         Ressource::Domaines => "/v1/domaines".to_owned(),
         Ressource::RechercheDomaines { alias } => reencoder("/v1/domaines?alias=", alias),
@@ -132,6 +133,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Inscriptions => "/v1/inscriptions".to_owned(),
         Ressource::DecisionInscription { membre } => format!("/v1/inscriptions/{membre}/decision"),
         Ressource::HebergeurDomaine { domaine } => format!("/v1/domaines/{domaine}/hebergeur"),
+        Ressource::Racines => "/v1/racines".to_owned(),
     }
 }
 
@@ -253,7 +255,9 @@ fuzz_target!(|entree: Entree| {
     // (2026-09-27) — la preuve de l'exploitant est dans le corps, comme pour
     // les invitations —, puis `/v1/annuaires/inscription` et
     // `/v1/annuaires/etat` (0.27.0) — la preuve de possession de l'annuaire
-    // local est dans le corps, comme pour l'enrôlement. Le verbe était légitime et sa liberté délibérée
+    // local est dans le corps, comme pour l'enrôlement —, puis `/v1/racines`
+    // (0.30.0) — la liste que chaque logiciel embarque, portée par une
+    // connexion déjà vérifiée par clé. Le verbe était légitime et sa liberté délibérée
     // — mais c'est précisément le point : une ressource ne devient publique
     // que si quelqu'un l'écrit ICI, jamais parce qu'un `_ =>` l'a laissée
     // passer.
@@ -264,6 +268,7 @@ fuzz_target!(|entree: Entree| {
                 Ressource::Defi
                     | Ressource::Vu
                     | Ressource::Version
+                    | Ressource::Racines
                     | Ressource::Comptes
                     | Ressource::Enrolement
                     | Ressource::Attestation

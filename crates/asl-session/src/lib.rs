@@ -134,6 +134,10 @@ const _: () = assert!(
     asl_registre::ALIAS_DE_MACHINE_BRUT_MAX < asl_api::corps::CORPS_MAX,
     "un alias de machine brut doit tenir dans un corps de requête"
 );
+const _: () = assert!(
+    asl_api::annuaire::LOCATEURS_MAX == asl_registre::LOCATEURS_MAX,
+    "les locateurs publiés doivent avoir la borne des locateurs rangés"
+);
 
 /// Ce qu'un corps de requête peut faire, en octets.
 ///
@@ -843,6 +847,16 @@ pub enum Besoin<'a> {
         /// Les entrées, à la suite.
         entrees: &'a [u8],
     },
+    /// `PUT /v1/federation/locateurs` — où joindre l'annuaire local de cette
+    /// connexion (décision 57). **Le corps est déjà lu une fois ici**, chaque
+    /// locateur jugé comme une adresse déclarée ; l'étage 3 le relit.
+    PublierLocateurs {
+        /// Le corps JSON, tel que reçu.
+        corps: &'a [u8],
+    },
+    /// `GET /v1/racines` — l'identité et les locateurs des racines
+    /// (décision 56). Sans exigence.
+    Racines,
     /// `PUT` / `DELETE /v1/domaines/{d}/hebergeur`.
     ConfierDomaine {
         /// Le domaine.
@@ -1193,6 +1207,8 @@ pub enum Trouvaille {
     /// confié. Le corps, déjà encodé, dit lequel et où le joindre — `421`
     /// (`protocole.md` §3 ter, 0.28.0).
     Ailleurs(alloc::vec::Vec<u8>),
+    /// Les racines, **chacune déjà encodée** (décision 56).
+    Racines(alloc::vec::Vec<alloc::vec::Vec<u8>>),
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -1784,6 +1800,8 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         Ressource::InscriptionAnnuaire => lire_une_inscription(session, corps),
         Ressource::FederationMachines { apres } => Besoin::MachinesFederees { apres },
         Ressource::FederationEtat => lire_un_etat_federe(corps),
+        Ressource::FederationLocateurs => lire_une_publication_de_locateurs(corps),
+        Ressource::Racines => Besoin::Racines,
         Ressource::EtatAnnuaire => lire_une_demande_d_etat(session, corps),
         Ressource::Inscriptions => Besoin::InscriptionsEnAttente,
         Ressource::DecisionInscription { membre } => {
@@ -2024,6 +2042,23 @@ fn lire_un_etat_federe(corps: &[u8]) -> Besoin<'_> {
         }
     }
     Besoin::EtatFedere { entrees: corps }
+}
+
+/// Lit `PUT /v1/federation/locateurs` : de zéro à quatre locateurs, dont
+/// chacun a la forme d'une adresse déclarée. Un seul de travers refuse le
+/// corps entier.
+fn lire_une_publication_de_locateurs(corps: &[u8]) -> Besoin<'_> {
+    match asl_api::annuaire::PublicationDeLocateurs::decoder(corps) {
+        Ok(publication)
+            if publication
+                .locateurs()
+                .iter()
+                .all(|locateur| asl_registre::Adresse::nouvelle(locateur).is_ok()) =>
+        {
+            Besoin::PublierLocateurs { corps }
+        }
+        _ => Besoin::Deja(StatusCode::BAD_REQUEST),
+    }
 }
 
 /// Lit `POST /v1/annuaires/etat` : la clé d'identité, et la preuve.
@@ -2803,6 +2838,29 @@ pub fn repondre<'o>(
             Trouvaille::MachinesFederees(corps) => {
                 composer(StatusCode::OK, OCTETS_MEDIA, corps, sortie)
             }
+            _ => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+        },
+        // **`204` publiés** ; `404` si l'annuaire n'est plus membre.
+        Besoin::PublierLocateurs { .. } => match trouvaille {
+            Trouvaille::Fait => composer(StatusCode::NO_CONTENT, OCTETS_MEDIA, b"", sortie),
+            Trouvaille::Rien => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+            autre => rendre_l_echec(autre, sortie),
+        },
+        // **UNE LISTE, TOUJOURS** : la liste embarquée ne manque jamais. Et
+        // jamais `500` pour `Rien` — la ressource n'exige rien (voir
+        // `Besoin::Version`).
+        Besoin::Racines => match trouvaille {
+            Trouvaille::Racines(quoi) => composer_une_liste(quoi, sortie),
             _ => composer(
                 StatusCode::NOT_FOUND,
                 PROBLEME_MEDIA,
@@ -9450,6 +9508,67 @@ mod voie_de_l_annuaire_local {
         assert_eq!(reponse.status(), StatusCode::OK);
         assert_eq!(champ(&reponse, b"content-type"), Some(OCTETS_MEDIA));
         assert_eq!(reponse.body(), &[9_u8; 5]);
+        let mut sortie = [0_u8; 256];
+        let reponse = repondre(&mut session, &quoi, &Trouvaille::Rien, None, &mut sortie);
+        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn des_locateurs_se_publient_chacun_de_la_forme_d_une_adresse() {
+        let (mut session, _) = session_prouvee(CleTrouvee::AnnuaireLocal);
+        let publier = tete(b"PUT", b"/v1/federation/locateurs");
+        let corps = br#"{"locateurs":["[2001:db8::7]:6630","192.0.2.7:6630"]}"#;
+        let quoi = besoin(&session, &publier, corps);
+        assert_eq!(quoi, Besoin::PublierLocateurs { corps });
+        // Vide : un retrait, permis.
+        let vide = br#"{"locateurs":[]}"#;
+        assert_eq!(
+            besoin(&session, &publier, vide),
+            Besoin::PublierLocateurs { corps: vide }
+        );
+        // Un locateur sans port, ou un corps de travers : `400`.
+        for mauvais in [
+            &br#"{"locateurs":["192.0.2.7"]}"#[..],
+            br#"{"locateurs":"192.0.2.7:6630"}"#,
+        ] {
+            assert_eq!(
+                besoin(&session, &publier, mauvais),
+                Besoin::Deja(StatusCode::BAD_REQUEST)
+            );
+        }
+        // Un inconnu n'y a pas droit.
+        let inconnu = Session::new(liaison());
+        assert_eq!(
+            besoin(&inconnu, &publier, corps),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+        let mut sortie = [0_u8; 256];
+        for (trouvaille, statut) in [
+            (Trouvaille::Fait, StatusCode::NO_CONTENT),
+            (Trouvaille::Rien, StatusCode::NOT_FOUND),
+            (Trouvaille::Refus, StatusCode::FORBIDDEN),
+        ] {
+            let reponse = repondre(&mut session, &quoi, &trouvaille, None, &mut sortie);
+            assert_eq!(reponse.status(), statut);
+        }
+    }
+
+    #[test]
+    fn les_racines_se_rendent_a_qui_les_demande_sans_preuve() {
+        let mut session = Session::new(liaison());
+        let quoi = besoin(&session, &tete(b"GET", b"/v1/racines"), b"");
+        assert_eq!(quoi, Besoin::Racines);
+        let mut sortie = [0_u8; 256];
+        let reponse = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Racines(alloc::vec![b"{}".to_vec(), b"{}".to_vec()]),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert_eq!(champ(&reponse, b"content-type"), Some(JSON_MEDIA));
+        assert_eq!(reponse.body(), b"[{},{}]");
         let mut sortie = [0_u8; 256];
         let reponse = repondre(&mut session, &quoi, &Trouvaille::Rien, None, &mut sortie);
         assert_eq!(reponse.status(), StatusCode::NOT_FOUND);

@@ -23,14 +23,22 @@ use asl_store::{
 
 use super::{Service, alloc_reponse, maintenant};
 
-/// Un membre, encodé — `proprietaire` pour les administrateurs.
+/// Un membre, encodé — `proprietaire` pour les administrateurs, et les
+/// locateurs qu'il a publiés (décision 57).
 fn encoder_un_membre(lu: &MembreLu, avec_proprietaire: bool) -> Option<Vec<u8>> {
+    let locateurs: Vec<&str> = lu
+        .locateurs
+        .iter()
+        .flat_map(asl_registre::Locateurs::adresses)
+        .map(Adresse::texte)
+        .collect();
     let rendu = asl_api::annuaire::InscriptionRendue {
         membre: Some(lu.membre),
         annuaire: Some(lu.annuaire),
         proprietaire: avec_proprietaire.then_some(lu.proprietaire),
         etat: lu.etat.mot(),
         adresse: lu.adresse.texte(),
+        locateurs: &locateurs,
         expire_a: None,
     };
     let mut sortie = alloc_reponse();
@@ -47,6 +55,7 @@ fn encoder_une_attente(attendue: &DeclarationAttendue) -> Option<Vec<u8>> {
         proprietaire: None,
         etat: "attendue",
         adresse: attendue.adresse.texte(),
+        locateurs: &[],
         expire_a: Some(attendue.expire_a),
     };
     let mut sortie = alloc_reponse();

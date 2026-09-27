@@ -595,6 +595,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                     }),
                     journal: Box::new(|ligne| eprintln!("asl-server : {ligne}")),
                     plafond_recul_ms: reglages.keepalive_s.saturating_mul(1_000).max(1),
+                    locateurs: federation.locateurs.clone(),
                 };
                 federateurs.push(tokio::spawn(federateur.federer_sans_fin()));
             }

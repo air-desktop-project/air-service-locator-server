@@ -1241,7 +1241,51 @@ fn conflits() -> Vec<(Estampille, Operation)> {
                 par: un(Genre::Utilisateur, 1),
             },
         ),
+        // Les locateurs de n2 publiés deux fois (213, 214) : les plus récents.
+        // Ceux de n3 publiés (215), puis retirés (216) : le retrait tient, et
+        // l'adresse déclarée sert de nouveau.
+        (
+            est(autre(), 213),
+            Operation::InscriptionLocateurs {
+                membre: un(Genre::Annuaire, 2),
+                enregistrement: locateurs(est(autre(), 213), &["192.0.2.2:6630"]),
+            },
+        ),
+        (
+            est(pair(), 214),
+            Operation::InscriptionLocateurs {
+                membre: un(Genre::Annuaire, 2),
+                enregistrement: locateurs(
+                    est(pair(), 214),
+                    &["[2001:db8::2]:6630", "198.51.100.2:6630"],
+                ),
+            },
+        ),
+        (
+            est(pair(), 215),
+            Operation::InscriptionLocateurs {
+                membre: un(Genre::Annuaire, 3),
+                enregistrement: locateurs(est(pair(), 215), &["[2001:db8::3]:6630"]),
+            },
+        ),
+        (
+            est(autre(), 216),
+            Operation::InscriptionLocateurs {
+                membre: un(Genre::Annuaire, 3),
+                enregistrement: locateurs(est(autre(), 216), &[]),
+            },
+        ),
     ]
+}
+
+/// Des locateurs publiés.
+fn locateurs(estampille: Estampille, adresses: &[&str]) -> asl_registre::Locateurs {
+    let adresses: Vec<asl_registre::Adresse> = adresses
+        .iter()
+        .map(|texte| asl_registre::Adresse::nouvelle(texte).expect("une adresse"))
+        .collect();
+    asl_registre::Locateurs::nouveaux(Provenance::Ici, estampille, &adresses)
+        .expect("au plus quatre")
 }
 
 /// Une déclaration d'annuaire local.
@@ -2327,6 +2371,20 @@ fn les_inscriptions_convergent_vers_ce_que_les_regles_annoncent() {
         .map(|lu| lu.membre)
         .collect();
     assert_eq!(attente, vec![un(Genre::Annuaire, 3)]);
+    // Les locateurs : les plus récents de n2 ; n3 a retiré les siens, et se
+    // joint de nouveau à son adresse déclarée.
+    let joindre = |graine: u8| -> Vec<String> {
+        base.membre_d_annuaire(un(Genre::Annuaire, graine))
+            .expect("lisible")
+            .expect("un membre")
+            .ou_joindre()
+            .iter()
+            .map(|adresse| adresse.texte().to_owned())
+            .collect()
+    };
+    assert_eq!(joindre(2), ["[2001:db8::2]:6630", "198.51.100.2:6630"]);
+    assert_eq!(joindre(3), ["maison.local:6630"]);
+    assert_eq!(joindre(1), ["maison.local:6630"]);
     // Retiré deux fois : la marque est la plus ancienne des deux.
     let retraits: Vec<Estampille> = base
         .instantane()
@@ -2926,6 +2984,69 @@ fn un_code_d_inscription_expire_ne_sert_qu_une_cle_et_un_annuaire_n_a_qu_un_seco
             .expect("lue"),
         DeclarationDAnnuaire::Inconnu
     );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn un_membre_publie_ses_locateurs_et_une_publication_identique_n_ecrit_rien() {
+    let (base, chemin) = entrepot("inscriptions-locateurs");
+    let alice = un(Genre::Utilisateur, 1);
+    creer(&base, alice, 1);
+    let adresse = |texte: &str| asl_registre::Adresse::nouvelle(texte).expect("une adresse");
+    let declaree = adresse("speedy.maison:6630");
+    let n1 = un(Genre::Annuaire, 1);
+    let publies = [adresse("[2001:db8::1]:6630"), adresse("192.0.2.1:6630")];
+    // L'estampille des locateurs de n1 dans l'instantané, s'il y en a.
+    let publiee = || -> Option<Estampille> {
+        base.instantane()
+            .expect("l'instantané se lit")
+            .iter()
+            .find_map(|octets| match Cadre::lire(octets) {
+                Ok((
+                    Cadre::Operation {
+                        estampille,
+                        operation: Operation::InscriptionLocateurs { membre, .. },
+                    },
+                    _,
+                )) if membre == n1 => Some(estampille),
+                _ => None,
+            })
+    };
+    let joindre = || {
+        base.membre_d_annuaire(n1)
+            .expect("lisible")
+            .expect("un membre")
+            .ou_joindre()
+    };
+
+    // Qui n'est pas membre ne publie rien.
+    assert!(!base.publier_locateurs(n1, &publies).expect("lue"));
+    base.declarer_annuaire(alice, None, declaree, [1; 32], u64::MAX)
+        .expect("posée");
+    base.presenter_un_code([1; 32], n1, [0x11; 32], 0)
+        .expect("présenté");
+    assert_eq!(joindre(), vec![declaree]);
+
+    // Publiés : ils remplacent l'adresse déclarée.
+    assert!(base.publier_locateurs(n1, &publies).expect("posés"));
+    assert_eq!(joindre(), publies.to_vec());
+    let premiere = publiee().expect("publiés");
+    // La même publication, au démarrage suivant : rien ne s'écrit.
+    assert!(base.publier_locateurs(n1, &publies).expect("lue"));
+    assert_eq!(publiee(), Some(premiere));
+    // Retirés : l'adresse déclarée sert de nouveau, et le retrait garde son
+    // estampille.
+    assert!(base.publier_locateurs(n1, &[]).expect("retirés"));
+    assert_eq!(joindre(), vec![declaree]);
+    let retrait = publiee().expect("le retrait voyage");
+    assert!(retrait > premiere);
+    // Un retrait répété n'écrit rien non plus.
+    assert!(base.publier_locateurs(n1, &[]).expect("lue"));
+    assert_eq!(publiee(), Some(retrait));
+
+    // Retiré de l'inscription, il ne publie plus.
+    base.retirer_un_membre(n1, alice).expect("retiré");
+    assert!(!base.publier_locateurs(n1, &publies).expect("lue"));
     let _ = std::fs::remove_file(&chemin);
 }
 

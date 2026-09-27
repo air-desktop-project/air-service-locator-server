@@ -308,6 +308,16 @@ impl ServerCertVerifier for Verificateur {
     }
 }
 
+/// La configuration cliente d'une confiance, seule — pour un client qui mène
+/// lui-même sa connexion (un harnais d'essai, un diagnostic).
+///
+/// # Errors
+///
+/// [`Faute::Tls`] : ni identité ni autorité, une autorité illisible ou vide.
+pub fn configuration_cliente_de(confiance: &Confiance) -> Result<Arc<rustls::ClientConfig>, Faute> {
+    configuration_cliente(confiance).map(|(configuration, _)| configuration)
+}
+
 /// Joint l'annuaire au bout de ce locateur, mène la poignée de main, et rend
 /// la forme sous laquelle il a été cru — ou pourquoi il ne l'a pas été.
 ///

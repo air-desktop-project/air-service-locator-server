@@ -241,6 +241,9 @@ fn trois_ressources_seulement_n_exigent_rien() {
         // **`/v1/version` NON PLUS** : ceux qui ont besoin de la lire n'ont pas
         // encore de clé, et un numéro de version de logiciel libre est public.
         "/v1/version".to_owned(),
+        // **`/v1/racines` NON PLUS** (0.30.0, décision 56) : la liste que
+        // chaque logiciel embarque, portée par une connexion vérifiée par clé.
+        "/v1/racines".to_owned(),
         format!("/v1/utilisateurs/{u}"),
         // **`/v1/attestation` EST UNE PREUVE**, comme `/v1/defi` : la
         // signature d'un appareil qui rejoint, avec sa chaîne. Exiger un
@@ -1449,6 +1452,21 @@ fn la_voie_de_l_annuaire_local_se_route_et_exige_un_annuaire_local() {
         &[Methode::Get]
     );
     assert_eq!(Ressource::FederationEtat.verbes(), &[Methode::Post]);
+    // **LES LOCATEURS** (décision 57) : un membre pose les siens, sur sa voie.
+    let locateurs = resoudre(Methode::Put, b"/v1/federation/locateurs").unwrap();
+    assert_eq!(locateurs.ressource, Ressource::FederationLocateurs);
+    assert!(locateurs.sert);
+    assert_eq!(locateurs.exigence, Exigence::AnnuaireLocal);
+    assert!(
+        !resoudre(Methode::Get, b"/v1/federation/locateurs")
+            .unwrap()
+            .sert
+    );
+    // **LES RACINES** (décision 56) : publiques, en lecture seule.
+    let racines = resoudre(Methode::Get, b"/v1/racines").unwrap();
+    assert_eq!(racines.ressource, Ressource::Racines);
+    assert!(racines.sert);
+    assert!(!resoudre(Methode::Put, b"/v1/racines").unwrap().sert);
     // Le rang a la grammaire du curseur des opérations : une seule écriture.
     for requete in ["", "apres=", "apres=01", "rang=1"] {
         assert_eq!(

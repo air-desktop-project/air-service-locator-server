@@ -1,5 +1,5 @@
 //! L'inscription d'un annuaire local (`docs/annuaires.md` §2 ter, §4.1 ;
-//! `docs/replication.md` décisions 32, 48, 49) : ce que les racines rangent
+//! `docs/replication.md` décisions 32, 48, 49, 57) : ce que les racines rangent
 //! quand un propriétaire déclare son annuaire, quand l'annuaire se présente
 //! avec sa clé, quand un administrateur tranche, et quand un domaine lui est
 //! confié.
@@ -25,6 +25,10 @@
 //! L'hébergement d'un domaine ([`Hebergement`]) est le cinquième : le plus
 //! récent gagne, et il ne VAUT que si l'annuaire nommé est accepté et
 //! appartient au propriétaire du domaine — encore une lecture.
+//!
+//! Les locateurs d'un membre ([`Locateurs`], décision 57, 0.30.0) sont le
+//! dernier : publiés par le membre lui-même, le plus récent gagne, et vides
+//! ils rendent la parole à l'adresse déclarée — encore une lecture.
 
 use asl_id::{Genre, Identifiant};
 
@@ -481,6 +485,137 @@ impl Hebergement {
     }
 }
 
+// ── Les locateurs d'un membre (décision 57) ─────────────────────────────────
+
+/// Combien de locateurs un membre publie, au plus — le même nombre que
+/// `asl_api::annuaire::LOCATEURS_MAX`, que le corps ne dépasse pas.
+pub const LOCATEURS_MAX: usize = 4;
+
+/// Ce que des locateurs occupent rangés.
+pub const LOCATEURS_OCTETS: usize =
+    PROVENANCE_OCTETS + ESTAMPILLE_OCTETS + 1 + LOCATEURS_MAX * ADRESSE_OCTETS;
+
+/// Où joindre un membre d'annuaire local, tel qu'il l'a publié lui-même
+/// (décision 57) — **le plus récent gagne**, par membre.
+///
+/// Aucune valeur de confiance : on joint un locateur, on attend une identité
+/// (`protocole.md` §0). **Vide, c'est un retrait** : l'adresse déclarée à
+/// l'inscription sert de nouveau, et le retrait garde son estampille pour
+/// qu'une publication plus ancienne, arrivée en retard, ne le défasse pas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Locateurs {
+    /// D'où vient cet enregistrement.
+    pub provenance: Provenance,
+    /// La publication.
+    pub estampille: Estampille,
+    /// Les locateurs, les `combien` premiers.
+    adresses: [Option<Adresse>; LOCATEURS_MAX],
+}
+
+impl Locateurs {
+    /// Des locateurs publiés — de zéro à [`LOCATEURS_MAX`].
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Longueur`] au-delà de [`LOCATEURS_MAX`].
+    pub fn nouveaux(
+        provenance: Provenance,
+        estampille: Estampille,
+        publies: &[Adresse],
+    ) -> Result<Self, Faute> {
+        if publies.len() > LOCATEURS_MAX {
+            return Err(Faute::Longueur {
+                annoncee: publies.len(),
+                maximum: LOCATEURS_MAX,
+            });
+        }
+        let mut adresses = [None; LOCATEURS_MAX];
+        for (place, adresse) in adresses.iter_mut().zip(publies) {
+            *place = Some(*adresse);
+        }
+        Ok(Self {
+            provenance,
+            estampille,
+            adresses,
+        })
+    }
+
+    /// Les locateurs, dans l'ordre publié.
+    pub fn adresses(&self) -> impl Iterator<Item = &Adresse> {
+        self.adresses.iter().flatten()
+    }
+
+    /// Écrit ces locateurs.
+    pub fn ecrire(&self, sortie: &mut [u8; LOCATEURS_OCTETS]) {
+        sortie.fill(0);
+        self.provenance
+            .ecrire(sortie.get_mut(..PROVENANCE_OCTETS).unwrap_or_default());
+        let apres_estampille = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        self.estampille.ecrire(
+            sortie
+                .get_mut(PROVENANCE_OCTETS..apres_estampille)
+                .unwrap_or_default(),
+        );
+        let combien = self.adresses().count();
+        poser_un(
+            sortie.get_mut(apres_estampille..).unwrap_or_default(),
+            u8::try_from(combien).unwrap_or(0),
+        );
+        for (rang, adresse) in self.adresses().enumerate() {
+            let debut = apres_estampille
+                .saturating_add(1)
+                .saturating_add(rang.saturating_mul(ADRESSE_OCTETS));
+            adresse.ecrire(
+                sortie
+                    .get_mut(debut..debut.saturating_add(ADRESSE_OCTETS))
+                    .unwrap_or_default(),
+            );
+        }
+    }
+
+    /// Relit des locateurs, et EXIGE leur forme : un compte au plus de
+    /// [`LOCATEURS_MAX`], des emplacements inutilisés nuls.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute`] si les octets ne forment pas des locateurs.
+    pub fn lire(octets: &[u8; LOCATEURS_OCTETS]) -> Result<Self, Faute> {
+        let provenance = Provenance::lire(octets.get(..PROVENANCE_OCTETS).unwrap_or_default())?;
+        let apres_estampille = PROVENANCE_OCTETS.saturating_add(ESTAMPILLE_OCTETS);
+        let estampille = Estampille::lire(
+            octets
+                .get(PROVENANCE_OCTETS..apres_estampille)
+                .unwrap_or_default(),
+        )?;
+        let combien = usize::from(octets.get(apres_estampille).copied().unwrap_or(0));
+        if combien > LOCATEURS_MAX {
+            return Err(Faute::Longueur {
+                annoncee: combien,
+                maximum: LOCATEURS_MAX,
+            });
+        }
+        let mut adresses = [None; LOCATEURS_MAX];
+        for (rang, place) in adresses.iter_mut().enumerate() {
+            let debut = apres_estampille
+                .saturating_add(1)
+                .saturating_add(rang.saturating_mul(ADRESSE_OCTETS));
+            let tranche = octets
+                .get(debut..debut.saturating_add(ADRESSE_OCTETS))
+                .unwrap_or_default();
+            if rang < combien {
+                *place = Some(Adresse::lire(tranche)?);
+            } else if !bourrage_nul(tranche) {
+                return Err(Faute::Bourrage);
+            }
+        }
+        Ok(Self {
+            provenance,
+            estampille,
+            adresses,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use asl_id::{Genre, Identifiant};
@@ -711,5 +846,55 @@ mod tests {
             Hebergement::lire(&drapeau),
             Err(Faute::Etiquette { lue: 2 })
         );
+    }
+
+    #[test]
+    fn des_locateurs_font_l_aller_retour_et_exigent_leur_forme() {
+        use super::{LOCATEURS_MAX, LOCATEURS_OCTETS, Locateurs};
+        let adresses = [
+            Adresse::nouvelle("[2001:db8::7]:6630").unwrap(),
+            Adresse::nouvelle("192.0.2.7:6630").unwrap(),
+        ];
+        for publies in [&adresses[..], &[]] {
+            let locateurs = Locateurs::nouveaux(Provenance::Ici, e(9), publies).unwrap();
+            assert_eq!(locateurs.adresses().count(), publies.len());
+            let mut octets = [0_u8; LOCATEURS_OCTETS];
+            locateurs.ecrire(&mut octets);
+            assert_eq!(Locateurs::lire(&octets), Ok(locateurs));
+        }
+        let trop = [adresses[0]; LOCATEURS_MAX + 1];
+        assert_eq!(
+            Locateurs::nouveaux(Provenance::Ici, e(9), &trop),
+            Err(Faute::Longueur {
+                annoncee: LOCATEURS_MAX + 1,
+                maximum: LOCATEURS_MAX
+            })
+        );
+        let mut octets = [0_u8; LOCATEURS_OCTETS];
+        Locateurs::nouveaux(Provenance::Ici, e(9), &adresses)
+            .unwrap()
+            .ecrire(&mut octets);
+        let compte = PROVENANCE_OCTETS + ESTAMPILLE_OCTETS;
+        let mut trop_annonce = octets;
+        trop_annonce[compte] = 5;
+        assert_eq!(
+            Locateurs::lire(&trop_annonce),
+            Err(Faute::Longueur {
+                annoncee: 5,
+                maximum: LOCATEURS_MAX
+            })
+        );
+        let mut bourre = octets;
+        bourre[LOCATEURS_OCTETS - 1] = 1;
+        assert_eq!(Locateurs::lire(&bourre), Err(Faute::Bourrage));
+        let mut adresse_fausse = octets;
+        adresse_fausse[compte + 1] = 0;
+        assert!(Locateurs::lire(&adresse_fausse).is_err());
+        let mut provenance = octets;
+        provenance[0] = 9;
+        assert!(Locateurs::lire(&provenance).is_err());
+        let mut estampille = octets;
+        estampille[PROVENANCE_OCTETS + 8] = b'u';
+        assert!(Locateurs::lire(&estampille).is_err());
     }
 }

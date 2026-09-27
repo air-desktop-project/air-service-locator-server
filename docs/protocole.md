@@ -789,6 +789,7 @@ l'empêcherait de comprendre.
 | `GET /v1/machines/{m}/services` | Les services, leurs candidats, leur état et la date de la dernière sonde. |
 | `GET /v1/vu` | **D'où l'annuaire voit cette connexion**, sans rien annoncer ni prouver. Voir ci-dessous. |
 | `GET /v1/version` | **La version de l'annuaire qui répond, et sa posture d'attestation**, `{"version": "0.2.0", "posture": "optional"}`, sans rien prouver. Voir ci-dessous. |
+| `GET /v1/racines` | **Les racines, leur identité et leurs locateurs** (décision 56, 0.30.0), sans rien prouver : `[{"annuaire":"n-…","cle":"<64 chiffres hexadécimaux>","locateurs":["[IPv6]:port","IPv4:port","nom:port"]},…]` — la liste embarquée dans le binaire. **Aucune signature à part** : la connexion, vérifiée par la clé de la racine jointe (§0), est la signature. Le client vérifie que chaque clé se déduit en le `n-…` écrit à côté, et refuse la liste entière sinon ; puis met à jour ses locateurs. |
 | `GET /v1/utilisateurs/{u}` | **Confirme qu'un identifiant existe**, et rien d'autre : ni nom, ni machines, ni services. Sert à ce qu'une faute de frappe ne produise pas une autorisation muette. |
 | `GET /v1/moi/appareils` | **Les appareils du compte de la machine qui demande**, révoqués compris — lecture seule, voie machine. Voir §3. |
 | `GET /v1/utilisateurs/{u}/machines` | **Les machines de `u` que le demandeur a le droit de voir** — les siennes si `u` est lui, sinon celles que les autorisations de `u` envers lui couvrent (`modele.md` §2.5). Voir ci-dessous. Servi aussi sur la voie machine (§3). |
@@ -810,7 +811,7 @@ l'empêcherait de comprendre.
 | `DELETE /v1/machines/{m}/alias` | Le retire. |
 | `DELETE /v1/domaines/{d}` | Supprime un domaine : ses machines détachées, son alias, ses groupes et les droits qui le visent retirés. **`409` si c'est mon dernier.** Propriétaire seulement ; le domaine racine ne se supprime pas. |
 | `POST /v1/annuaires` | **Déclare MON annuaire local** : `{"adresse":"hôte:port"}` — ASCII imprimable, sans `"` ni `\`, un port de 1 à 65 535 ; `201` `{"code":"XXXXX-XXXXX","expire_a":<ms>}`, un code d'inscription — dix symboles, à usage unique, comme un code d'enrôlement, **valable vingt-quatre heures** (0.27.0). L'annuaire le présente aux racines avec sa clé d'identité (`POST /v1/annuaires/inscription`) ; l'inscription est alors **en attente**. |
-| `GET /v1/annuaires` | Mes annuaires locaux et l'état de leur inscription : `attendue` (un code déclaré, pas encore présenté ni expiré — `adresse`, `expire_a`), `en attente`, `acceptée`, `refusée`, `retirée` (`membre`, `annuaire` — son titulaire —, `adresse`). |
+| `GET /v1/annuaires` | Mes annuaires locaux et l'état de leur inscription : `attendue` (un code déclaré, pas encore présenté ni expiré — `adresse`, `expire_a`), `en attente`, `acceptée`, `refusée`, `retirée` (`membre`, `annuaire` — son titulaire —, `adresse`, et `locateurs` s'il en a publié : décision 57, 0.30.0). |
 | `DELETE /v1/annuaires/{n}` | Retire l'inscription de mon annuaire local — son second avec lui ; ses domaines reviennent aux racines. **Un administrateur des racines le peut aussi** : c'est révoquer une inscription acceptée (0.27.0). |
 | `POST /v1/annuaires/{n}/membres` | **Déclare le second membre** de mon annuaire local accepté — sa paire de secours (2026-09-27, décision 49) : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription, que la seconde machine présente avec **sa** clé. `409` si l'annuaire a déjà deux membres ; `404` s'il n'est pas à moi ou pas accepté. |
 | `DELETE /v1/annuaires/{n}/membres/{n2}` | Retire le second membre. Nommer ici le titulaire, c'est retirer l'annuaire entier, comme `DELETE /v1/annuaires/{n}`. `404` pour un membre d'un autre annuaire. |
@@ -2094,12 +2095,28 @@ POST /v1/federation/etat         des EntreeDEtat à la suite, huit kibioctets au
              [‖ longueur (2, gros-boutiste) ‖ réponse d'annonce, 4 096 au plus]
         204  rangé ; 403 une entrée hors de ses domaines (C11), rien n'est rangé ;
         404  l'inscription n'est plus acceptée
+PUT  /v1/federation/locateurs    {"locateurs":["[IPv6]:port","IPv4:port",…]} — de
+             zéro à quatre, chacun de la forme d'une adresse déclarée (0.30.0)
+        204  publiés — une publication identique n'écrit rien ; vide, un
+             retrait : l'adresse déclarée sert de nouveau ;
+        400  un locateur de travers, ou plus de quatre ;
+        404  l'inscription n'est plus acceptée
 ```
+
+**Où le joindre, dit par lui** (décision 57, 0.30.0) : l'annuaire local publie
+ses locateurs à **chaque ouverture** de sa voie — `--locator <hôte:port>`,
+répétable, quatre au plus ; aucun, c'est un retrait. L'opération répliquée
+`inscription-locateurs` les porte d'une racine à l'autre (le plus récent gagne,
+par membre) ; le `421` et `GET /v1/annuaires` les rendent. La détection
+automatique des adresses IPv6 de la maison — qu'un préfixe qui change se
+publie sans redémarrer — est une suite nommée.
 
 La réponse d'annonce est **l'objet que `GET /v1/ou` rend**, encodé par
 l'annuaire local : les racines le rendent tel quel à qui peut le localiser.
 Et une racine qui reçoit l'annonce d'une machine d'un domaine confié répond
-**`421`** avec `{"annuaire":"n-…","adresses":["hôte:port",…]}`.
+**`421`** avec `{"annuaire":"n-…","adresses":["hôte:port",…]}` : pour chaque
+membre accepté, les locateurs qu'il a publiés, ou son adresse déclarée s'il
+n'en a publié aucun (décision 57) — huit au plus pour une paire.
 
 **L'exigence est nouvelle** : une clé d'identité `n-…` **inscrite et
 acceptée**, pas celle de `--peer-key`. Une racine qui reçoit un `POST /v1/defi`

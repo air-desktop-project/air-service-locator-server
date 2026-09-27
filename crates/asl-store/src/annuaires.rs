@@ -1,5 +1,5 @@
 //! L'inscription des annuaires locaux dans l'entrepôt (`docs/annuaires.md`
-//! §2 ter, §4.1 ; `docs/replication.md` décisions 32, 48, 49) : six tables,
+//! §2 ter, §4.1 ; `docs/replication.md` décisions 32, 48, 49, 57) : sept tables,
 //! les écritures locales, les règles d'application, l'instantané, le
 //! ré-estampillage.
 //!
@@ -24,8 +24,8 @@ use std::collections::BTreeMap;
 use asl_id::Identifiant;
 use asl_registre::{
     Adresse, Estampille, HEBERGEMENT_OCTETS, Hebergement, INSCRIPTION_OCTETS, Inscription,
-    MARQUE_D_INSCRIPTION_OCTETS, MarqueDInscription, Operation, PRESENTATION_OCTETS, Presentation,
-    Provenance,
+    LOCATEURS_OCTETS, Locateurs, MARQUE_D_INSCRIPTION_OCTETS, MarqueDInscription, Operation,
+    PRESENTATION_OCTETS, Presentation, Provenance,
 };
 use redb::{ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
@@ -58,6 +58,11 @@ pub(crate) const RETRAITS: TableDefinition<'_, &[u8], &[u8; MARQUE_D_INSCRIPTION
 /// L'hébergement de chaque domaine qui en a eu un : le plus récent.
 pub(crate) const HEBERGEMENTS: TableDefinition<'_, &[u8], &[u8; HEBERGEMENT_OCTETS]> =
     TableDefinition::new("hebergements");
+
+/// Les locateurs que chaque membre a publiés, par membre : les plus récents
+/// (décision 57).
+pub(crate) const LOCATEURS: TableDefinition<'_, &[u8], &[u8; LOCATEURS_OCTETS]> =
+    TableDefinition::new("inscriptions-locateurs");
 
 /// L'état d'un membre d'annuaire local, tel qu'il se LIT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +105,8 @@ pub struct MembreLu {
     pub cle: [u8; 32],
     /// Son état.
     pub etat: EtatDInscription,
+    /// Les locateurs qu'il a publiés lui-même, s'il l'a fait (décision 57).
+    pub locateurs: Option<Locateurs>,
 }
 
 impl MembreLu {
@@ -107,6 +114,24 @@ impl MembreLu {
     #[must_use]
     pub fn titulaire(&self) -> bool {
         self.membre == self.annuaire
+    }
+
+    /// Où le joindre : les locateurs qu'il a publiés — ou, s'il n'en a
+    /// publié aucun, ou s'il les a retirés, l'adresse déclarée à
+    /// l'inscription.
+    #[must_use]
+    pub fn ou_joindre(&self) -> Vec<Adresse> {
+        let publies: Vec<Adresse> = self
+            .locateurs
+            .iter()
+            .flat_map(Locateurs::adresses)
+            .copied()
+            .collect();
+        if publies.is_empty() {
+            vec![self.adresse]
+        } else {
+            publies
+        }
     }
 }
 
@@ -174,6 +199,8 @@ pub(crate) struct Registre {
     retraits: BTreeMap<Identifiant, MarqueDInscription>,
     /// Les propriétaires effacés, parmi ceux des déclarations.
     effaces: Vec<Identifiant>,
+    /// Les locateurs publiés, par membre.
+    locateurs: BTreeMap<Identifiant, Locateurs>,
 }
 
 /// Recopie une clé de trente-deux octets.
@@ -203,18 +230,20 @@ where
 
 impl Registre {
     /// Charge le registre depuis ces tables ; `efface` dit si un compte l'est.
-    fn charger<I, P, M>(
+    fn charger<I, P, M, L>(
         inscriptions: &I,
         presentations: &P,
         acceptations: &M,
         refus: &M,
         retraits: &M,
+        publies: &L,
         efface: impl Fn(Identifiant) -> Result<bool, Faute>,
     ) -> Result<Self, Faute>
     where
         I: ReadableTable<&'static [u8], &'static [u8; INSCRIPTION_OCTETS]>,
         P: ReadableTable<&'static [u8], &'static [u8; PRESENTATION_OCTETS]>,
         M: ReadableTable<&'static [u8], &'static [u8; MARQUE_D_INSCRIPTION_OCTETS]>,
+        L: ReadableTable<&'static [u8], &'static [u8; LOCATEURS_OCTETS]>,
     {
         let mut declarations = BTreeMap::new();
         let mut effaces = Vec::new();
@@ -234,6 +263,14 @@ impl Registre {
                 Presentation::lire(valeur.value())?,
             );
         }
+        let mut locateurs = BTreeMap::new();
+        for entree in publies.iter()? {
+            let (membre, valeur) = entree?;
+            locateurs.insert(
+                depuis_clef(membre.value())?,
+                Locateurs::lire(valeur.value())?,
+            );
+        }
         Ok(Self {
             declarations,
             presentations: lues,
@@ -241,6 +278,7 @@ impl Registre {
             refus: charger_les_marques(refus)?,
             retraits: charger_les_marques(retraits)?,
             effaces,
+            locateurs,
         })
     }
 
@@ -324,6 +362,7 @@ impl Registre {
             adresse: declaration.adresse,
             cle: presentation.cle,
             etat,
+            locateurs: self.locateurs.get(&membre).copied(),
         })
     }
 
@@ -357,6 +396,7 @@ macro_rules! registre {
             &$transaction.open_table(ACCEPTATIONS)?,
             &$transaction.open_table(REFUS)?,
             &$transaction.open_table(RETRAITS)?,
+            &$transaction.open_table(LOCATEURS)?,
             $efface,
         )
     };
@@ -386,6 +426,17 @@ fn marquer(
     marque.ecrire(&mut octets);
     ouverte.insert(clef(membre).as_slice(), &octets)?;
     Ok(())
+}
+
+/// Les locateurs rangés de ce membre, s'il en a publié.
+fn locateurs_dans<T>(table: &T, membre: Identifiant) -> Result<Option<Locateurs>, Faute>
+where
+    T: ReadableTable<&'static [u8], &'static [u8; LOCATEURS_OCTETS]>,
+{
+    Ok(match table.get(clef(membre).as_slice())? {
+        Some(brut) => Some(Locateurs::lire(brut.value())?),
+        None => None,
+    })
 }
 
 /// L'hébergement rangé de ce domaine, s'il en a un.
@@ -499,6 +550,26 @@ pub(crate) fn appliquer_hebergement(
     Ok(())
 }
 
+/// `inscription-locateurs` — le plus récent, par membre (décision 57).
+pub(crate) fn appliquer_locateurs(
+    ecriture: &WriteTransaction,
+    membre: Identifiant,
+    enregistrement: &Locateurs,
+) -> Result<(), Faute> {
+    let mut table = ecriture.open_table(LOCATEURS)?;
+    if locateurs_dans(&table, membre)?
+        .is_some_and(|avant| avant.estampille >= enregistrement.estampille)
+    {
+        return Ok(());
+    }
+    let mut octets = [0_u8; LOCATEURS_OCTETS];
+    let mut ici = *enregistrement;
+    ici.provenance = Provenance::Ici;
+    ici.ecrire(&mut octets);
+    table.insert(clef(membre).as_slice(), &octets)?;
+    Ok(())
+}
+
 // ── La rupture de confiance (C17) ───────────────────────────────────────────
 
 /// Ce qui vient de cet annuaire, dans les tables des inscriptions. **Rien
@@ -551,6 +622,21 @@ pub(crate) fn oublier_ce_qui_vient_de(
     let mut table = ecriture.open_table(HEBERGEMENTS)?;
     for domaine in &condamnes {
         table.remove(domaine.as_slice())?;
+    }
+    combien = combien.saturating_add(condamnes.len());
+    let mut condamnes = Vec::new();
+    for entree in ecriture.open_table(LOCATEURS)?.iter()? {
+        let (membre, valeur) = entree?;
+        if Locateurs::lire(valeur.value())?
+            .provenance
+            .vient_de(annuaire)
+        {
+            condamnes.push(membre.value().to_vec());
+        }
+    }
+    let mut table = ecriture.open_table(LOCATEURS)?;
+    for membre in &condamnes {
+        table.remove(membre.as_slice())?;
     }
     Ok(combien.saturating_add(condamnes.len()))
 }
@@ -614,6 +700,17 @@ pub(crate) fn instantane_des_inscriptions(
             &Operation::DomaineHebergeur {
                 domaine: depuis_clef(domaine.value())?,
                 enregistrement: hebergement,
+            },
+        );
+    }
+    for entree in lecture.open_table(LOCATEURS)?.iter()? {
+        let (membre, valeur) = entree?;
+        let locateurs = Locateurs::lire(valeur.value())?;
+        suite.ajouter(
+            locateurs.estampille,
+            &Operation::InscriptionLocateurs {
+                membre: depuis_clef(membre.value())?,
+                enregistrement: locateurs,
             },
         );
     }
@@ -834,6 +931,52 @@ impl Entrepot {
             },
         )?;
         self.commettre_une_operation(ecriture, journalisee)
+    }
+
+    /// Ce membre publie ses locateurs — vides : il les retire, et l'adresse
+    /// déclarée sert de nouveau (décision 57). Rend `false` s'il n'est pas un
+    /// membre, ou s'il est retiré. **Une publication qui ne change rien
+    /// n'écrit rien** : un annuaire publie les siens à chaque ouverture de sa
+    /// voie, et le journal n'a pas à le retenir.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
+    pub fn publier_locateurs(
+        &self,
+        membre: Identifiant,
+        adresses: &[Adresse],
+    ) -> Result<bool, Faute> {
+        let ecriture = self.base.begin_write()?;
+        let Some(lu) = registre_dans(&ecriture)?.membre(membre) else {
+            return Ok(false);
+        };
+        if lu.etat == EtatDInscription::Retiree {
+            return Ok(false);
+        }
+        let deja: Vec<Adresse> = lu
+            .locateurs
+            .iter()
+            .flat_map(Locateurs::adresses)
+            .copied()
+            .collect();
+        if lu.locateurs.is_some() && deja == adresses {
+            return Ok(true);
+        }
+        let estampille = estampiller(&ecriture, self.racine)?;
+        let locateurs = Locateurs::nouveaux(Provenance::Ici, estampille, adresses)?;
+        appliquer_locateurs(&ecriture, membre, &locateurs)?;
+        let journalisee = journaliser_l_operation(
+            &ecriture,
+            estampille,
+            Provenance::Ici,
+            &Operation::InscriptionLocateurs {
+                membre,
+                enregistrement: locateurs,
+            },
+        )?;
+        self.commettre_une_operation(ecriture, journalisee)?;
+        Ok(true)
     }
 
     /// L'annuaire qui héberge EFFECTIVEMENT ce domaine — ou rien : les
