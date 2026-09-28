@@ -2137,7 +2137,7 @@ PUT  /v1/federation/locateurs    {"locateurs":["[IPv6]:port","IPv4:port",…]} �
         404  l'inscription n'est plus acceptée
 ```
 
-**Le `s-…` d'une `EntreeDEtat` est celui du membre qui rapporte** (constaté le 2026-09-28) : chaque membre d'une paire a frappé le sien pour le même `(machine, nom)`, la racine les range par membre, et `GET /v1/ou` rend celui du rapport retenu — il change donc à chaque bascule. Défaut, pistes et questions : `annuaires.md` §2 ter, « L'identifiant d'un service dans une paire ». **Rien n'est décidé** ; le format de l'entrée ne change pas avec la piste recommandée.
+**Le `s-…` d'une `EntreeDEtat` est celui du membre qui rapporte** (constaté le 2026-09-28) : chaque membre d'une paire frappe le sien pour le même `(machine, nom)`, la racine les range par membre, et `GET /v1/ou` rend celui du rapport retenu. Une paire qui se réplique (`--peer`) converge vers un seul au premier rattrapage ; une paire qui ne se parle pas en garde deux, et le `s-…` rendu change à chaque bascule. Défaut, pistes et questions : `annuaires.md` §2 ter, « L'identifiant d'un service dans une paire ». **Rien n'est décidé** ; le format de l'entrée ne change pas avec la piste recommandée.
 
 **Où le joindre, dit par lui** (décision 57, 0.30.0) : l'annuaire local publie
 ses locateurs à **chaque ouverture** de sa voie — `--locator <hôte:port>`,

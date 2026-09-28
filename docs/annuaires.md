@@ -452,7 +452,7 @@ que ce que lui seul disait.
 
 **Proposé le 2026-09-28, rien n'est décidé ici** : cette sous-section décrit un
 défaut vu en production, pose l'invariant qu'on voudrait, compare les pistes et
-en recommande une. Les questions à trancher sont au §7 (14 à 19).
+en recommande une. Les questions à trancher sont au §7 (14 à 20).
 
 #### Le constat (2026-09-28, 0.35.1)
 
@@ -466,9 +466,31 @@ résout toujours. **Mais le `s-…` rendu change avec le membre** :
 plus ancienne faite à speedy. Chaque membre a frappé SON identifiant pour le même
 couple `(machine, nom)`, et le garde.
 
+**La cause est établie : la configuration.** speedy et helium tournaient
+**sans `--peer`** — leurs journaux le disaient : « sans pair (--peer) : cette
+racine tourne seule ». Un oubli au déploiement, contraire au §2 ter : les deux
+membres ne se répliquaient pas, et chacun a frappé le sien.
+
+**Avec `--peer`, la convergence a joué en production.** Le 2026-09-28 à 18:44,
+`--peer [IPv6 de l'autre]:6630 --peer-key /etc/asl-server/pair.pub` est posé
+sur les deux, qui redémarrent ; les voies sont prouvées dans les deux sens.
+Rattrapage : helium tire les **2** opérations du journal de speedy (journal de
+speedy : « n-4EQRD… tire les opérations après 0 : 2 en rattrapage »), speedy
+tire **1** opération d'helium (journal d'helium : « n-7MSV5… tire les opérations
+après 0 : 1 en rattrapage »). Bascule refaite — helium coupé à 18:45, speedy à
+18:49 — : l'annonce repart en 28 s au plus, et `GET /v1/ou` rend
+**`s-0DV36MNC74TXR549YA45KJVKBZ` tout du long**, sans alternance. Les deux
+membres ont convergé — mais vers l'identifiant d'helium, **pas vers le plus
+ancien dans le temps**. Pourquoi, c'est le paragraphe « Pourquoi `s-0DV…` a
+gagné » ci-dessous.
+
 Ce que le §2 ter promet est **un** service dont l'état est tenu par membre ;
 `replication.md` §1 promet davantage : « le client qui a mémorisé un `s-…` doit
-le retrouver après bascule ». Aucun des deux n'est tenu dans une paire.
+le retrouver après bascule ». **Dans une paire bien configurée, les deux sont
+tenus à terme** ; ils ne le sont pas pendant que les membres ne se parlent pas
+(une paire sans `--peer`, une voie coupée, un second membre qui arrive), et
+celui des deux identifiants qui perd **disparaît** pour qui l'avait vu — ici
+`s-6AQ…`, que speedy a rendu aux clients pendant plus d'une journée.
 
 #### Comment un `s-…` naît aujourd'hui (lu dans le code de la 0.35.1)
 
@@ -476,27 +498,50 @@ le retrouver après bascule ». Aucun des deux n'est tenu dans une paire.
 |---|---|
 | **À l'annonce, chez qui la reçoit** — racine ou membre d'un annuaire local, le même chemin | `crates/asl-loop-tokio/src/h3.rs` l. 2284–2308 : on cherche `(machine, nom)` dans l'entrepôt (`service_par_nom`) ; s'il n'y est pas, **seize octets d'aléa** (`tirer_un_identifiant`, `getrandom(2)` via `crates/asl-server/src/entropie.rs`) deviennent un `s-…`, déclaré par `declarer_service`. La première annonce d'un nom crée le service (`modele.md` §2.4). |
 | **Persistance** | `crates/asl-store/src/lib.rs` l. 2713–2767 : table `services` (identifiant → machine, nom, estampille) et index `services-par-nom` (`machine ‖ nom` → identifiant), dans redb, journalisé. **Un service ne se retire jamais** (`replication.md` §3.2) : l'identifiant survit aux redémarrages du daemon et du membre, et une ré-annonce du même nom au MÊME membre retrouve le même `s-…`. |
-| **Entre les deux membres** | Ils se répliquent l'opération `service` comme deux racines (§2 ter, `replication.md` §3.2) : `appliquer_service`, `lib.rs` l. 4730–4791. Si `(machine, nom)` est déjà tenu sous un autre `s-…`, **le plus ancien par estampille de Lamport reste**, l'autre s'efface. La règle converge — **si l'opération passe**. |
+| **Entre les deux membres** | Ils se répliquent l'opération `service` comme deux racines (§2 ter, `replication.md` §3.2) : `appliquer_service`, `lib.rs` l. 4730–4791. Si `(machine, nom)` est déjà tenu sous un autre `s-…`, **celui dont l'estampille de Lamport est la plus petite reste**, l'autre s'efface — l'estampille est `(compteur, annuaire)`, comparée compteur d'abord, puis identifiant de l'annuaire (`Estampille`, `crates/asl-registre/src/lib.rs` l. 482–488, `Ord` dérivé). La règle converge — **si l'opération passe**. |
 | **Aux racines** | Rien n'est rangé dans l'entrepôt (C13 amendée). `EtatFedere` (`crates/asl-loop-tokio/src/federation.rs` l. 69–171) tient, en mémoire, `machine ‖ nom` → membre → `(s-…, réponse, heure)`, **chacun avec le `s-…` que CE membre a rapporté** ; le commentaire l. 85–87 admet déjà que « leurs identifiants de service peuvent différer ». `retenir` (l. 125–148) rend le `s-…` du **rapport vivant le plus récent**, sinon celui du rapport le plus récent. |
 | **Ce que `GET /v1/ou` rend** | `rassembler`, `h3.rs` l. 2861–2890 : le service tenu par la racine elle-même, sinon celui que `EtatFedere::lire` retient. Le `s-…` rendu est donc **celui du membre qui tient le daemon** ; quand le daemon est parti des deux, les deux membres le rapportent `parti` toutes les dix secondes, chacun sous son `s-…`, et celui que la racine rend **alterne au gré du dernier rapport reçu**. `GET /v1/machines/{m}/services` suit la même règle (`services_federes`, `h3.rs` l. 2495). |
 
-**Pourquoi la réplication de la paire n'a pas réconcilié speedy et helium.**
-Deux explications sont compatibles avec le code ; laquelle a joué se lit dans les
-journaux des deux membres, pas ici :
+**Pourquoi `s-0DV…` a gagné, alors que `s-6AQ…` était plus ancien.** « Le plus
+ancien reste » (`replication.md` §3.2) veut dire **la plus petite estampille de
+Lamport**, pas la date la plus ancienne. Entre deux écritures qui ne se sont
+jamais vues, l'horloge de Lamport ne dit **rien** du temps : chaque membre
+compte ses propres écritures depuis un, et l'estampille ne se hisse que sur ce
+qu'on reçoit (`hisser_dans`, `lib.rs` l. 3677). Ce que les journaux du
+2026-09-28 donnent, sans ouvrir aucune base :
 
-1. **La voie entre les membres n'a pas passé** (`--peer` absent, ou coupée
-   pendant les deux premières annonces) : chacun frappe le sien, et rien ne les
-   rapproche.
-2. **L'opération a été reçue, puis perdue sans bruit.** `appliquer_service`
-   (`lib.rs` l. 4737–4753) ignore un service dont la machine n'est ni dans
-   `machines` ni dans `machines-federees`, **et rend `Ok`** : le curseur avance,
-   l'opération ne sera jamais rejouée. Un second membre qui tire l'instantané de
-   son pair AVANT d'avoir tiré ses machines des racines — un membre fraîchement
-   inscrit, pas encore approuvé, ou dont le fédérateur n'a pas encore fait son
-   premier tour — perd donc le `s-6AQ…` de speedy. Il frappe ensuite `s-0DV…` à
-   la première annonce ; speedy reçoit ce second identifiant, le trouve **plus
-   récent** que le sien, et le rejette. La divergence est alors **définitive** :
-   helium ne reverra jamais `s-6AQ…`. C'est exactement ce qu'on observe.
+- helium démarre à 18:43:45 avec « **compteur à 1** » : sa seule écriture
+  estampillée est la déclaration de `s-0DV…`, donc son estampille est
+  `(1, n-4EQRD…)` ; son journal n'a qu'une opération, celle que speedy tire ;
+- speedy démarre à 18:44:16 avec « **compteur à 2** » : ses deux écritures sont
+  ses deux services déclarés, dont `s-6AQ…` — estampille `(1, n-7MSV5…)` ou
+  `(2, n-7MSV5…)`. Le journal ne dit pas laquelle ; la réponse n'y change rien ;
+- à compteur égal, l'identifiant de l'annuaire départage, sur ses seize octets
+  (`Identifiant`, `crates/asl-id/src/lib.rs` l. 300–304, `Ord` dérivé ; le
+  corps Crockford se lit en gros-boutiste, l. 374–411) : **`n-4EQ…` < `n-7MS…`**.
+
+Dans les deux cas `(1, n-4EQRD…)` est la plus petite. `appliquer_service`
+(`lib.rs` l. 4757–4775) fait alors exactement ce qu'il dit : chez speedy,
+l'opération entrante `s-0DV…` est « plus ancienne » que `s-6AQ…` tenu, elle
+prend sa place ; chez helium, l'opération entrante `s-6AQ…` ne l'est pas, elle
+ne s'écrit pas. Les deux convergent vers `s-0DV…`, dans tous les ordres
+d'arrivée. `s-6AQ…` était bien une opération rejouable — il est dans le journal
+de speedy, et helium l'a tirée — ; elle a **perdu**, elle n'a pas manqué.
+(Helium redémarre à 18:48 avec « compteur à 2 » : il s'est hissé sur ce qu'il a
+reçu, comme prévu.) **Le code tient donc sa règle ; c'est la règle qui ne tient
+pas la promesse** qu'on lui prêtait : entre deux membres qui ne se sont pas
+parlé, le gagnant est arbitraire vis-à-vis du temps — ici, l'annuaire au plus
+petit identifiant, sur des compteurs presque vierges.
+
+**Un défaut latent, qui n'a pas joué ici mais reste réel.** `appliquer_service`
+(`lib.rs` l. 4737–4753) ignore un service dont la machine n'est ni dans
+`machines` ni dans `machines-federees`, **et rend `Ok`** : le curseur avance,
+l'opération ne sera jamais rejouée. Un membre qui tire le journal de son pair
+AVANT d'avoir tiré ses machines des racines — fraîchement inscrit, pas encore
+approuvé, ou dont le fédérateur n'a pas encore fait son premier tour — perd
+donc les services de son pair, **définitivement**. Le 2026-09-28 l'ordre a été
+favorable (helium : « 3 machine(s) de nos domaines reçue(s) » à 18:43:45, la
+voie du pair ouverte à 18:44:16) ; rien ne le garantit.
 
 **Un troisième défaut, que la convergence elle-même provoquerait.** Si la règle
 « le plus ancien reste » remplaçait le `s-…` d'un membre pendant qu'un daemon y
@@ -592,11 +637,17 @@ aux deux membres, par la voie descendante qui porte déjà les machines
   `s-…` **déplace la session vivante** sous le nouveau (ou la ferme, et le
   daemon se ré-annonce) ; et un membre qui arrive **relit l'instantané de son
   pair** une fois ses machines tirées. **Pour** : le moins de code, le modèle
-  d'aujourd'hui. **Contre** : la convergence est **à terme** — pendant une
+  d'aujourd'hui — et **il marche en pratique** : la paire speedy/helium, une
+  fois `--peer` posé, a convergé au premier rattrapage et n'a plus rendu qu'un
+  `s-…` à travers deux bascules (le constat ci-dessus). **Contre** : la
+  convergence est **à terme** — pendant une
   coupure entre membres, ou à l'arrivée d'un second, deux `s-…` existent, et
   celui qui perd **disparaît** pour qui l'avait vu (le prix que `replication.md`
-  §3.2 accepte entre racines). I3 non tenu. Un membre sans `--peer` diverge pour
-  toujours. **Migration** : relire l'instantané du pair depuis zéro ; les `s-…`
+  §3.2 accepte entre racines) ; **et celui qui gagne n'est pas le plus ancien
+  dans le temps** mais la plus petite estampille de Lamport, arbitraire entre
+  deux membres qui ne se sont pas parlé (le 2026-09-28, `s-6AQ…`, servi depuis
+  la veille, a perdu). I3 non tenu. Un membre sans `--peer` diverge pour
+  toujours, sans que rien ne le dise (question 20). **Migration** : relire l'instantané du pair depuis zéro ; les `s-…`
   perdants s'effacent.
 - **C2 — le daemon porte son `s-…`** et le présente à la reconnexion ; le membre
   l'adopte s'il n'est tenu par aucun autre `(machine, nom)`. **Contre** : un
@@ -617,6 +668,18 @@ aux deux membres, par la voie descendante qui porte déjà les machines
 annuaires locaux), avec la migration déterministe ci-dessus — **plus le premier
 point de C1**, qui reste un défaut quelle que soit la piste : une opération
 reçue et ignorée sans que le curseur le sache.
+
+**Ce que l'essai de 18:44 change à l'équilibre, dit honnêtement.** Il retire à
+A1 son argument le plus pressant : le défaut vu à midi venait de la
+configuration, et **C1 — la règle d'aujourd'hui — marche quand la paire est bien
+configurée**. Ce n'est donc plus une urgence : une paire avec `--peer` rend un
+seul `s-…` après son premier rattrapage. A1 garde ce que C1 n'a pas, et c'est
+ce qui la fait recommander encore : **aucun échange** (donc rien à configurer
+pour que l'identité tienne), **hors ligne**, **aucune fenêtre** où deux `s-…`
+coexistent, **aucun perdant** — et pas de gagnant arbitraire vis-à-vis du temps.
+Si Thierry juge ces avantages trop minces pour une migration de tous les `s-…`,
+**C1 complète** (ses trois points, plus le garde-fou de la question 20) est la
+seconde réponse raisonnable, et la moins chère.
 
 Les raisons :
 
@@ -1125,8 +1188,11 @@ Rassemblé, plutôt que dispersé.
     de la maison — sans passer par les racines —, il lui faudrait les droits
     qui visent ses domaines, et il ne les reçoit pas.
 14. **Un `s-…` par service, dans une paire ?** (§2 ter, « L'identifiant d'un
-    service dans une paire », constaté le 2026-09-28.) Aujourd'hui chaque membre
-    frappe le sien, et le `s-…` que les racines rendent change à chaque bascule.
+    service dans une paire », constaté le 2026-09-28.) Chaque membre frappe le
+    sien ; une paire bien configurée (`--peer`) converge vers un seul au premier
+    rattrapage — mais vers la plus petite estampille de Lamport, pas vers le
+    plus ancien —, et une paire qui ne se parle pas en garde deux, que les
+    racines rendent tour à tour.
     Les invariants I1 (le même `s-…` quel que soit le membre) et I2 (stable à
     travers bascules, redémarrages et remplacement du second membre) sont-ils
     voulus — ou le `s-…` reste-t-il un détail d'affichage, puisque tout client
@@ -1147,7 +1213,10 @@ Rassemblé, plutôt que dispersé.
     `s-…` existant change une fois, à la reprise, droits réécrits dans la même
     transaction ; un cran mineur), ou pour les seuls services des domaines
     hébergés (les racines gardent leurs `s-…` aléatoires et leur règle « le
-    plus ancien reste ») ? **Proposé : A1, pour tous.**
+    plus ancien reste ») ? Depuis l'essai de 18:44, **C1 complète** — la règle
+    d'aujourd'hui, réparée, avec le garde-fou de la question 20 — est une
+    réponse raisonnable si l'on juge qu'une convergence à terme suffit.
+    **Proposé : A1, pour tous ; C1 complète à défaut.**
 18. **Un droit par service, sur un service fédéré.** Il est impossible
     aujourd'hui, et indépendamment du défaut : les racines ne rangent pas les
     services des domaines hébergés, donc `POST /v1/droits` ne trouve pas la
@@ -1159,12 +1228,23 @@ Rassemblé, plutôt que dispersé.
     machine d'un domaine confié.
 19. **L'opération perdue sans bruit.** Entre deux membres, une opération
     `service` dont la machine n'est pas encore connue est ignorée ET le curseur
-    avance (`appliquer_service`) : elle ne revient jamais. C'est vrai quelle que
-    soit la piste. **Proposé : à corriger en patch, avant la piste retenue** —
-    garder l'opération, ou ne pas avancer — et **lire les journaux de speedy et
-    d'helium** pour savoir si c'est elle, ou une voie `--peer` absente, qui a
-    produit les deux `s-…` du 2026-09-28. Les deux identifiants actuels ne
-    gênent pas la résolution ; on les laisse jusqu'à la migration.
+    avance (`appliquer_service`) : elle ne revient jamais. **Ce n'est pas ce qui
+    a joué le 2026-09-28** — la cause était une paire sans `--peer`, et l'ordre
+    des démarrages a été favorable après correction —, mais le défaut est réel
+    et vaut quelle que soit la piste. **Proposé : à corriger en patch, avant la
+    piste retenue** — garder l'opération, ou ne pas avancer le curseur. Reste à
+    dire si l'on corrige avec lui le vivier (une session restée sous le `s-…`
+    perdant serait rapportée `parti`, §2 ter), ce que A1 rendrait inutile.
+20. **Une paire qui tourne sans `--peer`.** C'est une erreur de déploiement
+    silencieuse : chaque membre se croit seul (« cette racine tourne seule »),
+    frappe ses propres `s-…`, et rien ne le signale ailleurs que dans une ligne
+    de démarrage. Or les racines SAVENT que l'annuaire a deux membres acceptés
+    (§2 ter). Faut-il qu'un membre d'un annuaire local à deux membres, lancé sans
+    `--peer`, **le signale fort** — journal à chaque tour, `GET /v1/version`,
+    l'écran de l'annuaire dans les applications —, ou qu'il **refuse de
+    démarrer** ? Et qui le détecte : le membre (il faudrait que les racines lui
+    disent qu'il a un second), ou les racines (elles voient deux membres
+    rapporter des `s-…` différents pour le même `(machine, nom)`) ?
 
 ## 8. L'annuaire `ordinaire` et la confiance bilatérale — une suite nommée
 
