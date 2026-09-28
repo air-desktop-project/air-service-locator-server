@@ -796,7 +796,7 @@ l'empêcherait de comprendre.
 | `GET /v1/machines/{m}/services` | Les services, leurs candidats, leur état et la date de la dernière sonde. |
 | `GET /v1/vu` | **D'où l'annuaire voit cette connexion**, sans rien annoncer ni prouver. Voir ci-dessous. |
 | `GET /v1/version` | **La version de l'annuaire qui répond, et sa posture d'attestation**, `{"version": "0.2.0", "posture": "optional"}`, sans rien prouver. Voir ci-dessous. |
-| `GET /v1/racines` | **Les racines, leur identité et leurs locateurs** (décision 56, 0.30.0), sans rien prouver : `[{"annuaire":"n-…","cle":"<64 chiffres hexadécimaux>","locateurs":["[IPv6]:port","IPv4:port","nom:port"]},…]` — la liste embarquée dans le binaire. **Aucune signature à part** : la connexion, vérifiée par la clé de la racine jointe (§0), est la signature. Le client vérifie que chaque clé se déduit en le `n-…` écrit à côté, et refuse la liste entière sinon ; puis met à jour ses locateurs. **Au moins une racine écoute sur 6630** — celle que la liste embarquée garantit ; les autres peuvent écouter ailleurs, et c'est par cette liste, **relue et gardée en cache**, que le client l'apprend (décision 76 ; pas d'`asl-directory` pour les racines). Le client d'aujourd'hui ne la lit que pour `asl roots` : à coder (`annuaires.md` §2 quinquies). |
+| `GET /v1/racines` | **Les racines, leur identité et leurs locateurs** (décision 56, 0.30.0), sans rien prouver : `[{"annuaire":"n-…","cle":"<64 chiffres hexadécimaux>","locateurs":["[IPv6]:port","IPv4:port","nom:port"]},…]` — la liste embarquée dans le binaire. **Aucune signature à part** : la connexion, vérifiée par la clé de la racine jointe (§0), est la signature. Le client vérifie que chaque clé se déduit en le `n-…` écrit à côté, et refuse la liste entière sinon ; puis met à jour ses locateurs. **Au moins une racine écoute sur 6630** — celle que la liste embarquée garantit ; les autres peuvent écouter ailleurs, et c'est par cette liste, **relue et gardée en cache**, que le client l'apprend (décision 76 ; pas d'`asl-directory` pour les racines). **Elle ne change que les locateurs des racines déjà embarquées**, par leur `n-…` : elle n'en ajoute ni n'en retire aucune — une racine nouvelle exige une nouvelle version du client —, et le client essaie d'abord les locateurs appris, puis les embarqués (décision 85). Le client d'aujourd'hui ne la lit que pour `asl roots` : à coder (`annuaires.md` §2 quinquies). |
 | `GET /v1/utilisateurs/{u}` | **Confirme qu'un identifiant existe**, et rien d'autre : ni nom, ni machines, ni services. Sert à ce qu'une faute de frappe ne produise pas une autorisation muette. |
 | `GET /v1/moi/appareils` | **Les appareils du compte de la machine qui demande**, révoqués compris — lecture seule, voie machine. Voir §3. |
 | `GET /v1/utilisateurs/{u}/machines` | **Les machines de `u` que le demandeur a le droit de voir** — les siennes si `u` est lui, sinon celles que les autorisations de `u` envers lui couvrent (`modele.md` §2.5). Voir ci-dessous. Servi aussi sur la voie machine (§3). |
@@ -1976,30 +1976,37 @@ pas, et n'a pas à savoir, que le service vit derrière un annuaire local.
 
 ### Résoudre un annuaire local : `asl-directory`
 
-**Décidé le 2026-09-28 (Thierry ; décisions 73 à 78, `annuaires.md` §2
+**Décidé le 2026-09-28 (Thierry ; décisions 73 à 85, `annuaires.md` §2
 quinquies).** Un annuaire local accepté se résout comme un service, **sous le
 `n-…` de son titulaire** :
 
 ```
 GET /v1/ou/{n-…}/asl-directory
-200  {"service":"s-…","annuaire":"n-…","adresses":["hôte:port",…],"identites":"n-… n-…"}
+200  avec `localiser` : {"service":"s-…","annuaire":"n-…","adresses":["hôte:port",…],"identites":"n-… n-…"}
+200  avec `voir` seul : {"service":"s-…","annuaire":"n-…"}
 404  aucun membre vivant, hors du cercle, ou aucun annuaire sous ce `n-…` —
      la même réponse, après le même délai (C9)
 ```
 
 **Le corps est celui du `421`** (§3 ter), plus `service` : pour chaque membre
 **vivant** — sa voie tient vers cette racine —, ses locateurs publiés, sinon
-son adresse déclarée, et au même rang de `identites` le `n-…` qu'on doit
-trouver au bout. **Ce n'est pas une réponse d'annonce** : celle-ci ne tolère
-aucun champ inconnu (§1.1, `asl-proto`), et un champ de plus y casserait les
-clients ; le chemin par `n-…` est nouveau, et le lecteur de renvoi
-d'aujourd'hui lit ce corps, dont il saute `service`. **Personne ne l'annonce** :
-les racines le synthétisent, et une annonce du nom `asl-directory` est refusée
-(`403`). **Vivant** veut dire qu'une voie tient, pas que la maison est
-joignable du dehors — aucune sonde en v1. **Le cercle** : le propriétaire, les
-administrateurs des racines, qui tient `voir` ou `localiser` sur un domaine
-hébergé, et qui a une machine rattachée à l'un d'eux (l'alignement sur le
-`421`, à confirmer). **Les racines n'en ont pas** : `GET /v1/racines` (§2.2).
+son adresse déclarée (décision 81), et au même rang de `identites` le `n-…`
+qu'on doit trouver au bout. **Ce n'est pas une réponse d'annonce** : celle-ci ne
+tolère aucun champ inconnu (§1.1, `asl-proto`), et un champ de plus y casserait
+les clients ; le chemin par `n-…` est nouveau, et le lecteur de renvoi
+d'aujourd'hui lit ce corps, dont il saute `service`. **`voir` sans `localiser`**
+reçoit le même `200` sans `adresses` ni `identites` — absents, pas vides : on
+omet ce qui n'est pas accordé, comme une liste (§2.2), et C9 garde ses deux
+seules réponses (décision 80). **Personne ne l'annonce** : les racines le
+synthétisent, et une annonce du nom `asl-directory` est refusée (`403`).
+**Vivant** veut dire qu'une voie tient, pas que la maison est joignable du
+dehors — aucune sonde en v1 (décision 83). **Le cercle est étroit** (décision
+79) : le propriétaire, les administrateurs des racines, qui tient un droit sur
+un domaine hébergé ; **le `421`, lui, reste servi à toute machine rattachée**,
+quel que soit son compte. **Servi sur la voie machine et sur la voie
+appareil** — la tuile de l'annuaire le lit (décision 84) ; `GET /v1/ou?service=`
+ne rend aucun annuaire. **Les racines n'en ont pas** : `GET /v1/racines`
+(§2.2).
 
 ## 3 bis. La voie entre racines — servie, pas encore tirée
 
@@ -2196,6 +2203,10 @@ attend alors `annuaire` au bout de chaque adresse, comme hier.
 **Le `421` reste tel quel** (décision 78) ; sa forme sert aussi de corps à
 `GET /v1/ou/{n-…}/asl-directory` (§3, « Résoudre un annuaire local »), qui
 rend, sans attendre une annonce mal adressée, les seuls membres vivants.
+**Leurs cercles diffèrent, et c'est voulu** (décision 79) : le `421` va à
+toute machine rattachée à un domaine confié, quel que soit son propriétaire —
+sans lui, elle ne pourrait plus annoncer —, l'`asl-directory` aux seuls comptes
+qui tiennent un droit sur un domaine hébergé.
 
 **L'exigence est nouvelle** : une clé d'identité `n-…` **inscrite et
 acceptée**, pas celle de `--peer-key`. Une racine qui reçoit un `POST /v1/defi`
