@@ -23,9 +23,14 @@ use asl_store::{
 
 use super::{Service, alloc_reponse, maintenant};
 
-/// Un membre, encodé — `proprietaire` pour les administrateurs, et les
-/// locateurs qu'il a publiés (décision 57).
-fn encoder_un_membre(lu: &MembreLu, avec_proprietaire: bool) -> Option<Vec<u8>> {
+/// Un membre, encodé — `proprietaire` pour les administrateurs, les
+/// locateurs qu'il a publiés (décision 57), et ce qu'il a conclu de sa paire
+/// s'il l'a dit à cette racine (décision 70).
+fn encoder_un_membre(
+    lu: &MembreLu,
+    avec_proprietaire: bool,
+    paire: Option<asl_api::annuaire::EtatDePaire>,
+) -> Option<Vec<u8>> {
     let locateurs: Vec<&str> = lu
         .locateurs
         .iter()
@@ -40,6 +45,7 @@ fn encoder_un_membre(lu: &MembreLu, avec_proprietaire: bool) -> Option<Vec<u8>> 
         adresse: lu.adresse.texte(),
         locateurs: &locateurs,
         expire_a: None,
+        paire,
     };
     let mut sortie = alloc_reponse();
     let combien = rendu.encoder(&mut sortie).ok()?;
@@ -57,6 +63,7 @@ fn encoder_une_attente(attendue: &DeclarationAttendue) -> Option<Vec<u8>> {
         adresse: attendue.adresse.texte(),
         locateurs: &[],
         expire_a: Some(attendue.expire_a),
+        paire: None,
     };
     let mut sortie = alloc_reponse();
     let combien = rendu.encoder(&mut sortie).ok()?;
@@ -85,7 +92,7 @@ impl Service<'_> {
         };
         let mut elements: Vec<Vec<u8>> = membres
             .iter()
-            .filter_map(|lu| encoder_un_membre(lu, false))
+            .filter_map(|lu| encoder_un_membre(lu, false, self.etat_federe.paire_de(lu.membre)))
             .collect();
         elements.extend(attendues.iter().filter_map(encoder_une_attente));
         Trouvaille::Inscriptions(elements)
@@ -192,7 +199,8 @@ impl Service<'_> {
                     lu.proprietaire.texte().as_str(),
                     lu.etat.mot()
                 ));
-                encoder_un_membre(&lu, false).map_or(Trouvaille::Rien, Trouvaille::InscriptionLue)
+                encoder_un_membre(&lu, false, None)
+                    .map_or(Trouvaille::Rien, Trouvaille::InscriptionLue)
             }
             Ok(PresentationDeCode::Inconnu) => {
                 self.echecs_d_invitation.echec(adresse, maintenant_ms);
@@ -211,9 +219,8 @@ impl Service<'_> {
     pub(super) fn lire_l_etat_d_une_inscription(&self, cle: &ClePublique) -> Trouvaille {
         let membre = asl_cle::identifiant_de_racine(cle);
         match self.entrepot.membre_d_annuaire(membre) {
-            Ok(Some(lu)) if lu.cle == cle.octets() => {
-                encoder_un_membre(&lu, false).map_or(Trouvaille::Rien, Trouvaille::InscriptionLue)
-            }
+            Ok(Some(lu)) if lu.cle == cle.octets() => encoder_un_membre(&lu, false, None)
+                .map_or(Trouvaille::Rien, Trouvaille::InscriptionLue),
             _ => Trouvaille::Rien,
         }
     }
@@ -233,7 +240,7 @@ impl Service<'_> {
         Trouvaille::Inscriptions(
             membres
                 .iter()
-                .filter_map(|lu| encoder_un_membre(lu, true))
+                .filter_map(|lu| encoder_un_membre(lu, true, self.etat_federe.paire_de(lu.membre)))
                 .collect(),
         )
     }

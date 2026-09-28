@@ -81,6 +81,7 @@ pub use annuaires::{
 };
 pub use domaines::SuppressionDeDomaine;
 pub use droits::{Acces, EcritureDeDroit, Voulu};
+pub use federation::Rangement;
 pub use groupes::{EcritureDeGroupe, GroupeLu};
 
 const COMPTES: TableDefinition<'_, &[u8], &[u8; COMPTE_OCTETS]> = TableDefinition::new("comptes");
@@ -721,6 +722,13 @@ pub struct EffetsVivants {
     /// révoqué. La boucle les compare au pair authentifié de chaque connexion
     /// (`asl_session::Session::pair`), comme pour une révocation locale.
     pub a_fermer: Vec<Identifiant>,
+    /// Les services dont l'identifiant a perdu la règle « le plus ancien
+    /// reste » (`docs/replication.md` §3.2) : `(perdant, gagnant)`, pour le
+    /// même `(machine, nom)`. **La boucle déplace sous le gagnant la session
+    /// vivante rangée sous le perdant** (0.36.0, décision 69) : sans cela, un
+    /// daemon connecté ICI serait cherché sous le gagnant, pas trouvé, et dit
+    /// `parti`.
+    pub remplaces: Vec<(Identifiant, Identifiant)>,
 }
 
 /// Pourquoi une opération a été refusée (`docs/replication.md` §3, §5.3, §7).
@@ -863,6 +871,11 @@ pub struct Entrepot {
     /// Combien d'autorisations d'hier sont devenues des droits à l'ouverture
     /// (décision 41) — une fois.
     autorisations_converties: usize,
+    /// **Cet entrepôt est-il celui d'un annuaire LOCAL ?** (0.36.0, décision
+    /// 69) Alors une opération `service` dont la machine n'est pas encore
+    /// reçue des racines est GARDÉE, et rejouée quand la machine arrive —
+    /// voir [`Entrepot::se_savoir_annuaire_local`].
+    local: std::sync::atomic::AtomicBool,
 }
 
 impl Entrepot {
@@ -1035,6 +1048,9 @@ impl Entrepot {
             // Et les machines qu'un annuaire local reçoit des racines
             // (0.28.0) : une table neuve, vide partout ailleurs.
             ecriture.open_table(federation::MACHINES_FEDEREES)?;
+            // Et les services du pair qui attendent leur machine (0.36.0,
+            // décision 69) : une table neuve, vide chez une racine.
+            ecriture.open_table(federation::SERVICES_EN_ATTENTE)?;
             ecriture.open_table(droits::DROITS_PAR_GROUPE)?;
             ecriture.open_table(droits::DROITS_ACCORDES)?;
             ecriture.open_table(droits::DROITS_PAR_ELEMENT)?;
@@ -1111,7 +1127,37 @@ impl Entrepot {
             premiers_domaines,
             groupes_deduits,
             autorisations_converties,
+            local: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Dit à l'entrepôt qu'il sert un annuaire LOCAL (`--federation`).
+    ///
+    /// # POURQUOI L'ENTREPÔT DOIT LE SAVOIR (0.36.0, décision 69)
+    ///
+    /// Une opération `service` venue du pair nomme une machine. **Chez une
+    /// racine**, une machine inconnue est une machine qui n'existe plus : le
+    /// journal du pair porte la déclaration d'une machine AVANT celle de ses
+    /// services, et seul un effacement l'a fait partir — le service part avec
+    /// elle (§3.2), l'opération s'ignore, et c'est juste. **Chez un membre
+    /// d'une paire**, les machines ne viennent pas du pair mais des racines,
+    /// par une autre voie et à un autre rythme : une machine inconnue est
+    /// souvent une machine PAS ENCORE reçue — un membre neuf, pas encore
+    /// accepté, dont le fédérateur n'a pas fait son premier tour. Ignorer
+    /// l'opération la perdait pour toujours, puisque le curseur avance.
+    ///
+    /// Ici, elle est gardée ([`federation::SERVICES_EN_ATTENTE`]) et rejouée
+    /// par [`Entrepot::ranger_les_machines_federees`] quand la machine
+    /// arrive. **Appelé une fois, au démarrage, avant que le tireur ne
+    /// tire.**
+    pub fn se_savoir_annuaire_local(&self) {
+        self.local.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Cet entrepôt sert-il un annuaire local ?
+    #[must_use]
+    pub fn est_annuaire_local(&self) -> bool {
+        self.local.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Combien d'autorisations d'hier sont devenues des droits à l'ouverture
@@ -3434,6 +3480,7 @@ impl Entrepot {
     ) -> Result<Vec<Applique>, Faute> {
         let ecriture = self.base.begin_write()?;
         let mut faites = Vec::with_capacity(cadres.len());
+        let garder = self.est_annuaire_local();
         {
             // Le curseur tel qu'il est DANS la transaction : un cadre du lot
             // le fait avancer pour le suivant.
@@ -3481,7 +3528,7 @@ impl Entrepot {
                 }
 
                 let mut effets = EffetsVivants::default();
-                appliquer_dans(&ecriture, estampille, operation, &mut effets)?;
+                appliquer_dans(&ecriture, estampille, operation, garder, &mut effets)?;
                 // 5. Le compteur se hisse au-dessus de l'estampille appliquée
                 //    (§4).
                 hisser_dans(&ecriture, estampille.compteur)?;
@@ -3925,6 +3972,7 @@ fn appliquer_dans(
     ecriture: &WriteTransaction,
     estampille: Estampille,
     operation: &Operation,
+    garder: bool,
     effets: &mut EffetsVivants,
 ) -> Result<(), Faute> {
     match operation {
@@ -3990,7 +4038,7 @@ fn appliquer_dans(
         Operation::Service {
             service,
             enregistrement,
-        } => appliquer_service(ecriture, *service, enregistrement),
+        } => appliquer_service(ecriture, *service, enregistrement, garder, effets),
         // **LUES ENCORE, CONVERTIES À L'APPLICATION** (décision 41) : une
         // racine en retard tire peut-être un journal d'avant la conversion.
         Operation::Autorisation {
@@ -4731,6 +4779,8 @@ fn appliquer_service(
     ecriture: &WriteTransaction,
     quel: Identifiant,
     enregistrement: &Service,
+    garder: bool,
+    effets: &mut EffetsVivants,
 ) -> Result<(), Faute> {
     let clef_service = clef(quel);
     let clef_nom = clef_de_nom(enregistrement.machine, enregistrement.nom.octets());
@@ -4749,6 +4799,16 @@ fn appliquer_service(
             .get(clef(enregistrement.machine).as_slice())?
             .is_none()
     {
+        // **CHEZ UN MEMBRE, ELLE EST GARDÉE** (0.36.0, décision 69) : la
+        // machine n'est peut-être pas encore arrivée des racines, et le
+        // curseur avance quand même — l'opération n'est plus dans le flux,
+        // elle est ici. [`Entrepot::ranger_les_machines_federees`] la rejoue
+        // quand la machine arrive. Chez une racine, elle s'ignore, comme
+        // avant : sa machine est partie (voir
+        // [`Entrepot::se_savoir_annuaire_local`]).
+        if garder {
+            federation::garder_en_attente(ecriture, quel, enregistrement)?;
+        }
         return Ok(());
     }
     let mut services = ecriture.open_table(SERVICES)?;
@@ -4770,6 +4830,9 @@ fn appliquer_service(
         // ancien, il prend la place ; sinon il ne s'écrit pas du tout.
         if enregistrement.estampille < estampille_tenu {
             services.remove(tenu.as_slice())?;
+            // **ET LA SESSION VIVANTE SUIT** (0.36.0, décision 69) : la
+            // boucle la déplace du perdant au gagnant.
+            effets.remplaces.push((depuis_clef(&tenu)?, quel));
         } else {
             return Ok(());
         }

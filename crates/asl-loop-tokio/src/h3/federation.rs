@@ -149,6 +149,49 @@ impl Service<'_> {
         }
     }
 
+    /// `PUT /v1/federation/paire` — ce membre dit son `--peer` ; on lui rend
+    /// son annuaire et ses membres acceptés (0.36.0, décision 70).
+    ///
+    /// **C'est lui qui juge**, de ce qu'on lui rend ; on juge ici de la même
+    /// façon ([`asl_api::annuaire::EtatDePaire::juger`], les mêmes données),
+    /// pour que `GET /v1/annuaires` le montre à l'écran de l'annuaire, et
+    /// que le journal de la racine le dise quand cela change.
+    pub(super) fn declarer_ma_paire(&mut self, pair: Option<Identifiant>) -> Trouvaille {
+        let Some(lu) = self.membre_accepte() else {
+            return Trouvaille::Rien;
+        };
+        let Ok((membres, _)) = self
+            .entrepot
+            .annuaires_du_compte(lu.proprietaire, maintenant().saturating_div(1_000))
+        else {
+            return Trouvaille::Rien;
+        };
+        let acceptes: Vec<Identifiant> = membres
+            .iter()
+            .filter(|autre| {
+                autre.annuaire == lu.annuaire && autre.etat == EtatDInscription::Acceptee
+            })
+            .map(|autre| autre.membre)
+            .collect();
+        let etat = asl_api::annuaire::EtatDePaire::juger(lu.membre, pair, &acceptes);
+        if self.etat_federe.noter_une_paire(lu.membre, etat) {
+            (self.voie.journal)(&format!(
+                "fédération : {} dit sa paire — {}{}",
+                lu.membre,
+                etat.mot(),
+                if etat.alerte() {
+                    " : paire MAL RÉGLÉE (décision 70)"
+                } else {
+                    ""
+                }
+            ));
+        }
+        Trouvaille::Paire(asl_api::annuaire::PaireRendue::nouvelle(
+            lu.annuaire,
+            &acceptes,
+        ))
+    }
+
     /// Cette machine appartient-elle à un domaine confié à un annuaire local ?
     /// Si oui, le corps du `421` : l'annuaire, et où joindre ses membres
     /// acceptés — les locateurs que chacun a publiés, ou son adresse

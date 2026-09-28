@@ -3107,10 +3107,15 @@ fn les_machines_federees_se_remplacent_en_bloc_et_portent_les_services_d_une_pai
     );
 
     // Reçues : elles se lisent comme des machines.
-    let sorties = base
+    let rangement = base
         .ranger_les_machines_federees(&[federee(m1, "grenier"), federee(m2, "cave")])
         .expect("rangées");
-    assert!(sorties.is_empty());
+    assert!(rangement.sorties.is_empty());
+    // **CHEZ UNE RACINE, RIEN N'ATTENDAIT** : cet entrepôt ne s'est pas dit
+    // annuaire local, et le service d'une machine inconnue y est ignoré —
+    // sa machine est partie (décision 69).
+    assert_eq!(rangement.rejoues, 0);
+    assert_eq!(base.services_en_attente().expect("lisible"), 0);
     assert_eq!(
         base.machine(m1).expect("une lecture").map(|lue| lue.nom),
         Some(nom("grenier"))
@@ -3126,10 +3131,10 @@ fn les_machines_federees_se_remplacent_en_bloc_et_portent_les_services_d_une_pai
     );
 
     // Le remplacement en bloc : m2 sort, et c'est dit ; m1 est mis à jour.
-    let sorties = base
+    let rangement = base
         .ranger_les_machines_federees(&[federee(m1, "grenier-2")])
         .expect("rangées");
-    assert_eq!(sorties, vec![m2]);
+    assert_eq!(rangement.sorties, vec![m2]);
     assert!(base.machine(m2).expect("une lecture").is_none());
     assert_eq!(
         base.machine(m1).expect("une lecture").map(|lue| lue.nom),
@@ -3150,6 +3155,209 @@ fn les_machines_federees_se_remplacent_en_bloc_et_portent_les_services_d_une_pai
                     ..
                 }
             ))
+    );
+    let _ = std::fs::remove_file(&fichier);
+}
+
+/// Applique ce cadre du flux, et rend ce qu'il a donné.
+fn appliquer_du_flux(base: &Entrepot, estampille: Estampille, operation: Operation) -> Applique {
+    base.appliquer(
+        pair(),
+        &Cadre::Operation {
+            estampille,
+            operation,
+        },
+        false,
+    )
+    .expect("l'application ne refuse pas la base")
+}
+
+#[test]
+fn un_service_du_pair_recu_avant_sa_machine_attend_puis_se_range() {
+    // **DÉCISION 69, LE DÉFAUT (a)** : un membre tire le journal de son pair
+    // AVANT d'avoir reçu ses machines des racines. Jusqu'à la 0.35.3,
+    // l'opération était ignorée ET le curseur avançait : perdue pour
+    // toujours. Elle attend désormais sa machine, et se range quand elle
+    // arrive — le curseur, lui, avance tout de suite, et rien ne se fige
+    // derrière elle.
+    let (base, fichier) = entrepot("service-avant-machine");
+    base.se_savoir_annuaire_local();
+    assert!(base.est_annuaire_local());
+    let proprietaire = un(Genre::Utilisateur, 1);
+    let (m1, m2) = (un(Genre::Machine, 1), un(Genre::Machine, 2));
+    let federee = |quelle: Identifiant| asl_registre::MachineFederee {
+        machine: quelle,
+        enregistrement: machine(est(pair(), 3), proprietaire, "grenier"),
+    };
+    let (s_ancien, s_recent, s_autre) = (
+        un(Genre::Service, 7),
+        un(Genre::Service, 8),
+        un(Genre::Service, 9),
+    );
+    let operation =
+        |quel: Identifiant, compteur: u64, sur: Identifiant, texte: &str| Operation::Service {
+            service: quel,
+            enregistrement: service(est(pair(), compteur), sur, texte),
+        };
+
+    // Le pair a déclaré `depot` deux fois (s-8 puis s-7, plus ancien — les
+    // estampilles ne suivent pas l'ordre du journal quand un instantané a
+    // amorcé), et `cave` sur une machine qui ne viendra jamais.
+    for (compteur, quel, estampille, sur, texte) in [
+        (10, s_recent, 12, m1, "depot"),
+        (11, s_ancien, 11, m1, "depot"),
+        (13, s_autre, 13, m2, "cave"),
+    ] {
+        let fait = base
+            .appliquer(
+                pair(),
+                &Cadre::Operation {
+                    estampille: est(pair(), compteur),
+                    operation: operation(quel, estampille, sur, texte),
+                },
+                false,
+            )
+            .expect("appliquée");
+        assert!(matches!(fait, Applique::Faite { .. }), "{fait:?}");
+    }
+    // **LE CURSEUR A AVANCÉ** : l'opération n'est plus dans le flux, elle est
+    // gardée — et une relivraison ne la redouble pas.
+    assert_eq!(base.curseur(pair()).expect("lisible"), 13);
+    assert_eq!(
+        appliquer_du_flux(&base, est(pair(), 13), operation(s_autre, 13, m2, "cave")),
+        Applique::Refusee(MotifDeRefus::Recule)
+    );
+    assert!(base.service(s_ancien).expect("lisible").is_none());
+    assert!(base.service(s_recent).expect("lisible").is_none());
+    // Une par `(machine, nom)` : la plus ancienne.
+    assert_eq!(base.services_en_attente().expect("lisible"), 2);
+
+    // La machine arrive des racines : ce qui l'attendait se range, par la
+    // règle ordinaire — le plus ancien.
+    let rangement = base
+        .ranger_les_machines_federees(&[federee(m1)])
+        .expect("rangées");
+    assert_eq!(rangement.rejoues, 1);
+    assert!(rangement.effets.remplaces.is_empty());
+    assert_eq!(
+        base.service_par_nom(m1, "depot").expect("lisible"),
+        Some(s_ancien)
+    );
+    assert!(base.service(s_recent).expect("lisible").is_none());
+    // Celle dont la machine ne vient pas attend encore, sans rien retenir.
+    assert_eq!(base.services_en_attente().expect("lisible"), 1);
+    // Un second rangement ne rejoue rien de plus.
+    assert_eq!(
+        base.ranger_les_machines_federees(&[federee(m1)])
+            .expect("rangées")
+            .rejoues,
+        0
+    );
+    // Et le flux continue derrière elle.
+    assert!(matches!(
+        appliquer_du_flux(
+            &base,
+            est(pair(), 14),
+            operation(un(Genre::Service, 10), 14, m1, "imap")
+        ),
+        Applique::Faite { curseur: 14, .. }
+    ));
+    let _ = std::fs::remove_file(&fichier);
+}
+
+#[test]
+fn un_service_qui_perd_la_convergence_nomme_son_gagnant() {
+    // **DÉCISION 69, LE DÉFAUT (b)** : l'entrepôt ne tient pas le vivier ; il
+    // NOMME le `s-…` perdant et le gagnant, et la boucle déplace la session.
+    let (base, fichier) = entrepot("service-remplace");
+    base.se_savoir_annuaire_local();
+    let proprietaire = un(Genre::Utilisateur, 1);
+    let m1 = un(Genre::Machine, 1);
+    let federee = asl_registre::MachineFederee {
+        machine: m1,
+        enregistrement: machine(est(pair(), 3), proprietaire, "grenier"),
+    };
+    base.ranger_les_machines_federees(&[federee])
+        .expect("rangées");
+    // Ce membre a déclaré `depot` lui-même : sa propre estampille.
+    let local = un(Genre::Service, 1);
+    base.declarer_service(local, Provenance::Ici, m1, nom("depot"))
+        .expect("déclaré");
+    let tenue = base
+        .service(local)
+        .expect("lisible")
+        .expect("déclaré")
+        .estampille;
+    // Le pair l'avait déclaré avant — une estampille plus petite.
+    let gagnant = un(Genre::Service, 2);
+    let plus_ancienne = Estampille {
+        compteur: tenue.compteur,
+        racine: Identifiant::depuis_entropie(Genre::Annuaire, [0x00; 16]),
+    };
+    assert!(plus_ancienne < tenue);
+    let fait = base
+        .appliquer(
+            plus_ancienne.racine,
+            &Cadre::Operation {
+                estampille: plus_ancienne,
+                operation: Operation::Service {
+                    service: gagnant,
+                    enregistrement: service(plus_ancienne, m1, "depot"),
+                },
+            },
+            false,
+        )
+        .expect("appliquée");
+    let Applique::Faite { effets, .. } = fait else {
+        panic!("appliquée : {fait:?}");
+    };
+    assert_eq!(effets.remplaces, vec![(local, gagnant)]);
+    assert_eq!(
+        base.service_par_nom(m1, "depot").expect("lisible"),
+        Some(gagnant)
+    );
+
+    // **PAR LE REJEU AUSSI** : m2 était là, `depot` s'y est déclaré ici ; elle
+    // sort de nos domaines, le pair rapporte son `depot` plus ancien — gardé
+    // —, et quand elle revient, le rejeu le fait gagner.
+    let m2 = un(Genre::Machine, 2);
+    let federee_2 = asl_registre::MachineFederee {
+        machine: m2,
+        enregistrement: machine(est(pair(), 3), proprietaire, "cave"),
+    };
+    base.ranger_les_machines_federees(&[federee, federee_2])
+        .expect("rangées");
+    let local_2 = un(Genre::Service, 3);
+    base.declarer_service(local_2, Provenance::Ici, m2, nom("depot"))
+        .expect("déclaré");
+    let rangement = base
+        .ranger_les_machines_federees(&[federee])
+        .expect("rangées");
+    assert_eq!(rangement.sorties, vec![m2]);
+    let ancien = un(Genre::Service, 4);
+    let fait = base
+        .appliquer(
+            pair(),
+            &Cadre::Operation {
+                estampille: est(pair(), 1),
+                operation: Operation::Service {
+                    service: ancien,
+                    enregistrement: service(plus_ancienne, m2, "depot"),
+                },
+            },
+            true,
+        )
+        .expect("appliquée");
+    assert!(matches!(fait, Applique::Faite { .. }));
+    assert_eq!(base.services_en_attente().expect("lisible"), 1);
+    let rangement = base
+        .ranger_les_machines_federees(&[federee, federee_2])
+        .expect("rangées");
+    assert_eq!(rangement.rejoues, 1);
+    assert_eq!(rangement.effets.remplaces, vec![(local_2, ancien)]);
+    assert_eq!(
+        base.service_par_nom(m2, "depot").expect("lisible"),
+        Some(ancien)
     );
     let _ = std::fs::remove_file(&fichier);
 }

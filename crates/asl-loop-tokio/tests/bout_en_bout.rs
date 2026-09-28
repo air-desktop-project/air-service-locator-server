@@ -207,6 +207,9 @@ struct ClesDeLExploitant {
     /// Où rendre à l'essai l'entrepôt que la boucle sert — pour un
     /// fédérateur qui y range, ou pour vérifier ce qui n'y est pas écrit.
     entrepot_partage: Option<tokio::sync::oneshot::Sender<Arc<Entrepot>>>,
+    /// Côté annuaire local : ce que les fédérateurs concluent de la paire
+    /// (décision 70), que `GET /v1/version` rend.
+    paire: Option<Arc<asl_loop_tokio::PaireJugee>>,
 }
 
 #[allow(
@@ -255,6 +258,12 @@ async fn lever_complet(
             Some([rang; 16])
         };
         let entrepot = Arc::new(entrepot);
+        // **COMME LE BINAIRE** : un annuaire qui publie aux racines est local,
+        // et son entrepôt garde ce que le pair donne avant ses machines
+        // (décision 69).
+        if cles.publies.is_some() {
+            entrepot.se_savoir_annuaire_local();
+        }
         let mut application = Annuaire::new(
             &entrepot,
             &tirer,
@@ -287,6 +296,9 @@ async fn lever_complet(
         }
         if let Some(publies) = cles.publies {
             application.publier_l_etat_dans(publies);
+        }
+        if let Some(paire) = cles.paire {
+            application.dire_la_paire_depuis(paire);
         }
         if let Some(delai) = cles.expiration_federee_us {
             application.expirer_l_etat_federe_apres(delai);
@@ -6851,10 +6863,13 @@ struct AnnuaireLocal {
     entrepot: Arc<Entrepot>,
     /// Ses locateurs, que l'essai peut changer en service (décision 64).
     locateurs: Arc<asl_loop_tokio::LocateursPublies>,
+    /// Ce qu'il conclut de sa paire (décision 70).
+    paire: Arc<asl_loop_tokio::PaireJugee>,
 }
 
 /// Lève un annuaire local qui fédère vers cette racine, avec cette clé
-/// d'identité, et rafraîchit tout à cette cadence.
+/// d'identité, et rafraîchit tout à cette cadence — avec ce `--peer`, s'il en
+/// a un (le `n-…` de sa clé).
 async fn lever_un_annuaire_local(
     nom: &str,
     confiance: asl_loop_tokio::Confiance,
@@ -6862,6 +6877,7 @@ async fn lever_un_annuaire_local(
     identite: asl_cle::CleSecrete,
     cadence_ms: u64,
     locateurs: &[&str],
+    pair: Option<Identifiant>,
 ) -> AnnuaireLocal {
     // Le certificat que l'annuaire local présente est celui de son banc ; la
     // clé qu'il prouve aux racines est `identite` — le binaire tient les deux
@@ -6869,6 +6885,7 @@ async fn lever_un_annuaire_local(
     let (racine, presente) = banc(nom);
     let (base, fichier) = entrepot(nom);
     let publies = Arc::new(asl_loop_tokio::ServicesPublies::nouvelle());
+    let paire = Arc::new(asl_loop_tokio::PaireJugee::nouvelle());
     let (rendre_fermetures, fermetures) = tokio::sync::oneshot::channel();
     let (rendre_entrepot, entrepot_local) = tokio::sync::oneshot::channel();
     let (adresse, dire_stop, tache) = lever_complet(
@@ -6882,6 +6899,7 @@ async fn lever_un_annuaire_local(
             publies: Some(Arc::clone(&publies)),
             fermetures: Some(rendre_fermetures),
             entrepot_partage: Some(rendre_entrepot),
+            paire: Some(Arc::clone(&paire)),
             ..ClesDeLExploitant::default()
         },
     )
@@ -6905,6 +6923,8 @@ async fn lever_un_annuaire_local(
         journal: Box::new(|ligne| journaliser(&ligne)),
         plafond_recul_ms: 200,
         locateurs: Arc::clone(&locateurs),
+        pair,
+        paire: Arc::clone(&paire),
     };
     AnnuaireLocal {
         adresse,
@@ -6915,6 +6935,7 @@ async fn lever_un_annuaire_local(
         federateur: tokio::spawn(federateur.federer_sans_fin()),
         entrepot: entrepot_local,
         locateurs,
+        paire,
     }
 }
 
@@ -6934,6 +6955,21 @@ impl AnnuaireLocal {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         panic!("les racines n'ont pas transmis {machine}");
+    }
+
+    /// Attend qu'il ait conclu ceci de sa paire (décision 70).
+    async fn attendre_la_paire(&self, voulue: asl_api::annuaire::EtatDePaire) {
+        for _ in 0..100_u32 {
+            if self.paire.etat() == Some(voulue) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!(
+            "la paire devait être {:?}, elle est {:?}",
+            voulue,
+            self.paire.etat()
+        );
     }
 
     /// L'arrête tout entier.
@@ -7047,6 +7083,56 @@ async fn un_annuaire_local_renvoie_aux_racines(
     assert_eq!(
         statut, b"401",
         "une racine sert les domaines, elle ne renvoie pas : {corps}"
+    );
+}
+
+/// **Décision 70**, hors du futur déjà long de `la_federation_de_bout_en_bout` :
+/// speedy, le titulaire, tourne sans `--peer` alors qu'helium est accepté ;
+/// helium a un `--peer` qui n'est pas speedy. Chacun l'apprend des racines, le
+/// dit à son journal et dans `GET /v1/version` — et continue de servir.
+async fn la_paire_mal_reglee_se_dit(
+    speedy_local: &AnnuaireLocal,
+    helium_local: &AnnuaireLocal,
+    alice: &mut ams_quic_client::Client,
+    [n_speedy, n_helium, n_etranger]: [Identifiant; 3],
+) {
+    speedy_local
+        .attendre_la_paire(asl_api::annuaire::EtatDePaire::SansPeer)
+        .await;
+    helium_local
+        .attendre_la_paire(asl_api::annuaire::EtatDePaire::PeerInconnu)
+        .await;
+    {
+        let journal = JOURNAL.lock().expect("le journal n'est pas empoisonné");
+        assert!(
+            journal
+                .iter()
+                .any(|ligne| ligne.starts_with("PAIRE MAL RÉGLÉE (sans-peer)")
+                    && ligne.contains(n_speedy.texte().as_str())
+                    && ligne.contains(n_helium.texte().as_str())),
+            "speedy dit qu'il tourne sans --peer, et qui est l'autre membre"
+        );
+        assert!(
+            journal
+                .iter()
+                .any(|ligne| ligne.starts_with("PAIRE MAL RÉGLÉE (peer-inconnu)")
+                    && ligne.contains(n_etranger.texte().as_str())),
+            "helium dit que son --peer ne désigne aucun membre accepté"
+        );
+    }
+    let mut curieux = connecter(&speedy_local.racine, speedy_local.adresse).await;
+    let (statut, version) = lire_json(&mut curieux, 0, b"/v1/version").await;
+    assert_eq!(statut, b"200", "{version}");
+    assert!(
+        version.contains(r#""paire":"sans-peer""#),
+        "GET /v1/version d'un membre dit sa paire : {version}"
+    );
+    let (statut, mes_annuaires) = lire_json(alice, 40, b"/v1/annuaires").await;
+    assert_eq!(statut, b"200", "{mes_annuaires}");
+    assert!(
+        mes_annuaires.contains(r#""paire":"sans-peer""#)
+            && mes_annuaires.contains(r#""paire":"peer-inconnu""#),
+        "l'écran de l'annuaire le montre, membre par membre : {mes_annuaires}"
     );
 }
 
@@ -7193,6 +7279,8 @@ async fn la_federation_de_bout_en_bout() {
             // **SPEEDY PUBLIE SES LOCATEURS** (décision 57) : ils remplacent
             // l'adresse déclarée.
             &["[2001:db8::51]:6630", "192.0.2.51:6630"],
+            // **ET TOURNE SANS `--peer`** — l'oubli du 2026-09-28.
+            None,
         )
         .await;
     speedy_local.attendre_la_machine(machine_d).await;
@@ -7232,8 +7320,17 @@ async fn la_federation_de_bout_en_bout() {
             && !corps.contains("speedy.maison"),
         "le `421` rend les locateurs publiés, pas l'adresse déclarée : {corps}"
     );
+    // **SEUL, ET RIEN À REDIRE** (décision 70) : speedy n'a pas d'autre
+    // membre accepté, et pas de `--peer`.
+    speedy_local
+        .attendre_la_paire(asl_api::annuaire::EtatDePaire::Seul)
+        .await;
     // Et l'application du propriétaire les lit dans `GET /v1/annuaires`.
     let (statut, mes_annuaires) = lire_json(&mut alice, 28, b"/v1/annuaires").await;
+    assert!(
+        mes_annuaires.contains(r#""paire":"seul""#),
+        "l'écran de l'annuaire dit ce que le membre conclut : {mes_annuaires}"
+    );
     assert_eq!(statut, b"200", "{mes_annuaires}");
     assert!(
         mes_annuaires.contains(
@@ -7408,6 +7505,9 @@ async fn la_federation_de_bout_en_bout() {
     assert_eq!(statut, b"201");
     let helium = asl_cle::CleSecrete::depuis_entropie([0x53; 32]);
     let n_helium = asl_cle::identifiant_de_racine(&helium.publique());
+    let n_etranger = asl_cle::identifiant_de_racine(
+        &asl_cle::CleSecrete::depuis_entropie([0x5F; 32]).publique(),
+    );
     let (statut, _) = se_presenter(
         &racine,
         adresse,
@@ -7438,6 +7538,9 @@ async fn la_federation_de_bout_en_bout() {
             200,
             // Helium n'en publie aucun : son adresse déclarée sert.
             &[],
+            // **ET SON `--peer` DÉSIGNE UNE CLÉ QUI N'EST PAS CELLE DE SPEEDY**
+            // (décision 70) : une faute de copie de `pair.pub`.
+            Some(n_etranger),
         )
         .await;
     helium_local.attendre_la_machine(machine_d).await;
@@ -7451,6 +7554,19 @@ async fn la_federation_de_bout_en_bout() {
             >= 2,
         "helium devait croire la racine par son identité, comme speedy"
     );
+    // ── DÉCISION 70 : LA PAIRE MAL RÉGLÉE SE DIT, DES DEUX CÔTÉS ────────────
+    //
+    // Speedy, le titulaire, tourne sans `--peer` alors qu'helium est accepté ;
+    // helium a un `--peer` qui n'est pas speedy. Chacun l'apprend des racines,
+    // le dit à son journal et dans `GET /v1/version` — et continue de servir.
+    Box::pin(la_paire_mal_reglee_se_dit(
+        &speedy_local,
+        &helium_local,
+        &mut alice,
+        [n_speedy, n_helium, n_etranger],
+    ))
+    .await;
+
     // **LA PAIRE DANS LE `421`** : les locateurs de speedy, l'adresse
     // déclarée d'helium — chaque membre les siens.
     // La même connexion que le premier `421` : le harnais borne les siennes.
@@ -7557,7 +7673,7 @@ async fn la_federation_de_bout_en_bout() {
     // L'écran le voit aussi, et sait que c'est HELIUM qui le rapporte.
     let (statut, services) = lire_json(
         &mut alice,
-        40,
+        44,
         format!("/v1/machines/{}/services", machine_d.texte()).as_bytes(),
     )
     .await;
@@ -7590,7 +7706,7 @@ async fn la_federation_de_bout_en_bout() {
     // Et l'écran ne le montre plus : plus personne ne le confirme (C6).
     let (statut, services) = lire_json(
         &mut alice,
-        44,
+        48,
         format!("/v1/machines/{}/services", machine_d.texte()).as_bytes(),
     )
     .await;
@@ -7604,6 +7720,158 @@ async fn la_federation_de_bout_en_bout() {
     let _ = dire_stop.send(());
     let _ = tache.await;
     let _ = std::fs::remove_file(&fichier);
+}
+
+// ── LA CONVERGENCE D'UNE PAIRE ET LE VIVIER (décision 69) ──────────────────
+
+#[tokio::test]
+async fn une_session_vivante_suit_le_service_qui_gagne_la_convergence() {
+    // **LE DÉFAUT (b) DE LA DÉCISION 69, REPRODUIT PUIS CORRIGÉ.** Un membre
+    // tient un daemon sous le `s-…` qu'il a frappé ; l'opération de son pair
+    // arrive, plus ancienne, pour le même `(machine, nom)` : l'entrepôt garde
+    // celle du pair. Tant que la session vivante reste rangée sous le perdant,
+    // la publication aux racines cherche le gagnant, ne le trouve pas, et dit
+    // le daemon `parti` alors qu'il est connecté. Le tireur nomme le
+    // remplacement ; la boucle déplace la session ; le gagnant est publié
+    // vivant, sa réponse portant son identifiant. L'essai tient le rôle du
+    // tireur, comme `une_fermeture_demandee_par_le_tireur_ferme_sans_attendre`.
+    let (racine, identite) = banc("convergence-vivier");
+    let (base, fichier) = entrepot("convergence-vivier");
+    // La machine est enrôlée AUX RACINES ; ce membre la reçoit d'elles.
+    let (aux_racines, fichier_racines) = entrepot("convergence-vivier-racines");
+    let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xC7; 16]);
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0xC7; 16]);
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xC7; 32]);
+    machine_enrolee(
+        &aux_racines,
+        machine,
+        compte,
+        secrete.publique().octets(),
+        TOUT,
+    );
+    let enregistrement = aux_racines
+        .machine(machine)
+        .expect("lisible")
+        .expect("enrôlée");
+    base.ranger_les_machines_federees(&[asl_registre::MachineFederee {
+        machine,
+        enregistrement,
+    }])
+    .expect("reçue des racines");
+
+    let publies = Arc::new(asl_loop_tokio::ServicesPublies::nouvelle());
+    let (rendre_fermetures, fermetures) = tokio::sync::oneshot::channel();
+    let (rendre_entrepot, entrepot_local) = tokio::sync::oneshot::channel();
+    let (adresse, dire_stop, tache) = lever_complet(
+        identite,
+        base,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            publies: Some(Arc::clone(&publies)),
+            fermetures: Some(rendre_fermetures),
+            entrepot_partage: Some(rendre_entrepot),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+    let fermetures = fermetures.await.expect("les fermetures");
+    let entrepot_local = entrepot_local.await.expect("l'entrepôt");
+
+    let mut daemon = connecter(&racine, adresse).await;
+    let (statut, corps) = annoncer_depot(&mut daemon, machine, &secrete).await;
+    assert_eq!(statut, b"200", "{corps}");
+    let frappe = entrepot_local
+        .service_par_nom(machine, "depot")
+        .expect("lisible")
+        .expect("déclaré à l'annonce");
+
+    // Ce que la boucle publie pour `depot` : `(s-…, vivant ?)`. La boucle ne
+    // publie qu'à son tour ; un datagramme du daemon la réveille.
+    let mut flux = 12_u64;
+    let mut attendre = async |voulu: (Identifiant, bool), daemon: &mut ams_quic_client::Client| {
+        for _ in 0..60_u32 {
+            let (_, liste) = publies.lire();
+            let vu = liste
+                .iter()
+                .find(|publie| publie.nom.octets() == b"depot")
+                .map(|publie| (publie.service, publie.reponse.clone()));
+            if let Some((service, reponse)) = &vu
+                && (*service, reponse.is_some()) == voulu
+            {
+                return reponse.clone();
+            }
+            let _ = lire_json(daemon, flux, b"/v1/vu").await;
+            flux = flux.saturating_add(4);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("la publication n'est jamais devenue {voulu:?}");
+    };
+    attendre((frappe, true), &mut daemon).await;
+
+    // Le pair avait déclaré `depot` AVANT : même compteur, un identifiant
+    // d'annuaire plus petit — le cas du 2026-09-28, où `n-4EQ…` a gagné.
+    let tenue = entrepot_local
+        .service(frappe)
+        .expect("lisible")
+        .expect("déclaré")
+        .estampille;
+    let pair = Identifiant::depuis_entropie(Genre::Annuaire, [0x00; 16]);
+    let plus_ancienne = asl_registre::Estampille {
+        compteur: tenue.compteur,
+        racine: pair,
+    };
+    assert!(plus_ancienne < tenue);
+    let gagnant = Identifiant::depuis_entropie(Genre::Service, [0xC8; 16]);
+    let fait = entrepot_local
+        .appliquer(
+            pair,
+            &asl_registre::Cadre::Operation {
+                estampille: plus_ancienne,
+                operation: asl_registre::Operation::Service {
+                    service: gagnant,
+                    enregistrement: asl_registre::Service {
+                        provenance: Provenance::Ici,
+                        estampille: plus_ancienne,
+                        machine,
+                        nom: asl_registre::NomRange::nouveau("depot").expect("un nom"),
+                    },
+                },
+            },
+            false,
+        )
+        .expect("appliquée");
+    let asl_store::Applique::Faite { effets, .. } = fait else {
+        panic!("appliquée : {fait:?}");
+    };
+    assert_eq!(effets.remplaces, vec![(frappe, gagnant)]);
+
+    // **LE DÉFAUT** : le gagnant est publié `parti`, le daemon connecté.
+    attendre((gagnant, false), &mut daemon).await;
+
+    // **LA CORRECTION** : le tireur nomme, la boucle déplace.
+    for (perdant, gagnant) in effets.remplaces {
+        fermetures.renommer(perdant, gagnant);
+    }
+    let reponse = attendre((gagnant, true), &mut daemon)
+        .await
+        .expect("vivant, avec sa réponse");
+    let reponse = String::from_utf8_lossy(&reponse);
+    assert!(
+        reponse.contains(gagnant.texte().as_str()),
+        "la réponse publiée porte le gagnant : {reponse}"
+    );
+    assert!(
+        !reponse.contains(frappe.texte().as_str()),
+        "et plus le perdant : {reponse}"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_file(&fichier);
+    let _ = std::fs::remove_file(&fichier_racines);
 }
 
 // ── L'IDENTITÉ PAR LA CLÉ (décisions 53 à 58) ──────────────────────────────

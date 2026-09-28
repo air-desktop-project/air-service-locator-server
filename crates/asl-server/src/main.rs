@@ -223,6 +223,11 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?;
 
     let entrepot = Arc::new(Entrepot::ouvrir(&reglages.entrepot, racine)?);
+    // **UN MEMBRE D'ANNUAIRE LOCAL GARDE CE QUE SON PAIR LUI DONNE AVANT SES
+    // MACHINES** (0.36.0, décision 69) : dit AVANT que le tireur ne tire.
+    if reglages.federation.is_some() {
+        entrepot.se_savoir_annuaire_local();
+    }
     // **CE QUE L'ANNUAIRE PRÉSENTE À LA POIGNÉE DE MAIN** (décisions 53, 55,
     // 58) : son certificat d'identité, frappé ici depuis la clé d'identité —
     // aucun fichier à tenir, aucune date à renouveler —, et rien d'autre.
@@ -517,6 +522,10 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(federation) = &reglages.federation {
             let publies = Arc::new(asl_loop_tokio::ServicesPublies::nouvelle());
             application.publier_l_etat_dans(Arc::clone(&publies));
+            // **LA PAIRE, JUGÉE PAR LES FÉDÉRATEURS, DITE PAR LA BOUCLE**
+            // (décision 70) : le journal, et `GET /v1/version`.
+            let paire = Arc::new(asl_loop_tokio::PaireJugee::nouvelle());
+            application.dire_la_paire_depuis(Arc::clone(&paire));
             eprintln!(
                 "asl-server : annuaire LOCAL — fédère vers {} racine(s) : {}.",
                 federation.racines.len(),
@@ -585,6 +594,8 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                     journal: Box::new(|ligne| eprintln!("asl-server : {ligne}")),
                     plafond_recul_ms: reglages.keepalive_s.saturating_mul(1_000).max(1),
                     locateurs: Arc::clone(&locateurs),
+                    pair: cle_du_pair.as_ref().map(asl_cle::identifiant_de_racine),
+                    paire: Arc::clone(&paire),
                 };
                 federateurs.push(tokio::spawn(federateur.federer_sans_fin()));
             }

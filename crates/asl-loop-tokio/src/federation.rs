@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use asl_api::annuaire::{DeclarationDePair, EtatDePaire, PaireRendue};
 use asl_cle::CleSecrete;
 use asl_id::Identifiant;
 use asl_registre::{EntreeDEtat, MACHINE_FEDEREE_OCTETS, MachineFederee, NomRange};
@@ -41,6 +42,17 @@ use crate::tireur::{Connexion, Faute, Reprise, resoudre};
 /// Combien de temps une racine croit un rapport qu'aucun membre ne
 /// confirme : trente secondes (décidé le 2026-09-27, Thierry).
 pub const EXPIRATION_US: u64 = 30 * 1_000_000;
+
+/// Tous les combien un membre dont la paire est mal réglée le redit au
+/// journal, en microsecondes : **dix minutes** (0.36.0, décision 70).
+///
+/// Assez souvent pour qu'un `journalctl -u asl-server --since -15min` le
+/// montre toujours, et qu'on ne puisse pas lire le journal d'un membre mal
+/// réglé sans le voir ; assez rarement pour ne pas noyer ce qui compte — à la
+/// cadence des tours, dix secondes, ce serait trois cent soixante lignes par
+/// heure, et l'œil apprend vite à sauter ce qui se répète. Un changement, lui,
+/// se dit tout de suite.
+pub const RAPPEL_DE_PAIRE_US: u64 = 10 * 60 * 1_000_000;
 
 /// La cadence à laquelle un annuaire local rafraîchit tout — les machines
 /// qu'il tire, l'état qu'il pousse —, en millisecondes. Dix secondes : trois
@@ -93,6 +105,11 @@ pub struct EtatFedere {
     /// vivantes)` —, pour que le journal ne dise un rapport qu'à la première
     /// fois et quand il change.
     derniers_rapports: HashMap<Identifiant, (usize, usize)>,
+    /// Ce que chaque membre a conclu de sa paire, la dernière fois qu'il l'a
+    /// dit (0.36.0, décision 70) — pour `GET /v1/annuaires`. **En mémoire,
+    /// comme le reste** : une racine qui redémarre l'apprend au tour suivant
+    /// de chaque membre, dix secondes au plus.
+    paires: HashMap<Identifiant, EtatDePaire>,
 }
 
 /// Ce qu'une racine rend d'un service fédéré.
@@ -245,6 +262,19 @@ impl EtatFedere {
     ) -> bool {
         self.derniers_rapports.insert(membre, (entrees, vivantes)) != Some((entrees, vivantes))
     }
+
+    /// Note ce qu'un membre conclut de sa paire ; rend `true` si c'est la
+    /// première fois ou si cela a changé — ce que le journal doit dire.
+    pub fn noter_une_paire(&mut self, membre: Identifiant, etat: EtatDePaire) -> bool {
+        self.paires.insert(membre, etat) != Some(etat)
+    }
+
+    /// Ce que ce membre a conclu de sa paire, s'il l'a dit depuis que cette
+    /// racine tourne.
+    #[must_use]
+    pub fn paire_de(&self, membre: Identifiant) -> Option<EtatDePaire> {
+        self.paires.get(&membre).copied()
+    }
 }
 
 /// L'annuaire local s'est-il sondé DE L'INTÉRIEUR (décision 60) ?
@@ -391,6 +421,145 @@ pub fn lire_une_part_de_machines(octets: &[u8]) -> Result<Vec<MachineFederee>, F
         .collect()
 }
 
+/// Ce qu'un membre d'annuaire local conclut de sa paire (0.36.0, décision 70),
+/// partagé entre ses fédérateurs — un par racine — et la boucle qui sert
+/// `GET /v1/version`.
+///
+/// # C'EST LE MEMBRE QUI DÉTECTE, ET IL LE DIT FORT
+///
+/// Les racines lui disent, à chaque tour, les membres acceptés de son
+/// annuaire (`PUT /v1/federation/paire`) ; il les compare à son `--peer`
+/// ([`EtatDePaire::juger`]). Une paire mal réglée — un autre membre accepté
+/// et pas de `--peer`, ou un `--peer` qui ne désigne aucun membre accepté —
+/// se dit au journal **dès qu'on l'apprend, puis toutes les dix minutes**
+/// ([`RAPPEL_DE_PAIRE_US`]), et `GET /v1/version` la rend. **Le membre ne
+/// s'arrête pas** : seul, il sert encore ses daemons, et c'est ce qu'on veut
+/// d'un secours.
+///
+/// **Partagé, et c'est ce qui évite le doublon** : deux fédérateurs
+/// apprennent la même chose de deux racines ; la ligne ne sort qu'une fois.
+#[derive(Debug)]
+pub struct PaireJugee {
+    /// Ce qu'on a conclu, et quand on l'a dit.
+    tenue: Mutex<TenueDePaire>,
+    /// Tous les combien redire une paire mal réglée, en microsecondes.
+    rappel_us: u64,
+}
+
+/// L'intérieur de [`PaireJugee`].
+#[derive(Debug, Default)]
+struct TenueDePaire {
+    /// La conclusion, si l'on a entendu les racines.
+    etat: Option<EtatDePaire>,
+    /// Les membres acceptés qu'elles ont dits.
+    membres: Vec<Identifiant>,
+    /// Quand la dernière ligne est partie au journal, en microsecondes.
+    dite_a: u64,
+}
+
+impl Default for PaireJugee {
+    fn default() -> Self {
+        Self::nouvelle()
+    }
+}
+
+impl PaireJugee {
+    /// Rien encore : les racines n'ont rien dit.
+    #[must_use]
+    pub fn nouvelle() -> Self {
+        Self::avec_rappel(RAPPEL_DE_PAIRE_US)
+    }
+
+    /// La même, avec un autre rappel — un essai n'attend pas dix minutes.
+    #[must_use]
+    pub fn avec_rappel(rappel_us: u64) -> Self {
+        Self {
+            tenue: Mutex::new(TenueDePaire::default()),
+            rappel_us,
+        }
+    }
+
+    /// Ce qu'on a conclu, si les racines ont parlé.
+    #[must_use]
+    pub fn etat(&self) -> Option<EtatDePaire> {
+        self.tenue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .etat
+    }
+
+    /// Range ce que les racines viennent de dire, et rend la ligne à écrire
+    /// au journal, s'il en faut une : **à la première fois et à chaque
+    /// changement**, et, tant que la paire est mal réglée, **toutes les
+    /// [`RAPPEL_DE_PAIRE_US`]**.
+    pub fn constater(
+        &self,
+        moi: Identifiant,
+        pair: Option<Identifiant>,
+        membres: &[Identifiant],
+        maintenant: u64,
+    ) -> Option<String> {
+        let etat = EtatDePaire::juger(moi, pair, membres);
+        let mut tenue = self
+            .tenue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let change = tenue.etat != Some(etat) || tenue.membres != membres;
+        let rappel = etat.alerte() && maintenant >= tenue.dite_a.saturating_add(self.rappel_us);
+        tenue.etat = Some(etat);
+        tenue.membres = membres.to_vec();
+        if !change && !rappel {
+            return None;
+        }
+        tenue.dite_a = maintenant;
+        Some(ligne_de_paire(etat, moi, pair, membres))
+    }
+}
+
+/// La ligne du journal pour cette conclusion.
+fn ligne_de_paire(
+    etat: EtatDePaire,
+    moi: Identifiant,
+    pair: Option<Identifiant>,
+    membres: &[Identifiant],
+) -> String {
+    let autres: Vec<String> = membres
+        .iter()
+        .filter(|membre| **membre != moi)
+        .map(|membre| membre.texte().as_str().to_owned())
+        .collect();
+    let autres = if autres.is_empty() {
+        "aucun".to_owned()
+    } else {
+        autres.join(", ")
+    };
+    let pair = pair.map_or_else(String::new, |pair| pair.texte().as_str().to_owned());
+    match etat {
+        EtatDePaire::SansPeer => format!(
+            "PAIRE MAL RÉGLÉE (sans-peer) : les racines disent que cet annuaire local ({moi}) \
+             a un autre membre accepté, {autres}, et ce membre tourne SANS --peer — les deux ne \
+             se répliquent pas, chacun frappe ses propres s-…, et un daemon qui bascule de l'un \
+             à l'autre change d'identifiant. Réglez --peer <hôte:port> et --peer-key <la clé \
+             publique de {autres}> (docs/annuaires.md §2 ter, décision 70). Cet annuaire \
+             continue de servir."
+        ),
+        EtatDePaire::PeerInconnu => format!(
+            "PAIRE MAL RÉGLÉE (peer-inconnu) : --peer désigne {pair}, qui n'est pas un autre \
+             membre accepté de cet annuaire local ({moi}) — autre(s) membre(s) accepté(s) : \
+             {autres}. Corrigez --peer-key (docs/annuaires.md §2 ter, décision 70). Cet \
+             annuaire continue de servir."
+        ),
+        EtatDePaire::Reglee => format!(
+            "paire réglée : --peer désigne {pair}, l'autre membre accepté de cet annuaire \
+             local ({moi})."
+        ),
+        EtatDePaire::Seul => format!(
+            "paire : cet annuaire local ({moi}) n'a pas d'autre membre accepté, et tourne sans \
+             --peer — il est seul."
+        ),
+    }
+}
+
 /// La connexion d'un annuaire local vers UNE racine, et ce qu'elle porte.
 ///
 /// **Elle possède ce qu'elle tient**, comme [`crate::tireur::Tireur`] : la
@@ -429,6 +598,12 @@ pub struct Federateur {
     /// de nouveau ; **aucune liste** (localisateur pas encore détecté) ne
     /// publie rien, et les racines gardent ce qu'elles tenaient.
     pub locateurs: Arc<LocateursPublies>,
+    /// Le `n-…` que la clé de `--peer-key` donne, si ce membre a un
+    /// `--peer` (0.36.0, décision 70) : c'est ce qu'il dit aux racines, et ce
+    /// qu'il compare aux membres acceptés qu'elles lui rendent.
+    pub pair: Option<Identifiant>,
+    /// Ce qu'il en conclut, partagé avec les autres fédérateurs et la boucle.
+    pub paire: Arc<PaireJugee>,
 }
 
 /// Où l'on joint cet annuaire, tel que les fédérateurs le publient aux
@@ -561,6 +736,9 @@ impl Federateur {
         // ligne six fois par minute noie celle qui compte.
         let mut machines_dites = None;
         let mut etat_dit = None;
+        // Une racine d'avant la 0.36.0 ne connaît pas la paire : on le dit
+        // une fois par session, pas à chaque tour.
+        let mut paire_muette = false;
         loop {
             let maintenant = maintenant();
             let version = self.publies.version();
@@ -576,6 +754,10 @@ impl Federateur {
                 let pousse = self.pousser_l_etat(&mut connexion).await?;
                 self.dire_l_etat(&mut etat_dit, pousse);
                 version_poussee = Some(version);
+                // **LA PAIRE, À CHAQUE TOUR** (décision 70) : on dit son
+                // `--peer`, on apprend les membres acceptés, on juge.
+                self.juger_la_paire(&mut connexion, &mut paire_muette)
+                    .await?;
                 prochaine = maintenant.saturating_add(cadence_us);
             } else if version_poussee != Some(version) {
                 // **UN CHANGEMENT PART TOUT DE SUITE** : un daemon qui arrive ou
@@ -613,6 +795,54 @@ impl Federateur {
         }
     }
 
+    /// `PUT /v1/federation/paire` : dit notre `--peer`, apprend les membres
+    /// acceptés de notre annuaire, et juge (décision 70).
+    ///
+    /// **Rien de ce qui ne va pas ici ne coupe la voie** : une racine d'avant
+    /// la 0.36.0 rend `404` — on le dit une fois, et l'on continue —, et une
+    /// réponse illisible ne dit rien de plus. La fédération sert d'abord les
+    /// daemons ; la paire n'est qu'un avertissement.
+    async fn juger_la_paire(
+        &self,
+        connexion: &mut Connexion,
+        muette: &mut bool,
+    ) -> Result<(), Faute> {
+        let mut corps = [0_u8; 64];
+        let combien = DeclarationDePair { pair: self.pair }
+            .encoder(&mut corps)
+            .unwrap_or(0);
+        let reponse = connexion
+            .requete(
+                b"PUT",
+                b"/v1/federation/paire",
+                &[(b"content-type", b"application/json")],
+                corps.get(..combien).unwrap_or_default(),
+            )
+            .await?;
+        let lue = match reponse.statut.value() {
+            200 => PaireRendue::decoder(&reponse.corps).ok(),
+            _ => None,
+        };
+        let Some(lue) = lue else {
+            if !*muette {
+                (self.journal)(format!(
+                    "fédération vers {} : la racine ne dit pas la paire ({}) — antérieure à \
+                     la 0.36.0 ?",
+                    self.adresse,
+                    reponse.statut.value()
+                ));
+                *muette = true;
+            }
+            return Ok(());
+        };
+        let membres: Vec<Identifiant> = lue.membres().collect();
+        let moi = asl_cle::identifiant_de_racine(&self.identite.publique());
+        if let Some(ligne) = self.paire.constater(moi, self.pair, &membres, maintenant()) {
+            (self.journal)(ligne);
+        }
+        Ok(())
+    }
+
     /// Tire toutes les parts des machines de nos domaines, et les range ;
     /// rend combien il y en a.
     async fn tirer_les_machines(&self, connexion: &mut Connexion) -> Result<usize, Faute> {
@@ -633,12 +863,25 @@ impl Federateur {
                 break;
             }
         }
-        let sorties = self
+        let rangement = self
             .entrepot
             .ranger_les_machines_federees(&machines)
             .map_err(Faute::Entrepot)?;
-        for sortie in sorties {
+        for sortie in rangement.sorties {
             self.fermetures.fermer(sortie);
+        }
+        // **CE QUI ATTENDAIT SA MACHINE EST RANGÉ** (0.36.0, décision 69) :
+        // des services du pair, tirés avant que les racines nous aient donné
+        // leur machine. Le journal le dit, une fois par rejeu.
+        if rangement.rejoues > 0 {
+            (self.journal)(format!(
+                "fédération vers {} : {} service(s) du pair, gardé(s) en attente de leur \
+                 machine, rangé(s)",
+                self.adresse, rangement.rejoues
+            ));
+        }
+        for (perdant, gagnant) in rangement.effets.remplaces {
+            self.fermetures.renommer(perdant, gagnant);
         }
         Ok(machines.len())
     }
@@ -721,6 +964,89 @@ mod essais {
 
     fn nom(texte: &str) -> NomRange {
         NomRange::nouveau(texte).unwrap_or_else(|_| unreachable!())
+    }
+
+    #[test]
+    fn la_paire_se_dit_au_changement_puis_tous_les_rappels_si_elle_est_mal_reglee() {
+        // **DÉCISION 70** : une ligne dès qu'on apprend, puis une par rappel
+        // tant que c'est mal réglé ; rien de plus quand tout va bien.
+        let (moi, autre, etranger) = (
+            id(Genre::Annuaire, 1),
+            id(Genre::Annuaire, 2),
+            id(Genre::Annuaire, 3),
+        );
+        let jugee = PaireJugee::avec_rappel(1_000);
+        assert_eq!(
+            jugee.etat(),
+            None,
+            "rien tant que les racines n'ont pas parlé"
+        );
+        assert_eq!(PaireJugee::default().etat(), None);
+
+        // Seul : dit une fois, jamais redit.
+        let ligne = jugee
+            .constater(moi, None, &[moi], 0)
+            .expect("la première fois");
+        assert!(
+            ligne.starts_with("paire :") && ligne.contains("seul"),
+            "{ligne}"
+        );
+        assert_eq!(jugee.constater(moi, None, &[moi], 5_000), None);
+        assert_eq!(jugee.etat(), Some(EtatDePaire::Seul));
+
+        // Un second est accepté, et pas de `--peer` : tout de suite, puis au
+        // rappel — pas avant.
+        let ligne = jugee
+            .constater(moi, None, &[moi, autre], 6_000)
+            .expect("un changement se dit");
+        assert!(ligne.starts_with("PAIRE MAL RÉGLÉE (sans-peer)"), "{ligne}");
+        assert!(ligne.contains(autre.texte().as_str()) && ligne.contains(moi.texte().as_str()));
+        assert_eq!(jugee.constater(moi, None, &[moi, autre], 6_500), None);
+        let rappel = jugee
+            .constater(moi, None, &[moi, autre], 7_000)
+            .expect("le rappel");
+        assert_eq!(rappel, ligne);
+        assert_eq!(jugee.etat(), Some(EtatDePaire::SansPeer));
+
+        // Un `--peer` qui n'est pas l'autre membre.
+        let ligne = jugee
+            .constater(moi, Some(etranger), &[moi, autre], 7_100)
+            .expect("un changement se dit");
+        assert!(
+            ligne.starts_with("PAIRE MAL RÉGLÉE (peer-inconnu)"),
+            "{ligne}"
+        );
+        assert!(
+            ligne.contains(etranger.texte().as_str()) && ligne.contains(autre.texte().as_str())
+        );
+        // … ou un `--peer` alors qu'on est seul.
+        let ligne = jugee
+            .constater(moi, Some(etranger), &[moi], 7_200)
+            .expect("les membres ont changé");
+        assert!(ligne.contains("aucun"), "{ligne}");
+
+        // Réglée : dit une fois.
+        let ligne = jugee
+            .constater(moi, Some(autre), &[moi, autre], 7_300)
+            .expect("un changement se dit");
+        assert!(ligne.starts_with("paire réglée"), "{ligne}");
+        assert_eq!(
+            jugee.constater(moi, Some(autre), &[moi, autre], 99_000),
+            None
+        );
+        assert_eq!(jugee.etat(), Some(EtatDePaire::Reglee));
+    }
+
+    #[test]
+    fn une_racine_retient_la_paire_de_chaque_membre() {
+        let mut etat = EtatFedere::nouveau();
+        let (speedy, helium) = (id(Genre::Annuaire, 1), id(Genre::Annuaire, 2));
+        assert_eq!(etat.paire_de(speedy), None);
+        assert!(etat.noter_une_paire(speedy, EtatDePaire::SansPeer));
+        assert!(!etat.noter_une_paire(speedy, EtatDePaire::SansPeer));
+        assert!(etat.noter_une_paire(speedy, EtatDePaire::Reglee));
+        assert_eq!(etat.paire_de(speedy), Some(EtatDePaire::Reglee));
+        assert_eq!(etat.paire_de(helium), None);
     }
 
     #[test]

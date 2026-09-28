@@ -27,34 +27,122 @@
 //!
 //! [`Entrepot::machine`] lit donc les deux ; et un service répliqué entre les
 //! deux membres d'une paire se range si sa machine est dans l'une ou l'autre.
+//!
+//! # UN SERVICE DU PAIR QUI ARRIVE AVANT SA MACHINE ATTEND ICI (0.36.0)
+//!
+//! Les deux membres d'une paire se répliquent leurs services ; chacun tire
+//! ses machines des racines, par sa propre voie. Les deux voies ne vont pas
+//! au même pas : un membre neuf — pas encore accepté, ou dont le fédérateur
+//! n'a pas fait son premier tour — tire le journal de son pair AVANT d'avoir
+//! reçu les machines de ses domaines. Jusqu'à la 0.35.3, l'opération
+//! `service` d'une machine inconnue était ignorée, **et le curseur avançait** :
+//! elle ne revenait jamais (`docs/annuaires.md` §2 ter, décision 69).
+//!
+//! Elle est désormais **gardée** dans [`SERVICES_EN_ATTENTE`], et
+//! [`Entrepot::ranger_les_machines_federees`] la **rejoue** — avec la règle
+//! ordinaire, « le plus ancien reste » — quand sa machine arrive. Pourquoi
+//! garder plutôt que de retenir le curseur : une opération qui ne
+//! s'appliquerait jamais (une machine sortie de nos domaines pour de bon)
+//! figerait tout le flux derrière elle ; gardée à part, elle ne retient
+//! qu'elle-même. Et pourquoi pas l'écrire quand même parmi les services :
+//! un service sans machine serait publié aux racines, qui le refuseraient
+//! (C11) — et le rapport ENTIER avec lui.
+//!
+//! **Une seule par `(machine, nom)`** : la plus ancienne, puisque c'est elle
+//! qui gagnerait au rejeu. La table ne grandit donc pas avec les relivraisons,
+//! et reste bornée par ce que le pair a déclaré.
 
 use asl_id::Identifiant;
-use asl_registre::{MACHINE_OCTETS, Machine, MachineFederee};
-use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+use asl_registre::{
+    IDENTIFIANT_OCTETS, MACHINE_OCTETS, Machine, MachineFederee, NOM_OCTETS_MAX, SERVICE_OCTETS,
+    Service,
+};
+use redb::{ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
-use crate::{Entrepot, Faute, clef};
+use crate::{EffetsVivants, Entrepot, Faute, clef, clef_de_nom, depuis_clef};
 
 /// Les machines reçues des racines, par identifiant — le même encodage que
 /// la table des machines.
 pub(crate) const MACHINES_FEDEREES: TableDefinition<'_, &[u8], &[u8; MACHINE_OCTETS]> =
     TableDefinition::new("machines-federees");
 
+/// Les services du pair qui attendent leur machine (0.36.0, décision 69) :
+/// `machine ‖ nom` vers `identifiant (17) ‖ service`. Vide chez une racine.
+pub(crate) const SERVICES_EN_ATTENTE: TableDefinition<'_, &[u8], &[u8]> =
+    TableDefinition::new("services-en-attente");
+
+/// Ce qu'un rangement des machines reçues a donné.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Rangement {
+    /// Les machines qui sont sorties de nos domaines : leurs connexions
+    /// doivent tomber ici.
+    pub sorties: Vec<Identifiant>,
+    /// Combien de services du pair, gardés en attente de leur machine, ont été
+    /// rejoués parce qu'elle vient d'arriver.
+    pub rejoues: usize,
+    /// Ce que ces rejeux font à l'état vivant — un `s-…` qui perd la règle du
+    /// plus ancien, et la session à déplacer.
+    pub effets: EffetsVivants,
+}
+
+/// Garde ce service du pair, dont la machine n'est pas encore reçue — le plus
+/// ancien seulement, pour son `(machine, nom)`.
+pub(crate) fn garder_en_attente(
+    ecriture: &WriteTransaction,
+    quel: Identifiant,
+    enregistrement: &Service,
+) -> Result<(), Faute> {
+    let clef_nom = clef_de_nom(enregistrement.machine, enregistrement.nom.octets());
+    let mut table = ecriture.open_table(SERVICES_EN_ATTENTE)?;
+    if let Some(tenu) = table.get(clef_nom.as_slice())? {
+        let (_, deja) = lire_en_attente(tenu.value())?;
+        if deja.estampille <= enregistrement.estampille {
+            return Ok(());
+        }
+    }
+    let mut valeur = clef(quel).to_vec();
+    let mut octets = [0_u8; SERVICE_OCTETS];
+    enregistrement.ecrire(&mut octets);
+    valeur.extend_from_slice(&octets);
+    table.insert(clef_nom.as_slice(), valeur.as_slice())?;
+    Ok(())
+}
+
+/// Relit une entrée en attente : l'identifiant, puis le service.
+fn lire_en_attente(octets: &[u8]) -> Result<(Identifiant, Service), Faute> {
+    let (tete, corps) = octets
+        .split_at_checked(IDENTIFIANT_OCTETS)
+        .ok_or(Faute::Longueur {
+            obtenue: octets.len(),
+        })?;
+    let corps: &[u8; SERVICE_OCTETS] = corps.try_into().map_err(|_| Faute::Longueur {
+        obtenue: octets.len(),
+    })?;
+    Ok((depuis_clef(tete)?, Service::lire(corps)?))
+}
+
 impl Entrepot {
-    /// Remplace les machines reçues des racines par celles-ci, et rend
-    /// celles qui en sont sorties.
+    /// Remplace les machines reçues des racines par celles-ci, rend celles
+    /// qui en sont sorties, et rejoue les services du pair qui attendaient
+    /// l'une d'elles.
     ///
     /// **Ce qui sort est rendu** pour que l'étage 3 ferme les connexions de
     /// leurs daemons : une machine qui n'est plus dans un domaine hébergé ici
     /// — détachée, révoquée, son domaine rendu aux racines — n'annonce plus
     /// ici.
     ///
+    /// **Ce qui attendait est rejoué dans la même transaction** (0.36.0,
+    /// décision 69) : une machine qui arrive fait ranger, par la règle
+    /// ordinaire, les services que le pair avait déclarés pour elle avant
+    /// qu'on la connaisse.
+    ///
     /// # Errors
     ///
-    /// [`Faute::Base`].
+    /// [`Faute::Base`] ou [`Faute::Enregistrement`].
     pub fn ranger_les_machines_federees(
         &self,
         machines: &[MachineFederee],
-    ) -> Result<Vec<Identifiant>, Faute> {
+    ) -> Result<Rangement, Faute> {
         let ecriture = self.base.begin_write()?;
         let mut sorties = Vec::new();
         {
@@ -80,8 +168,48 @@ impl Entrepot {
                 table.insert(clef(federee.machine).as_slice(), &octets)?;
             }
         }
+        let mut rangement = Rangement {
+            sorties,
+            ..Rangement::default()
+        };
+        // **LES SERVICES QUI ATTENDAIENT CES MACHINES**, rejoués comme s'ils
+        // arrivaient maintenant : la machine est là, la règle s'applique.
+        let mut a_rejouer = Vec::new();
+        {
+            let attente = ecriture.open_table(SERVICES_EN_ATTENTE)?;
+            for federee in machines {
+                let (debut, fin) = intervalle_de_machine(federee.machine);
+                for entree in attente.range(debut.as_slice()..fin.as_slice())? {
+                    let (tenue, valeur) = entree?;
+                    a_rejouer.push((tenue.value().to_vec(), lire_en_attente(valeur.value())?));
+                }
+            }
+        }
+        for (tenue, (quel, service)) in a_rejouer {
+            ecriture
+                .open_table(SERVICES_EN_ATTENTE)?
+                .remove(tenue.as_slice())?;
+            crate::appliquer_service(&ecriture, quel, &service, true, &mut rangement.effets)?;
+            rangement.rejoues = rangement.rejoues.saturating_add(1);
+        }
         ecriture.commit()?;
-        Ok(sorties)
+        Ok(rangement)
+    }
+
+    /// Combien de services du pair attendent encore leur machine.
+    ///
+    /// # Errors
+    ///
+    /// [`Faute::Base`].
+    pub fn services_en_attente(&self) -> Result<usize, Faute> {
+        let lecture = self.base.begin_read()?;
+        let table = lecture.open_table(SERVICES_EN_ATTENTE)?;
+        let mut combien = 0_usize;
+        for entree in table.iter()? {
+            let _ = entree?;
+            combien = combien.saturating_add(1);
+        }
+        Ok(combien)
     }
 
     /// Les machines reçues des racines, en ce moment.
@@ -102,6 +230,15 @@ impl Entrepot {
         }
         Ok(rendues)
     }
+}
+
+/// Les bornes des clefs `machine ‖ nom` de cette machine : sa clef, puis sa
+/// clef suivie de l'octet le plus grand — un nom est plus court que la table.
+fn intervalle_de_machine(machine: Identifiant) -> (Vec<u8>, Vec<u8>) {
+    let debut = clef(machine).to_vec();
+    let mut fin = debut.clone();
+    fin.extend_from_slice(&[0xFF; NOM_OCTETS_MAX + 1]);
+    (debut, fin)
 }
 
 /// L'identifiant d'une clef de table : son genre, puis ses seize octets.

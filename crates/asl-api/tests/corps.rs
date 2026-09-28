@@ -3365,9 +3365,10 @@ mod groupes {
 
 mod annuaires {
     use asl_api::annuaire::{
-        DecisionDInscription, DeclarationDAnnuaire, Hebergeur, InscriptionRendue,
-        LOCATEURS_CORPS_MAX, LOCATEURS_DE_RACINE_MAX, LOCATEURS_MAX, ListeDeRacines,
-        PublicationDeLocateurs, RACINES_MAX, RacineRendue,
+        DecisionDInscription, DeclarationDAnnuaire, DeclarationDePair, EtatDePaire, Hebergeur,
+        InscriptionRendue, LOCATEURS_CORPS_MAX, LOCATEURS_DE_RACINE_MAX, LOCATEURS_MAX,
+        ListeDeRacines, MEMBRES_MAX, PaireRendue, PublicationDeLocateurs, RACINES_MAX,
+        RacineRendue,
     };
     use asl_id::{Genre, Identifiant};
     use asl_proto::Erreur;
@@ -3448,6 +3449,7 @@ mod annuaires {
             adresse: "speedy:6630",
             locateurs: &[],
             expire_a: None,
+            paire: None,
         };
         let combien = entiere.encoder(&mut sortie).unwrap();
         assert_eq!(
@@ -3469,6 +3471,7 @@ mod annuaires {
             adresse: "speedy:6630",
             locateurs: &[],
             expire_a: Some(1_790_000_000_000),
+            paire: None,
         };
         let combien = attendue.encoder(&mut sortie).unwrap();
         assert_eq!(
@@ -3561,12 +3564,198 @@ mod annuaires {
             adresse: "speedy:6630",
             locateurs: &["[2001:db8::7]:6630", "192.0.2.7:6630"],
             expire_a: None,
+            paire: None,
         };
         let combien = rendue.encoder(&mut sortie).unwrap();
         assert!(core::str::from_utf8(&sortie[..combien]).unwrap().ends_with(
             "\"adresse\":\"speedy:6630\",\
                      \"locateurs\":[\"[2001:db8::7]:6630\",\"192.0.2.7:6630\"]}"
         ));
+    }
+
+    // ── La paire (0.36.0, décision 70) ──────────────────────────────────────
+
+    #[test]
+    fn la_paire_se_juge_dans_ses_quatre_cas() {
+        let (titulaire, second, etranger) = (
+            un(Genre::Annuaire, 1),
+            un(Genre::Annuaire, 2),
+            un(Genre::Annuaire, 3),
+        );
+        let paire = [titulaire, second];
+        // Le titulaire sans `--peer` alors qu'un second est accepté.
+        assert_eq!(
+            EtatDePaire::juger(titulaire, None, &paire),
+            EtatDePaire::SansPeer
+        );
+        // Le second sans `--peer` : il apprend qu'il est second.
+        assert_eq!(
+            EtatDePaire::juger(second, None, &paire),
+            EtatDePaire::SansPeer
+        );
+        // `--peer` qui ne désigne aucun membre accepté — ou soi-même, ou un
+        // pair alors qu'on est seul.
+        assert_eq!(
+            EtatDePaire::juger(titulaire, Some(etranger), &paire),
+            EtatDePaire::PeerInconnu
+        );
+        assert_eq!(
+            EtatDePaire::juger(titulaire, Some(titulaire), &paire),
+            EtatDePaire::PeerInconnu
+        );
+        assert_eq!(
+            EtatDePaire::juger(titulaire, Some(second), &[titulaire]),
+            EtatDePaire::PeerInconnu
+        );
+        // Réglée, des deux côtés.
+        assert_eq!(
+            EtatDePaire::juger(titulaire, Some(second), &paire),
+            EtatDePaire::Reglee
+        );
+        assert_eq!(
+            EtatDePaire::juger(second, Some(titulaire), &paire),
+            EtatDePaire::Reglee
+        );
+        // Seul, et rien à redire.
+        assert_eq!(
+            EtatDePaire::juger(titulaire, None, &[titulaire]),
+            EtatDePaire::Seul
+        );
+        for (etat, mot, alerte) in [
+            (EtatDePaire::Seul, "seul", false),
+            (EtatDePaire::Reglee, "reglee", false),
+            (EtatDePaire::SansPeer, "sans-peer", true),
+            (EtatDePaire::PeerInconnu, "peer-inconnu", true),
+        ] {
+            assert_eq!(etat.mot(), mot);
+            assert_eq!(etat.alerte(), alerte, "{mot}");
+        }
+    }
+
+    #[test]
+    fn un_membre_declare_son_pair_ou_null() {
+        let n = un(Genre::Annuaire, 1);
+        let mut sortie = [0_u8; 64];
+        for pair in [Some(n), None] {
+            let declaration = DeclarationDePair { pair };
+            let combien = declaration.encoder(&mut sortie).unwrap();
+            assert_eq!(
+                DeclarationDePair::decoder(&sortie[..combien]).unwrap(),
+                declaration
+            );
+        }
+        assert_eq!(
+            DeclarationDePair::decoder(br#"{ "pair" : null }"#).unwrap(),
+            DeclarationDePair { pair: None }
+        );
+        let texte = format!("{{\"pair\":\"{}\"}}", un(Genre::Machine, 1).texte());
+        assert!(matches!(
+            DeclarationDePair::decoder(texte.as_bytes()),
+            Err(Erreur::IdentifiantInvalide { .. })
+        ));
+        for mauvais in [
+            &br#"{"pair":true}"#[..],
+            br#"{"autre":null}"#,
+            br#"{"pair":null"#,
+        ] {
+            assert!(DeclarationDePair::decoder(mauvais).is_err());
+        }
+        let mut petit = [0_u8; 4];
+        assert!(
+            DeclarationDePair { pair: Some(n) }
+                .encoder(&mut petit)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn la_paire_rendue_dit_l_annuaire_et_ses_membres() {
+        let (titulaire, second) = (un(Genre::Annuaire, 1), un(Genre::Annuaire, 2));
+        let mut sortie = [0_u8; 256];
+        let paire = PaireRendue::nouvelle(titulaire, &[titulaire, second]);
+        let combien = paire.encoder(&mut sortie).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&sortie[..combien]).unwrap(),
+            format!(
+                "{{\"annuaire\":\"{0}\",\"membres\":[\"{0}\",\"{1}\"]}}",
+                titulaire.texte(),
+                second.texte()
+            )
+        );
+        let lue = PaireRendue::decoder(&sortie[..combien]).unwrap();
+        assert_eq!(lue, paire);
+        assert_eq!(lue.annuaire, titulaire);
+        assert_eq!(lue.membres().collect::<Vec<_>>(), vec![titulaire, second]);
+        // Au-delà de deux, rien n'est pris ; un seul membre, et aucun, se lisent.
+        let trois = PaireRendue::nouvelle(titulaire, &[titulaire, second, un(Genre::Annuaire, 3)]);
+        assert_eq!(trois.membres().count(), MEMBRES_MAX);
+        let seul = PaireRendue::nouvelle(titulaire, &[titulaire]);
+        let combien = seul.encoder(&mut sortie).unwrap();
+        assert_eq!(PaireRendue::decoder(&sortie[..combien]).unwrap(), seul);
+        let aucun = format!("{{\"annuaire\":\"{}\",\"membres\":[]}}", titulaire.texte());
+        assert_eq!(
+            PaireRendue::decoder(aucun.as_bytes())
+                .unwrap()
+                .membres()
+                .count(),
+            0
+        );
+        // Ce qui n'est pas un `n-…`, où que ce soit, et un membre de trop.
+        let machine = un(Genre::Machine, 1).texte();
+        for mauvais in [
+            format!("{{\"annuaire\":\"{machine}\",\"membres\":[]}}"),
+            format!(
+                "{{\"annuaire\":\"{}\",\"membres\":[\"{machine}\"]}}",
+                titulaire.texte()
+            ),
+        ] {
+            assert!(matches!(
+                PaireRendue::decoder(mauvais.as_bytes()),
+                Err(Erreur::IdentifiantInvalide { .. })
+            ));
+        }
+        let t = titulaire.texte();
+        let de_trop = format!("{{\"annuaire\":\"{t}\",\"membres\":[\"{t}\",\"{t}\",\"{t}\"]}}");
+        assert!(matches!(
+            PaireRendue::decoder(de_trop.as_bytes()),
+            Err(Erreur::TropDElements { .. })
+        ));
+        for mauvais in [
+            format!("{{\"annuaire\":\"{t}\"}}"),
+            format!("{{\"annuaire\":\"{t}\",\"autres\":[]}}"),
+            format!("{{\"annuaire\":\"{t}\",\"membres\":[]"),
+            "[]".to_owned(),
+            "{\"annuaire\":12,\"membres\":[]}".to_owned(),
+        ] {
+            assert!(
+                PaireRendue::decoder(mauvais.as_bytes()).is_err(),
+                "{mauvais}"
+            );
+        }
+        let mut petit = [0_u8; 4];
+        assert!(paire.encoder(&mut petit).is_err());
+    }
+
+    #[test]
+    fn une_inscription_rendue_dit_la_paire_de_son_membre() {
+        let n = un(Genre::Annuaire, 1);
+        let mut sortie = [0_u8; 512];
+        let rendue = InscriptionRendue {
+            membre: Some(n),
+            annuaire: Some(n),
+            proprietaire: None,
+            etat: "acceptée",
+            adresse: "speedy:6630",
+            locateurs: &[],
+            expire_a: None,
+            paire: Some(EtatDePaire::SansPeer),
+        };
+        let combien = rendue.encoder(&mut sortie).unwrap();
+        assert!(
+            core::str::from_utf8(&sortie[..combien])
+                .unwrap()
+                .ends_with("\"adresse\":\"speedy:6630\",\"paire\":\"sans-peer\"}")
+        );
     }
 
     #[test]

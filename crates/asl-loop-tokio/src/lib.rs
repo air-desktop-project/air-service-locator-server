@@ -63,7 +63,7 @@ pub mod tireur;
 pub mod vivier;
 
 pub use confiance::{Confiance, configuration_d_annuaire};
-pub use federation::{EtatFedere, Federateur, LocateursPublies, ServicesPublies};
+pub use federation::{EtatFedere, Federateur, LocateursPublies, PaireJugee, ServicesPublies};
 #[cfg(feature = "porte-d-essai")]
 pub use h3::PanneDInstantane;
 pub use h3::{Annuaire, Fermetures};

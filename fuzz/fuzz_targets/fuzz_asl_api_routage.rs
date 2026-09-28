@@ -103,6 +103,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::FederationMachines { apres } => format!("/v1/federation/machines?apres={apres}"),
         Ressource::FederationEtat => "/v1/federation/etat".to_owned(),
         Ressource::FederationLocateurs => "/v1/federation/locateurs".to_owned(),
+        Ressource::FederationPaire => "/v1/federation/paire".to_owned(),
         Ressource::Replication => "/v1/replication".to_owned(),
         Ressource::Domaines => "/v1/domaines".to_owned(),
         Ressource::RechercheDomaines { alias } => reencoder("/v1/domaines?alias=", alias),
