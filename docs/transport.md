@@ -191,7 +191,15 @@ Nommé ici pour ne pas être redécouvert :
 
 ## 8. Les certificats : une autorité à nous, et pourquoi
 
-Tranché le **2026-09-09**. La cérémonie est `scripts/ca.sh`.
+Tranché le **2026-09-09**. La cérémonie était `scripts/ca.sh`.
+
+> **Retirée en 0.34.0 (2026-09-28), avec la fin de la transition** (décision
+> 58, `replication.md` ; `annuaires.md` §2 quater). Un annuaire ne présente plus
+> que le certificat que sa clé d'identité signe elle-même, et un client ne croit
+> que cette clé : il n'y a plus d'autorité à tenir. `scripts/ca.sh` et l'essai
+> qui chargeait ce qu'il frappait sont retirés ; `--push-roots` reste une
+> autorité — la périphérie, vers les serveurs de poussée. Ce qui suit est
+> gardé comme l'histoire de ce que l'identité a remplacé.
 
 ### La CA d'`air` ne pouvait pas servir, et il faut dire pourquoi
 
@@ -310,17 +318,20 @@ daemon parle est de la DONNÉE pour l'annuaire (`Origine`, `VuDepuis` dans
 authentifiée, et la connexion QUIC **est** le bail : une session partagée entre
 connexions ferait hériter une requête des droits d'une autre.
 
-### `configuration_tls`, pour qu'un ALPN ne s'oublie pas
+### `configuration_d_annuaire`, pour qu'un ALPN ne s'oublie pas
 
 `ams_tls::quic_server_config` monte tout sauf l'ALPN, et le dit. Une
 configuration qui l'oublie se construit, démarre, et échoue à la première
 poignée de main — loin du fichier où l'oubli a eu lieu. Notre fonction n'a pas
-de paramètre : **ce qu'on ne peut pas exprimer ne peut pas être faux.**
+de paramètre pour lui : **ce qu'on ne peut pas exprimer ne peut pas être
+faux.** (`configuration_tls`, qui montait une chaîne PEM, est retirée en
+0.34.0 : `confiance::configuration_d_annuaire` monte le certificat d'identité,
+et pose l'ALPN de la même façon.)
 
 ### CE QUI EST ÉPROUVÉ, ET COMMENT
 
 Quatre essais d'intégration, dont deux qui font tourner **la chaîne entière** :
-la cérémonie frappe un certificat, `configuration_tls` le monte, `servir_quic`
+une clé d'identité frappe son certificat, `configuration_d_annuaire` le monte, `servir_quic`
 écoute sur une vraie socket UDP, et un vrai client QUIC — `ams-quic-client`,
 employé ici comme ce qu'il est — monte la poignée de main et envoie une requête.
 

@@ -27,37 +27,12 @@ use asl_id::{Genre, Identifiant};
 use asl_registre::{AliasRange, Cadre, Cause, Operation, Provenance};
 use asl_store::{Entrepot, Rattrapage};
 
-/// La racine du dépôt, depuis ce paquet.
-fn depot() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("le paquet vit sous `crates/`")
-        .to_path_buf()
-}
-
-/// Frappe une autorité et un certificat de banc dans un temporaire.
-fn materiel(quoi: &str) -> (PathBuf, Vec<u8>) {
-    let autorite = std::env::temp_dir().join(format!("asl-bin-{}-{quoi}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&autorite);
-    for arguments in [
-        vec!["racine"],
-        vec!["serveur", "banc", "localhost", "127.0.0.1", "::1"],
-    ] {
-        let sortie = Command::new(depot().join("scripts/ca.sh"))
-            .args(&arguments)
-            .env("ASL_CA", &autorite)
-            .current_dir(depot())
-            .output()
-            .expect("`scripts/ca.sh` doit être lançable — et `openssl` présent");
-        assert!(
-            sortie.status.success(),
-            "la cérémonie a échoué :\n{}",
-            String::from_utf8_lossy(&sortie.stderr)
-        );
-    }
-    let racine = std::fs::read(autorite.join("racine.crt")).expect("la racine");
-    (autorite, racine)
+/// L'identité de banc d'un annuaire, frappée PAR LE BINAIRE : le fichier de
+/// sa clé (`--identity-key`), et ce qu'un client en attend — sa clé, rien
+/// d'autre (décision 58).
+fn banc(quoi: &str) -> (PathBuf, asl_loop_tokio::Confiance) {
+    let (cle, _, _, publique) = identite(&format!("banc-{quoi}"));
+    (cle, asl_loop_tokio::Confiance::par_identite(&[publique]))
 }
 
 /// Lance le binaire, et rend l'adresse qu'il annonce.
@@ -65,8 +40,8 @@ fn materiel(quoi: &str) -> (PathBuf, Vec<u8>) {
 /// **ON LIT SON ANNONCE PLUTÔT QUE D'ATTENDRE UN DÉLAI** : une attente fixe est
 /// soit trop courte sur une machine chargée, soit du temps perdu à chaque
 /// exécution.
-fn lancer(autorite: &Path, base: &Path) -> (Child, SocketAddr) {
-    lancer_avec(autorite, base, &[])
+fn lancer(cle: &Path, base: &Path) -> (Child, SocketAddr) {
+    lancer_avec(cle, base, &[])
 }
 
 /// Éteint ce serveur PROPREMENT, et attend qu'il soit sorti.
@@ -119,14 +94,12 @@ fn eteindre(serveur: &mut Child) {
 }
 
 /// La même chose, avec des arguments de plus — ceux de la voie entre racines.
-fn lancer_avec(autorite: &Path, base: &Path, en_plus: &[&str]) -> (Child, SocketAddr) {
+fn lancer_avec(cle: &Path, base: &Path, en_plus: &[&str]) -> (Child, SocketAddr) {
     let mut enfant = Command::new(env!("CARGO_BIN_EXE_asl-server"))
         .arg("--store")
         .arg(base)
-        .arg("--certificate")
-        .arg(autorite.join("banc/chaine.pem"))
-        .arg("--key")
-        .arg(autorite.join("banc/serveur.key"))
+        .arg("--identity-key")
+        .arg(cle)
         .args(["--port", "0"])
         // Le banc crée des comptes : il tient donc la posture faible, et le
         // binaire l'annonce dans son journal.
@@ -169,7 +142,7 @@ fn lancer_avec(autorite: &Path, base: &Path, en_plus: &[&str]) -> (Child, Socket
 
 #[tokio::test]
 async fn le_binaire_sert_un_compte_de_son_entrepot() {
-    let (autorite, racine) = materiel("sert");
+    let (banc_cle, racine) = banc("sert");
     let base = std::env::temp_dir().join(format!("asl-bin-{}-sert.redb", std::process::id()));
     let _ = std::fs::remove_file(&base);
 
@@ -188,13 +161,17 @@ async fn le_binaire_sert_un_compte_de_son_entrepot() {
             .expect("le compte est écrit");
     }
 
-    let (mut serveur, ou) = lancer(&autorite, &base);
+    let (mut serveur, ou) = lancer(&banc_cle, &base);
 
     // Le harnais client se lie en IPv4 : on parle donc au serveur par sa face
     // IPv4, ce que la double pile rend possible sur la MÊME socket.
     let vers = SocketAddr::from(([127, 0, 0, 1], ou.port()));
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), vers).await;
+    let mut client = ams_quic_client::Client::new(
+        asl_loop_tokio::confiance::configuration_cliente_de(&racine)
+            .expect("une identité attendue"),
+        vers,
+    )
+    .await;
     for _ in 0..64_u32 {
         client.parler().await;
         if !client.ecouter().await {
@@ -217,7 +194,7 @@ async fn le_binaire_sert_un_compte_de_son_entrepot() {
     );
 
     eteindre(&mut serveur);
-    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&banc_cle);
     let _ = std::fs::remove_file(&base);
 }
 
@@ -234,7 +211,7 @@ fn sans_arguments_il_refuse_et_montre_comment_faire() {
         "il doit nommer ce qui manque : {dit}"
     );
     assert!(
-        dit.contains("--certificate"),
+        dit.contains("--identity-key"),
         "et montrer l'usage complet : {dit}"
     );
 }
@@ -558,9 +535,11 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
     // `nitrogen` et `argon`, chacun avec sa clé et la clé de l'autre ; le
     // harnais joue `argon` qui tire chez `nitrogen` — la connexion sortante
     // n'est pas écrite, mais tout ce qu'elle fera est servi ici.
-    let (autorite, racine_tls) = materiel("racines");
     let (cle_nitrogen, pub_nitrogen, secrete_nitrogen, publique_nitrogen) = identite("nitrogen");
     let (cle_argon, pub_argon, secrete_argon, publique_argon) = identite("argon");
+    // **UN CLIENT CROIT CHACUNE PAR SA CLÉ** (décision 58) : l'une ou l'autre,
+    // comme un locateur partagé.
+    let racine_tls = asl_loop_tokio::Confiance::par_identite(&[publique_nitrogen, publique_argon]);
     let n_argon = identifiant_de_racine(&publique_argon);
 
     // L'entrepôt de `nitrogen`, garni avant le lancement : un compte, son
@@ -633,20 +612,14 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
     // `nitrogen` d'abord — l'adresse de son pair ne sert pas encore, et c'est
     // dit : la connexion sortante est la tranche suivante. `argon` ensuite,
     // avec la vraie adresse de `nitrogen`.
-    let racine_ca = autorite.join("racine.crt");
-    let ca = racine_ca.to_str().expect("utf-8");
     let (mut nitrogen, ou_nitrogen) = lancer_avec(
-        &autorite,
+        &cle_nitrogen,
         &base_nitrogen,
         &[
-            "--identity-key",
-            cle_nitrogen.to_str().expect("utf-8"),
             "--peer",
             "127.0.0.1:6630",
             "--peer-key",
             pub_argon.to_str().expect("utf-8"),
-            "--peer-ca",
-            ca,
         ],
     );
     let vers_nitrogen = SocketAddr::from(([127, 0, 0, 1], ou_nitrogen.port()));
@@ -656,25 +629,24 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
     // personne — sinon `argon` répliquerait l'entrepôt de `nitrogen`, et son
     // instantané ne serait plus vide. Ils rappellent 6630 sans fin, sans effet.
     let (mut argon, ou_argon) = lancer_avec(
-        &autorite,
+        &cle_argon,
         &base_argon,
         &[
-            "--identity-key",
-            cle_argon.to_str().expect("utf-8"),
             "--peer",
             "127.0.0.1:6630",
             "--peer-key",
             pub_nitrogen.to_str().expect("utf-8"),
-            "--peer-ca",
-            ca,
         ],
     );
     let vers_argon = SocketAddr::from(([127, 0, 0, 1], ou_argon.port()));
 
     // ── `argon` TIRE CHEZ `nitrogen` ────────────────────────────────────────
-    let mut tireur =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine_tls), vers_nitrogen)
-            .await;
+    let mut tireur = ams_quic_client::Client::new(
+        asl_loop_tokio::confiance::configuration_cliente_de(&racine_tls)
+            .expect("une identité attendue"),
+        vers_nitrogen,
+    )
+    .await;
     poignee(&mut tireur).await;
 
     // Sans preuve, la voie est fermée.
@@ -770,9 +742,12 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
     //
     // L'appareil de Thierry change l'alias, sur SA connexion ; le flux du
     // tireur reçoit l'opération, sans qu'il ait rien redemandé.
-    let mut telephone =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine_tls), vers_nitrogen)
-            .await;
+    let mut telephone = ams_quic_client::Client::new(
+        asl_loop_tokio::confiance::configuration_cliente_de(&racine_tls)
+            .expect("une identité attendue"),
+        vers_nitrogen,
+    )
+    .await;
     poignee(&mut telephone).await;
     {
         let defi = un_defi(&mut telephone, 0).await;
@@ -825,9 +800,12 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
     }
 
     // ── UN TIERS AVEC UNE CLÉ DE MACHINE : `401` SUR LES TROIS VERBES ───────
-    let mut tiers =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine_tls), vers_nitrogen)
-            .await;
+    let mut tiers = ams_quic_client::Client::new(
+        asl_loop_tokio::confiance::configuration_cliente_de(&racine_tls)
+            .expect("une identité attendue"),
+        vers_nitrogen,
+    )
+    .await;
     poignee(&mut tiers).await;
     assert_eq!(
         prouver(&mut tiers, grenier, &secrete_grenier, 0).await,
@@ -859,9 +837,12 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
 
     // ── UNE RACINE QUI N'EST PAS LE PAIR : REFUSÉE COMME UNE CLÉ INCONNUE ──
     let inconnue = CleSecrete::depuis_entropie([0x66; 32]);
-    let mut intruse =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine_tls), vers_nitrogen)
-            .await;
+    let mut intruse = ams_quic_client::Client::new(
+        asl_loop_tokio::confiance::configuration_cliente_de(&racine_tls)
+            .expect("une identité attendue"),
+        vers_nitrogen,
+    )
+    .await;
     poignee(&mut intruse).await;
     assert_eq!(
         prouver(
@@ -879,8 +860,12 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
     //
     // Le même code des deux côtés (`replication.md` §2.1) : `argon` reconnaît
     // `nitrogen` par la clé qu'il tient de lui, et prouve la sienne en retour.
-    let mut autre_sens =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine_tls), vers_argon).await;
+    let mut autre_sens = ams_quic_client::Client::new(
+        asl_loop_tokio::confiance::configuration_cliente_de(&racine_tls)
+            .expect("une identité attendue"),
+        vers_argon,
+    )
+    .await;
     poignee(&mut autre_sens).await;
     assert_eq!(
         prouver(
@@ -909,7 +894,6 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
 
     eteindre(&mut nitrogen);
     eteindre(&mut argon);
-    let _ = std::fs::remove_dir_all(&autorite);
     for fichier in [
         &base_nitrogen,
         &base_argon,
@@ -923,42 +907,86 @@ async fn deux_racines_se_prouvent_et_l_une_tire_chez_l_autre() {
 }
 
 #[test]
-fn un_pair_sans_identite_refuse_de_demarrer() {
-    // **`replication.md` §8** : une racine sans identité ne peut ni prouver
-    // ni être prouvée, et une adresse seule n'est pas une racine.
+fn sans_identite_il_refuse_de_demarrer_et_dit_comment_en_frapper_une() {
+    // **FIN DE LA TRANSITION** (0.34.0, décision 58) : l'annuaire ne présente
+    // que son certificat d'identité ; sans clé, il n'aurait rien à montrer.
     let sortie = Command::new(env!("CARGO_BIN_EXE_asl-server"))
-        .args([
-            "--store",
-            "/tmp/x",
-            "--certificate",
-            "/tmp/y",
-            "--key",
-            "/tmp/z",
-            "--attestation",
-            "optional",
-            "--peer",
-            "argon.air-desktop.org:6630",
-            "--peer-key",
-            "/tmp/argon.pub",
-            "--peer-ca",
-            "/tmp/racine.crt",
-        ])
+        .args(["--store", "/tmp/x", "--attestation", "optional"])
         .output()
         .expect("le binaire se lance");
     assert!(!sortie.status.success(), "il aurait dû refuser");
     let dit = String::from_utf8_lossy(&sortie.stderr);
     assert!(
-        dit.contains("--identity-key"),
-        "il doit nommer ce qui manque : {dit}"
+        dit.contains("--identity-key") && dit.contains("--new-identity-key"),
+        "il doit nommer ce qui manque, et comment le frapper : {dit}"
+    );
+}
+
+#[test]
+fn la_forme_d_hier_est_refusee_et_dit_quoi_faire() {
+    // **UNE UNITÉ D'HIER NE DÉMARRE PAS EN CROYANT ENCORE À UNE AUTORITÉ** :
+    // `--certificate`, `--key`, `--peer-ca`, `--federation-ca` et `--ca` sont
+    // refusés, avec ce qu'il faut faire à la place.
+    for (drapeau, conseil) in [
+        ("--certificate", "--identity-key"),
+        ("--key", "--identity-key"),
+        ("--peer-ca", "--peer-key"),
+        ("--federation-ca", "<n-…>"),
+    ] {
+        let sortie = Command::new(env!("CARGO_BIN_EXE_asl-server"))
+            .args([
+                "--store",
+                "/tmp/x",
+                "--identity-key",
+                "/tmp/y",
+                "--attestation",
+                "optional",
+                drapeau,
+                "/tmp/z",
+            ])
+            .output()
+            .expect("le binaire se lance");
+        assert!(!sortie.status.success(), "{drapeau} aurait dû être refusé");
+        let dit = String::from_utf8_lossy(&sortie.stderr);
+        assert!(
+            dit.contains(drapeau) && dit.contains("0.34.0") && dit.contains(conseil),
+            "{drapeau} : {dit}"
+        );
+    }
+    // Et un geste d'exploitant ne lit pas un `--ca` en silence.
+    let sortie = Command::new(env!("CARGO_BIN_EXE_asl-server"))
+        .args([
+            "--invite",
+            "--directory",
+            "127.0.0.1:1",
+            "--ca",
+            "/tmp/racine.crt",
+            "--operator-secret",
+            "/tmp/k",
+        ])
+        .output()
+        .expect("le binaire se lance");
+    assert!(!sortie.status.success(), "--ca aurait dû être refusé");
+    let dit = String::from_utf8_lossy(&sortie.stderr);
+    assert!(
+        dit.contains("--ca") && dit.contains("--directory <locateur>=<n-…>"),
+        "{dit}"
     );
 }
 
 // ── La réplication, de bout en bout : le TIREUR réel (`replication.md` §3) ───
 
 /// Un client qui parle à cet annuaire, la poignée de main faite.
-async fn client_vers(vers: SocketAddr, racine_tls: &[u8]) -> ams_quic_client::Client {
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(racine_tls), vers).await;
+async fn client_vers(
+    vers: SocketAddr,
+    racine_tls: &asl_loop_tokio::Confiance,
+) -> ams_quic_client::Client {
+    let mut client = ams_quic_client::Client::new(
+        asl_loop_tokio::confiance::configuration_cliente_de(racine_tls)
+            .expect("une identité attendue"),
+        vers,
+    )
+    .await;
     poignee(&mut client).await;
     client
 }
@@ -994,7 +1022,11 @@ async fn prouver_appareil(
 }
 
 /// Lit `GET /v1/alias/{alias}` chez cet annuaire, et rend son corps si `200`.
-async fn alias_chez(vers: SocketAddr, racine_tls: &[u8], alias: &str) -> Option<String> {
+async fn alias_chez(
+    vers: SocketAddr,
+    racine_tls: &asl_loop_tokio::Confiance,
+    alias: &str,
+) -> Option<String> {
     let mut client = client_vers(vers, racine_tls).await;
     ams_quic_client::envoyer_une_requete(
         &mut client,
@@ -1013,7 +1045,7 @@ async fn alias_chez(vers: SocketAddr, racine_tls: &[u8], alias: &str) -> Option<
 /// et rend son corps.
 async fn replication_chez(
     vers: SocketAddr,
-    racine_tls: &[u8],
+    racine_tls: &asl_loop_tokio::Confiance,
     machine: Identifiant,
     secrete: &CleSecrete,
 ) -> String {
@@ -1081,9 +1113,11 @@ async fn la_replication_de_bout_en_bout() {
     // `nitrogen` est garni avant le lancement ; `argon` part vide et s'amorce
     // de lui. On éprouve la chaîne entière : connexion sortante, deux preuves,
     // rattrapage, application, flux vivant, et l'effet d'une révocation.
-    let (autorite, racine_tls) = materiel("bout");
     let (cle_nitrogen, pub_nitrogen, _sn, publique_nitrogen) = identite("e2e-nitrogen");
     let (cle_argon, pub_argon, _sa, publique_argon) = identite("e2e-argon");
+    // **UN CLIENT CROIT CHACUNE PAR SA CLÉ** (décision 58) : l'une ou l'autre,
+    // comme un locateur partagé.
+    let racine_tls = asl_loop_tokio::Confiance::par_identite(&[publique_nitrogen, publique_argon]);
     let n_nitrogen = identifiant_de_racine(&publique_nitrogen);
     let n_argon = identifiant_de_racine(&publique_argon);
 
@@ -1147,39 +1181,28 @@ async fn la_replication_de_bout_en_bout() {
             )
             .expect("clé");
     }
-
-    let ca = autorite.join("racine.crt");
-    let ca = ca.to_str().expect("utf-8");
     // **NITROGEN D'ABORD**, pour connaître son port — c'est chez lui qu'argon
     // tire. Nitrogen part avec une adresse de pair provisoire (son propre
     // tireur vers argon n'importe pas ici : toutes les écritures de l'essai se
     // font chez lui, et c'est argon qui les tire) ; ce qui compte est que sa
     // `--peer-key` soit celle d'argon, pour vérifier argon quand il se présente.
     let (mut nitrogen, ou_nitrogen) = lancer_avec(
-        &autorite,
+        &cle_nitrogen,
         &base_nitrogen,
         &[
-            "--identity-key",
-            cle_nitrogen.to_str().unwrap(),
             "--peer-key",
             pub_argon.to_str().unwrap(),
-            "--peer-ca",
-            ca,
             "--peer",
             "127.0.0.1:6630",
         ],
     );
     let vers_nitrogen = SocketAddr::from(([127, 0, 0, 1], ou_nitrogen.port()));
     let (mut argon, ou_argon) = lancer_avec(
-        &autorite,
+        &cle_argon,
         &base_argon,
         &[
-            "--identity-key",
-            cle_argon.to_str().unwrap(),
             "--peer-key",
             pub_nitrogen.to_str().unwrap(),
-            "--peer-ca",
-            ca,
             "--peer",
             &vers_nitrogen.to_string(),
         ],
@@ -1333,7 +1356,6 @@ async fn la_replication_de_bout_en_bout() {
 
     eteindre(&mut nitrogen);
     eteindre(&mut argon);
-    let _ = std::fs::remove_dir_all(&autorite);
     for fichier in [
         &base_nitrogen,
         &base_argon,
@@ -1374,9 +1396,11 @@ async fn un_entrepot_de_plusieurs_milliers_d_enregistrements_s_amorce() {
     // TIREUR** : trois mille comptes chez nitrogen, argon part vide et les tire
     // tous — par parts, appliqués par lots —, puis `GET /v1/replication` chez
     // argon dit que tout est appliqué.
-    let (autorite, racine_tls) = materiel("grand");
     let (cle_nitrogen, pub_nitrogen, _sn, publique_nitrogen) = identite("grand-nitrogen");
-    let (cle_argon, pub_argon, _sa, _publique_argon) = identite("grand-argon");
+    let (cle_argon, pub_argon, _sa, publique_argon) = identite("grand-argon");
+    // **UN CLIENT CROIT CHACUNE PAR SA CLÉ** (décision 58) : l'une ou l'autre,
+    // comme un locateur partagé.
+    let racine_tls = asl_loop_tokio::Confiance::par_identite(&[publique_nitrogen, publique_argon]);
     let base_nitrogen = dossier_rapide().join(format!(
         "asl-bin-{}-grand-nitrogen.redb",
         std::process::id()
@@ -1433,34 +1457,23 @@ async fn un_entrepot_de_plusieurs_milliers_d_enregistrements_s_amorce() {
         (octets, entrepot.compteur().expect("lisible"))
     };
     assert!(octets > 64 * 1024, "{octets} octets");
-
-    let ca = autorite.join("racine.crt");
-    let ca = ca.to_str().expect("utf-8");
     let (mut nitrogen, ou_nitrogen) = lancer_avec(
-        &autorite,
+        &cle_nitrogen,
         &base_nitrogen,
         &[
-            "--identity-key",
-            cle_nitrogen.to_str().unwrap(),
             "--peer-key",
             pub_argon.to_str().unwrap(),
-            "--peer-ca",
-            ca,
             "--peer",
             "127.0.0.1:6630",
         ],
     );
     let vers_nitrogen = SocketAddr::from(([127, 0, 0, 1], ou_nitrogen.port()));
     let (mut argon, ou_argon) = lancer_avec(
-        &autorite,
+        &cle_argon,
         &base_argon,
         &[
-            "--identity-key",
-            cle_argon.to_str().unwrap(),
             "--peer-key",
             pub_nitrogen.to_str().unwrap(),
-            "--peer-ca",
-            ca,
             "--peer",
             &vers_nitrogen.to_string(),
         ],
@@ -1497,7 +1510,6 @@ async fn un_entrepot_de_plusieurs_milliers_d_enregistrements_s_amorce() {
 
     eteindre(&mut nitrogen);
     eteindre(&mut argon);
-    let _ = std::fs::remove_dir_all(&autorite);
     for fichier in [
         &base_nitrogen,
         &base_argon,
@@ -1513,7 +1525,11 @@ async fn un_entrepot_de_plusieurs_milliers_d_enregistrements_s_amorce() {
 // ── `--forget` : effacer un compte hors ligne (`modele.md` §2.1) ─────────────
 
 /// Le statut d'un `GET` sans corps sur cette cible, depuis une connexion neuve.
-async fn statut_chez(vers: SocketAddr, racine_tls: &[u8], cible: &str) -> String {
+async fn statut_chez(
+    vers: SocketAddr,
+    racine_tls: &asl_loop_tokio::Confiance,
+    cible: &str,
+) -> String {
     let mut client = client_vers(vers, racine_tls).await;
     ams_quic_client::envoyer_une_requete(&mut client, 0, 17, cible.as_bytes(), None, b"").await;
     let _ = ams_quic_client::attendre_la_reponse(&mut client, 0).await;
@@ -1539,10 +1555,10 @@ fn oublier(compte: &str, base: &Path, en_plus: &[&str]) -> (bool, String) {
 
 #[tokio::test]
 async fn forget_efface_un_compte_hors_ligne_et_refuse_si_le_daemon_tient_l_entrepot() {
-    let (autorite, racine_tls) = materiel("forget");
     let base = std::env::temp_dir().join(format!("asl-bin-{}-forget.redb", std::process::id()));
     let _ = std::fs::remove_file(&base);
     let (cle_identite, pub_identite, _, publique) = identite("forget");
+    let racine_tls = asl_loop_tokio::Confiance::par_identite(&[publique]);
     let n = identifiant_de_racine(&publique);
 
     // Un compte qui a tout : un alias, un appareil, une machine enrôlée — et un
@@ -1607,7 +1623,7 @@ async fn forget_efface_un_compte_hors_ligne_et_refuse_si_le_daemon_tient_l_entre
     let identite_arg = cle_identite.to_str().unwrap().to_owned();
 
     // ── LE DAEMON TIENT L'ENTREPÔT : REFUS, ET IL LE DIT ────────────────────
-    let (mut serveur, ou) = lancer_avec(&autorite, &base, &["--identity-key", &identite_arg]);
+    let (mut serveur, ou) = lancer(&cle_identite, &base);
     let (ok, dit) = oublier(&texte, &base, &["--identity-key", &identite_arg]);
     assert!(!ok, "il aurait dû refuser : {dit}");
     assert!(
@@ -1686,7 +1702,7 @@ async fn forget_efface_un_compte_hors_ligne_et_refuse_si_le_daemon_tient_l_entre
     );
 
     // ── AU REDÉMARRAGE, LE COMPTE EST UN INCONNU ET SA MACHINE NE PASSE PLUS ─
-    let (mut serveur, ou) = lancer_avec(&autorite, &base, &["--identity-key", &identite_arg]);
+    let (mut serveur, ou) = lancer(&cle_identite, &base);
     let vers = SocketAddr::from(([127, 0, 0, 1], ou.port()));
     assert_eq!(
         statut_chez(vers, &racine_tls, &format!("/v1/utilisateurs/{texte}")).await,
@@ -1706,7 +1722,6 @@ async fn forget_efface_un_compte_hors_ligne_et_refuse_si_le_daemon_tient_l_entre
         "401"
     );
     eteindre(&mut serveur);
-    let _ = std::fs::remove_dir_all(&autorite);
     for fichier in [&base, &cle_identite, &pub_identite] {
         let _ = std::fs::remove_file(fichier);
     }
@@ -1720,9 +1735,11 @@ async fn l_effacement_d_un_compte_se_replique_de_bout_en_bout() {
     // avec une machine enrôlée, effacé chez nitrogen par son appareil ; chez
     // argon, la machine ne peut plus se connecter — celle qui tenait une
     // connexion est fermée —, l'alias est libre, et le compte est un inconnu.
-    let (autorite, racine_tls) = materiel("efface-bout");
     let (cle_nitrogen, pub_nitrogen, _sn, publique_nitrogen) = identite("efface-nitrogen");
-    let (cle_argon, pub_argon, _sa, _publique_argon) = identite("efface-argon");
+    let (cle_argon, pub_argon, _sa, publique_argon) = identite("efface-argon");
+    // **UN CLIENT CROIT CHACUNE PAR SA CLÉ** (décision 58) : l'une ou l'autre,
+    // comme un locateur partagé.
+    let racine_tls = asl_loop_tokio::Confiance::par_identite(&[publique_nitrogen, publique_argon]);
 
     let base_nitrogen = std::env::temp_dir().join(format!(
         "asl-bin-{}-efface-nitrogen.redb",
@@ -1786,34 +1803,23 @@ async fn l_effacement_d_un_compte_se_replique_de_bout_en_bout() {
             )
             .expect("clé");
     }
-
-    let ca = autorite.join("racine.crt");
-    let ca = ca.to_str().expect("utf-8");
     let (mut nitrogen, ou_nitrogen) = lancer_avec(
-        &autorite,
+        &cle_nitrogen,
         &base_nitrogen,
         &[
-            "--identity-key",
-            cle_nitrogen.to_str().unwrap(),
             "--peer-key",
             pub_argon.to_str().unwrap(),
-            "--peer-ca",
-            ca,
             "--peer",
             "127.0.0.1:6630",
         ],
     );
     let vers_nitrogen = SocketAddr::from(([127, 0, 0, 1], ou_nitrogen.port()));
     let (mut argon, ou_argon) = lancer_avec(
-        &autorite,
+        &cle_argon,
         &base_argon,
         &[
-            "--identity-key",
-            cle_argon.to_str().unwrap(),
             "--peer-key",
             pub_nitrogen.to_str().unwrap(),
-            "--peer-ca",
-            ca,
             "--peer",
             &vers_nitrogen.to_string(),
         ],
@@ -1920,7 +1926,6 @@ async fn l_effacement_d_un_compte_se_replique_de_bout_en_bout() {
 
     eteindre(&mut nitrogen);
     eteindre(&mut argon);
-    let _ = std::fs::remove_dir_all(&autorite);
     for fichier in [
         &base_nitrogen,
         &base_argon,
@@ -1938,14 +1943,12 @@ async fn l_effacement_d_un_compte_se_replique_de_bout_en_bout() {
 /// **Un lanceur à part plutôt qu'un paramètre de plus** : `lancer_avec` pose
 /// `--attestation optional` pour tous les autres essais, et cette posture-ci
 /// n'admet personne sans code — les deux ne se mélangent pas.
-fn lancer_en_invitation(autorite: &Path, base: &Path, cle_publique: &Path) -> (Child, SocketAddr) {
+fn lancer_en_invitation(cle: &Path, base: &Path, cle_publique: &Path) -> (Child, SocketAddr) {
     let mut enfant = Command::new(env!("CARGO_BIN_EXE_asl-server"))
         .arg("--store")
         .arg(base)
-        .arg("--certificate")
-        .arg(autorite.join("banc/chaine.pem"))
-        .arg("--key")
-        .arg(autorite.join("banc/serveur.key"))
+        .arg("--identity-key")
+        .arg(cle)
         .args(["--port", "0"])
         .args(["--attestation", "invitation"])
         .arg("--operator-key")
@@ -2013,17 +2016,26 @@ fn cle_d_exploitant(quoi: &str) -> (PathBuf, PathBuf) {
 }
 
 /// Lance `--invite` contre cet annuaire, et rend `(succès, stdout, stderr)`.
-fn inviter(annuaire: SocketAddr, autorite: &Path, secrete: &Path) -> (bool, String, String) {
+fn inviter(
+    annuaire: SocketAddr,
+    attendu: &asl_loop_tokio::Confiance,
+    secrete: &Path,
+) -> (bool, String, String) {
     let sortie = Command::new(env!("CARGO_BIN_EXE_asl-server"))
         .arg("--invite")
         // **`127.0.0.1` ET NON `localhost`** : l'outil résout et prend l'IPv6
         // d'abord (comme tout ce produit), et une machine d'intégration n'a
         // pas toujours de `::1`. Les autres essais de ce fichier visent la
-        // boucle locale v4 pour la même raison ; le certificat du banc la
-        // porte dans ses SAN (`scripts/ca.sh`).
-        .args(["--directory", &format!("127.0.0.1:{}", annuaire.port())])
-        .arg("--ca")
-        .arg(autorite.join("racine.crt"))
+        // boucle locale v4 pour la même raison. **L'IDENTITÉ EST DITE DANS LE
+        // LOCATEUR** (`=<n-…>`) : c'est elle, et elle seule, que l'outil croit.
+        .args([
+            "--directory",
+            &format!(
+                "127.0.0.1:{}={}",
+                annuaire.port(),
+                attendu.identites()[0].texte()
+            ),
+        ])
         .arg("--operator-secret")
         .arg(secrete)
         .output()
@@ -2041,14 +2053,14 @@ async fn l_exploitant_emet_une_invitation_et_un_compte_s_ouvre_dessus() {
     // frappe ici, sa publique va sur le banc, et `--invite` parle à un
     // annuaire QUI TOURNE — rien n'est arrêté, aucun entrepôt n'est ouvert par
     // l'outil. Le code rendu ouvre un compte, une fois, et une seule.
-    let (autorite, racine) = materiel("invite");
+    let (banc_cle, racine) = banc("invite");
     let base = std::env::temp_dir().join(format!("asl-bin-{}-invite.redb", std::process::id()));
     let _ = std::fs::remove_file(&base);
     let (secrete, publique) = cle_d_exploitant("invite");
-    let (mut serveur, adresse) = lancer_en_invitation(&autorite, &base, &publique);
+    let (mut serveur, adresse) = lancer_en_invitation(&banc_cle, &base, &publique);
 
     // ── 1. L'exploitant émet ────────────────────────────────────────────────
-    let (succes, code, dit) = inviter(adresse, &autorite, &secrete);
+    let (succes, code, dit) = inviter(adresse, &racine, &secrete);
     assert!(succes, "l'émission doit aboutir : {dit}");
     assert_eq!(code.len(), 11, "dix symboles et un tiret : {code}");
     // **LE CODE EST SEUL SUR LA SORTIE STANDARD** — un `| pbcopy` ne doit rien
@@ -2118,14 +2130,14 @@ async fn l_exploitant_emet_une_invitation_et_un_compte_s_ouvre_dessus() {
 
     eteindre(&mut serveur);
     let _ = std::fs::remove_file(&base);
-    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&banc_cle);
 }
 
 #[tokio::test]
 async fn une_autre_cle_n_emet_rien_et_une_racine_sans_posture_non_plus() {
     // Les deux refus que l'exploitant doit pouvoir distinguer sans rien lire
     // d'autre : « ce n'est pas ma clé » et « cette racine n'invite pas ».
-    let (autorite, _racine) = materiel("invite-refus");
+    let (banc_cle, racine) = banc("invite-refus");
     let base =
         std::env::temp_dir().join(format!("asl-bin-{}-invite-refus.redb", std::process::id()));
     let _ = std::fs::remove_file(&base);
@@ -2133,8 +2145,8 @@ async fn une_autre_cle_n_emet_rien_et_une_racine_sans_posture_non_plus() {
     let (imposteur, _) = cle_d_exploitant("invite-imposteur");
 
     // ── Une clé qui n'est pas celle du réglage : `401` ──────────────────────
-    let (mut serveur, adresse) = lancer_en_invitation(&autorite, &base, &publique);
-    let (succes, code, dit) = inviter(adresse, &autorite, &imposteur);
+    let (mut serveur, adresse) = lancer_en_invitation(&banc_cle, &base, &publique);
+    let (succes, code, dit) = inviter(adresse, &racine, &imposteur);
     assert!(!succes, "une autre clé n'émet pas");
     assert!(code.is_empty(), "aucun code ne sort : {code:?}");
     assert!(
@@ -2149,8 +2161,8 @@ async fn une_autre_cle_n_emet_rien_et_une_racine_sans_posture_non_plus() {
         std::process::id()
     ));
     let _ = std::fs::remove_file(&base2);
-    let (mut serveur, adresse) = lancer(&autorite, &base2);
-    let (succes, code, dit) = inviter(adresse, &autorite, &_secrete);
+    let (mut serveur, adresse) = lancer(&banc_cle, &base2);
+    let (succes, code, dit) = inviter(adresse, &racine, &_secrete);
     assert!(!succes, "une racine en `optional` n'émet pas d'invitations");
     assert!(code.is_empty(), "aucun code ne sort : {code:?}");
     assert!(
@@ -2161,18 +2173,14 @@ async fn une_autre_cle_n_emet_rien_et_une_racine_sans_posture_non_plus() {
 
     let _ = std::fs::remove_file(&base);
     let _ = std::fs::remove_file(&base2);
-    let _ = std::fs::remove_dir_all(&autorite);
+    let _ = std::fs::remove_file(&banc_cle);
 }
 
 // ── L'IDENTITÉ PAR LA CLÉ, SUR DEUX VRAIS BINAIRES (décisions 53, 55, 58) ──
 
-/// Lance le binaire SANS chaîne ni clé TLS — sa seule identité —, et rend
+/// Lance le binaire avec ces arguments — `--identity-key` compris —, et rend
 /// l'adresse annoncée et son journal, ligne par ligne.
-///
-/// **C'est la forme d'un annuaire local, et d'une racine qui a fini sa
-/// transition** : `--certificate` et `--key` absents, le certificat d'identité
-/// frappé au démarrage depuis `--identity-key`.
-fn lancer_sans_chaine(
+fn lancer_et_lire(
     base: &Path,
     en_plus: &[&str],
 ) -> (
@@ -2258,7 +2266,7 @@ async fn deux_racines_se_repliquent_sous_leur_seule_identite() {
             .expect("le compte");
     }
 
-    let (mut nitrogen, ou_nitrogen, journal_nitrogen) = lancer_sans_chaine(
+    let (mut nitrogen, ou_nitrogen, journal_nitrogen) = lancer_et_lire(
         &base_nitrogen,
         &[
             "--identity-key",
@@ -2272,12 +2280,12 @@ async fn deux_racines_se_repliquent_sous_leur_seule_identite() {
     assert!(
         journal_dit(
             &journal_nitrogen,
-            &["TLS", "son certificat d'identité seul"]
+            &["TLS", "son certificat d'identité, et lui seul"]
         ),
         "le démarrage dit ce que l'annuaire présente"
     );
     let vers_nitrogen = format!("127.0.0.1:{}", ou_nitrogen.port());
-    let (mut argon, _ou_argon, journal_argon) = lancer_sans_chaine(
+    let (mut argon, _ou_argon, journal_argon) = lancer_et_lire(
         &base_argon,
         &[
             "--identity-key",
@@ -2290,7 +2298,7 @@ async fn deux_racines_se_repliquent_sous_leur_seule_identite() {
     );
     // **UN INTRUS** : la clé d'argon, mais une AUTRE clé attendue de nitrogen.
     // Nitrogen présente la sienne ; l'intrus ne doit jamais ouvrir sa voie.
-    let (mut intrus, _ou_intrus, journal_intrus) = lancer_sans_chaine(
+    let (mut intrus, _ou_intrus, journal_intrus) = lancer_et_lire(
         &base_intrus,
         &[
             "--identity-key",
@@ -2488,7 +2496,7 @@ async fn un_annuaire_local_publie_ses_locateurs_et_les_racines_les_repliquent() 
             .expect("confié");
     }
 
-    let (mut nitrogen, ou_nitrogen, _journal_nitrogen) = lancer_sans_chaine(
+    let (mut nitrogen, ou_nitrogen, _journal_nitrogen) = lancer_et_lire(
         &base_nitrogen,
         &[
             "--identity-key",
@@ -2500,7 +2508,7 @@ async fn un_annuaire_local_publie_ses_locateurs_et_les_racines_les_repliquent() 
         ],
     );
     let vers_nitrogen = format!("127.0.0.1:{}", ou_nitrogen.port());
-    let (mut argon, ou_argon, _journal_argon) = lancer_sans_chaine(
+    let (mut argon, ou_argon, _journal_argon) = lancer_et_lire(
         &base_argon,
         &[
             "--identity-key",
@@ -2553,7 +2561,7 @@ async fn un_annuaire_local_publie_ses_locateurs_et_les_racines_les_repliquent() 
             arguments.push((*locateur).to_owned());
         }
         let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        lancer_sans_chaine(&base_speedy, &arguments).0
+        lancer_et_lire(&base_speedy, &arguments).0
     };
     let premiers = ["[2001:db8::51]:6630", "192.0.2.51:6630"];
     let mut speedy = lancer_speedy(&premiers);

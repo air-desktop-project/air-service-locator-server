@@ -91,8 +91,15 @@ TLS 1.3 juge l'identité, jamais le locateur.
   racine pour `--federation` (décision 58 : `--federation
   <locateur>=<n-…>`, ou un locateur de la liste embarquée — 0.29.0), et une
   liste embarquée pour `asl` et les applications.
-  Les réglages PEM (`--roots`, `--ca`, `--peer-ca`, `--federation-ca`) vivent
-  le temps de la transition (décision 58), puis disparaissent au cran majeur.
+  **La transition est close côté serveur (0.34.0, décision 63)** : un
+  annuaire ne présente plus que son certificat d'identité, à tous, et
+  `--certificate`/`--key`, `--peer-ca`, `--federation-ca` et `--ca` sont
+  refusés avec ce qu'il faut faire à la place. `--roots` (côté `asl`) suit
+  dans le dépôt client.
+- **Un locateur peut rester un nom** (C20) : `--peer`, `--federation`,
+  `--directory` acceptent un nom DNS comme une adresse, parce qu'il ne dit que
+  **où** aller. La confiance ne vient jamais de lui : ni SNI jugé, ni nom
+  vérifié, et le client vise toujours l'adresse résolue.
 
 **Ce que la preuve HTTP garde.** Les défis de genre `n` (`POST /v1/defi`,
 `POST /v1/pair/preuve`) restent : liés au canal (§2.1 bis), ils prouvent
@@ -520,7 +527,7 @@ d'une racine choisit** — jamais une condition du service : les racines tournen
 en `optional` depuis le premier jour, et tout marche. Et quand elle est choisie,
 **aucun tiers n'est appelé** : ce que l'annuaire vérifie, il le vérifie hors
 ligne, contre des **racines de confiance qui sont des fichiers**, épinglés par
-l'exploitant comme `--peer-ca` l'est pour la réplication.
+l'exploitant comme `--peer-key` l'est pour la réplication.
 
 **Play Integrity contredisait ce principe, et il est abandonné.** Il demandait
 un compte développeur Google Play, l'app dans la Play Console, des clés de
@@ -1423,8 +1430,9 @@ l'exploitant dans le modèle par une porte dérobée. La preuve voyage donc dans
 le corps du verbe lui-même, comme celle de `POST /v1/attestation`, et le défi
 est dépensé qu'elle tienne ou non.
 
-**Qui parle ce verbe.** `asl-server --invite --directory <hôte:port> --ca
-<racine.crt> --operator-secret <fichier>`, et `asl-server --new-operator-key`
+**Qui parle ce verbe.** `asl-server --invite --directory
+<hôte:port>[=<n-…>] --operator-secret <fichier>` (l'identité attendue au
+bout : la liste embarquée des racines, ou le `=<n-…>` ; `--ca` jusqu'à 0.34.0), et `asl-server --new-operator-key`
 frappe la paire (2026-09-24). **Le même binaire, et non `asl`** : `asl` est
 l'utilitaire d'une MACHINE — il s'enrôle, annonce, résout —, et émettre une
 invitation n'est aucun de ces gestes ; lui donner ce verbe aurait fait entrer
@@ -2171,9 +2179,9 @@ les deux membres se répliquent comme deux racines (§3 bis, `--peer`).
 
 **Côté annuaire local** : un `asl-server` qui reçoit `--federation
 <hôte:port>` — **une fois par racine** (0.28.0 : chacune sa voie, puisque
-l'état ne se réplique pas entre elles) —, `--federation-ca` pour leur
-certificat (**jusqu'à la bascule de la décision 58** : ensuite, le `n-…` de
-chaque racine, attendu dans la poignée de main — §0, « Qui l'on croit »), et
+l'état ne se réplique pas entre elles) — avec le `n-…` de chaque racine,
+attendu dans la poignée de main (`<hôte:port>=<n-…>`, ou la liste embarquée ;
+§0, « Qui l'on croit » — `--federation-ca` a servi jusqu'à 0.34.0), et
 sa clé d'identité (`--identity-key`) ; il publie aussi **ses propres
 locateurs** (décision 57 : `PUT /v1/federation/locateurs`), pour
 qu'un préfixe IPv6 qui change chez un particulier ne demande rien à personne ; il

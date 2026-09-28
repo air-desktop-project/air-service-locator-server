@@ -17,7 +17,8 @@
 # Il n'active ni ne démarre le service, et il lui manque exprès deux choses :
 #
 #   — `--attestation`, qui n'a pas de défaut (`protocole.md` §2.1) ;
-#   — le certificat, qui n'existe pas encore au moment de l'installation.
+#   — la clé d'identité, qu'un paquet ne frappe pas à la place de
+#     l'exploitant (décision 58 : l'annuaire ne présente qu'elle).
 #
 # Un paquet qui démarrerait un service voué à échouer apprendrait à l'exploitant
 # que les échecs de ce service sont normaux.
@@ -94,8 +95,8 @@ install -D -m 0755 target/release/asl-server "$arbre/usr/bin/asl-server"
 install -D -m 0644 paquet/asl-server.service \
     "$arbre/usr/lib/systemd/system/asl-server.service"
 
-# Le répertoire des clés. Le PAQUET le crée, mais n'y met rien : le certificat
-# est émis pour un nom d'hôte qu'un paquet ne connaît pas.
+# Le répertoire des clés. Le PAQUET le crée, mais n'y met rien : une clé
+# d'identité frappée par un paquet serait une clé que personne n'a choisie.
 install -d -m 0750 "$arbre/etc/asl-server"
 
 install -d -m 0755 "$arbre/usr/share/doc/asl-server"
@@ -140,14 +141,14 @@ cat > "$arbre/usr/share/doc/asl-server/replication.conf.exemple" <<'EXEMPLE'
 # l'autre. La procédure complète est dans le README (« Mettre deux bancs en
 # réplication ») et dans docs/replication.md §8.
 #
-#   1. En tant que asl-server (ou chown ensuite root:asl-server, 0640) :
-#        sudo -u asl-server asl-server --new-identity-key /etc/asl-server/identite.key
-#      — écrit identite.key (0600) et identite.key.pub, imprime le n-… .
-#   2. Échangez les .pub entre les deux bancs, et posez le racine.crt de la
-#      cérémonie (celui que le client épingle) en /etc/asl-server/racine.crt.
+#   1. L'identité de cette racine existe déjà : l'unité la lit en
+#      /etc/asl-server/identite.key, et le service ne démarre pas sans elle.
+#   2. Échangez les .pub entre les deux bancs : celle de l'autre va en
+#      /etc/asl-server/pair.pub. C'est elle, et elle seule, qui fait croire
+#      l'autre racine — aucune autorité, aucun nom (décision 58).
 #   3. Remplissez la ligne ci-dessous — l'affectation ENTIÈRE entre guillemets :
 #      `Environment=` découpe sa ligne sur les espaces avant d'y lire des
-#      affectations, et sans eux la variable ne vaudrait que `--identity-key`.
+#      affectations, et sans eux la variable ne vaudrait que `--peer`.
 #      Les guillemets sont pour systemd ; c'est le `$ASL_REPLICATION` de
 #      l'unité, non cité, qui découpe ensuite la valeur en arguments —, puis
 #      `systemctl restart asl-server`.
@@ -155,7 +156,7 @@ cat > "$arbre/usr/share/doc/asl-server/replication.conf.exemple" <<'EXEMPLE'
 # Vide, cette variable laisse la racine SEULE : ce n'est pas un défaut.
 
 [Service]
-Environment="ASL_REPLICATION=--identity-key /etc/asl-server/identite.key --peer argon.air-desktop.org:6630 --peer-key /etc/asl-server/pair.pub --peer-ca /etc/asl-server/racine.crt"
+Environment="ASL_REPLICATION=--peer [2001:db8::2]:6630 --peer-key /etc/asl-server/pair.pub"
 EXEMPLE
 chmod 0644 "$arbre/usr/share/doc/asl-server/replication.conf.exemple"
 
@@ -278,8 +279,8 @@ Description: annuaire federe de services reseau, ecrit en Rust
  la connexion EST le bail.
  .
  Le paquet n'active ni ne demarre le service : il lui manque la posture
- d'attestation, qui n'a pas de defaut, et le certificat, qui est emis pour un
- nom d'hote qu'un paquet ne connait pas. Voir /usr/share/doc/asl-server/.
+ d'attestation, qui n'a pas de defaut, et la cle d'identite, qu'un paquet ne
+ frappe pas a la place de l'exploitant. Voir /usr/share/doc/asl-server/.
 CONTROL
 
 cat > "$arbre/DEBIAN/postinst" <<'POSTINST'
@@ -338,10 +339,12 @@ qu'un paquet ne peut pas décider.
 
          /usr/share/doc/asl-server/poussee.conf.exemple
 
-  2. le certificat, émis pour le nom sous lequel cet annuaire répond :
+  2. la clé d'identité de cet annuaire — il ne présente que le certificat
+     qu'elle signe (décision 58) ; le geste imprime le n-… qu'on en déduit :
 
-         /etc/asl-server/certificat.pem   (chaîne, en PEM)
-         /etc/asl-server/cle.pem          (clé privée, 0640 root:asl-server)
+         asl-server --new-identity-key /etc/asl-server/identite.key
+         chown root:asl-server /etc/asl-server/identite.key*
+         chmod 0640 /etc/asl-server/identite.key
 
   3. le pare-feu, APRÈS l'avoir relu — il porte son propre filet de sécurité :
 

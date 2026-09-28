@@ -246,7 +246,12 @@ enregistrement DNS à publier : exactement la dépendance que le produit refuse.
 5. **Le DNS reste permis — comme locateur.** `asl-root.air-desktop.org`,
    `nitrogen.air-desktop.org`, `speedy.air-desktop.org` sont des commodités ;
    aucune n'entre dans la décision de croire, et l'absence de résolveur ne
-   bloque rien : les locateurs embarqués sont des adresses.
+   bloque rien : les locateurs embarqués sont des adresses. **Tranché à la
+   fin de la transition (0.34.0, décision 63)** : `--peer`, `--federation` et
+   `--directory` gardent le droit d'être un nom, et rien de plus.
+6. **La transition est close côté serveur (0.34.0)** : plus de chaîne d'hier
+   servie à qui envoie un SNI, plus d'autorité PEM acceptée en repli — un
+   client d'hier (une autorité, un nom) est refusé à la poignée de main.
 
 ### Pourquoi un certificat auto-signé, et pas des clés brutes (RFC 7250)
 
@@ -261,7 +266,8 @@ certificat Ed25519 — les racines présentent déjà de l'Ed25519), même
 `rustls::ClientConfig::…dangerous().with_custom_certificate_verifier(…)` —
 ASL construit déjà lui-même ses configurations clientes (`configuration_tls`
 dans `asl-client-tokio` et dans le tireur d'`asl-loop-tokio`), et
-`ams_quic_tls::Connection::connect` prend un `Arc<ClientConfig>`. C'est ce
+`ams_quic_tls::Connection::connect` prend un `Arc<ClientConfig>` (côté serveur,
+depuis 0.34.0 : `asl_loop_tokio::confiance`). C'est ce
 qu'`air-mail-server` fait déjà pour DANE (`ams_tls::relay::dane_config`, le
 vérificateur `Dane`) : une ancre qui n'est pas une autorité, sans toucher à la
 pile. L'enveloppe X.509 n'est qu'un emballage que le vérificateur ouvre pour
