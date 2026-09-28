@@ -385,7 +385,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_<architecture>.deb
-sudo dpkg -i asl-server_0.35.1_amd64.deb
+sudo dpkg -i asl-server_0.35.2_amd64.deb
 ```
 
 **Le paquet existe en `amd64` et en `arm64`** — un PC ou un Raspberry Pi
