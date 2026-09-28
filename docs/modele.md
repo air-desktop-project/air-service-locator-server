@@ -610,7 +610,7 @@ Ce qu'un daemon annonce. **Identifié par le couple (machine, nom).**
 
 | Champ | Ce que c'est |
 |---|---|
-| `identifiant` | `s-` + 26 caractères. Attribué à la première annonce. |
+| `identifiant` | `s-` + 26 caractères. Attribué à la première annonce — **tiré au hasard par l'annuaire qui la reçoit**, ce qui, dans une paire d'annuaire local, donne un `s-…` par membre : défaut constaté le 2026-09-28, pistes et recommandation (un identifiant dérivé de la machine et du nom) dans `annuaires.md` §2 ter, questions 14 à 19 de son §7. **Non décidé.** |
 | `machine` | La machine qui le porte. |
 | `nom` | Choisi par le daemon, 1 à 64 caractères. C'est ce que son client connaît. |
 | `points d'écoute` | Un ou plusieurs `(protocole, port)`. |

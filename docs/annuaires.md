@@ -448,6 +448,197 @@ reçu **par cette racine** — l'état vivant ne se réplique pas entre racines,
 chacune tranche avec ce qu'elle reçoit. Un membre qui se tait ne fait tomber
 que ce que lui seul disait.
 
+### L'identifiant d'un service dans une paire — un défaut constaté, et les pistes
+
+**Proposé le 2026-09-28, rien n'est décidé ici** : cette sous-section décrit un
+défaut vu en production, pose l'invariant qu'on voudrait, compare les pistes et
+en recommande une. Les questions à trancher sont au §7 (14 à 19).
+
+#### Le constat (2026-09-28, 0.35.1)
+
+L'essai de bascule de la paire speedy (`n-7MSV5RPCXBZH25PQM4ZPE5X87P`, titulaire)
+et helium (`n-4EQRD1VWYQQB1Y9C3T49Z8F8Z9`) : un daemon —
+`asl announce essai-federation tcp:8080` sur `m-32Q2JXER1HTVRZQ956T7V3GE0S` —
+passe d'un membre à l'autre en 27 s au plus, et `GET /v1/ou` aux racines le
+résout toujours. **Mais le `s-…` rendu change avec le membre** :
+`s-0DV36MNC74TXR549YA45KJVKBZ` quand helium tient l'annonce,
+`s-6AQ1BCA8SY1GVVMR0JMWXCA0AQ` quand c'est speedy — ce dernier né d'une annonce
+plus ancienne faite à speedy. Chaque membre a frappé SON identifiant pour le même
+couple `(machine, nom)`, et le garde.
+
+Ce que le §2 ter promet est **un** service dont l'état est tenu par membre ;
+`replication.md` §1 promet davantage : « le client qui a mémorisé un `s-…` doit
+le retrouver après bascule ». Aucun des deux n'est tenu dans une paire.
+
+#### Comment un `s-…` naît aujourd'hui (lu dans le code de la 0.35.1)
+
+| Où | Ce que fait le code |
+|---|---|
+| **À l'annonce, chez qui la reçoit** — racine ou membre d'un annuaire local, le même chemin | `crates/asl-loop-tokio/src/h3.rs` l. 2284–2308 : on cherche `(machine, nom)` dans l'entrepôt (`service_par_nom`) ; s'il n'y est pas, **seize octets d'aléa** (`tirer_un_identifiant`, `getrandom(2)` via `crates/asl-server/src/entropie.rs`) deviennent un `s-…`, déclaré par `declarer_service`. La première annonce d'un nom crée le service (`modele.md` §2.4). |
+| **Persistance** | `crates/asl-store/src/lib.rs` l. 2713–2767 : table `services` (identifiant → machine, nom, estampille) et index `services-par-nom` (`machine ‖ nom` → identifiant), dans redb, journalisé. **Un service ne se retire jamais** (`replication.md` §3.2) : l'identifiant survit aux redémarrages du daemon et du membre, et une ré-annonce du même nom au MÊME membre retrouve le même `s-…`. |
+| **Entre les deux membres** | Ils se répliquent l'opération `service` comme deux racines (§2 ter, `replication.md` §3.2) : `appliquer_service`, `lib.rs` l. 4730–4791. Si `(machine, nom)` est déjà tenu sous un autre `s-…`, **le plus ancien par estampille de Lamport reste**, l'autre s'efface. La règle converge — **si l'opération passe**. |
+| **Aux racines** | Rien n'est rangé dans l'entrepôt (C13 amendée). `EtatFedere` (`crates/asl-loop-tokio/src/federation.rs` l. 69–171) tient, en mémoire, `machine ‖ nom` → membre → `(s-…, réponse, heure)`, **chacun avec le `s-…` que CE membre a rapporté** ; le commentaire l. 85–87 admet déjà que « leurs identifiants de service peuvent différer ». `retenir` (l. 125–148) rend le `s-…` du **rapport vivant le plus récent**, sinon celui du rapport le plus récent. |
+| **Ce que `GET /v1/ou` rend** | `rassembler`, `h3.rs` l. 2861–2890 : le service tenu par la racine elle-même, sinon celui que `EtatFedere::lire` retient. Le `s-…` rendu est donc **celui du membre qui tient le daemon** ; quand le daemon est parti des deux, les deux membres le rapportent `parti` toutes les dix secondes, chacun sous son `s-…`, et celui que la racine rend **alterne au gré du dernier rapport reçu**. `GET /v1/machines/{m}/services` suit la même règle (`services_federes`, `h3.rs` l. 2495). |
+
+**Pourquoi la réplication de la paire n'a pas réconcilié speedy et helium.**
+Deux explications sont compatibles avec le code ; laquelle a joué se lit dans les
+journaux des deux membres, pas ici :
+
+1. **La voie entre les membres n'a pas passé** (`--peer` absent, ou coupée
+   pendant les deux premières annonces) : chacun frappe le sien, et rien ne les
+   rapproche.
+2. **L'opération a été reçue, puis perdue sans bruit.** `appliquer_service`
+   (`lib.rs` l. 4737–4753) ignore un service dont la machine n'est ni dans
+   `machines` ni dans `machines-federees`, **et rend `Ok`** : le curseur avance,
+   l'opération ne sera jamais rejouée. Un second membre qui tire l'instantané de
+   son pair AVANT d'avoir tiré ses machines des racines — un membre fraîchement
+   inscrit, pas encore approuvé, ou dont le fédérateur n'a pas encore fait son
+   premier tour — perd donc le `s-6AQ…` de speedy. Il frappe ensuite `s-0DV…` à
+   la première annonce ; speedy reçoit ce second identifiant, le trouve **plus
+   récent** que le sien, et le rejette. La divergence est alors **définitive** :
+   helium ne reverra jamais `s-6AQ…`. C'est exactement ce qu'on observe.
+
+**Un troisième défaut, que la convergence elle-même provoquerait.** Si la règle
+« le plus ancien reste » remplaçait le `s-…` d'un membre pendant qu'un daemon y
+est connecté, sa session vivante resterait rangée dans le vivier sous l'ancien
+identifiant ; `publier` (`h3.rs` l. 3221–3253) parcourt les services de
+l'entrepôt et cherche leur session par le NOUVEAU : le daemon serait rapporté
+`parti` alors qu'il est là, jusqu'à sa prochaine annonce.
+
+#### Où l'identifiant est consommé
+
+| Consommateur | Ce qu'il en fait | Ce que la divergence lui coûte |
+|---|---|---|
+| **Le daemon** (`asl announce`, `asl-client`) | La réponse d'annonce porte `service` (`protocole.md` §1.1) ; `asl` l'affiche. Il ne le renvoie jamais. | Un affichage qui change à chaque bascule. |
+| **La résolution** (`asl where`, `GET /v1/ou`, l'ABI `asl-client-ffi`) | Cherche par `(machine, nom)`, jamais par `s-…` ; rend le `s-…` dans la réponse. | Rien pour trouver le service ; un client qui mémorise le `s-…` le voit changer. |
+| **L'autorisation** (`asl-auth`, `Portee::UnService`) | Un droit sur un `s-…` s'évalue contre `cible.service` — le `s-…` que `rassembler` vient de retenir (`crates/asl-auth/src/lib.rs` l. 480). | **Un droit par service ne vaudrait que pour un membre sur deux.** Aujourd'hui il ne vaut pour aucun : aux racines, un `s-…` fédéré n'est pas dans l'entrepôt, donc `POST /v1/droits` le refuse (`machine_de_l_element`, `crates/asl-store/src/droits.rs` l. 686–691) et un tel droit ne « vaudrait » pas (`vaut`, l. 698–711). |
+| **Les applications** (Android `AccorderEcran`, iOS `AccorderVue`) | Offrent « Un service » comme portée d'un droit, avec le `s-…` lu dans `GET /v1/machines/{m}/services`. | Pour un service fédéré, l'identifiant proposé est celui du membre du moment — et la racine refuse le droit (ci-dessus). |
+| **`DELETE`, tickets, sondes** | Il n'existe ni `DELETE` d'un service (§3.2 : un service ne se retire pas) ni ticket. Les sondes sont rangées par session (`asl-annuaire`), sous le `s-…` du membre qui sonde ; `sonde_par` nomme le membre, pas le service. | Rien de plus. |
+
+#### L'invariant voulu
+
+- **(I1) Dans une paire, un service `(machine, nom)` a le même `s-…` quel que
+  soit le membre** qui tient son daemon, et quel que soit l'ordre des annonces.
+- **(I2) Il est stable** à travers les bascules, les redémarrages des membres et
+  des daemons, et le remplacement du second membre.
+- **(I3), à trancher** (question 15) : il survit aussi au changement
+  d'hébergeur — un domaine confié à un annuaire local, repris par les racines,
+  confié à un autre.
+
+#### Piste A — un identifiant DÉRIVÉ, calculé et non frappé
+
+`s-…` = les 128 premiers bits d'un hachage de ce qui identifie déjà le service.
+Deux variantes :
+
+- **A1** : `SHA-256("asl/service/1" ‖ m-… (16 octets) ‖ nom)`.
+- **A2** : la même chose, précédée du `n-…` titulaire de l'annuaire logique.
+
+| | A1 — machine + nom | A2 — titulaire + machine + nom |
+|---|---|---|
+| I1, I2 | Oui, **sans aucun échange** : deux membres qui ne se sont jamais parlé frappent le même. | Oui, à condition que chaque membre connaisse le titulaire — le second ne le sait aujourd'hui que par `--peer` ; les racines devraient le lui dire. |
+| I3 | **Oui** : le même `s-…` aux racines, dans tout annuaire local, dans les deux paires. | **Non** : changer d'hébergeur change l'identifiant — c'est voulu si l'on pense qu'un autre annuaire est une autre autorité. |
+| Retrait puis ré-annonce | Le même `s-…` revient. Aujourd'hui rien ne se retire ; le jour où un retrait existera, **les droits sur ce `s-…` devront partir avec lui**, sinon ils ressusciteraient. | Pareil. |
+| Machine ré-enrôlée sous un nouveau `m-…` | Un nouveau `s-…` : c'est une autre machine. | Pareil. |
+| Collision | 128 bits de SHA-256 : paradoxe des anniversaires à 2⁶⁴ services. Négligeable, et le même ordre que l'aléa d'aujourd'hui. | Pareil. |
+| Ce qu'il révèle | Un `s-…` **n'est plus imprévisible** : qui tient `m-…` peut essayer des noms (`ssh`, `depot`…) jusqu'à retomber sur un `s-…` qu'il a vu, donc **apprendre un nom** qu'on ne lui a montré que sous forme d'identifiant. Ce qui ne s'ouvre pas : la résolution se fait déjà par `(machine, nom)` et répond `404` pareil pour l'inexistant et l'interdit (C9) ; `POST /v1/droits` aussi. Le « 128 bits ne se devinent pas » de `asl-id` cesse de valoir pour ce seul genre. | Le même coût, sauf pour qui ignore le titulaire — un `n-…` est public (`GET /v1/annuaires`). |
+| Conflits entre racines | **Le conflit « le même service déclaré des deux côtés » (`replication.md` §3.2) disparaît** pour tout service frappé après la bascule : les deux côtés écrivent le même. | Seulement dans l'annuaire local. |
+| Coût | Un hachage — `sha2` est déjà dans le graphe (`asl-registre`, `asl-cle`) ; rien à ajouter sous C4. | Plus un moyen pour le second membre d'apprendre le titulaire. |
+
+**Migration.** Les entrepôts tiennent des `s-…` aléatoires. **La dérivation
+permet une migration sans coordination** : chaque entrepôt — les deux racines,
+les deux membres — recalcule le `s-…` de chacun de ses services à la reprise
+(`replication.md` §11.4), dans une transaction, et **arrive au même résultat que
+les autres** sans leur parler. Les droits qui visent un ancien `s-…` (seuls des
+services tenus aux racines peuvent en avoir) se réécrivent dans la même
+transaction. Une opération `service` venue d'un pair pas encore migré se range
+sous l'identifiant recalculé depuis `(machine, nom)`, pas sous celui qu'elle
+porte ; une opération `droit` qui nomme un ancien `s-…` demande une table de
+correspondance tenue le temps de la transition — ou des racines mises à jour
+ensemble. Aux racines, `EtatFedere` est en mémoire : rien à migrer, les deux
+rapports convergent dès que les deux membres sont à jour. **Coût visible** :
+chaque `s-…` existant change UNE fois ; c'est un changement de format
+d'enregistrement, donc un cran mineur.
+
+#### Piste B — un identifiant FRAPPÉ PAR LES RACINES
+
+Le membre qui reçoit la première annonce d'un nom demande un `s-…` aux racines ;
+elles le rangent (identifiant, machine, nom — pas d'état vivant) et le rendent
+aux deux membres, par la voie descendante qui porte déjà les machines
+(`GET /v1/federation/machines`).
+
+- **Pour** : une seule autorité frappe ; les racines connaissent enfin le
+  service, et un droit par service devient possible sans rien de plus (la
+  vérification de `droits.rs` trouve l'élément).
+- **Contre** : **un aller-retour avant de répondre au daemon** — la réponse
+  d'annonce porte le `s-…`. **Hors ligne** — les racines injoignables, ce que
+  l'annuaire local sait survivre —, il faut soit faire attendre le daemon (une
+  annonce qui échoue parce que l'internet est coupé), soit lui donner un
+  identifiant provisoire, qu'on renommera : c'est le défaut d'aujourd'hui,
+  reporté. **Les deux racines peuvent frapper chacune le sien** pendant une
+  coupure entre elles : on retombe sur « le plus ancien reste », entre racines
+  cette fois. Et un verbe de plus, une table de plus aux racines, une
+  réplication de plus.
+- **Migration** : les racines adoptent, pour chaque `(machine, nom)` fédéré, le
+  premier `s-…` qu'un membre leur rapporte ; l'autre membre le reprend et
+  efface le sien. Deux racines qui n'ont pas vu le même premier rapport doivent
+  encore se départager.
+
+#### Piste C — garder l'aléa, et le faire converger
+
+- **C1 — réparer la réplication de la paire**, sans rien changer à la nature
+  de l'identifiant : une opération `service` dont la machine est encore inconnue
+  est **gardée** (rangée quand même, ou tenue jusqu'à ce que la machine arrive)
+  au lieu d'être perdue en avançant le curseur ; une convergence qui remplace un
+  `s-…` **déplace la session vivante** sous le nouveau (ou la ferme, et le
+  daemon se ré-annonce) ; et un membre qui arrive **relit l'instantané de son
+  pair** une fois ses machines tirées. **Pour** : le moins de code, le modèle
+  d'aujourd'hui. **Contre** : la convergence est **à terme** — pendant une
+  coupure entre membres, ou à l'arrivée d'un second, deux `s-…` existent, et
+  celui qui perd **disparaît** pour qui l'avait vu (le prix que `replication.md`
+  §3.2 accepte entre racines). I3 non tenu. Un membre sans `--peer` diverge pour
+  toujours. **Migration** : relire l'instantané du pair depuis zéro ; les `s-…`
+  perdants s'effacent.
+- **C2 — le daemon porte son `s-…`** et le présente à la reconnexion ; le membre
+  l'adopte s'il n'est tenu par aucun autre `(machine, nom)`. **Contre** : un
+  changement du message d'annonce (`asl-proto`, binaire, clients déployés) ; un
+  daemon doit garder un état sur disque, ce que beaucoup n'ont pas (conteneurs) ;
+  deux premières annonces concurrentes divergent encore ; un daemon qui a connu
+  les deux identifiants fait osciller les membres. Il ne résout rien que C1 ne
+  résolve, et coûte un protocole.
+- **C3 — les racines masquent** : elles rendent aux clients un identifiant
+  dérivé de `(machine, nom)` quel que soit le `s-…` rapporté. Bon marché, mais
+  le daemon et les membres voient un autre `s-…` que les clients : deux noms
+  pour une chose, et un droit posé sur l'un que l'autre ne connaît pas. C'est
+  A1 appliquée à moitié.
+
+#### Recommandation
+
+**A1** — l'identifiant dérivé de la machine et du nom, partout (racines comme
+annuaires locaux), avec la migration déterministe ci-dessus — **plus le premier
+point de C1**, qui reste un défaut quelle que soit la piste : une opération
+reçue et ignorée sans que le curseur le sache.
+
+Les raisons :
+
+1. **Le modèle le dit déjà.** « Un service est identifié par `(machine, nom)` »
+   (`modele.md` §2.4, `replication.md` §1) ; le `s-…` n'en est qu'un nom
+   attribué. Le dériver rend la phrase vraie à la lettre.
+2. **C'est la seule piste qui tienne I1 et I2 sans échange**, donc sans fenêtre,
+   sans perdant, et hors ligne — ce que B ne peut pas et ce que C1 ne fait qu'à
+   terme. Elle supprime du même coup un cas de conflit entre racines.
+3. **Elle tient I3**, ce qui fait d'un droit par service une chose qui survit au
+   déménagement d'un domaine — le jour où un tel droit sera possible pour un
+   service fédéré (question 18).
+4. **Sa migration est locale** : chaque entrepôt la fait seul et tombe juste.
+5. **Son coût est une propriété**, pas un mécanisme : un `s-…` devient
+   prévisible pour qui connaît la machine et devine le nom. Aucun verbe ne
+   s'ouvre pour autant (C9) ; c'est à Thierry de dire si la confidentialité d'un
+   NOM de service, vis-à-vis de qui voit son `s-…` sans le voir lui, compte
+   (question 16).
+
+A2 ne vaut mieux que si l'on veut qu'un service change d'identité en changeant
+d'hébergeur — et coûte au second membre de connaître le titulaire.
+
 ## 4. S'enregistrer, puis se faire connaître
 
 **Deux étapes distinctes, et la première ne donne accès à rien.**
@@ -933,6 +1124,47 @@ Rassemblé, plutôt que dispersé.
     groupes et les droits. S'il devait un jour répondre lui-même aux machines
     de la maison — sans passer par les racines —, il lui faudrait les droits
     qui visent ses domaines, et il ne les reçoit pas.
+14. **Un `s-…` par service, dans une paire ?** (§2 ter, « L'identifiant d'un
+    service dans une paire », constaté le 2026-09-28.) Aujourd'hui chaque membre
+    frappe le sien, et le `s-…` que les racines rendent change à chaque bascule.
+    Les invariants I1 (le même `s-…` quel que soit le membre) et I2 (stable à
+    travers bascules, redémarrages et remplacement du second membre) sont-ils
+    voulus — ou le `s-…` reste-t-il un détail d'affichage, puisque tout client
+    résout par `(machine, nom)` (ce que `replication.md` §3.2 acceptait entre
+    racines) ? **Proposé : voulus.**
+15. **Le `s-…` survit-il au changement d'hébergeur** (I3) — un domaine confié à
+    un annuaire local, rendu aux racines, confié à un autre ? Oui avec A1 (dérivé
+    de la machine et du nom), non avec A2 (le titulaire entre dans le calcul).
+    **Proposé : oui (A1).**
+16. **Un `s-…` prévisible est-il acceptable ?** Dérivé, il se recalcule depuis
+    `m-…` et le nom : qui voit un `s-…` sans voir le nom peut deviner ce nom par
+    essais. Aucun verbe ne s'ouvre (C9), mais `asl-id` ne pourrait plus dire
+    « 128 bits ne se devinent pas » pour ce genre. Si c'est inacceptable, il
+    reste B (frappé aux racines) ou C1 (aléa, convergence à terme).
+    **Proposé : acceptable.**
+17. **Quelle piste, et sur quel périmètre ?** A1 (recommandée), A2, B, C1 — et,
+    si A : pour **tous** les services, ceux tenus aux racines compris (chaque
+    `s-…` existant change une fois, à la reprise, droits réécrits dans la même
+    transaction ; un cran mineur), ou pour les seuls services des domaines
+    hébergés (les racines gardent leurs `s-…` aléatoires et leur règle « le
+    plus ancien reste ») ? **Proposé : A1, pour tous.**
+18. **Un droit par service, sur un service fédéré.** Il est impossible
+    aujourd'hui, et indépendamment du défaut : les racines ne rangent pas les
+    services des domaines hébergés, donc `POST /v1/droits` ne trouve pas la
+    machine d'un tel `s-…`, et un droit rangé ne « vaudrait » pas. Les
+    applications le proposent pourtant (« Un service »). Le veut-on ? Il faudrait
+    alors que les racines rangent le service DÉCLARÉ — identifiant, machine,
+    nom, sans état vivant, ce que C13 permet —, ou que le droit porte sa machine.
+    Sinon, les applications devraient ne pas offrir cette portée pour une
+    machine d'un domaine confié.
+19. **L'opération perdue sans bruit.** Entre deux membres, une opération
+    `service` dont la machine n'est pas encore connue est ignorée ET le curseur
+    avance (`appliquer_service`) : elle ne revient jamais. C'est vrai quelle que
+    soit la piste. **Proposé : à corriger en patch, avant la piste retenue** —
+    garder l'opération, ou ne pas avancer — et **lire les journaux de speedy et
+    d'helium** pour savoir si c'est elle, ou une voie `--peer` absente, qui a
+    produit les deux `s-…` du 2026-09-28. Les deux identifiants actuels ne
+    gênent pas la résolution ; on les laisse jusqu'à la migration.
 
 ## 8. L'annuaire `ordinaire` et la confiance bilatérale — une suite nommée
 
