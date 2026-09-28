@@ -7511,8 +7511,21 @@ async fn la_federation_de_bout_en_bout() {
             .map(|adresse| adresse.texte().to_owned())
             .collect()
     };
+    // La racine range AVANT de répondre, et le fédérateur ne le dit qu'à la
+    // réponse : on attend les deux.
+    let publie = format!(
+        "fédération vers 127.0.0.1:{} : localisateur publié — [2001:db8:1::51]:6630 (204)",
+        adresse.port()
+    );
+    let dit = || {
+        JOURNAL
+            .lock()
+            .expect("le journal n'est pas empoisonné")
+            .iter()
+            .any(|ligne| ligne == &publie)
+    };
     for _ in 0..100_u32 {
-        if ou_joindre_speedy() == ["[2001:db8:1::51]:6630"] {
+        if ou_joindre_speedy() == ["[2001:db8:1::51]:6630"] && dit() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -7522,18 +7535,7 @@ async fn la_federation_de_bout_en_bout() {
         ["[2001:db8:1::51]:6630"],
         "la nouvelle adresse remplace les deux anciennes"
     );
-    let publie = format!(
-        "fédération vers 127.0.0.1:{} : localisateur publié — [2001:db8:1::51]:6630 (204)",
-        adresse.port()
-    );
-    assert!(
-        JOURNAL
-            .lock()
-            .expect("le journal n'est pas empoisonné")
-            .iter()
-            .any(|ligne| ligne == &publie),
-        "le fédérateur dit ce qu'il a publié"
-    );
+    assert!(dit(), "le fédérateur dit ce qu'il a publié");
 
     // Speedy s'arrête ; le daemon se replie sur helium.
     speedy_local.arreter().await;
