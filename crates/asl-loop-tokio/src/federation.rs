@@ -422,10 +422,81 @@ pub struct Federateur {
     pub journal: Box<dyn Fn(String) + Send + Sync>,
     /// Le plafond du recul, en millisecondes.
     pub plafond_recul_ms: u64,
-    /// Où l'on nous joint, publié à chaque ouverture (décision 57) — de
-    /// l'ASCII sans guillemet ni barre, que les réglages ont jugé. **Vide,
-    /// il retire ce qui était publié** : l'adresse déclarée sert de nouveau.
-    pub locateurs: Vec<String>,
+    /// Où l'on nous joint (décision 57) — de l'ASCII sans guillemet ni
+    /// barre, que les réglages ou la détection ont jugé. Publié à chaque
+    /// ouverture, et **dès qu'il change pendant la session** (décision 64).
+    /// **Une liste vide retire ce qui était publié** : l'adresse déclarée sert
+    /// de nouveau ; **aucune liste** (localisateur pas encore détecté) ne
+    /// publie rien, et les racines gardent ce qu'elles tenaient.
+    pub locateurs: Arc<LocateursPublies>,
+}
+
+/// Où l'on joint cet annuaire, tel que les fédérateurs le publient aux
+/// racines — et ses versions, comme [`ServicesPublies`].
+///
+/// **Fixes** avec `--locator <hôte:port>` : posés au démarrage, ils ne
+/// bougent plus. **Détectés** avec `--locator auto` (décision 64) : la tâche
+/// de `crate::localisateur` les republie quand l'adresse change, et chaque
+/// fédérateur le voit au tour suivant de sa boucle.
+///
+/// `None` n'est pas une liste vide : c'est « on ne sait pas encore ». Une
+/// liste vide retire ce qui était publié ; « on ne sait pas » ne dit rien, et
+/// la racine garde la dernière publication — qui a plus de chances d'être
+/// juste qu'un retrait vers l'adresse déclarée à l'inscription.
+#[derive(Debug, Default)]
+pub struct LocateursPublies {
+    /// La dernière liste publiée, si l'on en a une.
+    liste: Mutex<Option<Vec<String>>>,
+    /// Combien de fois elle a changé.
+    version: AtomicU64,
+}
+
+impl LocateursPublies {
+    /// Des locateurs fixes, connus dès le démarrage.
+    #[must_use]
+    pub fn fixes(liste: Vec<String>) -> Self {
+        Self {
+            liste: Mutex::new(Some(liste)),
+            version: AtomicU64::new(0),
+        }
+    }
+
+    /// Rien encore : le localisateur n'est pas détecté.
+    #[must_use]
+    pub fn inconnus() -> Self {
+        Self::default()
+    }
+
+    /// Publie cette liste, si elle diffère de la précédente ; rend `true` si
+    /// elle a changé.
+    pub fn publier(&self, liste: Vec<String>) -> bool {
+        let mut tenue = self
+            .liste
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if tenue.as_ref() == Some(&liste) {
+            return false;
+        }
+        *tenue = Some(liste);
+        self.version.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+
+    /// La liste, et sa version.
+    #[must_use]
+    pub fn lire(&self) -> (u64, Option<Vec<String>>) {
+        let tenue = self
+            .liste
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (self.version.load(Ordering::Acquire), tenue.clone())
+    }
+
+    /// Sa version.
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
+    }
 }
 
 /// Le corps de `PUT /v1/federation/locateurs` : `{"locateurs":[…]}`.
@@ -480,7 +551,7 @@ impl Federateur {
             "fédération vers {} ouverte : clé prouvée (TLS : identité par la clé)",
             self.adresse,
         ));
-        self.publier_les_locateurs(&mut connexion).await?;
+        let mut locateurs_publies = self.publier_les_locateurs(&mut connexion, None).await?;
 
         let cadence_us = self.cadence_ms.saturating_mul(1_000);
         let mut prochaine = 0_u64;
@@ -512,6 +583,14 @@ impl Federateur {
                 let pousse = self.pousser_l_etat(&mut connexion).await?;
                 self.dire_l_etat(&mut etat_dit, pousse);
                 version_poussee = Some(version);
+            }
+            // **UN LOCALISATEUR QUI CHANGE PART TOUT DE SUITE** (décision
+            // 64) : un préfixe renouvelé par l'opérateur se voit aux racines
+            // dans le tour, sans attendre une reconnexion.
+            if self.locateurs.version() != locateurs_publies {
+                locateurs_publies = self
+                    .publier_les_locateurs(&mut connexion, Some(locateurs_publies))
+                    .await?;
             }
             connexion.entretenir(200).await?;
             if !connexion.vivante() {
@@ -564,22 +643,43 @@ impl Federateur {
         Ok(machines.len())
     }
 
-    /// Publie où l'on nous joint — **à chaque ouverture** : une adresse qui a
-    /// changé pendant la coupure est dite dès la reprise, et une publication
-    /// identique n'écrit rien aux racines.
-    async fn publier_les_locateurs(&self, connexion: &mut Connexion) -> Result<(), Faute> {
+    /// Publie où l'on nous joint — **à chaque ouverture** (`avant` vaut
+    /// `None`) : une adresse qui a changé pendant la coupure est dite dès la
+    /// reprise, et une publication identique n'écrit rien aux racines ; puis
+    /// **à chaque changement** (`avant` est la version déjà publiée), et le
+    /// journal le dit. Rend la version publiée.
+    ///
+    /// **Rien n'est publié tant qu'on ne sait pas** (`--locator auto` sans
+    /// adresse candidate) : la racine garde ce qu'elle tenait.
+    async fn publier_les_locateurs(
+        &self,
+        connexion: &mut Connexion,
+        avant: Option<u64>,
+    ) -> Result<u64, Faute> {
+        let (version, liste) = self.locateurs.lire();
+        let Some(liste) = liste else {
+            return Ok(version);
+        };
         let reponse = connexion
             .requete(
                 b"PUT",
                 b"/v1/federation/locateurs",
                 &[(b"content-type", b"application/json")],
-                &corps_de_locateurs(&self.locateurs),
+                &corps_de_locateurs(&liste),
             )
             .await?;
         match reponse.statut.value() {
-            204 => Ok(()),
-            autre => Err(Faute::Statut(autre)),
+            204 => {}
+            autre => return Err(Faute::Statut(autre)),
         }
+        if avant.is_some() {
+            (self.journal)(format!(
+                "fédération vers {} : localisateur publié — {} (204)",
+                self.adresse,
+                liste.join(", ")
+            ));
+        }
+        Ok(version)
     }
 
     /// Pousse l'état publié, part après part ; rend `(services, vivants)`.
@@ -831,6 +931,24 @@ mod essais {
         assert!(lire_une_part_de_machines(&[]).is_ok_and(|machines| machines.is_empty()));
         assert!(lire_une_part_de_machines(&[0; 3]).is_err());
         assert!(lire_une_part_de_machines(&[0; MACHINE_FEDEREE_OCTETS]).is_err());
+    }
+
+    #[test]
+    fn les_locateurs_publies_comptent_leurs_changements_et_distinguent_l_inconnu() {
+        let detectes = LocateursPublies::inconnus();
+        assert_eq!(detectes.lire(), (0, None));
+        assert!(detectes.publier(vec!["[2001:db8::1]:6630".to_owned()]));
+        assert!(!detectes.publier(vec!["[2001:db8::1]:6630".to_owned()]));
+        assert!(detectes.publier(vec!["[2001:db8::2]:6630".to_owned()]));
+        assert_eq!(
+            detectes.lire(),
+            (2, Some(vec!["[2001:db8::2]:6630".to_owned()]))
+        );
+        // Des fixes vides : un retrait, qui se publie — ce n'est pas l'inconnu.
+        let fixes = LocateursPublies::fixes(Vec::new());
+        assert_eq!(fixes.lire(), (0, Some(Vec::new())));
+        assert!(!fixes.publier(Vec::new()));
+        assert_eq!(fixes.version(), 0);
     }
 
     #[test]

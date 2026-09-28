@@ -527,6 +527,40 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+            // **OÙ L'ON NOUS JOINT** (décisions 57, 64) : fixes, ils sont
+            // posés une fois ; détectés, une tâche les relit à la cadence de
+            // la fédération, et chaque fédérateur pousse le changement aussitôt.
+            let locateurs = Arc::new(match &federation.auto {
+                None => asl_loop_tokio::LocateursPublies::fixes(federation.locateurs.clone()),
+                Some(_) => asl_loop_tokio::LocateursPublies::inconnus(),
+            });
+            if let Some(auto) = &federation.auto {
+                eprintln!(
+                    "asl-server : localisateur DÉTECTÉ — l'adresse IPv6 globale stable {}, \
+                     port {}, relue toutes les {} s.",
+                    auto.interface.as_deref().map_or_else(
+                        || "de l'interface de la route par défaut".to_owned(),
+                        |nom| format!("de {nom}")
+                    ),
+                    ou.port(),
+                    asl_loop_tokio::federation::CADENCE_MS / 1_000,
+                );
+                let detecteur = asl_loop_tokio::localisateur::Detecteur {
+                    interface: auto.interface.clone(),
+                    // Le port où l'on ÉCOUTE vraiment — `--port 0` en tire un.
+                    port: ou.port(),
+                    fixes: federation.locateurs.clone(),
+                    publies: Arc::clone(&locateurs),
+                    lire: Box::new(asl_loop_tokio::localisateur::lire_le_noyau),
+                    journal: Box::new(|ligne| eprintln!("asl-server : {ligne}")),
+                    cadence_ms: asl_loop_tokio::federation::CADENCE_MS,
+                };
+                // Un premier tour AVANT les fédérateurs : la première ouverture
+                // de chaque voie publie déjà l'adresse, sans attendre un tour.
+                let mut souvenir = asl_loop_tokio::localisateur::Souvenir::default();
+                detecteur.un_tour(&mut souvenir);
+                federateurs.push(tokio::spawn(detecteur.continuer_sans_fin(souvenir)));
+            }
             for cible in &federation.racines {
                 let adresse = &cible.adresse;
                 let federateur = asl_loop_tokio::Federateur {
@@ -550,7 +584,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                     }),
                     journal: Box::new(|ligne| eprintln!("asl-server : {ligne}")),
                     plafond_recul_ms: reglages.keepalive_s.saturating_mul(1_000).max(1),
-                    locateurs: federation.locateurs.clone(),
+                    locateurs: Arc::clone(&locateurs),
                 };
                 federateurs.push(tokio::spawn(federateur.federer_sans_fin()));
             }

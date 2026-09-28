@@ -43,6 +43,7 @@ mod droit;
 mod federation;
 mod groupe;
 mod inscription;
+pub mod localisateur;
 
 pub use domaine::{
     ALIAS_DE_COMPTE_BRUT_MAX, ALIAS_DE_COMPTE_OCTETS_MIN, ALIAS_DE_DOMAINE_BRUT_MAX,
