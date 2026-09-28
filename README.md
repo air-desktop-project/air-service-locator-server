@@ -231,8 +231,16 @@ la liste. Un locateur peut être un nom : il ne dit que **où** aller, jamais
 **Où l'on joint la maison** (0.30.0, décision 57) : `--locator`, répétable,
 quatre au plus, publié aux racines à chaque ouverture de la voie — le `421`
 et `GET /v1/annuaires` les rendent à la place de l'adresse déclarée à
-l'inscription. Un préfixe IPv6 qui change se dit en redémarrant avec le
-nouveau ; aucun `--locator` retire ce qui était publié. Les racines, elles,
+l'inscription. Aucun `--locator` retire ce qui était publié.
+
+**Derrière une box, `--locator auto`** (0.35.0, décision 64) : l'annuaire
+publie l'adresse IPv6 globale et stable de sa machine — ni temporaire, ni
+dépréciée, ni lien local, ni ULA ; celle de l'interface de la route par
+défaut, ou de `--locator auto:<interface>` —, au port où il écoute. Il la
+relit toutes les dix secondes (`/proc/net/if_inet6`, Linux) : un préfixe que
+l'opérateur renouvelle se dit au journal (`localisateur : A → B`) et part aux
+racines aussitôt, sans redémarrer. Sans adresse candidate, rien n'est publié
+et les racines gardent la dernière (`docs/annuaires.md` §2 quater). Les racines, elles,
 servent `GET /v1/racines` : leur identité et leurs locateurs (décision 56).
 
 `asl-server --identity-certificate <clé>` imprime le certificat d'identité

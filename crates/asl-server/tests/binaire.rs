@@ -2561,10 +2561,11 @@ async fn un_annuaire_local_publie_ses_locateurs_et_les_racines_les_repliquent() 
             arguments.push((*locateur).to_owned());
         }
         let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        lancer_et_lire(&base_speedy, &arguments).0
+        let (enfant, _, journal) = lancer_et_lire(&base_speedy, &arguments);
+        (enfant, journal)
     };
     let premiers = ["[2001:db8::51]:6630", "192.0.2.51:6630"];
-    let mut speedy = lancer_speedy(&premiers);
+    let (mut speedy, _) = lancer_speedy(&premiers);
     for (quelle, ou, cle) in [
         ("nitrogen", ou_nitrogen, &publique_nitrogen),
         ("argon", ou_argon, &publique_argon),
@@ -2597,7 +2598,7 @@ async fn un_annuaire_local_publie_ses_locateurs_et_les_racines_les_repliquent() 
     // ── 3. SES ADRESSES CHANGENT : IL REDÉMARRE, ET LE DIT ──────────────────
     eteindre(&mut speedy);
     let seconds = ["[2001:db8::52]:6630"];
-    let mut speedy = lancer_speedy(&seconds);
+    let (mut speedy, _) = lancer_speedy(&seconds);
     for (quelle, ou, cle) in [
         ("nitrogen", ou_nitrogen, &publique_nitrogen),
         ("argon", ou_argon, &publique_argon),
@@ -2610,9 +2611,42 @@ async fn un_annuaire_local_publie_ses_locateurs_et_les_racines_les_repliquent() 
         });
     }
 
+    // ── 3 BIS. `--locator auto` SANS ADRESSE : RIEN DE FAUX NE PART ─────────
+    //
+    // (décision 64) Une interface qui n'existe pas — ou un noyau sans
+    // `/proc/net/if_inet6` — ne donne aucune adresse : l'absence se dit, la
+    // voie s'ouvre, et les racines gardent la dernière publication plutôt
+    // qu'un retrait vers l'adresse déclarée.
+    eteindre(&mut speedy);
+    let (mut speedy, journal) = lancer_speedy(&["auto:asl-essai0"]);
+    let dit = |quoi: &str| {
+        journal
+            .lock()
+            .expect("le journal")
+            .iter()
+            .any(|ligne| ligne.contains(quoi))
+    };
+    attendre!("l'absence d'adresse dite", {
+        dit("localisateur : aucune adresse IPv6 globale stable sur asl-essai0")
+    });
+    // Les machines arrivent APRÈS la publication des locateurs, dans la même
+    // session : la voie a passé l'endroit où elle aurait publié.
+    attendre!("la voie de speedy ouverte et servie", {
+        dit("machine(s) de nos domaines reçue(s)")
+    });
+    for (ou, cle) in [
+        (ou_nitrogen, &publique_nitrogen),
+        (ou_argon, &publique_argon),
+    ] {
+        assert!(renvoie_vers(
+            &annonce_chez(ou, cle, grenier, &secrete_grenier).await,
+            &seconds,
+        ));
+    }
+
     // ── 4. AUCUN LOCATEUR : L'ADRESSE DÉCLARÉE SERT DE NOUVEAU ──────────────
     eteindre(&mut speedy);
-    let mut speedy = lancer_speedy(&[]);
+    let (mut speedy, _) = lancer_speedy(&[]);
     for (quelle, ou, cle) in [
         ("nitrogen", ou_nitrogen, &publique_nitrogen),
         ("argon", ou_argon, &publique_argon),

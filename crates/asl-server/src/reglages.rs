@@ -170,9 +170,21 @@ pub struct ReglageFederation {
     pub racines: Vec<CibleFederee>,
     /// Où l'on joint CET annuaire (`--locator`, répétable, quatre au plus),
     /// publié aux racines à chaque ouverture de sa voie (décision 57). **Vide,
-    /// il retire ce qui était publié** : l'adresse déclarée à l'inscription
-    /// sert de nouveau.
+    /// et sans [`Self::auto`], il retire ce qui était publié** : l'adresse
+    /// déclarée à l'inscription sert de nouveau.
     pub locateurs: Vec<String>,
+    /// `--locator auto` ou `--locator auto:<interface>` (décision 64) :
+    /// l'adresse IPv6 globale stable de la machine, détectée et relue à la
+    /// cadence de la fédération, publiée AVANT [`Self::locateurs`].
+    pub auto: Option<LocateurAuto>,
+}
+
+/// `--locator auto[:<interface>]` : le localisateur se détecte (décision 64).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocateurAuto {
+    /// L'interface dont on prend l'adresse, si elle est nommée ; sinon, celle
+    /// de la route par défaut (`asl_registre::localisateur`).
+    pub interface: Option<String>,
 }
 
 /// Une racine vers laquelle un annuaire local fédère.
@@ -339,8 +351,9 @@ pub enum Faute {
     CompteInvalide(String),
     /// `--federation <locateur>=<…>` dont l'identité n'est pas un `n-…`.
     AnnuaireInvalide(String),
-    /// `--locator` n'a pas la forme `hôte:port`, ou il y en a plus de quatre,
-    /// ou il n'y a pas de `--federation` à qui les publier.
+    /// `--locator` n'a pas la forme `hôte:port`, `auto` ou
+    /// `auto:<interface>`, ou il y en a plus de quatre, ou `auto` est donné
+    /// deux fois, ou il n'y a pas de `--federation` à qui les publier.
     LocateurInvalide(String),
     /// Un drapeau de l'ancienne grammaire, en français, qui a son
     /// équivalent en anglais.
@@ -439,7 +452,8 @@ impl core::fmt::Display for Faute {
             ),
             Self::LocateurInvalide(quoi) => write!(
                 sortie,
-                "--locator attend `hôte:port`, quatre au plus, avec --federation — et non « {quoi} »"
+                "--locator attend `hôte:port`, `auto` ou `auto:<interface>` (une fois), quatre \
+                 au plus, avec --federation — et non « {quoi} »"
             ),
             Self::Manque(quoi) => write!(sortie, "il manque {quoi}"),
             Self::Ancien { ancien, nouveau } => {
@@ -498,10 +512,16 @@ asl-server — an air-service-locator service directory.
                             identity to find there; repeat it for each root;
                             without `=<n-…>`, the locator must be in the
                             embedded roots list; without it, this is a root
-  --locator      <host:port> where this LOCAL directory is reached, published
+  --locator      <host:port|auto|auto:<interface>>
+                            where this LOCAL directory is reached, published
                             to the roots each time its lane opens; repeat it
                             (four at most); none withdraws what was published,
-                            and the address declared at registration serves
+                            and the address declared at registration serves.
+                            `auto` detects this machine's stable global IPv6
+                            address (Linux, /proc/net/if_inet6) on the default
+                            route's interface, or on <interface>, with the
+                            listening port; re-read every ten seconds, a new
+                            one is pushed to the roots at once
   --push-roots   <path>     the CAs that validate push servers' TLS certs, PEM
                             — typically /etc/ssl/certs/ca-certificates.crt;
                             without it, NO notification is ever sent
@@ -641,6 +661,7 @@ impl Reglages {
         let mut racines_de_poussee: Option<PathBuf> = None;
         let mut federation_racines: Vec<CibleFederee> = Vec::new();
         let mut locateurs: Vec<String> = Vec::new();
+        let mut auto: Option<LocateurAuto> = None;
 
         let mut arguments = arguments.into_iter();
         while let Some(drapeau) = arguments.next() {
@@ -688,7 +709,17 @@ impl Reglages {
                 "--invitation-ttl" => invitation_ttl_s = nombre(drapeau, valeur()?.as_ref())?,
                 "--push-roots" => racines_de_poussee = Some(PathBuf::from(valeur()?.as_ref())),
                 "--federation" => federation_racines.push(cible_federee(valeur()?.as_ref())?),
-                "--locator" => locateurs.push(locateur(valeur()?.as_ref(), locateurs.len())?),
+                "--locator" => {
+                    let donnee = valeur()?;
+                    let deja = locateurs.len().saturating_add(usize::from(auto.is_some()));
+                    match locateur_auto(donnee.as_ref()) {
+                        Some(lu) if auto.is_none() && deja < asl_registre::LOCATEURS_MAX => {
+                            auto = Some(lu?);
+                        }
+                        Some(_) => return Err(Faute::LocateurInvalide(donnee.as_ref().to_owned())),
+                        None => locateurs.push(locateur(donnee.as_ref(), deja)?),
+                    }
+                }
                 autre => return Err(refus(autre)),
             }
         }
@@ -741,16 +772,18 @@ impl Reglages {
                 _ => return Err(Faute::PairIncomplet),
             },
             federation: if federation_racines.is_empty() {
-                match locateurs.first() {
+                match (locateurs.first(), auto) {
                     // Une racine ne publie pas ses locateurs ainsi : les
                     // siens sont embarqués (décision 56).
-                    Some(premier) => return Err(Faute::LocateurInvalide(premier.clone())),
-                    None => None,
+                    (Some(premier), _) => return Err(Faute::LocateurInvalide(premier.clone())),
+                    (None, Some(_)) => return Err(Faute::LocateurInvalide("auto".to_owned())),
+                    (None, None) => None,
                 }
             } else {
                 Some(ReglageFederation {
                     racines: federation_racines,
                     locateurs,
+                    auto,
                 })
             },
             orphelins_jours,
@@ -1102,6 +1135,33 @@ fn locateur(donnee: &str, deja: usize) -> Result<String, Faute> {
     Ok(donnee.to_owned())
 }
 
+/// Lit `auto` ou `auto:<interface>` (décision 64) — `None` si ce n'est pas
+/// cette forme, et c'est alors un locateur `hôte:port`. **Un hôte nommé
+/// `auto` ne se donne donc pas par son nom** : son adresse le désigne.
+///
+/// Un nom d'interface Linux : de un à quinze octets (`IFNAMSIZ`), ni espace,
+/// ni `/`, ni `:`.
+fn locateur_auto(donnee: &str) -> Option<Result<LocateurAuto, Faute>> {
+    let interface = match donnee.strip_prefix("auto") {
+        Some("") => None,
+        Some(reste) => Some(reste.strip_prefix(':')?),
+        None => return None,
+    };
+    let valide = interface.is_none_or(|nom| {
+        (1..=15).contains(&nom.len())
+            && nom
+                .bytes()
+                .all(|octet| octet.is_ascii_graphic() && !matches!(octet, b'/' | b':'))
+    });
+    Some(if valide {
+        Ok(LocateurAuto {
+            interface: interface.map(str::to_owned),
+        })
+    } else {
+        Err(Faute::LocateurInvalide(donnee.to_owned()))
+    })
+}
+
 /// Lit `<locateur>` ou `<locateur>=<n-…>` — une racine vers laquelle
 /// fédérer, et qui l'on doit y trouver (décision 58).
 fn cible_federee(donnee: &str) -> Result<CibleFederee, Faute> {
@@ -1149,8 +1209,8 @@ fn nombre<T: core::str::FromStr>(drapeau: &str, donnee: &str) -> Result<T, Faute
 #[cfg(test)]
 mod tests {
     use super::{
-        Administration, CibleFederee, Faute, Invite, Oubli, ReglageAndroid, ReglageApple,
-        ReglageFederation, ReglagePair, Reglages,
+        Administration, CibleFederee, Faute, Invite, LocateurAuto, Oubli, ReglageAndroid,
+        ReglageApple, ReglageFederation, ReglagePair, Reglages,
     };
 
     /// Les trois réglages obligatoires, et rien d'autre.
@@ -1642,6 +1702,7 @@ mod tests {
                     },
                 ],
                 locateurs: Vec::new(),
+                auto: None,
             }))
         );
         // `--locator` : répétable, quatre au plus, de la forme `hôte:port`,
@@ -1687,6 +1748,59 @@ mod tests {
             !Faute::LocateurInvalide("x".to_owned())
                 .to_string()
                 .is_empty()
+        );
+        // `--locator auto[:<interface>]` (décision 64) : une fois, et il
+        // compte parmi les quatre ; les fixes le suivent.
+        let federation = |locateurs: &[&str]| {
+            let mut arguments = federe.to_vec();
+            for locateur in locateurs {
+                arguments.extend(["--locator", locateur]);
+            }
+            Reglages::depuis(avec(&arguments)).map(|lus| {
+                lus.federation
+                    .map(|federation| (federation.auto, federation.locateurs))
+            })
+        };
+        assert_eq!(
+            federation(&["auto"]),
+            Ok(Some((Some(LocateurAuto { interface: None }), Vec::new())))
+        );
+        assert_eq!(
+            federation(&["192.0.2.7:6630", "auto:enp3s0f0"]),
+            Ok(Some((
+                Some(LocateurAuto {
+                    interface: Some("enp3s0f0".to_owned())
+                }),
+                vec!["192.0.2.7:6630".to_owned()]
+            )))
+        );
+        // Un hôte dont le nom commence par `auto` reste un locateur.
+        assert_eq!(
+            federation(&["automate:6630"]),
+            Ok(Some((None, vec!["automate:6630".to_owned()])))
+        );
+        for (locateurs, refuse) in [
+            (&["auto", "auto:eth0"][..], "auto:eth0"),
+            (&["auto:"][..], "auto:"),
+            (&["auto:eth/0"][..], "auto:eth/0"),
+            (&["auto:eth:0"][..], "auto:eth:0"),
+            (
+                &["auto:un-nom-bien-trop-long"][..],
+                "auto:un-nom-bien-trop-long",
+            ),
+            (&["a:1", "b:2", "c:3", "d:4", "auto"][..], "auto"),
+            (&["auto", "a:1", "b:2", "c:3", "d:4"][..], "d:4"),
+        ] {
+            assert_eq!(
+                federation(locateurs),
+                Err(Faute::LocateurInvalide(refuse.to_owned())),
+                "{locateurs:?}"
+            );
+        }
+        // Une racine ne détecte pas ses locateurs : ils sont embarqués.
+        assert_eq!(
+            Reglages::depuis(avec(&["--locator", "auto"])).map(|_| ()),
+            Err(Faute::LocateurInvalide("auto".to_owned()))
         );
         // `<locateur>=<n-…>` : l'identité attendue, dite (décision 58).
         let identite = asl_id::Identifiant::depuis_entropie(asl_id::Genre::Annuaire, [7; 16]);

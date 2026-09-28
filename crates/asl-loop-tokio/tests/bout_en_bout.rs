@@ -6849,6 +6849,8 @@ struct AnnuaireLocal {
     tache: tokio::task::JoinHandle<Comptes>,
     federateur: tokio::task::JoinHandle<()>,
     entrepot: Arc<Entrepot>,
+    /// Ses locateurs, que l'essai peut changer en service (décision 64).
+    locateurs: Arc<asl_loop_tokio::LocateursPublies>,
 }
 
 /// Lève un annuaire local qui fédère vers cette racine, avec cette clé
@@ -6886,6 +6888,9 @@ async fn lever_un_annuaire_local(
     .await;
     let fermetures = fermetures.await.expect("les fermetures");
     let entrepot_local = entrepot_local.await.expect("l'entrepôt");
+    let locateurs = Arc::new(asl_loop_tokio::LocateursPublies::fixes(
+        locateurs.iter().map(|&texte| texte.to_owned()).collect(),
+    ));
     let federateur = asl_loop_tokio::Federateur {
         entrepot: Arc::clone(&entrepot_local),
         adresse: format!("127.0.0.1:{}", vers.port()),
@@ -6899,7 +6904,7 @@ async fn lever_un_annuaire_local(
         alea: Box::new(|| 0),
         journal: Box::new(|ligne| journaliser(&ligne)),
         plafond_recul_ms: 200,
-        locateurs: locateurs.iter().map(|&texte| texte.to_owned()).collect(),
+        locateurs: Arc::clone(&locateurs),
     };
     AnnuaireLocal {
         adresse,
@@ -6909,6 +6914,7 @@ async fn lever_un_annuaire_local(
         tache,
         federateur: tokio::spawn(federateur.federer_sans_fin()),
         entrepot: entrepot_local,
+        locateurs,
     }
 }
 
@@ -7483,6 +7489,51 @@ async fn la_federation_de_bout_en_bout() {
         };
         assert_eq!(identite, attendue.texte().as_str(), "{adresse} : {corps}");
     }
+
+    // ── LE PRÉFIXE CHANGE EN SERVICE : LA VOIE LE POUSSE, SANS SE ROUVRIR ───
+    //
+    // (décision 64) Le détecteur de `--locator auto` republie ; le fédérateur
+    // le voit au tour suivant de sa boucle et le pose à la racine, qui le
+    // prend pour le même membre — la même clé prouvée, une autre adresse — et
+    // remplace l'ancienne.
+    assert!(
+        speedy_local
+            .locateurs
+            .publier(vec!["[2001:db8:1::51]:6630".to_owned()])
+    );
+    let ou_joindre_speedy = || -> Vec<String> {
+        entrepot_racine
+            .membre_d_annuaire(n_speedy)
+            .expect("lisible")
+            .expect("speedy est membre")
+            .ou_joindre()
+            .iter()
+            .map(|adresse| adresse.texte().to_owned())
+            .collect()
+    };
+    for _ in 0..100_u32 {
+        if ou_joindre_speedy() == ["[2001:db8:1::51]:6630"] {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        ou_joindre_speedy(),
+        ["[2001:db8:1::51]:6630"],
+        "la nouvelle adresse remplace les deux anciennes"
+    );
+    let publie = format!(
+        "fédération vers 127.0.0.1:{} : localisateur publié — [2001:db8:1::51]:6630 (204)",
+        adresse.port()
+    );
+    assert!(
+        JOURNAL
+            .lock()
+            .expect("le journal n'est pas empoisonné")
+            .iter()
+            .any(|ligne| ligne == &publie),
+        "le fédérateur dit ce qu'il a publié"
+    );
 
     // Speedy s'arrête ; le daemon se replie sur helium.
     speedy_local.arreter().await;

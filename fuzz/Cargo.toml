@@ -265,3 +265,10 @@ path = "fuzz_targets/fuzz_asl_racines.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_asl_registre_localisateur"
+path = "fuzz_targets/fuzz_asl_registre_localisateur.rs"
+test = false
+doc = false
+bench = false

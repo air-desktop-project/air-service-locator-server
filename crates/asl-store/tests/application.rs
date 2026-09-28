@@ -3051,6 +3051,17 @@ fn un_membre_publie_ses_locateurs_et_une_publication_identique_n_ecrit_rien() {
     // La même publication, au démarrage suivant : rien ne s'écrit.
     assert!(base.publier_locateurs(n1, &publies).expect("lue"));
     assert_eq!(publiee(), Some(premiere));
+    // **LE PRÉFIXE A CHANGÉ** (décision 64) : le même membre publie une autre
+    // adresse, qui remplace la précédente sous une estampille plus récente.
+    let renumerotes = [adresse("[2001:db8:1::1]:6630")];
+    assert!(base.publier_locateurs(n1, &renumerotes).expect("remplacés"));
+    assert_eq!(joindre(), renumerotes.to_vec());
+    let renumerotee = publiee().expect("remplacés");
+    assert!(renumerotee > premiere);
+    assert!(base.publier_locateurs(n1, &publies).expect("reposés"));
+    assert_eq!(joindre(), publies.to_vec());
+    let premiere = publiee().expect("reposés");
+    assert!(premiere > renumerotee);
     // Retirés : l'adresse déclarée sert de nouveau, et le retrait garde son
     // estampille.
     assert!(base.publier_locateurs(n1, &[]).expect("retirés"));

@@ -284,7 +284,9 @@ lire la clé.
   (allocation à nous) et 2 (ancrer sur les noms) ne sont plus nécessaires ; la
   première reste un confort, la seconde est abandonnée.
 - **Un annuaire local change d'adresse sans rien redéclarer** : il publie
-  lui-même ses locateurs sur sa voie (décision 57), et le `421` suit.
+  lui-même ses locateurs sur sa voie (décision 57), et le `421` suit. **Et il
+  la détecte lui-même** (`--locator auto`, décision 64, 0.35.0) : un préfixe
+  IPv6 que l'opérateur renouvelle se publie sans redémarrer — ci-dessous.
 - **La preuve de possession à la couche HTTP ne disparaît pas.** Les défis
   (`POST /v1/defi`, genre `n`, `POST /v1/pair/preuve`) prouvent déjà l'identité
   au-dessus de TLS ; TLS la prouve maintenant AUSSI au-dessous. Les deux
@@ -299,6 +301,61 @@ lire la clé.
   fédérer.
 
 ---
+
+### Le localisateur se détecte (décision 64, 0.35.0)
+
+**Le défaut constaté** : speedy, derrière une box grand public, déclarait
+`--locator [2a01:cb19:d27:2f00:3ac9:86ff:fe47:9d54]:6630`, écrit en dur dans
+son unité. Le préfixe `2a01:cb19:d27:2f00::/64` est **délégué par
+l'opérateur**, et peut changer — une box qui redémarre, une renumérotation.
+L'adresse publiée devenait alors fausse **en silence** : les racines
+renvoyaient les daemons (`421`) vers une adresse où personne ne répondait, et
+rien ne le disait.
+
+**`--locator auto`** : l'annuaire local publie l'adresse IPv6 **globale et
+stable** de sa machine, au port où il écoute, et la **relit toutes les dix
+secondes** — la cadence de la fédération (`asl_loop_tokio::federation::CADENCE_MS`).
+Quand elle change, le journal dit `localisateur : A → B`, et **chaque voie
+la pousse aussitôt** à sa racine (`PUT /v1/federation/locateurs`), sans se
+rouvrir. La racine la prend pour le même membre — la clé l'a prouvé à
+l'ouverture de la voie — et la nouvelle remplace l'ancienne (décision 57 : le
+plus récent gagne, et se réplique à l'autre racine).
+
+**La règle du choix**, écrite une fois (`asl_registre::localisateur`, une
+fonction pure des deux textes du noyau, couverte et fuzzée) :
+
+1. **Linux** : on lit `/proc/net/if_inet6` (les adresses et leurs drapeaux) et
+   `/proc/net/ipv6_route` (la route par défaut). Aucune dépendance, aucun
+   appel au réseau.
+2. **Publiable** : unicast globale (`2000::/3`, ni Teredo ni 6to4) — donc ni
+   lien local, ni ULA, ni bouclage —, et ni **temporaire** (RFC 8981 : elle
+   change d'elle-même et ne reçoit rien), ni **dépréciée**, ni **en essai**,
+   ni **refusée** par la détection de doublon. Reste une adresse stable :
+   EUI-64, « stable privacy » (RFC 7217), ou posée à la main.
+3. **Laquelle** : celles de l'interface nommée (`--locator auto:<interface>`)
+   s'il y en a une ; sinon celles de l'interface de **la route par défaut
+   de plus petite métrique** — c'est par elle que la maison sort — si elle en
+   porte une ; sinon toutes. Parmi elles, **la plus petite** dans l'ordre
+   numérique. Le même état du noyau rend la même adresse, quel que soit
+   l'ordre des lignes.
+
+Sur speedy le 2026-09-28 : Ethernet (métrique 100) porte l'EUI-64
+`…:3ac9:86ff:fe47:9d54`, le Wi-Fi (métrique 600) une stable privacy et deux
+temporaires — la règle rend l'EUI-64 d'Ethernet.
+
+**Sans adresse publiable** — lien tombé, préfixe retiré avant que le suivant
+n'arrive, interface absente, système sans `/proc` —, **rien n'est publié**, et
+le journal le dit une fois. Les racines gardent la dernière publication : c'est
+la meilleure estimation qu'on ait, et un retrait renverrait vers l'adresse
+déclarée à l'inscription, qui n'a aucune raison d'être meilleure. Au démarrage,
+tant que rien n'est détecté, la voie s'ouvre sans rien publier. Dès qu'une
+adresse revient, elle part.
+
+**`auto` se combine** avec des locateurs fixes (`--locator auto --locator
+192.0.2.10:6630`) : l'adresse détectée est publiée en premier, les fixes à la
+suite, quatre au plus en tout. Sans `--locator`, rien ne change : aucun
+locateur, c'est un retrait (décision 57). Un hôte qui s'appellerait `auto` ne
+se donne plus par son nom — son adresse le désigne.
 
 ## 3. Ce qui se synchronise ENTRE LES RACINES, et ce qui ne s'y synchronise pas
 

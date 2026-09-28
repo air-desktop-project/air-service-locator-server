@@ -2141,9 +2141,13 @@ PUT  /v1/federation/locateurs    {"locateurs":["[IPv6]:port","IPv4:port",…]} �
 ses locateurs à **chaque ouverture** de sa voie — `--locator <hôte:port>`,
 répétable, quatre au plus ; aucun, c'est un retrait. L'opération répliquée
 `inscription-locateurs` les porte d'une racine à l'autre (le plus récent gagne,
-par membre) ; le `421` et `GET /v1/annuaires` les rendent. La détection
-automatique des adresses IPv6 de la maison — qu'un préfixe qui change se
-publie sans redémarrer — est une suite nommée.
+par membre) ; le `421` et `GET /v1/annuaires` les rendent. **Le localisateur
+se détecte** (décision 64, 0.35.0) : `--locator auto[:<interface>]` publie
+l'adresse IPv6 globale stable de la machine, la relit à la cadence de la
+fédération, et la republie **dans la session** quand elle change — un
+`PUT /v1/federation/locateurs` de plus sur la voie ouverte, que la racine
+prend pour le même membre. Sans adresse candidate, rien n'est publié, et la
+racine garde la dernière (`annuaires.md` §2 quater).
 
 La réponse d'annonce est **l'objet que `GET /v1/ou` rend**, encodé par
 l'annuaire local : les racines le rendent tel quel à qui peut le localiser.
