@@ -630,6 +630,18 @@ Le prix, là encore : deux daemons du même nom sur la même machine se chassent
 l'un l'autre indéfiniment. C'est visible — la date d'annonce oscille — et
 l'application le signale.
 
+**Un service n'a pas toujours une machine : l'`asl-directory`** (décidé le
+2026-09-28, Thierry ; décisions 73 à 78, `annuaires.md` §2 quinquies). Chaque
+annuaire local accepté a un service nommé `asl-directory`, **sous le `n-…` de
+son titulaire** et non sous un `m-…` ; personne ne l'annonce, les racines le
+synthétisent de l'inscription et des voies de ses membres, et son `s-…` se
+dérive du `n-…` sous une chaîne de séparation propre (`"asl/annuaire/1"`).
+**Le nom est réservé** : un daemon qui l'annonce est refusé. Il se résout par
+`GET /v1/ou/{n-…}/asl-directory`, en rendant l'adresse et l'identité de chaque
+membre vivant, et seulement au cercle de ceux qui reçoivent le `421` de cet
+annuaire (`annuaires.md` §2 quinquies, « Le cercle ») — **pas au public**, et
+pas par un droit qu'on écrirait.
+
 ### 2.5 Autorisation
 
 > **Renversé le 2026-09-26 (Thierry) — l'autorisation devient un DROIT accordé à
@@ -778,6 +790,7 @@ traverse un serveur de poussée qui n'a pas à le savoir.
 | `rôle` | `racine`, **`local`** (2026-09-26), ou `ordinaire`. Un annuaire **local** est l'`asl-server` qu'un utilisateur fait tourner chez lui : il fait autorité sur les domaines qu'il héberge (§2.11), et il est **inscrit** auprès des racines après approbation (ci-dessous). `ordinaire` — l'annuaire qui fait autorité sur des COMPTES, relié à d'autres par une confiance bilatérale — reste décrit par `annuaires.md` §4–§5, et devient une suite nommée (`annuaires.md` §8). |
 | `pairs` | Les annuaires avec qui une relation de confiance est établie, et ce qui se réplique dans chaque sens. |
 | `membres` | **Pour un annuaire local** (2026-09-27, décision 49) : un ou deux `n-…` — le titulaire, dont le `n-…` nomme l'annuaire, et au plus un second, sa paire de secours. Chacun approuvé à son tour (`annuaires.md` §2 ter). |
+| `asl-directory` | **Pour un annuaire local accepté** (2026-09-28, décisions 73 à 78) : son service, sous le `n-…` du titulaire, synthétisé par les racines — vivant tant qu'une voie de membre tient, avec les locateurs de chaque membre vivant et son `n-…`. **Pas pour une racine** : `GET /v1/racines` en tient lieu, et au moins une racine écoute sur 6630 (`annuaires.md` §2 quinquies). |
 
 Deux annuaires racines sont fournis par air-desktop-project — **deux, pour ne
 pas être un point de panne unique**. D'autres utilisateurs et d'autres
@@ -1149,6 +1162,14 @@ sur un élément**.
 | `rattacher` | Rattacher et détacher **ses propres** machines au domaine. | Un domaine. |
 | `voir` | Lister les machines et les services — identifiants, noms, état —, **pas leurs adresses**. | Domaine, machine, service. |
 | `localiser` | Obtenir l'adresse et le port d'un service : `GET /v1/ou` (`protocole.md` §3). **Emporte `voir`** sur ce qu'il couvre. | Domaine, machine, service. |
+
+**Un service échappe à ce tableau : l'`asl-directory` d'un annuaire local**
+(décision 77, `annuaires.md` §2 quinquies). Aucun droit ne s'écrit sur lui ; le
+résolvent son propriétaire, les administrateurs des racines, tout compte qui
+tient `voir` ou `localiser` sur un domaine que cet annuaire héberge, et —
+aligné sur le `421`, à confirmer (`annuaires.md` §7, question 24) — tout compte
+dont une machine y est rattachée. `voir` y donne donc une adresse, ce qu'il ne
+fait nulle part ailleurs.
 
 **Qui accorde.** Sur un domaine, ses machines et ses services : un membre d'un
 groupe qui a `administrer` sur ce domaine. Sur **sa propre machine**, et ses
