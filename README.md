@@ -133,28 +133,30 @@ ne doit pas cacher une faute de fond.
 ## Lancer un annuaire
 
 ```sh
-scripts/ca.sh racine
-scripts/ca.sh serveur banc localhost ::1 127.0.0.1
-
+cargo run -p asl-server -- --new-identity-key local/banc.key   # écrit .key (0600), .key.pub et
+                                                               # .key.crt, imprime le n-…
 cargo run -p asl-server -- \
-    --store       local/annuaire.redb \
-    --certificate local/ca/banc/chaine.pem \
-    --key         local/ca/banc/serveur.key \
-    --attestation optional      # ou `required` : il n'y a pas de défaut
+    --store        local/annuaire.redb \
+    --identity-key local/banc.key \
+    --attestation  optional     # ou `required` : il n'y a pas de défaut
 ```
 
-**Deux racines qui se répliquent** (`docs/replication.md`) tiennent chacune une
-clé d'identité, la clé publique de l'autre, et l'autorité qui valide son
-certificat TLS :
+**L'annuaire ne présente QUE son certificat d'identité** (0.34.0, fin de la
+transition, décision 58) : un certificat d'un maillon que sa clé signe
+elle-même, frappé au démarrage. Un client le croit si la clé est celle qu'il
+attend — ni autorité, ni nom, ni date (C20 : ASL fonctionne sans DNS).
+`--certificate`, `--key` et tous les `--…-ca` ont été **retirés** : passés
+encore, ils sont refusés, avec ce qu'il faut faire à la place.
+
+**Deux racines qui se répliquent** (`docs/replication.md`) tiennent chacune sa
+clé d'identité et la clé publique de l'autre — et c'est tout ce qui fait
+croire l'autre :
 
 ```sh
-asl-server --new-identity-key local/nitrogen.key      # écrit .key (0600) et .key.pub,
-                                                      # imprime la clé publique et le n-…
 cargo run -p asl-server -- … \
     --identity-key local/nitrogen.key \
-    --peer         argon.air-desktop.org:6630 \
-    --peer-key     local/argon.key.pub \              # le .pub de l'AUTRE
-    --peer-ca      local/ca/racine.crt                # l'autorité de la cérémonie
+    --peer         '[2001:db8::2]:6630' \
+    --peer-key     local/argon.key.pub                # le .pub de l'AUTRE
 ```
 
 **L'attestation de clé des Android** (`docs/protocole.md` §2.1, C19) se
@@ -188,7 +190,7 @@ cargo run -p asl-server -- … \
     --push-roots /etc/ssl/certs/ca-certificates.crt   # les autorités des serveurs de poussée
 ```
 
-`--push-roots` se lit comme `--peer-ca` et `--android-roots` : un fichier PEM
+`--push-roots` se lit comme `--android-roots` : un fichier PEM
 que VOUS désignez, rien de téléchargé, rien d'épinglé par défaut. **Pour
 joindre ntfy.sh et les distributeurs publics, le paquet de certificats de la
 distribution suffit** (`ca-certificates` sur Ubuntu) ; un distributeur
@@ -223,8 +225,8 @@ l'inscription : l'annuaire présente le certificat qu'elle signe elle-même,
 frappé au démarrage. `--federation` se donne une fois par racine, par un
 **locateur** — une adresse de la liste embarquée des racines, dont on attend
 la clé ; `--federation <locateur>=<n-…>` dit l'identité d'un locateur hors de
-la liste. `--federation-ca` (l'autorité d'hier) ne sert plus qu'aux racines
-qui n'ont pas fini leur transition (décision 58).
+la liste. Un locateur peut être un nom : il ne dit que **où** aller, jamais
+**qui** l'on y croit.
 
 **Où l'on joint la maison** (0.30.0, décision 57) : `--locator`, répétable,
 quatre au plus, publié aux racines à chaque ouverture de la voie — le `421`
@@ -233,11 +235,8 @@ l'inscription. Un préfixe IPv6 qui change se dit en redémarrant avec le
 nouveau ; aucun `--locator` retire ce qui était publié. Les racines, elles,
 servent `GET /v1/racines` : leur identité et leurs locateurs (décision 56).
 
-**Une racine en transition** garde `--certificate`/`--key` : elle sert sa
-chaîne d'hier à qui la vise par un nom (SNI), et son certificat d'identité à
-qui vise une adresse. `--peer-ca` devient facultatif : le pair est cru par
-`--peer-key`. `asl-server --identity-certificate <clé>` imprime le certificat
-d'identité d'une clé (`openssl x509 -noout -text` pour l'inspecter).
+`asl-server --identity-certificate <clé>` imprime le certificat d'identité
+d'une clé (`openssl x509 -noout -text` pour l'inspecter).
 
 **C'est lui qui ouvre** : aucun port entrant n'est nécessaire pour cette voie.
 Il reçoit des racines les machines de ses domaines, authentifie leurs daemons,
@@ -249,8 +248,8 @@ racine reçoit `421`, avec l'annuaire et son adresse déclarée. Un port entrant
 (UDP 6630 vers l'adresse publique) n'est utile que pour les daemons hors de la
 maison.
 
-Les quatre vont ensemble. Sans `--identity-key`, la racine tourne seule et le
-dit au démarrage. Chacune ouvre une connexion sortante vers l'autre et y **tire
+`--peer` et `--peer-key` vont ensemble ; sans eux, la racine tourne seule.
+Chacune ouvre une connexion sortante vers l'autre et y **tire
 sans fin** ce que l'autre a écrit ; une écriture faite chez l'une est chez
 l'autre en moins d'une seconde, voie ouverte. `GET /v1/replication`, **sur la
 voie machine**, rend l'état : `{"pair":"n-…","voie":"ouverte","compteur":…,
@@ -276,13 +275,13 @@ d'avant lit sans peine ce que le nouveau écrit, et un client qui ne lit pas
 Les bancs — `nitrogen` et `argon` — tournent en 0.4.x avec des bases sans
 estampille. La réplication les reprend sans rien perdre ; voici l'ordre exact.
 
-1. **Frappez l'identité de chaque banc, EN TANT QUE `asl-server`.** La clé est
-   lue par le service, qui tourne sous ce compte ; la frapper en `root` puis
-   oublier de la lui donner à lire est la faute la plus facile.
+1. **Chaque banc a son identité** — l'unité la lit en
+   `/etc/asl-server/identite.key`, et le service ne démarre pas sans elle.
+   La clé est lue par le service, qui tourne sous `asl-server` ; la frapper
+   en `root` puis oublier de la lui donner à lire est la faute la plus facile.
 
    ```sh
-   sudo -u asl-server asl-server --new-identity-key /etc/asl-server/identite.key
-   # ou, si vous l'avez frappée en root :
+   sudo asl-server --new-identity-key /etc/asl-server/identite.key
    sudo chown root:asl-server /etc/asl-server/identite.key* && sudo chmod 0640 /etc/asl-server/identite.key
    ```
 
@@ -293,26 +292,25 @@ estampille. La réplication les reprend sans rien perdre ; voici l'ordre exact.
    `/etc/asl-server/pair.pub`, et réciproquement. Comparez les `n-…` imprimés à
    l'œil — deux bancs qui parlent de la même clé impriment le même.
 
-3. **Posez `racine.crt`** — l'autorité de la cérémonie, celle que le client
-   épingle déjà (`scripts/ca.sh racine`) — en `/etc/asl-server/racine.crt` sur
-   les deux. C'est elle qui valide le certificat TLS d'en face (`--peer-ca`).
+   **Ce `.pub` est tout ce qui fait croire l'autre** : la poignée de main
+   attend sa clé, et rien d'autre (décision 58). Aucune autorité à poser.
 
-4. **Le drop-in**, sur chaque banc, avec l'adresse de l'AUTRE :
+3. **Le drop-in**, sur chaque banc, avec l'adresse de l'AUTRE :
 
    ```sh
    systemctl edit asl-server
    # [Service]
-   # Environment="ASL_REPLICATION=--identity-key /etc/asl-server/identite.key --peer argon.air-desktop.org:6630 --peer-key /etc/asl-server/pair.pub --peer-ca /etc/asl-server/racine.crt"
+   # Environment="ASL_REPLICATION=--peer [2001:db8::2]:6630 --peer-key /etc/asl-server/pair.pub"
    ```
 
    Le modèle est expédié sous
    `/usr/share/doc/asl-server/replication.conf.exemple`. **L'affectation est
    citée, en entier** : `Environment=` découpe sa ligne sur les espaces avant
    d'y lire des affectations, et sans les guillemets `ASL_REPLICATION` ne vaut
-   que `--identity-key` — l'annuaire refuse de démarrer, « attend une valeur ».
+   que `--peer` — l'annuaire refuse de démarrer, « attend une valeur ».
    Les guillemets sont pour systemd, pas pour la valeur : c'est ensuite le
    `$ASL_REPLICATION` de l'unité, lui non cité, qui la découpe en arguments,
-   et les quatre `--peer…` arrivent séparés.
+   et les `--peer…` arrivent séparés.
 
    **Entre deux bancs d'un même /64 chez un hébergeur, IPv6 peut ne pas
    passer** — la voie reste « coupée, la poignée de main n'a pas abouti à
@@ -323,7 +321,7 @@ estampille. La réplication les reprend sans rien perdre ; voici l'ordre exact.
    persistante — un fragment netplan à part, sans toucher à celui de
    l'hébergeur. C'est un réglage de l'hôte, pas de l'annuaire.
 
-5. **Redémarrez, l'un puis l'autre** — l'ordre est sans importance, chacun
+4. **Redémarrez, l'un puis l'autre** — l'ordre est sans importance, chacun
    rappelle l'autre jusqu'à ce qu'il réponde. Au **premier** démarrage avec une
    clé, chaque banc **ré-estampille** ce qu'il avait écrit sans identité (sous
    `n-` seize zéros) sous son identité réelle, une fois, dans une transaction,
@@ -335,7 +333,7 @@ estampille. La réplication les reprend sans rien perdre ; voici l'ordre exact.
    asl-server : … amorcé par instantané — … cadres, … octets, … parts
    ```
 
-6. **Vérifiez.** `asl` n'a pas encore de verbe pour l'état de la voie ; on
+5. **Vérifiez.** `asl` n'a pas encore de verbe pour l'état de la voie ; on
    interroge `GET /v1/replication` en brut, depuis une machine enrôlée (elle est
    **sur la voie machine**, pas publique — elle ne se rend pas à un inconnu). Un
    compte créé chez l'un doit se lire chez l'autre en une seconde, et
@@ -379,7 +377,7 @@ La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
 scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.33.0_amd64.deb
+sudo dpkg -i asl-server_0.34.0_amd64.deb
 ```
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
@@ -427,8 +425,9 @@ choses qu'un paquet ne peut pas décider :
    configurée ; `optional` laisse n'importe qui créer un compte. Elle se pose par
    `systemctl edit asl-server`, et le modèle est expédié sous
    `/usr/share/doc/asl-server/attestation.conf.exemple`.
-2. **Le certificat**, émis pour le nom sous lequel cet annuaire répond, à poser
-   en `/etc/asl-server/certificat.pem` et `/etc/asl-server/cle.pem`.
+2. **La clé d'identité**, en `/etc/asl-server/identite.key` — l'annuaire ne
+   présente que le certificat qu'elle signe (décision 58). Le `postinst` dit
+   comment la frapper.
 
 Et une troisième, **facultative** : les racines d'attestation Android. Le paquet
 expédie celle de Google sous `/usr/share/doc/asl-server/racines-android/google.pem`
@@ -530,8 +529,7 @@ asl-server --new-operator-key ~/.config/asl/exploitant.key
 
 # À chaque arrivant, contre un annuaire QUI TOURNE.
 asl-server --invite \
-  --directory asl-root.air-desktop.org:6630 \
-  --ca racine.crt \
+  --directory '[2001:41d0:20a:900::1d32]:6630' \
   --operator-secret ~/.config/asl/exploitant.key
 # → 4K9M2-P7R1T
 ```
@@ -550,12 +548,13 @@ asl-server --invite \
   posture, ou pas de `--operator-key`), « la racine a refusé la signature »
   (`401` — ce n'est pas la bonne clé privée), « trop d'échecs depuis cette
   adresse » (`429` — attendez une minute).
-- `--ca` est l'autorité qui valide le certificat TLS de la racine : le
-  `racine.crt` de la cérémonie (`scripts/ca.sh`), celui-là même qu'un client
-  épingle.
+- **Qui l'on croit au bout** : un locateur de la liste embarquée des racines
+  est cru par la clé que la liste lui associe ; hors de la liste,
+  `--directory <locateur>=<n-…>` dit l'identité attendue. `--ca` a été
+  retiré en 0.34.0 (décision 58) : il est refusé.
 - **Nommer un administrateur des racines** (depuis 0.24.0, `docs/modele.md`
   §2.12) est le même geste, un compte de plus : `asl-server --add-admin
-  <u-…> --directory … --ca … --operator-secret …`, et `--remove-admin
+  <u-…> --directory … --operator-secret …`, et `--remove-admin
   <u-…>` pour le retirer. Il faut `--operator-key` sur la racine, quelle
   que soit sa posture. Le premier nommé encore administrateur est le
   propriétaire du domaine racine ; aucun compte n'est écrit dans le code.
@@ -644,22 +643,6 @@ place et comment l'effacer soi-même, plutôt que de le faire à votre place.
 
 `scripts/check-paquet.sh` est la barrière qui juge tout cela — y compris que le
 paquet ne choisisse pas la posture, et que le `purge` ne dépossède personne.
-
-## L'autorité de certification
-
-Ce n'est **pas** une barrière : on la lance à la main, et le fichier ne s'appelle
-donc pas `check-…`.
-
-```sh
-scripts/ca.sh racine                              # la racine air-desktop-project
-scripts/ca.sh serveur banc localhost ::1          # un certificat de serveur
-scripts/ca.sh montrer                             # ce qui existe
-```
-
-Elle écrit dans `local/`, **ignoré par git** : une clé privée poussée sur un
-dépôt public ne se retire jamais vraiment d'un historique. Le pourquoi de
-l'autorité, de l'algorithme et des SAN d'adresse est en
-[`docs/transport.md` §8](docs/transport.md).
 
 ## Licence
 

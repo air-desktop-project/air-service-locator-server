@@ -48,8 +48,10 @@ __pycache__/
 
 # `local/` — CE QUI NE DOIT JAMAIS ÊTRE POUSSÉ, ET SURTOUT PAS ICI.
 #
-# `scripts/ca.sh` y dépose l'autorité d'air-desktop-project : la clé privée de
-# la racine, et les clés des certificats de serveur. **Ce dépôt est PUBLIC.**
+# `scripts/ca.sh` — retiré en 0.34.0 avec la fin de la transition (décision
+# 58) — y déposait l'autorité d'air-desktop-project : la clé privée de la
+# racine, et les clés des certificats de serveur. Un poste d'avant peut les y
+# garder encore, et on y range toute clé de banc. **Ce dépôt est PUBLIC.**
 # Une clé privée poussée par mégarde ne se retire jamais vraiment d'un
 # historique — elle se révoque, et il n'y a pas de révocation ici.
 #

@@ -851,7 +851,7 @@ pas promettre.
   serait une posture qu'un second appareil contourne.
 - **Les racines de confiance sont des fichiers épinglés par l'exploitant**
   (`--android-roots`, et la racine App Attest dans le binaire), comme
-  `--peer-ca` l'est pour la réplication. Aucune ne demande un compte, une
+  `--peer-key` l'est pour la réplication. Aucune ne demande un compte, une
   console ou une clé « gérée par » un tiers pour être obtenue. C'est ce qui a
   disqualifié Play Integrity (`protocole.md` §2.1, 2026-09-16).
 - **Aucune bibliothèque d'un fournisseur de services dans les apps pour

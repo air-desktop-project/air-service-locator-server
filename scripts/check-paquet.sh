@@ -171,10 +171,16 @@ grep -q './usr/share/doc/asl-server/replication.conf.exemple' "$essai/contenu" \
     || rate "le fragment de réplication n'est pas expédié"
 # **L'AFFECTATION DU DROP-IN EST CITÉE EN ENTIER.** `Environment=` découpe sa
 # ligne sur les espaces avant d'y lire des affectations : non citée, la
-# variable ne vaudrait que `--identity-key`, et l'annuaire refuserait de
-# démarrer — c'est arrivé sur un banc, quatre fois, avant qu'on comprenne.
-grep -q '^Environment="ASL_REPLICATION=--identity-key .*"$' scripts/paquet.sh \
+# variable ne vaudrait que `--peer`, et l'annuaire refuserait de démarrer —
+# c'est arrivé sur un banc, quatre fois, avant qu'on comprenne.
+grep -q '^Environment="ASL_REPLICATION=--peer .*"$' scripts/paquet.sh \
     || rate "le gabarit du drop-in de réplication ne cite pas l'affectation en entier"
+# **L'IDENTITÉ EST UNE LIGNE FIXE, ET LA CHAÎNE D'HIER A DISPARU** (0.34.0,
+# décision 58) : sans `--identity-key`, l'annuaire n'a rien à présenter.
+grep -q -- '--identity-key /etc/asl-server/identite.key' "$essai/unite-nue" \
+    || rate "l'unité ne lit pas la clé d'identité, sans laquelle rien ne démarre"
+grep -qE -- '\$ASL_TLS|--certificate|--peer-ca' "$essai/unite-nue" \
+    && rate "l'unité passe encore un réglage de la forme d'hier"
 
 # **L'ATTESTATION ANDROID EST OPTIONNELLE, ET AUCUNE RACINE N'EST ÉPINGLÉE PAR
 # LE PAQUET** (C19). `$ASL_ANDROID` non cité, vide par défaut ; la racine de
@@ -303,8 +309,8 @@ for chemin in /usr/share/doc/asl-server/attestation.conf.exemple \
         || rate "le \`postinst\` ne nomme pas $chemin"
     [ -f "$essai/deballe$chemin" ] || rate "$chemin est nommé mais n'est pas expédié"
 done
-# Les deux chemins de certificat que le postinst annonce sont ceux de l'unité.
-for chemin in /etc/asl-server/certificat.pem /etc/asl-server/cle.pem; do
+# La clé d'identité que le postinst fait frapper est celle que l'unité lit.
+for chemin in /etc/asl-server/identite.key; do
     grep -qF "$chemin" "$essai/CONTROLE/postinst" \
         || rate "le \`postinst\` ne nomme pas $chemin"
     grep -qF "$chemin" paquet/asl-server.service \

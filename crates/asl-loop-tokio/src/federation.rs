@@ -400,9 +400,8 @@ pub struct Federateur {
     pub entrepot: Arc<Entrepot>,
     /// La racine — `hôte:port`.
     pub adresse: String,
-    /// Ce qu'on croit de la racine : son identité (liste embarquée,
-    /// décision 56), et l'autorité d'hier en repli tant que `--federation-ca`
-    /// est réglé (décision 58).
+    /// Ce qu'on croit de la racine : son identité — dite (`=<n-…>`) ou tirée
+    /// de la liste embarquée (décision 56) —, et rien d'autre (décision 58).
     pub confiance: crate::confiance::Confiance,
     /// La clé d'identité de cet annuaire.
     pub identite: CleSecrete,
@@ -478,9 +477,8 @@ impl Federateur {
         // cette clé est celle d'un annuaire local accepté.
         connexion.prouver_notre_racine(&self.identite).await?;
         (self.journal)(format!(
-            "fédération vers {} ouverte : clé prouvée ({})",
+            "fédération vers {} ouverte : clé prouvée (TLS : identité par la clé)",
             self.adresse,
-            connexion.forme_dite(),
         ));
         self.publier_les_locateurs(&mut connexion).await?;
 

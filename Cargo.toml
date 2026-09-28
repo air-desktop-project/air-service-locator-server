@@ -91,7 +91,7 @@ exclude = ["fuzz"]
 [workspace.package]
 # Version en LOCKSTEP : toutes les crates la partagent via `version.workspace`.
 # Un seul numéro à incrémenter, donc aucune dérive possible entre les paquets.
-version = "0.33.0"
+version = "0.34.0"
 edition = "2024"
 # PAS DE `rust-version`, ET C'EST DÉLIBÉRÉ.
 #
@@ -110,22 +110,22 @@ repository = "https://github.com/air-desktop-project/air-service-locator-server"
 # Les arêtes INTERNES ne se déclarent qu'à mesure qu'elles servent : une
 # dépendance posée d'avance affirmerait un assemblage qui n'existe pas. Les neuf
 # crates sont donc listées, mais AUCUNE ne dépend encore d'une autre.
-asl-annuaire = { path = "crates/asl-annuaire", version = "0.33.0" }
-asl-api = { path = "crates/asl-api", version = "0.33.0" }
-asl-apple = { path = "crates/asl-apple", version = "0.33.0" }
-asl-attest = { path = "crates/asl-attest", version = "0.33.0" }
-asl-keystore = { path = "crates/asl-keystore", version = "0.33.0" }
-asl-auth = { path = "crates/asl-auth", version = "0.33.0" }
-asl-cle = { path = "crates/asl-cle", version = "0.33.0" }
-asl-id = { path = "crates/asl-id", version = "0.33.0" }
-asl-loop-tokio = { path = "crates/asl-loop-tokio", version = "0.33.0" }
-asl-proto = { path = "crates/asl-proto", version = "0.33.0" }
-asl-racines = { path = "crates/asl-racines", version = "0.33.0" }
-asl-registre = { path = "crates/asl-registre", version = "0.33.0" }
-asl-reveil = { path = "crates/asl-reveil", version = "0.33.0" }
-asl-server = { path = "crates/asl-server", version = "0.33.0" }
-asl-session = { path = "crates/asl-session", version = "0.33.0" }
-asl-store = { path = "crates/asl-store", version = "0.33.0" }
+asl-annuaire = { path = "crates/asl-annuaire", version = "0.34.0" }
+asl-api = { path = "crates/asl-api", version = "0.34.0" }
+asl-apple = { path = "crates/asl-apple", version = "0.34.0" }
+asl-attest = { path = "crates/asl-attest", version = "0.34.0" }
+asl-keystore = { path = "crates/asl-keystore", version = "0.34.0" }
+asl-auth = { path = "crates/asl-auth", version = "0.34.0" }
+asl-cle = { path = "crates/asl-cle", version = "0.34.0" }
+asl-id = { path = "crates/asl-id", version = "0.34.0" }
+asl-loop-tokio = { path = "crates/asl-loop-tokio", version = "0.34.0" }
+asl-proto = { path = "crates/asl-proto", version = "0.34.0" }
+asl-racines = { path = "crates/asl-racines", version = "0.34.0" }
+asl-registre = { path = "crates/asl-registre", version = "0.34.0" }
+asl-reveil = { path = "crates/asl-reveil", version = "0.34.0" }
+asl-server = { path = "crates/asl-server", version = "0.34.0" }
+asl-session = { path = "crates/asl-session", version = "0.34.0" }
+asl-store = { path = "crates/asl-store", version = "0.34.0" }
 
 # LES DÉPENDANCES EXTERNES n'entrent qu'au moment où une crate les consomme. Le
 # graphe est donc VIDE aujourd'hui, et cette section restera vide tant que rien
@@ -307,9 +307,9 @@ ams-quic-tls = { git = "https://github.com/air-desktop-project/air-mail-server.g
 
 # `ams-tls` N'ENTRE QUE COMME DÉPENDANCE DE DÉVELOPPEMENT, et la nuance compte.
 # Elle est DÉJÀ dans le graphe construit, tirée par `ams-quic-tls` ; ce qu'on
-# déclare ici, c'est le droit de l'appeler NOUS-MÊMES depuis un essai — pour
-# faire charger par notre propre pile le certificat que `scripts/ca.sh` frappe.
-# Un certificat qu'openssl valide n'est qu'un certificat qu'openssl valide.
+# déclare ici, c'est le droit de l'appeler NOUS-MÊMES — pour monter le
+# fournisseur QUIC et l'ALPN `h3` de nos configurations TLS, et, dans un essai,
+# le faux serveur de poussée que `--push-roots` doit croire.
 ams-tls = { git = "https://github.com/air-desktop-project/air-mail-server.git", rev = "6f0ea51b6" }
 
 # `ams-quic-client` EST UN HARNAIS D'ESSAI, PAS UNE BIBLIOTHÈQUE CLIENTE — voir

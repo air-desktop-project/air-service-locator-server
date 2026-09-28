@@ -61,7 +61,7 @@ pub mod sonde;
 pub mod tireur;
 pub mod vivier;
 
-pub use confiance::{Confiance, Forme, configuration_d_annuaire};
+pub use confiance::{Confiance, configuration_d_annuaire};
 pub use federation::{EtatFedere, Federateur, ServicesPublies};
 #[cfg(feature = "porte-d-essai")]
 pub use h3::PanneDInstantane;
@@ -73,36 +73,6 @@ pub use quic::{
 };
 pub use tireur::{EtatDeLaVoie, Tireur};
 pub use vivier::Vivier;
-
-/// Monte la configuration TLS d'un annuaire, ALPN comprise.
-///
-/// # POURQUOI CETTE FONCTION EXISTE, ALORS QU'`ams-tls` FAIT DÉJÀ LE GROS
-///
-/// `ams_tls::quic_server_config` monte tout **sauf l'ALPN**, et le dit : « le
-/// protocole applicatif est une décision de la couche du dessus ». Pour ce
-/// produit, cette décision est déjà prise et il n'y en a qu'une — **nous ne
-/// parlons que HTTP/3**.
-///
-/// Une configuration sans ALPN se construit, démarre, et échoue à la première
-/// poignée de main : le client propose `h3`, le serveur n'offre rien, et §3.1 de
-/// RFC 9114 impose l'échec. L'erreur arrive alors loin du fichier où l'oubli a
-/// eu lieu.
-///
-/// **Ce qu'on ne peut pas exprimer ne peut pas être faux** : il n'y a pas de
-/// paramètre, donc pas d'oubli possible.
-///
-/// # Errors
-///
-/// Chaîne illisible ou vide, clé illisible, ou clé qui ne correspond pas au
-/// certificat de tête.
-pub fn configuration_tls(
-    chaine_pem: &[u8],
-    cle_pem: &[u8],
-) -> Result<rustls::ServerConfig, ams_tls::MaterialError> {
-    let mut configuration = ams_tls::quic_server_config(chaine_pem, cle_pem)?;
-    configuration.alpn_protocols = ams_tls::alpn_h3();
-    Ok(configuration)
-}
 
 /// Les certificats d'un fichier PEM, en DER — les racines d'attestation
 /// Android qu'un exploitant épingle (`--android-roots`).

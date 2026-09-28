@@ -2,8 +2,8 @@
 //!
 //! # CE QUE CET ESSAI PROUVE, ET QU'AUCUN AUTRE NE PROUVE
 //!
-//! Toutes les pièces sont éprouvées séparément : `asl-session` à 100 %,
-//! `scripts/ca.sh` par l'essai de certificat, et la pile QUIC chez son amont.
+//! Toutes les pièces sont éprouvées séparément : `asl-session` à 100 %, le
+//! certificat d'identité par `asl-cle`, et la pile QUIC chez son amont.
 //! **Rien ne dit qu'elles s'emboîtent.** Un ALPN oublié, un flux de contrôle
 //! jamais ouvert, une réponse écrite sur le mauvais flux : chacune de ces fautes
 //! laisse tout compiler, tous les essais unitaires passer, et le serveur ne rien
@@ -11,11 +11,12 @@
 //!
 //! Ici, la chaîne entière tourne :
 //!
-//!   1. `scripts/ca.sh` frappe une autorité et un certificat ;
-//!   2. [`asl_loop_tokio::configuration_tls`] les monte, ALPN comprise ;
-//!   3. [`asl_loop_tokio::servir_quic`] écoute sur une vraie socket UDP ;
-//!   4. un client QUIC réel monte la poignée de main et envoie une requête ;
-//!   5. la réponse est celle qu'`asl-session` décide.
+//!   1. [`asl_loop_tokio::configuration_d_annuaire`] monte le certificat
+//!      d'identité d'une clé de banc, ALPN comprise ;
+//!   2. [`asl_loop_tokio::servir_quic`] écoute sur une vraie socket UDP ;
+//!   3. un client QUIC réel, qui n'attend QUE cette clé, monte la poignée de
+//!      main et envoie une requête ;
+//!   4. la réponse est celle qu'`asl-session` décide.
 //!
 //! # POURQUOI IPv4, DANS UN PRODUIT QUI EST « IPv6 D'ABORD »
 //!
@@ -23,60 +24,56 @@
 //! se lie sur `127.0.0.1:0`, en dur. Notre écoute, elle, prend la socket qu'on
 //! lui donne et ne connaît aucune famille d'adresses.
 //!
-//! # LE HARNAIS VÉRIFIE LE NOM `localhost`
+//! # LE HARNAIS ENVOIE LE NOM `localhost`, ET PERSONNE NE LE LIT
 //!
-//! `ams_quic_client::config_client` construit un `ServerName::try_from(
-//! "localhost")`. Le certificat de banc doit donc porter ce nom — et c'est le
-//! cas, la cérémonie le met en premier SAN.
+//! `ams_quic_client::Client` construit un `ServerName::try_from("localhost")`.
+//! Depuis la fin de la transition (décision 58), l'annuaire ne présente que
+//! son certificat d'identité, à qui que ce soit, et le client ne juge que sa
+//! clé : le nom part, et ne décide rien.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 use ams_proto_h3::{FrameHeader, FrameKind, qpack};
 use asl_api::corps::{CreationDeCompte, PlateformeAttestation};
 use asl_id::{Genre, Identifiant};
 use asl_loop_tokio::h3::{Attestations, ConfigAndroid, ConfigApple, Voie};
-use asl_loop_tokio::{Annuaire, Comptes, configuration_tls, servir_quic};
+use asl_loop_tokio::{Annuaire, Comptes, servir_quic};
 use asl_registre::{AliasRange, Provenance};
 use asl_store::Entrepot;
 
-/// La racine du dépôt, depuis ce paquet.
-fn depot() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("le paquet vit sous `crates/`")
-        .to_path_buf()
+/// L'identité de banc d'un annuaire : la clé qu'il présente à la poignée de
+/// main, et ce qu'un client en attend (décisions 53, 58). **Une par essai**,
+/// tirée de son nom.
+fn banc(quoi: &str) -> (asl_loop_tokio::Confiance, &'static asl_cle::CleSecrete) {
+    let mut graine = [0x5B_u8; 32];
+    for (rang, octet) in quoi.bytes().enumerate() {
+        let place = &mut graine[rang % 32];
+        *place = place.rotate_left(3) ^ octet;
+    }
+    let identite: &'static asl_cle::CleSecrete =
+        Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie(graine)));
+    (
+        asl_loop_tokio::Confiance::par_identite(&[identite.publique()]),
+        identite,
+    )
 }
 
-/// Frappe une autorité et un certificat de banc dans un temporaire.
-fn materiel(quoi: &str) -> (PathBuf, Vec<u8>, Vec<u8>, Vec<u8>) {
+/// La configuration cliente qui attend cette identité — ce qu'un client
+/// d'aujourd'hui monte, et rien d'autre.
+fn client_tls(racine: &asl_loop_tokio::Confiance) -> Arc<rustls::ClientConfig> {
+    asl_loop_tokio::confiance::configuration_cliente_de(racine).expect("une identité attendue")
+}
+
+/// Une autorité WebPKI et un certificat pour `localhost`, pour le faux
+/// serveur de POUSSÉE seulement : `--push-roots` reste une autorité (la
+/// périphérie, vers ntfy.sh), là où les annuaires n'en ont plus.
+fn poussee(quoi: &str) -> (PathBuf, Vec<u8>, Vec<u8>, Vec<u8>) {
     let autorite = std::env::temp_dir().join(format!("asl-bout-{}-{quoi}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&autorite);
-
-    for arguments in [
-        vec!["racine"],
-        vec!["serveur", "banc", "localhost", "127.0.0.1", "::1"],
-    ] {
-        let sortie = Command::new(depot().join("scripts/ca.sh"))
-            .args(&arguments)
-            .env("ASL_CA", &autorite)
-            .current_dir(depot())
-            .output()
-            .expect("`scripts/ca.sh` doit être lançable — et `openssl` présent");
-        assert!(
-            sortie.status.success(),
-            "la cérémonie a échoué :\n{}\n{}",
-            String::from_utf8_lossy(&sortie.stdout),
-            String::from_utf8_lossy(&sortie.stderr),
-        );
-    }
-
-    let racine = std::fs::read(autorite.join("racine.crt")).expect("la racine");
-    let chaine = std::fs::read(autorite.join("banc/chaine.pem")).expect("la chaîne");
-    let cle = std::fs::read(autorite.join("banc/serveur.key")).expect("la clé");
+    std::fs::create_dir_all(&autorite).expect("un répertoire");
+    let (racine, chaine, cle) = ams_quic_client::materiel(&autorite)
+        .expect("une autorité de banc — `openssl` doit être présent");
     (autorite, racine, chaine, cle)
 }
 
@@ -125,8 +122,7 @@ const TOUT: asl_registre::Capacites = asl_registre::Capacites {
 /// Lance l'écoute sur une socket éphémère, et rend son adresse et de quoi
 /// l'arrêter.
 async fn lever(
-    chaine: &[u8],
-    cle: &[u8],
+    identite: &'static asl_cle::CleSecrete,
     entrepot: Entrepot,
 ) -> (
     SocketAddr,
@@ -135,8 +131,7 @@ async fn lever(
 ) {
     // Le bail du produit : dix secondes de cadence, trente d'inactivité.
     lever_avec_bail(
-        chaine,
-        cle,
+        identite,
         entrepot,
         asl_proto::Bail::nouveau(10, 30).expect("un bail"),
     )
@@ -149,8 +144,7 @@ async fn lever(
 /// bail du produit, voir une annonce expirer demanderait d'attendre trente
 /// secondes par essai.
 async fn lever_avec_bail(
-    chaine: &[u8],
-    cle: &[u8],
+    identite: &'static asl_cle::CleSecrete,
     entrepot: Entrepot,
     bail: asl_proto::Bail,
 ) -> (
@@ -159,8 +153,7 @@ async fn lever_avec_bail(
     tokio::task::JoinHandle<Comptes>,
 ) {
     lever_complet(
-        chaine,
-        cle,
+        identite,
         entrepot,
         bail,
         asl_auth::Politique::AttestationFacultative,
@@ -214,12 +207,6 @@ struct ClesDeLExploitant {
     /// Où rendre à l'essai l'entrepôt que la boucle sert — pour un
     /// fédérateur qui y range, ou pour vérifier ce qui n'y est pas écrit.
     entrepot_partage: Option<tokio::sync::oneshot::Sender<Arc<Entrepot>>>,
-    /// La clé d'identité dont l'annuaire présente le CERTIFICAT D'IDENTITÉ à
-    /// la poignée de main (décisions 53, 58) — en plus de sa chaîne d'hier,
-    /// ou seul avec [`Self::sans_chaine`].
-    presenter: Option<&'static asl_cle::CleSecrete>,
-    /// Ne présenter QUE le certificat d'identité : pas de chaîne d'hier.
-    sans_chaine: bool,
 }
 
 #[allow(
@@ -229,8 +216,7 @@ struct ClesDeLExploitant {
               plus sûr"
 )]
 async fn lever_complet(
-    chaine: &[u8],
-    cle: &[u8],
+    identite: &'static asl_cle::CleSecrete,
     entrepot: Entrepot,
     bail: asl_proto::Bail,
     politique: asl_auth::Politique,
@@ -244,14 +230,13 @@ async fn lever_complet(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<Comptes>,
 ) {
-    let tls = Arc::new(match cles.presenter {
-        Some(identite) => asl_loop_tokio::configuration_d_annuaire(
-            Some(identite),
-            (!cles.sans_chaine).then_some((chaine, cle)),
-        )
-        .expect("une configuration TLS"),
-        None => configuration_tls(chaine, cle).expect("une configuration TLS"),
-    });
+    // **L'ANNUAIRE NE PRÉSENTE QUE SON CERTIFICAT D'IDENTITÉ** (décision 58).
+    // C'est la clé du banc ; celle de la voie (`cles.identite`), quand un
+    // essai en pose une, signe les preuves de racine — le binaire tient les
+    // deux sous la même clé, l'essai les distingue sans que rien n'en dépende.
+    let tls = Arc::new(
+        asl_loop_tokio::configuration_d_annuaire(identite).expect("une configuration TLS"),
+    );
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("une socket");
@@ -390,12 +375,11 @@ fn champ<'a>(champs: &'a [(Vec<u8>, Vec<u8>)], nom: &[u8]) -> Option<&'a [u8]> {
 
 #[tokio::test]
 async fn une_requete_traverse_toute_la_pile_et_revient() {
-    let (autorite, racine, chaine, cle) = materiel("servie");
+    let (racine, identite) = banc("servie");
     let (base, fichier) = entrepot("servie");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let mut client = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     // La poignée de main : on parle, on écoute, jusqu'à ce qu'elle aboutisse.
     for _ in 0..64_u32 {
         client.parler().await;
@@ -465,8 +449,6 @@ async fn une_requete_traverse_toute_la_pile_et_revient() {
     let comptes = tache.await.expect("l'écoute s'éteint proprement");
     assert_eq!(comptes.acceptees, 1, "{comptes:?}");
     assert_eq!(comptes.refusees, 0, "{comptes:?}");
-
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -476,12 +458,11 @@ async fn une_cible_inconnue_revient_en_404_et_non_en_501() {
     // un essai unitaire : `404` dit « cette cible ne désigne rien », `501` dit
     // « elle désigne quelque chose que je ne sais pas encore servir ». Les
     // confondre ferait chercher une faute d'URL là où il n'y en a pas.
-    let (autorite, racine, chaine, cle) = materiel("inconnue");
+    let (racine, identite) = banc("inconnue");
     let (base, fichier) = entrepot("inconnue");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let mut client = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     for _ in 0..64_u32 {
         client.parler().await;
         if !client.ecouter().await {
@@ -502,7 +483,6 @@ async fn une_cible_inconnue_revient_en_404_et_non_en_501() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -512,7 +492,7 @@ async fn un_compte_ecrit_dans_l_entrepot_revient_par_son_alias() {
     // une donnée qu'il a vraiment rangée : la cérémonie frappe un certificat,
     // l'entrepôt garde un compte, la boucle sert QUIC, la session dit ce qu'il
     // lui faut, l'étage 3 va le chercher, et le client reçoit l'identifiant.
-    let (autorite, racine, chaine, cle) = materiel("alias");
+    let (racine, identite) = banc("alias");
     let (base, fichier) = entrepot("alias");
 
     let qui = Identifiant::depuis_entropie(Genre::Utilisateur, [0x2A; 16]);
@@ -523,9 +503,8 @@ async fn un_compte_ecrit_dans_l_entrepot_revient_par_son_alias() {
     )
     .expect("le compte est écrit");
 
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
+    let mut client = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     for _ in 0..64_u32 {
         client.parler().await;
         if !client.ecouter().await {
@@ -560,18 +539,16 @@ async fn un_compte_ecrit_dans_l_entrepot_revient_par_son_alias() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
 #[tokio::test]
 async fn un_alias_que_personne_ne_porte_revient_en_404() {
-    let (autorite, racine, chaine, cle) = materiel("sans-alias");
+    let (racine, identite) = banc("sans-alias");
     let (base, fichier) = entrepot("sans-alias");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let mut client = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     for _ in 0..64_u32 {
         client.parler().await;
         if !client.ecouter().await {
@@ -588,7 +565,6 @@ async fn un_alias_que_personne_ne_porte_revient_en_404() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -597,7 +573,7 @@ async fn une_machine_s_authentifie_de_bout_en_bout() {
     // **LA CHAÎNE CRYPTOGRAPHIQUE ENTIÈRE**, sur une vraie socket : le client
     // tire un défi, le signe avec sa clé Ed25519 en le liant au certificat du
     // serveur, et la connexion devient authentifiée.
-    let (autorite, racine, chaine, cle) = materiel("authentifie");
+    let (racine, identite) = banc("authentifie");
     let (base, fichier) = entrepot("authentifie");
 
     // La machine et sa clé. L'annuaire ne connaît que la PUBLIQUE.
@@ -612,9 +588,8 @@ async fn une_machine_s_authentifie_de_bout_en_bout() {
         TOUT,
     );
 
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
+    let mut client = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     for _ in 0..64_u32 {
         client.parler().await;
         if !client.ecouter().await {
@@ -688,7 +663,6 @@ async fn une_machine_s_authentifie_de_bout_en_bout() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -739,7 +713,7 @@ async fn une_autorisation_ouvre_le_service_d_un_autre_compte() {
     // `imap`. B possède une machine qui cherche. Sans autorisation, B ne
     // trouve rien — et il ne peut même pas savoir que ça existe. Avec, il
     // trouve.
-    let (autorite, racine, chaine, cle) = materiel("autorise");
+    let (racine, identite) = banc("autorise");
     let (base, fichier) = entrepot("autorise");
 
     let compte_a = Identifiant::depuis_entropie(Genre::Utilisateur, [0xA1; 16]);
@@ -763,9 +737,8 @@ async fn une_autorisation_ouvre_le_service_d_un_autre_compte() {
     .expect("le service est écrit");
 
     let cible = format!("/v1/ou/{}/imap", machine_a.texte());
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
+    let mut client = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     for _ in 0..64_u32 {
         client.parler().await;
         if !client.ecouter().await {
@@ -785,13 +758,12 @@ async fn une_autorisation_ouvre_le_service_d_un_autre_compte() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
 #[tokio::test]
 async fn avec_l_autorisation_le_meme_service_cesse_d_etre_introuvable() {
-    let (autorite, racine, chaine, cle) = materiel("ouvert");
+    let (racine, identite) = banc("ouvert");
     let (base, fichier) = entrepot("ouvert");
 
     let compte_a = Identifiant::depuis_entropie(Genre::Utilisateur, [0xA1; 16]);
@@ -832,9 +804,8 @@ async fn avec_l_autorisation_le_meme_service_cesse_d_etre_introuvable() {
     .expect("l'autorisation est écrite");
 
     let cible = format!("/v1/ou/{}/imap", machine_a.texte());
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
+    let mut client = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     for _ in 0..64_u32 {
         client.parler().await;
         if !client.ecouter().await {
@@ -855,7 +826,6 @@ async fn avec_l_autorisation_le_meme_service_cesse_d_etre_introuvable() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -864,7 +834,7 @@ async fn un_daemon_annonce_et_son_service_devient_trouvable() {
     // **LA RAISON D'ÊTRE DU PRODUIT, EN UN ESSAI.** Un daemon obtient du système
     // le port qu'il veut, l'annonce, et ses clients le retrouvent — sans qu'il
     // ait jamais eu besoin d'un numéro de port fixe.
-    let (autorite, racine, chaine, cle) = materiel("annonce");
+    let (racine, identite) = banc("annonce");
     let (base, fichier) = entrepot("annonce");
 
     let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xC1; 16]);
@@ -872,9 +842,8 @@ async fn un_daemon_annonce_et_son_service_devient_trouvable() {
     let secrete = asl_cle::CleSecrete::depuis_entropie([0xD1; 32]);
     machine_enrolee(&base, machine, compte, secrete.publique().octets(), TOUT);
 
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
+    let mut client = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     for _ in 0..64_u32 {
         client.parler().await;
         if !client.ecouter().await {
@@ -949,7 +918,6 @@ async fn un_daemon_annonce_et_son_service_devient_trouvable() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -957,7 +925,7 @@ async fn un_daemon_annonce_et_son_service_devient_trouvable() {
 async fn une_machine_sans_capacite_d_annonce_est_refusee() {
     // La capacité est une décision de l'utilisateur sur SA machine. Une machine
     // de lecture seule ne doit rien pouvoir écrire dans l'annuaire.
-    let (autorite, racine, chaine, cle) = materiel("sans-annonce");
+    let (racine, identite) = banc("sans-annonce");
     let (base, fichier) = entrepot("sans-annonce");
 
     let machine = Identifiant::depuis_entropie(Genre::Machine, [0xE1; 16]);
@@ -973,9 +941,8 @@ async fn une_machine_sans_capacite_d_annonce_est_refusee() {
         },
     );
 
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
+    let mut client = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     for _ in 0..64_u32 {
         client.parler().await;
         if !client.ecouter().await {
@@ -1007,7 +974,6 @@ async fn une_machine_sans_capacite_d_annonce_est_refusee() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -1017,7 +983,7 @@ async fn un_service_annonce_par_a_se_retrouve_chez_b_qui_y_a_droit() {
     // que son système lui a donné. B, qu'A a autorisé, demande où est ce
     // service — et reçoit le port, sans qu'aucun numéro n'ait été fixé
     // d'avance ni convenu entre eux.
-    let (autorite, racine, chaine, cle) = materiel("trouve");
+    let (racine, identite) = banc("trouve");
     let (base, fichier) = entrepot("trouve");
 
     let compte_a = Identifiant::depuis_entropie(Genre::Utilisateur, [0xA1; 16]);
@@ -1053,11 +1019,10 @@ async fn un_service_annonce_par_a_se_retrouve_chez_b_qui_y_a_droit() {
     )
     .expect("l'autorisation est écrite");
 
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     // ── A ANNONCE, SUR SA CONNEXION ─────────────────────────────────────────
-    let mut daemon =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let mut daemon = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     for _ in 0..64_u32 {
         daemon.parler().await;
         if !daemon.ecouter().await {
@@ -1091,8 +1056,7 @@ async fn un_service_annonce_par_a_se_retrouve_chez_b_qui_y_a_droit() {
     //
     // **UNE AUTRE CONNEXION** : c'est bien l'annuaire qui fait le lien, pas un
     // état de session partagé par hasard.
-    let mut chercheur =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let mut chercheur = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     for _ in 0..64_u32 {
         chercheur.parler().await;
         if !chercheur.ecouter().await {
@@ -1119,7 +1083,6 @@ async fn un_service_annonce_par_a_se_retrouve_chez_b_qui_y_a_droit() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -1128,7 +1091,7 @@ async fn la_sonde_mesure_la_joignabilite_et_le_verdict_bascule() {
     // **C'EST LA FONCTION LA PLUS UTILE DU PRODUIT** (`modele.md` §4.3) :
     // l'annuaire dit au propriétaire si son service est joignable, à la seconde
     // où il démarre — plutôt qu'il ne le découvre quand quelqu'un essaie.
-    let (autorite, racine, chaine, cle) = materiel("sonde");
+    let (racine, identite) = banc("sonde");
     let (base, fichier) = entrepot("sonde");
 
     let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xF1; 16]);
@@ -1151,9 +1114,8 @@ async fn la_sonde_mesure_la_joignabilite_et_le_verdict_bascule() {
         }
     });
 
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
+    let mut client = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     for _ in 0..64_u32 {
         client.parler().await;
         if !client.ecouter().await {
@@ -1216,7 +1178,6 @@ async fn la_sonde_mesure_la_joignabilite_et_le_verdict_bascule() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -1225,7 +1186,7 @@ async fn un_port_ou_rien_n_ecoute_reste_injoignable() {
     // **C6 EN ACTION** : l'annuaire ne dit `joignable` que de ce qu'il a mesuré,
     // et dit `injoignable` de ce qu'il a mesuré aussi. C'est ce qui prévient un
     // administrateur derrière un NAT AVANT que quelqu'un n'essaie.
-    let (autorite, racine, chaine, cle) = materiel("injoignable");
+    let (racine, identite) = banc("injoignable");
     let (base, fichier) = entrepot("injoignable");
 
     let machine = Identifiant::depuis_entropie(Genre::Machine, [0xF2; 16]);
@@ -1246,9 +1207,8 @@ async fn un_port_ou_rien_n_ecoute_reste_injoignable() {
         ecoute.local_addr().expect("une adresse").port()
     };
 
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(&racine), adresse).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
+    let mut client = ams_quic_client::Client::new(client_tls(&racine), adresse).await;
     for _ in 0..64_u32 {
         client.parler().await;
         if !client.ecouter().await {
@@ -1295,7 +1255,6 @@ async fn un_port_ou_rien_n_ecoute_reste_injoignable() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -1305,9 +1264,11 @@ fn nom_de_machine(texte: &str) -> asl_registre::NomRange {
 }
 
 /// Monte une connexion cliente et achève sa poignée de main.
-async fn connecter(racine: &[u8], adresse: SocketAddr) -> ams_quic_client::Client {
-    let mut client =
-        ams_quic_client::Client::new(ams_quic_client::config_client(racine), adresse).await;
+async fn connecter(
+    racine: &asl_loop_tokio::Confiance,
+    adresse: SocketAddr,
+) -> ams_quic_client::Client {
+    let mut client = ams_quic_client::Client::new(client_tls(racine), adresse).await;
     for _ in 0..64_u32 {
         client.parler().await;
         if !client.ecouter().await {
@@ -1490,7 +1451,7 @@ async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
     // Google. L'invitation n'est pas servie. Les trois rendent `403` : la règle refuse,
     // ce n'est pas une panne (`500`). La possession, elle, est bien prouvée :
     // c'est l'attestation seule qui fait tomber la création.
-    let (autorite, racine, chaine, cle) = materiel("attest");
+    let (racine, identite) = banc("attest");
     let (base, fichier) = entrepot("attest");
     let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
     let apple = Some(ConfigApple {
@@ -1514,8 +1475,7 @@ async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
         signataire,
     });
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         bail,
         asl_auth::Politique::AttestationFacultative,
@@ -1590,7 +1550,6 @@ async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -1611,9 +1570,9 @@ async fn le_produit_entier_se_monte_par_l_api_et_rien_d_autre() {
     //
     // C'est l'énoncé du produit, du premier geste au dernier, sans qu'aucun
     // numéro de port n'ait été convenu ni aucune ligne posée sous la table.
-    let (autorite, racine, chaine, cle) = materiel("api");
+    let (racine, identite) = banc("api");
     let (base, fichier) = entrepot("api");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     // ── A : COMPTE, MACHINE, ENRÔLEMENT ─────────────────────────────────────
     let mut alice = connecter(&racine, adresse).await;
@@ -1728,7 +1687,6 @@ async fn le_produit_entier_se_monte_par_l_api_et_rien_d_autre() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -1778,9 +1736,9 @@ async fn une_autorisation_donne_a_voir_les_machines_et_une_machine_sait_qui_elle
     // refus — tant qu'elle ne lui a rien accordé ; avec « tout », il les voit
     // toutes, par son téléphone comme par sa machine de lecture. Et une machine
     // sait dire qui elle est et à qui elle appartient.
-    let (autorite, racine, chaine, cle) = materiel("machines-vues");
+    let (racine, identite) = banc("machines-vues");
     let (base, fichier) = entrepot("machines-vues");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     // ── ALICE : DEUX MACHINES, DONT UNE QUI NE SERT RIEN ────────────────────
     let mut alice = connecter(&racine, adresse).await;
@@ -1909,7 +1867,6 @@ async fn une_autorisation_donne_a_voir_les_machines_et_une_machine_sait_qui_elle
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -1923,9 +1880,9 @@ async fn une_machine_voit_les_appareils_de_son_compte_et_d_aucun_autre() {
     // marqués, description quand elle a été posée. Un compte étranger n'y
     // apparaît pas ; un appareil n'a pas ce verbe ; et une machine dont la clé
     // est révoquée n'a plus de propriétaire à qui poser la question.
-    let (autorite, racine, chaine, cle) = materiel("appareils-du-proprietaire");
+    let (racine, identite) = banc("appareils-du-proprietaire");
     let (base, fichier) = entrepot("appareils-du-proprietaire");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     // ── ALICE : DEUX APPAREILS, DONT UN RÉVOQUÉ, ET UNE MACHINE ─────────────
     let mut alice = connecter(&racine, adresse).await;
@@ -2108,7 +2065,6 @@ async fn une_machine_voit_les_appareils_de_son_compte_et_d_aucun_autre() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -2123,9 +2079,9 @@ async fn revoquer_la_cle_d_une_machine_ferme_sa_connexion_et_fait_tomber_son_bai
     //
     // Ici le daemon annonce, son propriétaire révoque la clé depuis une AUTRE
     // connexion, et l'annonce disparaît sans que le daemon ait rien fait.
-    let (autorite, racine, chaine, cle) = materiel("revoque");
+    let (racine, identite) = banc("revoque");
     let (base, fichier) = entrepot("revoque");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     // A crée son compte, déclare une machine, et l'enrôle.
     let mut alice = connecter(&racine, adresse).await;
@@ -2190,7 +2146,6 @@ async fn revoquer_la_cle_d_une_machine_ferme_sa_connexion_et_fait_tomber_son_bai
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -2206,9 +2161,9 @@ async fn on_apprend_d_ou_l_on_est_vu_sans_rien_annoncer_ni_prouver() {
     //
     // **AUCUNE PREUVE N'EST PRÉSENTÉE ICI** : la connexion vient d'être ouverte,
     // et rien n'a été signé.
-    let (autorite, racine, chaine, cle) = materiel("vu");
+    let (racine, identite) = banc("vu");
     let (base, fichier) = entrepot("vu");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     let mut client = connecter(&racine, adresse).await;
     // `17` est l'index QPACK de `:method: GET`.
@@ -2253,7 +2208,6 @@ async fn on_apprend_d_ou_l_on_est_vu_sans_rien_annoncer_ni_prouver() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -2263,9 +2217,9 @@ async fn la_version_se_lit_sans_rien_prouver() {
     //
     // Une connexion qui n'a présenté aucune clé lit la version de l'annuaire,
     // et c'est celle du workspace — la même que `asl-server --version`.
-    let (autorite, racine, chaine, cle) = materiel("version");
+    let (racine, identite) = banc("version");
     let (base, fichier) = entrepot("version");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     let mut client = connecter(&racine, adresse).await;
     ams_quic_client::envoyer_une_requete(&mut client, 0, 17, b"/v1/version", None, b"").await;
@@ -2290,7 +2244,6 @@ async fn la_version_se_lit_sans_rien_prouver() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -2302,7 +2255,7 @@ async fn une_racine_seule_dit_qu_elle_est_seule_a_une_machine_et_a_personne_d_au
     // inconnu reçoit `401`, une machine enrôlée — quelle que soit sa capacité —
     // lit l'état. Sans `--peer`, la racine dit « seule », avec son compteur, et
     // ni `pair` ni `applique`.
-    let (autorite, racine, chaine, cle) = materiel("replication-seule");
+    let (racine, identite) = banc("replication-seule");
     let (base, fichier) = entrepot("replication-seule");
     let proprietaire = Identifiant::depuis_entropie(Genre::Utilisateur, [0x01; 16]);
     let machine = Identifiant::depuis_entropie(Genre::Machine, [0x02; 16]);
@@ -2324,7 +2277,7 @@ async fn une_racine_seule_dit_qu_elle_est_seule_a_une_machine_et_a_personne_d_au
     // elle-même — ici tout, puisqu'elle n'a rien reçu de personne.
     let ecrit = base.ecrit().expect("lisible");
     assert_eq!(ecrit, compteur, "seule, elle n'a reçu de personne");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     // Un inconnu : `401`.
     let mut inconnu = connecter(&racine, adresse).await;
@@ -2353,7 +2306,6 @@ async fn une_racine_seule_dit_qu_elle_est_seule_a_une_machine_et_a_personne_d_au
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -2367,9 +2319,9 @@ async fn un_point_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
     //
     // Le refus est un `404`, et non un `403` : dire « ce n'est pas vous » à qui
     // vise l'identifiant d'un autre confirmerait que cet identifiant existe.
-    let (autorite, racine, chaine, cle) = materiel("jeton-poussee");
+    let (racine, identite) = banc("jeton-poussee");
     let (base, fichier) = entrepot("jeton-poussee");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     let mut alice = connecter(&racine, adresse).await;
     let (_compte, appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA1).await;
@@ -2439,7 +2391,6 @@ async fn un_point_de_poussee_se_depose_pour_soi_et_pour_personne_d_autre() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -2451,9 +2402,9 @@ async fn un_appareil_se_decrit_et_l_ecran_compte_le_montre() {
     // rendait ni système ni modèle, et c'est pourtant l'écran qu'on regarde pour
     // vérifier qu'aucun appareil de trop n'est entré. Ici, un appareil se
     // décrit, et la liste le rend — pour lui seul, et jamais un « nom ».
-    let (autorite, racine, chaine, cle) = materiel("description-appareil");
+    let (racine, identite) = banc("description-appareil");
     let (base, fichier) = entrepot("description-appareil");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     let mut alice = connecter(&racine, adresse).await;
     let (_compte, appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA2).await;
@@ -2569,7 +2520,6 @@ async fn un_appareil_se_decrit_et_l_ecran_compte_le_montre() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -2585,9 +2535,9 @@ async fn retirer_la_capacite_d_annonce_ferme_la_connexion_du_daemon() {
     //
     // **Un changement de NOM, lui, ne ferme rien**, et l'essai le montre dans le
     // même souffle : le daemon survit au premier `PATCH` et tombe au second.
-    let (autorite, racine, chaine, cle) = materiel("patch-machine");
+    let (racine, identite) = banc("patch-machine");
     let (base, fichier) = entrepot("patch-machine");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     let mut alice = connecter(&racine, adresse).await;
     let (_compte, _appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA1).await;
@@ -2659,7 +2609,6 @@ async fn retirer_la_capacite_d_annonce_ferme_la_connexion_du_daemon() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -2668,9 +2617,9 @@ async fn l_alias_se_pose_se_cherche_et_se_retire() {
     // **C'EST LA SEULE DONNÉE PERSONNELLE DU PRODUIT** (C13), et jusqu'ici aucun
     // verbe ne savait la poser : `GET /v1/alias/{alias}` interrogeait un champ
     // que rien ne remplissait.
-    let (autorite, racine, chaine, cle) = materiel("alias-api");
+    let (racine, identite) = banc("alias-api");
     let (base, fichier) = entrepot("alias-api");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     let mut alice = connecter(&racine, adresse).await;
     let (compte, _appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA1).await;
@@ -2751,7 +2700,6 @@ async fn l_alias_se_pose_se_cherche_et_se_retire() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -2783,21 +2731,10 @@ fn liaison_du_client(client: &ams_quic_client::Client) -> asl_cle::LiaisonDeCana
 /// `Initial`. Dans la vraie vie, c'est un échange de clés post-quantique qui le
 /// produit — les navigateurs en proposent un par défaut depuis 2024, et leur
 /// `ClientHello` fait environ 1600 octets.
-fn config_cliente_bavarde(autorite: &[u8]) -> std::sync::Arc<rustls::ClientConfig> {
-    use rustls::pki_types::pem::PemObject as _;
-
-    let mut racines = rustls::RootCertStore::empty();
-    for der in rustls::pki_types::CertificateDer::pem_slice_iter(autorite) {
-        racines
-            .add(der.expect("certificat lisible"))
-            .expect("racine");
-    }
-    let mut config =
-        rustls::ClientConfig::builder_with_provider(Arc::new(ams_tls::provider_quic()))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .expect("TLS 1.3")
-            .with_root_certificates(racines)
-            .with_no_client_auth();
+fn config_cliente_bavarde(
+    racine: &asl_loop_tokio::Confiance,
+) -> std::sync::Arc<rustls::ClientConfig> {
+    let mut config = (*client_tls(racine)).clone();
 
     // `h3` d'abord — c'est celui que l'annuaire offre —, puis du lest.
     let mut alpn = ams_tls::alpn_h3();
@@ -2826,9 +2763,9 @@ async fn un_client_hello_en_deux_paquets_monte_une_seule_connexion() {
     //
     // Ce n'est pas un cas limite : un `ClientHello` dépasse 1200 octets dès
     // qu'il porte un échange de clés post-quantique.
-    let (autorite, racine, chaine, cle) = materiel("hello-long");
+    let (racine, identite) = banc("hello-long");
     let (base, fichier) = entrepot("hello-long");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
@@ -2896,8 +2833,6 @@ async fn un_client_hello_en_deux_paquets_monte_une_seule_connexion() {
         comptes.acceptees, 1,
         "deux paquets d'un même client ont monté deux connexions"
     );
-
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -2918,9 +2853,9 @@ async fn le_bail_accorde_est_celui_que_la_mesure_a_choisi() {
     // Le DIX vient d'une mesure — `bancs/nat/README.md`, 2026-09-10 : sur un
     // lien résidentiel, vingt-huit secondes de silence tiennent et trente non.
     // À quinze, un SEUL keepalive perdu atteignait la borne.
-    let (autorite, racine, chaine, cle) = materiel("bail");
+    let (racine, identite) = banc("bail");
     let (base, fichier) = entrepot("bail");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     let mut alice = connecter(&racine, adresse).await;
     let (_compte, _appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA1).await;
@@ -2983,7 +2918,6 @@ async fn le_bail_accorde_est_celui_que_la_mesure_a_choisi() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -3004,10 +2938,10 @@ async fn un_daemon_qui_ne_fait_que_maintenir_garde_son_annonce() {
     // Le bail de cet essai vaut une seconde de cadence pour deux d'inactivité :
     // avec celui du produit — dix et trente —, il faudrait attendre trente
     // secondes pour voir quoi que ce soit.
-    let (autorite, racine, chaine, cle) = materiel("maintien");
+    let (racine, identite) = banc("maintien");
     let (base, fichier) = entrepot("maintien");
     let bail = asl_proto::Bail::nouveau(1, 2).expect("un bail court");
-    let (adresse, dire_stop, tache) = lever_avec_bail(&chaine, &cle, base, bail).await;
+    let (adresse, dire_stop, tache) = lever_avec_bail(identite, base, bail).await;
 
     let mut alice = connecter(&racine, adresse).await;
     let (compte, _appareil, _secrete) = creer_un_compte(&mut alice, 0, 0xA1).await;
@@ -3090,7 +3024,6 @@ async fn un_daemon_qui_ne_fait_que_maintenir_garde_son_annonce() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -3129,7 +3062,11 @@ async fn prouver_l_appareil(
 }
 
 /// Le statut d'un `GET` sans corps sur cette cible, depuis une connexion neuve.
-async fn statut_de(racine: &[u8], adresse: SocketAddr, cible: &str) -> Vec<u8> {
+async fn statut_de(
+    racine: &asl_loop_tokio::Confiance,
+    adresse: SocketAddr,
+    cible: &str,
+) -> Vec<u8> {
     let mut client = connecter(racine, adresse).await;
     ams_quic_client::envoyer_une_requete(&mut client, 0, 17, cible.as_bytes(), None, b"").await;
     let _ = ams_quic_client::attendre_la_reponse(&mut client, 0).await;
@@ -3159,9 +3096,9 @@ async fn effacer_mon_compte_retire_tout_ferme_les_connexions_et_le_compte_devien
     // tenait part dans une transaction — la machine et ses services, l'alias,
     // l'autorisation accordée à Bob — ; et le compte est un inconnu pour
     // qui tient encore son `u-…`.
-    let (autorite, racine, chaine, cle) = materiel("effacer");
+    let (racine, identite) = banc("effacer");
     let (base, fichier) = entrepot("effacer");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     // Alice : un compte, un alias, une machine enrôlée qui annonce, une
     // autorisation accordée à Bob.
@@ -3348,7 +3285,6 @@ async fn effacer_mon_compte_retire_tout_ferme_les_connexions_et_le_compte_devien
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -3360,7 +3296,7 @@ async fn un_compte_orphelin_est_efface_au_passage_et_pas_un_compte_vivant() {
     // appareils sont révoqués depuis plus de `--orphans` jours est effacé par
     // la racine, au premier passage — au démarrage — ; un compte dont un
     // appareil est vivant ne l'est pas ; et `--orphans 0` n'efface jamais.
-    let (autorite, racine, chaine, cle) = materiel("orphelins");
+    let (racine, identite) = banc("orphelins");
     let jour = 24 * 60 * 60 * 1_000_u64;
     let maintenant = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3416,8 +3352,7 @@ async fn un_compte_orphelin_est_efface_au_passage_et_pas_un_compte_vivant() {
     let (base, fichier) = entrepot("orphelins-trente");
     garnir(&base, orphelin, vivant, maintenant);
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         asl_proto::Bail::nouveau(10, 30).expect("un bail"),
         asl_auth::Politique::AttestationFacultative,
@@ -3504,7 +3439,7 @@ async fn un_compte_orphelin_est_efface_au_passage_et_pas_un_compte_vivant() {
     // ── `--orphans 0` : JAMAIS ──────────────────────────────────────────────
     let (base, fichier) = entrepot("orphelins-jamais");
     garnir(&base, orphelin, vivant, maintenant);
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
     assert_eq!(
         statut_de(
             &racine,
@@ -3517,7 +3452,6 @@ async fn un_compte_orphelin_est_efface_au_passage_et_pas_un_compte_vivant() {
     );
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -3658,13 +3592,12 @@ async fn un_appareil_qui_rejoint_prouve_sa_cle_et_presente_sa_chaine_sous_une_po
     // l'appareil reste `aucune`, la connexion est authentifiée, le journal
     // dit le refus. Une preuve nue passe aussi. Une signature fausse, un
     // appareil révoqué : `401`, le même.
-    let (autorite, racine, chaine, cle) = materiel("rejoindre-facultative");
+    let (racine, identite) = banc("rejoindre-facultative");
     let (base, fichier) = entrepot("rejoindre-facultative");
     let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
     let (case_reelle, attestations) = reglages_android_du_fp5();
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         bail,
         asl_auth::Politique::AttestationFacultative,
@@ -3794,7 +3727,6 @@ async fn un_appareil_qui_rejoint_prouve_sa_cle_et_presente_sa_chaine_sous_une_po
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -3808,7 +3740,7 @@ async fn sous_une_posture_exigee_un_appareil_apporte_est_attendu_jusqu_a_sa_chai
     // refusée rend `403`, et il reste `attendue` — visible dans Appareils,
     // révocable. Un appareil `aucune` d'hier, sur cette racine, reste servi :
     // la posture qualifie l'entrée, jamais ce qui est déjà entré.
-    let (autorite, racine, chaine, cle) = materiel("rejoindre-exigee");
+    let (racine, identite) = banc("rejoindre-exigee");
     let (base, fichier) = entrepot("rejoindre-exigee");
     // L'ancien appareil est entré `aucune` sous une posture d'hier : on le
     // range à la main, puisque `POST /v1/comptes` ne l'admettrait plus.
@@ -3829,8 +3761,7 @@ async fn sous_une_posture_exigee_un_appareil_apporte_est_attendu_jusqu_a_sa_chai
     let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
     let (case_reelle, attestations) = reglages_android_du_fp5();
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         bail,
         asl_auth::Politique::AttestationExigee,
@@ -3921,7 +3852,6 @@ async fn sous_une_posture_exigee_un_appareil_apporte_est_attendu_jusqu_a_sa_chai
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -3933,7 +3863,7 @@ async fn la_posture_invitation_de_bout_en_bout() {
     // son compte s'ouvre, l'appareil entré sous `invitation`. Le même code ne
     // sert pas deux fois, un code inconnu est refusé sans dire lequel des
     // trois, et la limite de débit ferme la porte à qui martèle.
-    let (autorite, racine, chaine, cle) = materiel("posture-invitation");
+    let (racine, identite) = banc("posture-invitation");
     let (base, fichier) = entrepot("posture-invitation");
     let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
 
@@ -3943,8 +3873,7 @@ async fn la_posture_invitation_de_bout_en_bout() {
     let publique = secrete.publique();
 
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         bail,
         asl_auth::Politique::Invitation,
@@ -4062,7 +3991,6 @@ async fn la_posture_invitation_de_bout_en_bout() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -4070,15 +3998,15 @@ async fn la_posture_invitation_de_bout_en_bout() {
 async fn la_racine_tiree_prouve_son_identite_sur_le_defi_du_tireur() {
     // **`replication.md` §2.2, LE SECOND TEMPS, SERVI EN PROCESSUS.** Le
     // tireur a prouvé sa clé (genre `n` sur `/v1/defi`) ; il pose maintenant
-    // un défi sur `/v1/pair/preuve`, et c'est la racine TIRÉE qui signe — sans
-    // quoi elle ne serait authentifiée que par son certificat, c'est-à-dire
-    // par l'autorité, qui n'est pas l'ancre.
+    // un défi sur `/v1/pair/preuve`, et c'est la racine TIRÉE qui signe — la
+    // preuve applicative, liée au canal, que §2.2 exige en plus de la
+    // poignée de main.
     //
     // Ce chemin n'était éprouvé que par les essais qui lancent le BINAIRE
     // (`asl-server/tests/binaire.rs`) : ce qu'un sous-processus exerce ne
     // remonte pas dans la mesure de couverture, et le code de l'étage 2 qui
     // lit ce défi et compose cette preuve n'était donc mesuré nulle part.
-    let (autorite, racine_tls, chaine, cle) = materiel("preuve-de-racine");
+    let (racine_tls, identite) = banc("preuve-de-racine");
     let (base, fichier) = entrepot("preuve-de-racine");
     let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
 
@@ -4088,8 +4016,7 @@ async fn la_racine_tiree_prouve_son_identite_sur_le_defi_du_tireur() {
     let tireur = asl_cle::CleSecrete::depuis_entropie([0xA2; 32]);
 
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         bail,
         asl_auth::Politique::AttestationFacultative,
@@ -4166,7 +4093,6 @@ async fn la_racine_tiree_prouve_son_identite_sur_le_defi_du_tireur() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -4207,7 +4133,7 @@ async fn la_boucle_sert_pendant_qu_un_instantane_se_prepare() {
     // ce qu'une base d'un million d'enregistrements coûterait —, une autre
     // connexion est servie aussitôt. Avant, la lecture se faisait dans la
     // boucle, et cette requête attendait qu'elle finisse.
-    let (autorite, racine_tls, chaine, cle) = materiel("instantane-hors-boucle");
+    let (racine_tls, identite) = banc("instantane-hors-boucle");
     let (base, fichier) = entrepot("instantane-hors-boucle");
     for rang in 0..3_u8 {
         base.creer_compte(
@@ -4224,8 +4150,7 @@ async fn la_boucle_sert_pendant_qu_un_instantane_se_prepare() {
     const LENTEUR: std::time::Duration = std::time::Duration::from_secs(3);
 
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         bail,
         asl_auth::Politique::AttestationFacultative,
@@ -4333,7 +4258,6 @@ async fn la_boucle_sert_pendant_qu_un_instantane_se_prepare() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -4390,7 +4314,7 @@ async fn un_verdict_de_sonde_part_sans_attendre_qu_un_paquet_arrive() {
     // arrive quand la connexion est silencieuse : seul le réveil le fait
     // partir.
     const RETARD: std::time::Duration = std::time::Duration::from_secs(3);
-    let (autorite, racine, chaine, cle) = materiel("sonde-reveil");
+    let (racine, identite) = banc("sonde-reveil");
     let (base, fichier) = entrepot("sonde-reveil");
     let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xE7; 16]);
     let machine = Identifiant::depuis_entropie(Genre::Machine, [0xE7; 16]);
@@ -4408,8 +4332,7 @@ async fn un_verdict_de_sonde_part_sans_attendre_qu_un_paquet_arrive() {
     });
 
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         asl_proto::Bail::nouveau(10, 30).expect("un bail"),
         asl_auth::Politique::AttestationFacultative,
@@ -4474,7 +4397,6 @@ async fn un_verdict_de_sonde_part_sans_attendre_qu_un_paquet_arrive() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -4485,7 +4407,7 @@ async fn une_fermeture_demandee_par_le_tireur_ferme_sans_attendre() {
     // attendait dans son canal le prochain paquet de n'importe qui — le
     // keepalive du tireur d'en face, dix secondes par défaut. L'essai tient le
     // rôle du tireur, et la machine n'écoute qu'en silence.
-    let (autorite, racine, chaine, cle) = materiel("fermeture-reveil");
+    let (racine, identite) = banc("fermeture-reveil");
     let (base, fichier) = entrepot("fermeture-reveil");
     let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xE8; 16]);
     let machine = Identifiant::depuis_entropie(Genre::Machine, [0xE8; 16]);
@@ -4494,8 +4416,7 @@ async fn une_fermeture_demandee_par_le_tireur_ferme_sans_attendre() {
 
     let (rendre, recevoir) = tokio::sync::oneshot::channel();
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         asl_proto::Bail::nouveau(10, 30).expect("un bail"),
         asl_auth::Politique::AttestationFacultative,
@@ -4536,7 +4457,6 @@ async fn une_fermeture_demandee_par_le_tireur_ferme_sans_attendre() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -4547,14 +4467,13 @@ async fn lever_une_racine_en_panne(
     panne: asl_loop_tokio::PanneDInstantane,
 ) -> (
     ams_quic_client::Client,
-    Vec<u8>,
+    asl_loop_tokio::Confiance,
     SocketAddr,
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<Comptes>,
     PathBuf,
-    PathBuf,
 ) {
-    let (autorite, racine_tls, chaine, cle) = materiel(quoi);
+    let (racine_tls, identite) = banc(quoi);
     let (base, fichier) = entrepot(quoi);
     base.creer_compte(
         Identifiant::depuis_entropie(Genre::Utilisateur, [0x31; 16]),
@@ -4566,8 +4485,7 @@ async fn lever_une_racine_en_panne(
         Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie([0xB5; 32])));
     let tireur = asl_cle::CleSecrete::depuis_entropie([0xA6; 32]);
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         asl_proto::Bail::nouveau(10, 30).expect("un bail"),
         asl_auth::Politique::AttestationFacultative,
@@ -4583,9 +4501,7 @@ async fn lever_une_racine_en_panne(
     .await;
     let mut pair = connecter(&racine_tls, adresse).await;
     prouver_la_racine(&mut pair, &tireur, 0, 4).await;
-    (
-        pair, racine_tls, adresse, dire_stop, tache, autorite, fichier,
-    )
+    (pair, racine_tls, adresse, dire_stop, tache, fichier)
 }
 
 #[tokio::test]
@@ -4594,7 +4510,7 @@ async fn une_lecture_d_instantane_en_faute_ferme_le_flux_vide_et_le_tireur_repre
     // est déjà partie, on ne peut plus dire `500`. Le flux se ferme donc vide,
     // sans cadre de fin — le tireur y lit un instantané tronqué, et redemande.
     // La connexion reste bonne, et le flux de la voie est rendu.
-    let (mut pair, racine_tls, adresse, dire_stop, tache, autorite, fichier) =
+    let (mut pair, racine_tls, adresse, dire_stop, tache, fichier) =
         lever_une_racine_en_panne("instantane-faute", asl_loop_tokio::PanneDInstantane::Faute)
             .await;
 
@@ -4629,7 +4545,6 @@ async fn une_lecture_d_instantane_en_faute_ferme_le_flux_vide_et_le_tireur_repre
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -4640,12 +4555,11 @@ async fn une_panique_pendant_la_lecture_fait_tomber_la_boucle_comme_avant() {
     // tombe donc avec LA MÊME panique — c'est ce qu'elle faisait quand la
     // lecture se faisait chez elle, avant la décision 28. Sans cela, le fil
     // mourrait seul et le flux attendrait pour toujours.
-    let (mut pair, _racine_tls, _adresse, _dire_stop, tache, autorite, fichier) =
-        lever_une_racine_en_panne(
-            "instantane-panique",
-            asl_loop_tokio::PanneDInstantane::Panique,
-        )
-        .await;
+    let (mut pair, _racine_tls, _adresse, _dire_stop, tache, fichier) = lever_une_racine_en_panne(
+        "instantane-panique",
+        asl_loop_tokio::PanneDInstantane::Panique,
+    )
+    .await;
 
     ams_quic_client::envoyer_une_requete(&mut pair, 8, 17, b"/v1/pair/instantane", None, b"").await;
     pair.parler().await;
@@ -4662,8 +4576,6 @@ async fn une_panique_pendant_la_lecture_fait_tomber_la_boucle_comme_avant() {
         Some("panique d'essai pendant la lecture de l'instantané"),
         "et c'est la panique du fil qui lit, relancée telle quelle"
     );
-
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -4726,8 +4638,7 @@ fn faux_serveur_de_poussee(
 /// Lève l'annuaire avec un réveilleur, s'il y en a un — le montage du
 /// binaire quand `--push-roots` est donné.
 async fn lever_avec_reveil(
-    chaine: &[u8],
-    cle: &[u8],
+    identite: &'static asl_cle::CleSecrete,
     entrepot: Arc<Entrepot>,
     reveilleur: Option<asl_loop_tokio::reveil::Reveilleur>,
 ) -> (
@@ -4735,7 +4646,9 @@ async fn lever_avec_reveil(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<Comptes>,
 ) {
-    let tls = Arc::new(configuration_tls(chaine, cle).expect("une configuration TLS"));
+    let tls = Arc::new(
+        asl_loop_tokio::configuration_d_annuaire(identite).expect("une configuration TLS"),
+    );
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("une socket");
@@ -4857,20 +4770,21 @@ async fn une_autorisation_ecrite_ici_reveille_le_beneficiaire_et_une_repliquee_n
     // 3. Un second réveil dans la minute ne part pas (le frein par appareil),
     //    mais la ligne du flux, elle, arrive : elle ne coûte rien à personne.
     // 4. Un second flux des nouvelles sur la même connexion : `409`.
-    let (autorite, racine, chaine, cle) = materiel("reveil");
+    let (racine, identite) = banc("reveil");
+    let (autorite, racines_de_poussee, chaine, cle) = poussee("reveil");
     let (base, fichier) = entrepot("reveil");
     let base = Arc::new(base);
     let (point_de_poussee, mut recues) = faux_serveur_de_poussee(&chaine, &cle, "201 Created");
     let reveilleur = asl_loop_tokio::reveil::Reveilleur::nouveau(
         Arc::clone(&base),
-        &racine,
+        &racines_de_poussee,
         Box::new(journaliser),
     )
     .expect("la racine de banc s'épingle")
     .resoudre_pour_un_essai(point_de_poussee);
     assert_eq!(reveilleur.racines(), 1);
     let (adresse, dire_stop, tache) =
-        lever_avec_reveil(&chaine, &cle, Arc::clone(&base), Some(reveilleur)).await;
+        lever_avec_reveil(identite, Arc::clone(&base), Some(reveilleur)).await;
 
     let mut alice = connecter(&racine, adresse).await;
     let (compte_a, _appareil_a, _) = creer_un_compte(&mut alice, 0, 0xA2).await;
@@ -5016,8 +4930,8 @@ async fn une_autorisation_ecrite_ici_reveille_le_beneficiaire_et_une_repliquee_n
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
+    let _ = std::fs::remove_dir_all(&autorite);
 }
 
 #[tokio::test]
@@ -5029,7 +4943,8 @@ async fn un_point_mort_et_une_adresse_de_bouclage_se_journalisent() {
     // et un point dont le nom mène à la boucle locale est refusé AVANT toute
     // connexion — ici sans porte d'essai : `localhost` se résout par le
     // système, et la règle de bouclage le refuse.
-    let (autorite, racine, chaine, cle) = materiel("reveil-journal");
+    let (racine, identite) = banc("reveil-journal");
+    let (autorite, racines_de_poussee, chaine, cle) = poussee("reveil-journal");
 
     // ── 410 ─────────────────────────────────────────────────────────────────
     let (base, fichier) = entrepot("reveil-mort");
@@ -5037,13 +4952,13 @@ async fn un_point_mort_et_une_adresse_de_bouclage_se_journalisent() {
     let (point_de_poussee, mut recues) = faux_serveur_de_poussee(&chaine, &cle, "410 Gone");
     let reveilleur = asl_loop_tokio::reveil::Reveilleur::nouveau(
         Arc::clone(&base),
-        &racine,
+        &racines_de_poussee,
         Box::new(journaliser),
     )
     .expect("la racine de banc s'épingle")
     .resoudre_pour_un_essai(point_de_poussee);
     let (adresse, dire_stop, tache) =
-        lever_avec_reveil(&chaine, &cle, Arc::clone(&base), Some(reveilleur)).await;
+        lever_avec_reveil(identite, Arc::clone(&base), Some(reveilleur)).await;
     let mut alice = connecter(&racine, adresse).await;
     let _ = creer_un_compte(&mut alice, 0, 0xA3).await;
     let mut bob = connecter(&racine, adresse).await;
@@ -5091,12 +5006,12 @@ async fn un_point_mort_et_une_adresse_de_bouclage_se_journalisent() {
     let base = Arc::new(base);
     let reveilleur = asl_loop_tokio::reveil::Reveilleur::nouveau(
         Arc::clone(&base),
-        &racine,
+        &racines_de_poussee,
         Box::new(journaliser),
     )
     .expect("la racine de banc s'épingle");
     let (adresse, dire_stop, tache) =
-        lever_avec_reveil(&chaine, &cle, Arc::clone(&base), Some(reveilleur)).await;
+        lever_avec_reveil(identite, Arc::clone(&base), Some(reveilleur)).await;
     let mut alice = connecter(&racine, adresse).await;
     let _ = creer_un_compte(&mut alice, 0, 0xA4).await;
     let mut bob = connecter(&racine, adresse).await;
@@ -5134,8 +5049,8 @@ async fn un_point_mort_et_une_adresse_de_bouclage_se_journalisent() {
     assert!(vu, "le journal dit le refus, l'hôte et la règle : {refus}");
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
+    let _ = std::fs::remove_dir_all(&autorite);
 }
 
 // ── Ce qu'une requête écrit part avec sa réponse (décision 29) ─────────────
@@ -5174,9 +5089,9 @@ async fn une_autorisation_ecrit_la_ligne_des_nouvelles_avec_sa_reponse() {
     // Bob écoute ses nouvelles ; Alice l'autorise, puis tout le monde se tait.
     // La ligne doit arriver avec le `201` d'Alice, et non à la première
     // retransmission.
-    let (autorite, racine, chaine, cle) = materiel("ligne-meme-lot");
+    let (racine, identite) = banc("ligne-meme-lot");
     let (base, fichier) = entrepot("ligne-meme-lot");
-    let (adresse, dire_stop, tache) = lever_avec_reveil(&chaine, &cle, Arc::new(base), None).await;
+    let (adresse, dire_stop, tache) = lever_avec_reveil(identite, Arc::new(base), None).await;
 
     let mut alice = connecter(&racine, adresse).await;
     let _ = creer_un_compte(&mut alice, 0, 0xA3).await;
@@ -5225,7 +5140,6 @@ async fn une_autorisation_ecrit_la_ligne_des_nouvelles_avec_sa_reponse() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -5233,12 +5147,11 @@ async fn une_autorisation_ecrit_la_ligne_des_nouvelles_avec_sa_reponse() {
 async fn une_operation_ecrite_part_au_pair_avec_sa_reponse() {
     // Le pair tient son flux des opérations ; Alice déclare une machine, puis
     // tout le monde se tait. L'opération doit partir au pair avec le `201`.
-    let (autorite, racine, chaine, cle) = materiel("operation-meme-lot");
+    let (racine, identite) = banc("operation-meme-lot");
     let (base, fichier) = entrepot("operation-meme-lot");
     let tireur = asl_cle::CleSecrete::depuis_entropie([0xC5; 32]);
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         asl_proto::Bail::nouveau(10, 30).expect("un bail"),
         asl_auth::Politique::AttestationFacultative,
@@ -5302,7 +5215,6 @@ async fn une_operation_ecrite_part_au_pair_avec_sa_reponse() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -5311,11 +5223,10 @@ async fn une_cle_revoquee_ferme_la_connexion_du_daemon_avec_la_reponse() {
     // Le daemon tient sa connexion ; son propriétaire révoque sa clé depuis
     // une autre, puis tout le monde se tait. La connexion du daemon doit
     // tomber avec le `204`, et celle qui a révoqué, elle, rester debout.
-    let (autorite, racine, chaine, cle) = materiel("fermeture-meme-lot");
+    let (racine, identite) = banc("fermeture-meme-lot");
     let (base, fichier) = entrepot("fermeture-meme-lot");
     let base = Arc::new(base);
-    let (adresse, dire_stop, tache) =
-        lever_avec_reveil(&chaine, &cle, Arc::clone(&base), None).await;
+    let (adresse, dire_stop, tache) = lever_avec_reveil(identite, Arc::clone(&base), None).await;
 
     let mut alice = connecter(&racine, adresse).await;
     let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA6).await;
@@ -5348,7 +5259,6 @@ async fn une_cle_revoquee_ferme_la_connexion_du_daemon_avec_la_reponse() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -5394,9 +5304,9 @@ async fn retirer(client: &mut ams_quic_client::Client, flux: u64, cible: &[u8]) 
 
 #[tokio::test]
 async fn les_domaines_se_creent_se_cherchent_rangent_des_machines_et_gardent_le_dernier() {
-    let (autorite, racine, chaine, cle) = materiel("domaines-api");
+    let (racine, identite) = banc("domaines-api");
     let (base, fichier) = entrepot("domaines-api");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     // ── A : SON PREMIER DOMAINE, NÉ AVEC LE COMPTE ──────────────────────────
     let mut alice = connecter(&racine, adresse).await;
@@ -5637,7 +5547,6 @@ async fn les_domaines_se_creent_se_cherchent_rangent_des_machines_et_gardent_le_
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -5645,9 +5554,9 @@ async fn les_domaines_se_creent_se_cherchent_rangent_des_machines_et_gardent_le_
 
 #[tokio::test]
 async fn les_alias_sont_sensibles_a_la_casse_et_le_nom_d_une_machine_est_un_nom_d_hote() {
-    let (autorite, racine, chaine, cle) = materiel("alias-et-noms");
+    let (racine, identite) = banc("alias-et-noms");
     let (base, fichier) = entrepot("alias-et-noms");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     // ── L'ALIAS DE COMPTE : UNIQUE, MAIS « Thierry » N'EST PAS « thierry » ──
     let mut alice = connecter(&racine, adresse).await;
@@ -5761,7 +5670,6 @@ async fn les_alias_sont_sensibles_a_la_casse_et_le_nom_d_une_machine_est_un_nom_
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -5785,13 +5693,12 @@ fn corps_d_exploitant(
 
 #[tokio::test]
 async fn les_groupes_administrent_un_domaine_et_les_racines_se_nomment_sous_la_cle() {
-    let (autorite, racine, chaine, cle) = materiel("groupes-api");
+    let (racine, identite) = banc("groupes-api");
     let (base, fichier) = entrepot("groupes-api");
     let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
     let secrete = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         bail,
         asl_auth::Politique::AttestationFacultative,
@@ -6155,15 +6062,14 @@ async fn les_groupes_administrent_un_domaine_et_les_racines_se_nomment_sous_la_c
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
 #[tokio::test]
 async fn sans_cle_d_exploitant_les_administrateurs_n_existent_pas() {
-    let (autorite, racine, chaine, cle) = materiel("groupes-sans-cle");
+    let (racine, identite) = banc("groupes-sans-cle");
     let (base, fichier) = entrepot("groupes-sans-cle");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
     let mut client = connecter(&racine, adresse).await;
     let liaison = liaison_du_client(&client);
     let defi = tirer_le_defi(&mut client, 0).await;
@@ -6184,7 +6090,6 @@ async fn sans_cle_d_exploitant_les_administrateurs_n_existent_pas() {
     assert_eq!(statut, b"404");
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -6210,9 +6115,9 @@ async fn les_droits_s_accordent_par_l_api_et_la_forme_d_hier_reste_a_l_octet() {
     //    de `GET /v1/autorisations`, champ pour champ, dans l'ordre d'hier.
     // 3. **Un droit sur un domaine n'a pas de forme d'hier** : il ne paraît
     //    pas dans `GET /v1/autorisations`, et paraît dans `GET /v1/droits`.
-    let (autorite, racine, chaine, cle) = materiel("droits-api");
+    let (racine, identite) = banc("droits-api");
     let (base, fichier) = entrepot("droits-api");
-    let (adresse, dire_stop, tache) = lever(&chaine, &cle, base).await;
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
 
     // ── A : COMPTE, MACHINE ENRÔLÉE ET RANGÉE, SERVICE ANNONCÉ ──────────────
     let mut alice = connecter(&racine, adresse).await;
@@ -6456,7 +6361,6 @@ async fn les_droits_s_accordent_par_l_api_et_la_forme_d_hier_reste_a_l_octet() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -6466,9 +6370,9 @@ async fn un_droit_accorde_reveille_les_membres_du_groupe_et_un_ajout_aussi() {
     // groupe qui le reçoit ; ajouter un compte à un groupe qui porte des
     // droits réveille ce compte. La ligne garde son genre — c'est sur elle
     // que les applications déployées relisent.
-    let (autorite, racine, chaine, cle) = materiel("droits-reveil");
+    let (racine, identite) = banc("droits-reveil");
     let (base, fichier) = entrepot("droits-reveil");
-    let (adresse, dire_stop, tache) = lever_avec_reveil(&chaine, &cle, Arc::new(base), None).await;
+    let (adresse, dire_stop, tache) = lever_avec_reveil(identite, Arc::new(base), None).await;
 
     let mut alice = connecter(&racine, adresse).await;
     let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA4).await;
@@ -6572,7 +6476,6 @@ async fn un_droit_accorde_reveille_les_membres_du_groupe_et_un_ajout_aussi() {
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
@@ -6603,7 +6506,7 @@ fn corps_d_annuaire(
 /// Un annuaire local se présente — ou relit son état — sur une connexion
 /// neuve : le statut, et l'état rendu.
 async fn se_presenter(
-    racine: &[u8],
+    racine: &asl_loop_tokio::Confiance,
     adresse: SocketAddr,
     identite: &asl_cle::CleSecrete,
     code: Option<&str>,
@@ -6629,13 +6532,12 @@ async fn se_presenter(
 
 #[tokio::test]
 async fn un_annuaire_local_s_inscrit_est_tranche_et_heberge_les_domaines_de_son_proprietaire() {
-    let (autorite, racine, chaine, cle) = materiel("inscriptions");
+    let (racine, identite) = banc("inscriptions");
     let (base, fichier) = entrepot("inscriptions");
     let bail = asl_proto::Bail::nouveau(10, 30).expect("un bail");
     let exploitant_cle = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         bail,
         asl_auth::Politique::AttestationFacultative,
@@ -6932,18 +6834,16 @@ async fn un_annuaire_local_s_inscrit_est_tranche_et_heberge_les_domaines_de_son_
 
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
 // ── LA FÉDÉRATION (0.28.0) ──────────────────────────────────────────────────
 
-/// Un annuaire local levé : son adresse, l'autorité de son certificat, de
+/// Un annuaire local levé : son adresse, l'identité qu'on en attend, de
 /// quoi l'arrêter, sa boucle, son fédérateur, et son entrepôt.
 struct AnnuaireLocal {
     adresse: SocketAddr,
-    racine: Vec<u8>,
-    autorite: PathBuf,
+    racine: asl_loop_tokio::Confiance,
     fichier: PathBuf,
     dire_stop: tokio::sync::oneshot::Sender<()>,
     tache: tokio::task::JoinHandle<Comptes>,
@@ -6961,14 +6861,16 @@ async fn lever_un_annuaire_local(
     cadence_ms: u64,
     locateurs: &[&str],
 ) -> AnnuaireLocal {
-    let (autorite, racine, chaine, cle) = materiel(nom);
+    // Le certificat que l'annuaire local présente est celui de son banc ; la
+    // clé qu'il prouve aux racines est `identite` — le binaire tient les deux
+    // sous la même clé.
+    let (racine, presente) = banc(nom);
     let (base, fichier) = entrepot(nom);
     let publies = Arc::new(asl_loop_tokio::ServicesPublies::nouvelle());
     let (rendre_fermetures, fermetures) = tokio::sync::oneshot::channel();
     let (rendre_entrepot, entrepot_local) = tokio::sync::oneshot::channel();
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        presente,
         base,
         asl_proto::Bail::nouveau(10, 30).expect("un bail"),
         asl_auth::Politique::AttestationFacultative,
@@ -7002,7 +6904,6 @@ async fn lever_un_annuaire_local(
     AnnuaireLocal {
         adresse,
         racine,
-        autorite,
         fichier,
         dire_stop,
         tache,
@@ -7034,7 +6935,6 @@ impl AnnuaireLocal {
         self.federateur.abort();
         let _ = self.dire_stop.send(());
         let _ = self.tache.await;
-        let _ = std::fs::remove_dir_all(&self.autorite);
         let _ = std::fs::remove_file(&self.fichier);
     }
 }
@@ -7067,7 +6967,7 @@ async fn annoncer_depot(
 async fn machine_du_compte(
     appareil: &mut ams_quic_client::Client,
     flux: u64,
-    racine: &[u8],
+    racine: &asl_loop_tokio::Confiance,
     adresse: SocketAddr,
     corps: &[u8],
     secrete: &asl_cle::CleSecrete,
@@ -7104,7 +7004,7 @@ async fn chercher_jusqu_a(
 /// liste des racines, tout ce qui vit chez elles — et sert toujours ce qui est
 /// à lui ; une racine, elle, ne renvoie rien de tout cela.
 async fn un_annuaire_local_renvoie_aux_racines(
-    racine_locale: &[u8],
+    racine_locale: &asl_loop_tokio::Confiance,
     adresse_locale: SocketAddr,
     a_la_racine: &mut ams_quic_client::Client,
     flux: &mut u64,
@@ -7146,20 +7046,16 @@ async fn un_annuaire_local_renvoie_aux_racines(
 
 #[tokio::test]
 async fn la_federation_de_bout_en_bout() {
-    let (autorite, racine, chaine, cle) = materiel("federation");
+    let (racine, identite) = banc("federation");
     let (base, fichier) = entrepot("federation");
     let exploitant_cle = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
     let (rendre_entrepot, entrepot_racine) = tokio::sync::oneshot::channel();
-    // **LA RACINE PRÉSENTE LES DEUX FORMES** (décision 58) : sa chaîne d'hier
-    // aux clients qui visent un nom, son certificat d'identité à qui vise une
-    // adresse.
-    let identite_racine: &'static asl_cle::CleSecrete =
-        Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie([0x0F; 32])));
+    // **LA RACINE NE PRÉSENTE QUE SON CERTIFICAT D'IDENTITÉ** (décision 58).
+    let identite_racine = identite;
     // **TROIS SECONDES D'EXPIRATION** au lieu de trente : l'essai voit tomber
     // un service sans attendre la demi-minute du produit.
     let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
+        identite,
         base,
         asl_proto::Bail::nouveau(10, 30).expect("un bail"),
         asl_auth::Politique::AttestationFacultative,
@@ -7169,7 +7065,6 @@ async fn la_federation_de_bout_en_bout() {
             exploitant: Some(exploitant_cle.publique()),
             expiration_federee_us: Some(3_000_000),
             entrepot_partage: Some(rendre_entrepot),
-            presenter: Some(identite_racine),
             ..ClesDeLExploitant::default()
         },
     )
@@ -7525,11 +7420,13 @@ async fn la_federation_de_bout_en_bout() {
     .await;
     assert_eq!(statut, b"204");
     let helium_local =
-        // **HELIUM, SOUS LA FORME D'HIER** (décision 58) : l'autorité et le
-        // nom. La même racine croit les deux.
+        // **HELIUM, PAR L'IDENTITÉ DITE** — `--federation <locateur>=<n-…>`
+        // (décision 58) : l'identifiant, pas la clé.
         lever_un_annuaire_local(
             "federation-helium",
-            asl_loop_tokio::Confiance::par_autorite(racine.clone()).pour_le_nom("localhost"),
+            asl_loop_tokio::Confiance::par_identifiants(&[asl_cle::identifiant_de_racine(
+                &identite_racine.publique(),
+            )]),
             adresse,
             helium,
             200,
@@ -7538,17 +7435,15 @@ async fn la_federation_de_bout_en_bout() {
         )
         .await;
     helium_local.attendre_la_machine(machine_d).await;
-    let ouverte_d_hier = format!(
-        "fédération vers 127.0.0.1:{} ouverte : clé prouvée (TLS : autorité et nom (forme d'hier))",
-        adresse.port()
-    );
     assert!(
         JOURNAL
             .lock()
             .expect("le journal n'est pas empoisonné")
             .iter()
-            .any(|ligne| ligne == &ouverte_d_hier),
-        "helium devait croire la chaîne d'hier, pour le nom `localhost`"
+            .filter(|ligne| *ligne == &ouverte_par_cle)
+            .count()
+            >= 2,
+        "helium devait croire la racine par son identité, comme speedy"
     );
     // **LA PAIRE DANS LE `421`** : les locateurs de speedy, l'adresse
     // déclarée d'helium — chaque membre les siens.
@@ -7655,71 +7550,36 @@ async fn la_federation_de_bout_en_bout() {
     helium_local.arreter().await;
     let _ = dire_stop.send(());
     let _ = tache.await;
-    let _ = std::fs::remove_dir_all(&autorite);
     let _ = std::fs::remove_file(&fichier);
 }
 
 // ── L'IDENTITÉ PAR LA CLÉ (décisions 53 à 58) ──────────────────────────────
 
 #[tokio::test]
-async fn une_racine_en_transition_sert_les_deux_formes_et_chacune_est_crue() {
-    // **C'EST LA DÉCISION 58, SUR UNE VRAIE SOCKET** : la même racine présente
-    // sa chaîne d'hier à qui envoie un nom (SNI), et son certificat d'identité
-    // à qui vise une adresse. Un client de chaque forme la croit ; un client
-    // qui attend une AUTRE clé ne la croit pas.
-    let (_autorite, racine, chaine, cle) = materiel("identite-deux-formes");
-    let (base, _fichier) = entrepot("identite-deux-formes");
-    let identite: &'static asl_cle::CleSecrete =
-        Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie([0x61; 32])));
-    let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
-        base,
-        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
-        asl_auth::Politique::AttestationFacultative,
-        Attestations::AUCUNE,
-        None,
-        ClesDeLExploitant {
-            presenter: Some(identite),
-            ..ClesDeLExploitant::default()
-        },
-    )
-    .await;
+async fn un_annuaire_ne_presente_que_son_identite_et_la_forme_d_hier_est_refusee() {
+    // **C'EST LA FIN DE LA DÉCISION 58, SUR UNE VRAIE SOCKET** : l'annuaire
+    // présente son certificat d'identité à tous — même à qui envoie un nom —,
+    // un client qui attend sa clé le croit, un client qui en attend une autre
+    // ne le croit pas, et **un client d'hier — une autorité PEM, un nom — est
+    // refusé** : aucune chaîne ne lui est plus servie.
+    let (racine, identite) = banc("identite-seule");
+    let (base, fichier) = entrepot("identite-seule");
+    let (adresse, dire_stop, tache) = lever(identite, base).await;
     let locateur = format!("127.0.0.1:{}", adresse.port());
 
-    // La forme nouvelle : une adresse, une clé.
-    assert_eq!(
-        asl_loop_tokio::confiance::sonder(
-            &locateur,
-            &asl_loop_tokio::Confiance::par_identite(&[identite.publique()]),
-        )
+    asl_loop_tokio::confiance::sonder(&locateur, &racine)
         .await
-        .expect("la racine est crue par sa clé"),
-        asl_loop_tokio::Forme::Identite
-    );
-    // La forme d'hier : une autorité, un nom qui part en SNI.
-    assert_eq!(
-        asl_loop_tokio::confiance::sonder(
-            &locateur,
-            &asl_loop_tokio::Confiance::par_autorite(racine.clone()).pour_le_nom("localhost"),
-        )
-        .await
-        .expect("la racine est crue par sa chaîne d'hier"),
-        asl_loop_tokio::Forme::Autorite
-    );
-    // Les deux ensemble, et un nom : la chaîne d'hier sert, jugée par l'autorité.
-    assert_eq!(
-        asl_loop_tokio::confiance::sonder(
-            &locateur,
-            &asl_loop_tokio::Confiance::par_identite(&[identite.publique()])
-                .avec_autorite(Some(racine.clone()))
-                .pour_le_nom("localhost"),
-        )
-        .await
-        .expect("crue en repli"),
-        asl_loop_tokio::Forme::Autorite
-    );
-    // **UNE AUTRE CLÉ N'EST PAS LA RACINE.**
+        .expect("l'annuaire est cru par sa clé");
+    // Par son identifiant `n-…` aussi — `--federation <locateur>=<n-…>`.
+    asl_loop_tokio::confiance::sonder(
+        &locateur,
+        &asl_loop_tokio::Confiance::par_identifiants(&[asl_cle::identifiant_de_racine(
+            &identite.publique(),
+        )]),
+    )
+    .await
+    .expect("l'annuaire est cru par son identifiant");
+    // **UNE AUTRE CLÉ N'EST PAS L'ANNUAIRE.**
     let autre = asl_cle::CleSecrete::depuis_entropie([0x62; 32]);
     assert!(
         asl_loop_tokio::confiance::sonder(
@@ -7728,70 +7588,53 @@ async fn une_racine_en_transition_sert_les_deux_formes_et_chacune_est_crue() {
         )
         .await
         .is_err(),
-        "une racine qui ne tient pas la clé attendue ne doit pas être crue"
+        "un annuaire qui ne tient pas la clé attendue ne doit pas être cru"
     );
-
-    let _ = dire_stop.send(());
-    let _ = tache.await;
-}
-
-#[tokio::test]
-async fn un_annuaire_sans_chaine_ne_presente_que_son_identite() {
-    // **LE CAS DE SPEEDY** : un annuaire qui n'a jamais eu d'autorité. Sa clé
-    // suffit ; une autorité, même la bonne, ne le reconnaît pas.
-    let (_autorite, racine, chaine, cle) = materiel("identite-seule");
-    let (base, _fichier) = entrepot("identite-seule");
-    let identite: &'static asl_cle::CleSecrete =
-        Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie([0x63; 32])));
-    let (adresse, dire_stop, tache) = lever_complet(
-        &chaine,
-        &cle,
-        base,
-        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
-        asl_auth::Politique::AttestationFacultative,
-        Attestations::AUCUNE,
-        None,
-        ClesDeLExploitant {
-            presenter: Some(identite),
-            sans_chaine: true,
-            ..ClesDeLExploitant::default()
-        },
-    )
-    .await;
-    let locateur = format!("127.0.0.1:{}", adresse.port());
-    assert_eq!(
-        asl_loop_tokio::confiance::sonder(
-            &locateur,
-            &asl_loop_tokio::Confiance::par_identite(&[identite.publique()]),
-        )
-        .await
-        .expect("cru par sa clé"),
-        asl_loop_tokio::Forme::Identite
-    );
-    // Même en envoyant un nom : il n'a que son identité à montrer.
-    assert_eq!(
-        asl_loop_tokio::confiance::sonder(
-            &locateur,
-            &asl_loop_tokio::Confiance::par_identite(&[identite.publique()])
-                .avec_autorite(Some(racine.clone()))
-                .pour_le_nom("localhost"),
-        )
-        .await
-        .expect("cru par sa clé, même avec un nom"),
-        asl_loop_tokio::Forme::Identite
-    );
+    // Rien à croire ne se monte pas.
     assert!(
-        asl_loop_tokio::confiance::sonder(
-            &locateur,
-            &asl_loop_tokio::Confiance::par_autorite(racine).pour_le_nom("localhost"),
-        )
-        .await
-        .is_err(),
-        "sans chaîne, une autorité ne reconnaît pas l'annuaire"
+        asl_loop_tokio::confiance::sonder(&locateur, &asl_loop_tokio::Confiance::default())
+            .await
+            .is_err()
+    );
+
+    // **UN CLIENT D'HIER** : une autorité PEM épinglée, le nom `localhost`
+    // en SNI — la forme que `--peer-ca`, `--federation-ca` et `--ca` montaient.
+    // Le certificat d'identité ne remonte à aucune autorité : la poignée de
+    // main échoue chez lui (le harnais le dit en paniquant sur la faute TLS).
+    let (autorite, racine_d_hier, _, _) = poussee("identite-seule-hier");
+    let hier = tokio::spawn(async move {
+        let mut client =
+            ams_quic_client::Client::new(ams_quic_client::config_client(&racine_d_hier), adresse)
+                .await;
+        for _ in 0..64_u32 {
+            client.parler().await;
+            if !client.ecouter().await {
+                break;
+            }
+        }
+        client.export(b"essai", None).is_some()
+    })
+    .await;
+    let refus = match hier {
+        Ok(etablie) => panic!("un client d'hier a fini sa poignée de main : {etablie}"),
+        Err(chute) => chute,
+    };
+    assert!(refus.is_panic(), "{refus}");
+    let dit = refus.into_panic();
+    let dit = dit
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| dit.downcast_ref::<&str>().map(|quoi| (*quoi).to_owned()))
+        .unwrap_or_default();
+    assert!(
+        dit.contains("InvalidCertificate"),
+        "le client d'hier refuse le certificat d'identité : {dit}"
     );
 
     let _ = dire_stop.send(());
     let _ = tache.await;
+    let _ = std::fs::remove_file(&fichier);
+    let _ = std::fs::remove_dir_all(&autorite);
 }
 
 /// Chaque adresse d'un `421`, et l'identité écrite en face (décision 59) :

@@ -61,20 +61,20 @@
 #
 # ── LA RÉPLICATION EST OPTIONNELLE, ET SUIT LA MÊME MÉCANIQUE ────────────────
 #
-# `docs/replication.md` §8 : `--identity-key`, `--peer`, `--peer-key` et
-# `--peer-ca` mettent une racine en réplication avec l'autre. Aucun n'a de
-# valeur par défaut ici : `$ASL_REPLICATION`, NON CITÉ, est vide tant qu'un
+# `docs/replication.md` §8 : `--peer` et `--peer-key` mettent une racine en
+# réplication avec l'autre (sa clé d'identité est déjà sur la ligne, voir
+# plus bas). Aucun n'a de valeur par défaut ici : `$ASL_REPLICATION`, NON CITÉ, est vide tant qu'un
 # drop-in ne le remplit pas — et une racine sans lui tourne SEULE, ce qui est
 # le cas nominal d'un banc isolé, pas un défaut. Un exemple est expédié sous
 # `/usr/share/doc/asl-server/replication.conf.exemple`.
 #
 # Non cité, comme `$ASL_ATTESTATION` : vide, l'argument disparaît, et rien ne
-# passe à `asl-server` ; rempli, systemd DÉCOUPE sur les espaces, et les quatre
+# passe à `asl-server` ; rempli, systemd DÉCOUPE sur les espaces, et les
 # `--peer…` arrivent séparés. Le drop-in, lui, CITE l'affectation entière —
-# `Environment="ASL_REPLICATION=--identity-key … --peer …"` — parce que
+# `Environment="ASL_REPLICATION=--peer … --peer-key …"` — parce que
 # `Environment=` découpe aussi sa ligne sur les espaces, avant d'y lire des
-# affectations : sans guillemets, la variable ne vaudrait que `--identity-key`
-# et l'annuaire refuserait de démarrer. Les guillemets sont pour systemd ; ils
+# affectations : sans guillemets, la variable ne vaudrait que `--peer` et
+# l'annuaire refuserait de démarrer. Les guillemets sont pour systemd ; ils
 # ne sont pas dans la valeur, et c'est ici, sur `$ASL_REPLICATION`, qu'elle se
 # découpe en arguments.
 
@@ -93,25 +93,26 @@ Group=asl-server
 # de lire quoi que ce soit. Ces deux lignes sont la ceinture ; son refus est
 # les bretelles.
 #
-# **LA CHAÎNE D'HIER EST UN RÉGLAGE, PLUS UNE LIGNE FIXE** (0.29.0, décisions
-# 55 et 58). Par défaut, `$ASL_TLS` la donne comme avant — une racine d'hier
-# redémarre à l'identique. Un annuaire qui n'a que son identité (un annuaire
-# local, ou une racine qui a fini sa transition) la vide par un drop-in :
-#   [Service]
-#   Environment=ASL_TLS=
-# Non cité, comme les autres : vide, l'argument disparaît.
-Environment="ASL_TLS=--certificate /etc/asl-server/certificat.pem --key /etc/asl-server/cle.pem"
+#
+# **LA CLÉ D'IDENTITÉ EST UNE LIGNE FIXE, COMME L'ENTREPÔT** (0.34.0, fin de
+# la transition, décision 58) : l'annuaire ne présente QUE le certificat
+# qu'elle signe, et ne démarre pas sans elle — `asl-server --new-identity-key
+# /etc/asl-server/identite.key` la frappe. `$ASL_TLS` et la chaîne d'hier
+# (`--certificate`/`--key`) ont disparu ; un drop-in d'avant qui pose encore
+# `Environment=ASL_TLS=` est sans effet — plus rien ne lit la variable. Un
+# `$ASL_REPLICATION` d'avant qui redonne `--identity-key` avec le MÊME chemin
+# ne change rien non plus : la dernière occurrence l'emporte, et c'est la même.
 ExecStart=/usr/bin/asl-server \
     --store /var/lib/asl-server/annuaire.redb \
-    $ASL_TLS \
+    --identity-key /etc/asl-server/identite.key \
     --attestation $ASL_ATTESTATION \
     $ASL_ANDROID \
     $ASL_POUSSEE \
     $ASL_REPLICATION
 
 # **PAS DE `Restart=always`.** Les fautes qui empêchent cet annuaire de démarrer
-# sont des fautes de configuration — un certificat absent, une posture non
-# choisie, une base verrouillée —, et redémarrer sans fin les répéterait dans le
+# sont des fautes de configuration — une clé d'identité absente, une posture
+# non choisie, une base verrouillée —, et redémarrer sans fin les répéterait dans le
 # journal jusqu'à le rendre illisible. `on-failure` avec un intervalle de dix
 # secondes couvre la panne passagère sans masquer la panne durable.
 Restart=on-failure

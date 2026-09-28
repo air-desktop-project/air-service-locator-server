@@ -37,8 +37,9 @@ ams-quic.workspace = true
 ams-quic-tls.workspace = true
 
 # `ams-tls` EST UNE VRAIE DÉPENDANCE, ET NON UNE DÉPENDANCE D'ESSAI. Elle
-# monte la configuration TLS, et surtout elle porte l'ALPN `h3` : voir
-# `configuration_tls`, qui existe pour qu'on ne puisse pas l'oublier.
+# porte le fournisseur QUIC et l'ALPN `h3` : voir `confiance`, qui les pose
+# sur chaque configuration, servie comme cliente, pour qu'on ne puisse pas
+# les oublier.
 ams-tls.workspace = true
 
 # `libc` POUR UN SEUL APPEL : `geteuid`, qui n'a pas d'équivalent dans `std`.

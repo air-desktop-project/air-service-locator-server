@@ -153,8 +153,7 @@ pub struct Tireur {
     /// L'adresse du pair, telle que l'exploitant l'a réglée — `hôte:port`.
     pub adresse: String,
     /// Ce qu'on croit du pair à la poignée de main : sa clé d'identité
-    /// (`--peer-key`), et l'autorité d'hier en repli tant que `--peer-ca` est
-    /// réglé (décision 58).
+    /// (`--peer-key`), et rien d'autre (décision 58).
     pub confiance: crate::confiance::Confiance,
     /// Notre clé d'identité : c'est elle qui signe la preuve de genre `n`.
     pub identite: CleSecrete,
@@ -248,9 +247,9 @@ impl Tireur {
             .await?;
         self.etat.poser(true);
         (self.journal)(format!(
-            "voie vers {} ({pair}) ouverte, prouvée dans les deux sens — état : ouverte ({})",
+            "voie vers {} ({pair}) ouverte, prouvée dans les deux sens — état : ouverte \
+             (TLS : identité par la clé)",
             self.adresse,
-            connexion.forme_dite(),
         ));
 
         self.tirer(&mut connexion, pair).await
@@ -676,10 +675,11 @@ impl Reprise {
     }
 }
 
-/// Le nom du certificat qu'on exige d'en face : la part `hôte` de l'adresse.
+/// L'hôte du locateur, pour l'`:authority` des requêtes — **jamais pour la
+/// confiance**, qui ne vient que de la clé (`protocole.md` §0).
 ///
-/// Une adresse IPv6 se donne entre crochets (`[::1]:6630`) ; le certificat,
-/// lui, porte l'adresse nue.
+/// Une adresse IPv6 se donne entre crochets (`[::1]:6630`) ; l'hôte, lui, est
+/// l'adresse nue.
 pub(crate) fn nom_tls(adresse: &str) -> String {
     let sans_port = adresse.rsplit_once(':').map_or(adresse, |(hote, _)| hote);
     sans_port
@@ -720,24 +720,21 @@ pub(crate) struct Connexion {
     h3: Http3Client,
     pub(crate) liaison: LiaisonDeCanal,
     autorite: String,
-    /// La forme sous laquelle le serveur a été cru (décision 58).
-    retenue: crate::confiance::Retenue,
 }
 
 impl Connexion {
     /// Ouvre une connexion et mène la poignée de main au bout.
     ///
     /// **`adresse` est un locateur, `confiance` dit qui l'on doit trouver au
-    /// bout** (`protocole.md` §0) : l'identité attendue, ou l'autorité d'hier
-    /// pendant la transition.
+    /// bout** (`protocole.md` §0) : l'identité attendue, et elle seule.
     pub(crate) async fn ouvrir(
         cible: SocketAddr,
         adresse: &str,
         confiance: &crate::confiance::Confiance,
         idle_us: u64,
     ) -> Result<Self, Faute> {
-        let (config, retenue) = crate::confiance::configuration_cliente(confiance)?;
-        let serveur = crate::confiance::nom_de_serveur(confiance, adresse, cible)?;
+        let config = crate::confiance::configuration_cliente_de(confiance)?;
+        let serveur = crate::confiance::nom_de_serveur(cible);
         let nom = nom_tls(adresse);
 
         // Une socket de la même famille que la cible : se lier en IPv4 pour
@@ -769,23 +766,9 @@ impl Connexion {
             h3: Http3Client::new(),
             liaison: LiaisonDeCanal::depuis_octets([0; asl_cle::LIAISON_OCTETS]),
             autorite: nom,
-            retenue,
         };
         connexion.poignee_de_main().await?;
         Ok(connexion)
-    }
-
-    /// La forme sous laquelle le serveur a été cru, pour le journal.
-    pub(crate) fn forme(&self) -> Option<crate::confiance::Forme> {
-        self.retenue.lock().ok().and_then(|forme| *forme)
-    }
-
-    /// La même, dite en toutes lettres.
-    pub(crate) fn forme_dite(&self) -> String {
-        self.forme().map_or_else(
-            || "TLS : forme inconnue".to_owned(),
-            |forme| forme.to_string(),
-        )
     }
 
     /// La cadence de maintien : c'est elle qui tient le mapping ouvert (§2.3).
