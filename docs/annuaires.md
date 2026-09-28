@@ -550,12 +550,38 @@ donc les services de son pair, **définitivement**. Le 2026-09-28 l'ordre a ét�
 favorable (helium : « 3 machine(s) de nos domaines reçue(s) » à 18:43:45, la
 voie du pair ouverte à 18:44:16) ; rien ne le garantit.
 
+**Corrigé en 0.36.0 (décision 69).** Chez un membre d'annuaire local,
+l'opération est **gardée** — table `services-en-attente`, une par
+`(machine, nom)`, la plus ancienne — et **rejouée**, par la règle ordinaire,
+dans la transaction où sa machine arrive des racines
+(`Entrepot::ranger_les_machines_federees`). **Le curseur avance quand même**,
+et c'est le choix : le retenir figerait tout le flux du pair derrière une
+opération qui, si sa machine ne vient jamais (sortie de nos domaines), ne
+s'appliquerait jamais ; l'écrire quand même parmi les services ferait publier
+aux racines un service sans machine, et la racine refuserait le rapport
+entier (C11). Gardée à part, elle ne retient qu'elle-même. **Chez une racine,
+rien ne change** : la machine d'un service arrive toujours avant lui dans le
+journal du pair, une machine inconnue y est une machine effacée, et le service
+part avec elle — l'entrepôt sait lequel il est (`se_savoir_annuaire_local`,
+posé au démarrage quand `--federation` est réglé).
+
 **Un troisième défaut, que la convergence elle-même provoquerait.** Si la règle
 « le plus ancien reste » remplaçait le `s-…` d'un membre pendant qu'un daemon y
 est connecté, sa session vivante resterait rangée dans le vivier sous l'ancien
 identifiant ; `publier` (`h3.rs` l. 3221–3253) parcourt les services de
 l'entrepôt et cherche leur session par le NOUVEAU : le daemon serait rapporté
 `parti` alors qu'il est là, jusqu'à sa prochaine annonce.
+
+**Corrigé en 0.36.0 (décision 69).** L'application d'une opération nomme
+chaque remplacement `(perdant, gagnant)` ; le tireur — et le fédérateur, pour
+un rejeu — le passe à la boucle par le canal des fermetures
+(`Fermetures::renommer`), et la boucle **déplace la session vivante** sous le
+gagnant (`Vivier::renommer`, `asl_annuaire::Session::renommer`) : la
+publication aux racines la trouve, et sa réponse porte le gagnant. Le daemon,
+lui, apprend le nouvel identifiant à sa prochaine annonce. Cela vaut aussi
+entre deux racines, où la même règle joue. Un verdict de sonde en vol pour le
+perdant, lui, tombe dans le vide : le point reste « en cours » jusqu'à la
+prochaine annonce.
 
 #### Où l'identifiant est consommé
 
@@ -1517,7 +1543,9 @@ Rassemblé, plutôt que dispersé.
     patch**, avant la migration — l'opération est gardée ou le curseur n'avance
     pas —, **et avec lui le vivier** : une session restée rangée sous un `s-…`
     qui a perdu la convergence est déplacée sous le gagnant, pour qu'un daemon
-    présent ne soit plus rapporté `parti`.
+    présent ne soit plus rapporté `parti`. **Fait (0.36.0)** : gardée et
+    rejouée quand sa machine arrive, le curseur avançant — §2 ter, « Un
+    défaut latent » ; la session suit le gagnant — « Un troisième défaut ».
 20. **Une paire qui tourne sans `--peer`.** C'est une erreur de déploiement
     silencieuse : chaque membre se croit seul (« cette racine tourne seule »),
     frappe ses propres `s-…`, et rien ne le signale ailleurs que dans une ligne
@@ -1528,6 +1556,22 @@ Rassemblé, plutôt que dispersé.
     tour** dans son journal, dans **`GET /v1/version`**, et les applications
     l'affichent sur **l'écran de l'annuaire**. **Il ne refuse pas de démarrer** :
     un membre seul sert encore ses daemons, et c'est ce qu'on veut d'un secours.
+    **Fait (0.36.0)** : à chaque tour de fédération (dix secondes), le
+    membre dit son `--peer` aux racines par `PUT /v1/federation/paire`, qui
+    lui rendent son annuaire et **ses membres acceptés** (`protocole.md`
+    §3 ter) ; il juge — `seul`, `reglee`, `sans-peer` (un autre membre
+    accepté, pas de `--peer` : le titulaire comme le second, chacun
+    l'apprend), `peer-inconnu` (un `--peer` qui n'est aucun autre membre
+    accepté). Les deux derniers se disent au journal **dès qu'on les
+    apprend, puis toutes les dix minutes** — « à chaque tour » ferait trois
+    cent soixante lignes à l'heure, que l'œil apprend à sauter ; dix minutes
+    garantissent qu'un `journalctl --since -15min` la montre toujours :
+    `PAIRE MAL RÉGLÉE (sans-peer) : les racines disent que cet annuaire
+    local (n-…) a un autre membre accepté, n-…, et ce membre tourne SANS
+    --peer — …`. `GET /v1/version` du membre porte `"paire":"<mot>"` ; les
+    racines jugent de même et rendent `"paire"` par membre dans
+    `GET /v1/annuaires` — c'est ce que **l'écran de l'annuaire** affichera
+    (les applications ne sont pas touchées par cette version).
 21. **Un annuaire local déclare, dès sa création, un service `asl-directory`.**
     **Proposé par Thierry le 2026-09-28, accepté dans son principe (décision
     71) ; ses sous-questions tranchées le même jour (Thierry ; décisions 73 à

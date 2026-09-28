@@ -278,6 +278,10 @@ pub struct InscriptionRendue<'a> {
     pub locateurs: &'a [&'a str],
     /// Jusqu'à quand le code se présente, pour une déclaration attendue.
     pub expire_a: Option<u64>,
+    /// Ce que ce membre a conclu de sa paire, s'il l'a dit à cette racine
+    /// depuis qu'elle tourne (0.36.0, décision 70) : l'un des mots
+    /// d'[`EtatDePaire`].
+    pub paire: Option<EtatDePaire>,
 }
 
 impl InscriptionRendue<'_> {
@@ -323,6 +327,11 @@ impl InscriptionRendue<'_> {
             let mut chiffres = [0_u8; 20];
             ecrivain.pousser(b",\"expire_a\":");
             ecrivain.pousser(ecrire_un_entier(quand, &mut chiffres));
+        }
+        if let Some(paire) = self.paire {
+            ecrivain.pousser(b",\"paire\":\"");
+            ecrivain.pousser(paire.mot().as_bytes());
+            ecrivain.pousser(b"\"");
         }
         ecrivain.pousser(b"}");
         ecrivain.achever()
@@ -570,6 +579,220 @@ impl<'a> ListeDeRacines<'a> {
     pub fn racines(&self) -> impl Iterator<Item = &RacineLue<'a>> {
         self.racines.iter().flatten()
     }
+}
+
+// ── La paire, vue par un membre (0.36.0, décision 70) ───────────────────────
+
+/// Le champ qui porte le pair qu'un membre a réglé.
+const CHAMP_PAIR: &str = "pair";
+
+/// Combien de membres un annuaire local a, au plus : un titulaire, un second
+/// (décision 49).
+pub const MEMBRES_MAX: usize = 2;
+
+/// Ce qu'un membre d'annuaire local conclut de sa paire : ce que les racines
+/// lui disent des membres acceptés de son annuaire, comparé à son `--peer`.
+///
+/// # LES QUATRE MOTS, ET CE QU'ILS DISENT
+///
+/// | Mot | Quand | Grave ? |
+/// |---|---|---|
+/// | `seul` | Aucun autre membre accepté, et pas de `--peer`. | Non : un annuaire à un membre. |
+/// | `reglee` | `--peer` désigne l'autre membre accepté. | Non : la paire se réplique. |
+/// | `sans-peer` | Un autre membre est accepté, et ce membre tourne sans `--peer`. | **Oui** : les deux ne se répliquent pas, chacun frappe ses `s-…`. |
+/// | `peer-inconnu` | `--peer` désigne une clé qui n'est celle d'aucun autre membre accepté. | **Oui** : on réplique avec qui n'est pas de l'annuaire, ou avec personne. |
+///
+/// **Des mots, et non un booléen** : le lecteur d'hier d'une réponse JSON
+/// (`asl` 0.16, les applications) ne saute un champ inconnu que si sa valeur
+/// est une chaîne ou un nombre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EtatDePaire {
+    /// Un annuaire à un membre, sans `--peer`.
+    Seul,
+    /// `--peer` désigne l'autre membre accepté.
+    Reglee,
+    /// Un autre membre est accepté, et ce membre tourne sans `--peer`.
+    SansPeer,
+    /// `--peer` ne désigne aucun autre membre accepté.
+    PeerInconnu,
+}
+
+impl EtatDePaire {
+    /// Juge : `moi`, le `n-…` que `--peer-key` donne (s'il est réglé), et les
+    /// membres acceptés de l'annuaire, tels que les racines les disent.
+    #[must_use]
+    pub fn juger(moi: Identifiant, pair: Option<Identifiant>, membres: &[Identifiant]) -> Self {
+        let autre = membres.iter().any(|membre| *membre != moi);
+        match pair {
+            None if autre => Self::SansPeer,
+            None => Self::Seul,
+            Some(pair) if pair != moi && membres.contains(&pair) => Self::Reglee,
+            Some(_) => Self::PeerInconnu,
+        }
+    }
+
+    /// Le mot, tel qu'il sort dans `GET /v1/version` et `GET /v1/annuaires`.
+    #[must_use]
+    pub const fn mot(self) -> &'static str {
+        match self {
+            Self::Seul => "seul",
+            Self::Reglee => "reglee",
+            Self::SansPeer => "sans-peer",
+            Self::PeerInconnu => "peer-inconnu",
+        }
+    }
+
+    /// Est-ce une erreur de déploiement, à dire fort ?
+    #[must_use]
+    pub const fn alerte(self) -> bool {
+        matches!(self, Self::SansPeer | Self::PeerInconnu)
+    }
+}
+
+/// Le corps de `PUT /v1/federation/paire` : le pair qu'un membre a réglé,
+/// `{"pair":"n-…"}`, ou `{"pair":null}` sans `--peer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeclarationDePair {
+    /// Le `n-…` que la clé de `--peer-key` donne, s'il y en a une.
+    pub pair: Option<Identifiant>,
+}
+
+impl DeclarationDePair {
+    /// Décode une déclaration.
+    ///
+    /// # Erreurs
+    ///
+    /// Celles du cadrage, plus [`Erreur::IdentifiantInvalide`] quand ce n'est
+    /// ni `null` ni un `n-…`.
+    pub fn decoder(octets: &[u8]) -> Result<Self, Erreur> {
+        let mut lecteur = ouvrir(octets, CHAMP_PAIR)?;
+        lecteur.sauter_blancs();
+        let pair = if lecteur.mot("null") {
+            None
+        } else {
+            let position = lecteur.position();
+            Some(
+                Identifiant::analyser_genre(Genre::Annuaire, lecteur.chaine()?)
+                    .map_err(|_| Erreur::IdentifiantInvalide { position })?,
+            )
+        };
+        fermer(&mut lecteur)?;
+        Ok(Self { pair })
+    }
+
+    /// Encode la déclaration en JSON.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`] si `sortie` ne suffit pas.
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{\"pair\":");
+        match self.pair {
+            Some(pair) => {
+                ecrivain.pousser(b"\"");
+                ecrivain.pousser(pair.texte().as_str().as_bytes());
+                ecrivain.pousser(b"\"");
+            }
+            None => ecrivain.pousser(b"null"),
+        }
+        ecrivain.pousser(b"}");
+        ecrivain.achever()
+    }
+}
+
+/// La réponse de `PUT /v1/federation/paire` : l'annuaire du membre qui
+/// demande — son titulaire — et ses membres acceptés, lui compris.
+///
+/// ```jsonc
+/// {"annuaire":"n-titulaire","membres":["n-titulaire","n-second"]}
+/// ```
+///
+/// C'est ce que les racines disent au membre ; c'est **lui** qui en conclut
+/// ([`EtatDePaire::juger`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaireRendue {
+    /// L'annuaire : son titulaire.
+    pub annuaire: Identifiant,
+    /// Ses membres acceptés — un ou deux —, les `combien` premiers.
+    membres: [Option<Identifiant>; MEMBRES_MAX],
+}
+
+impl PaireRendue {
+    /// Une paire, de ces membres — au-delà de [`MEMBRES_MAX`], ils ne sont pas
+    /// pris.
+    #[must_use]
+    pub fn nouvelle(annuaire: Identifiant, membres: &[Identifiant]) -> Self {
+        let mut places = [None; MEMBRES_MAX];
+        for (place, membre) in places.iter_mut().zip(membres) {
+            *place = Some(*membre);
+        }
+        Self {
+            annuaire,
+            membres: places,
+        }
+    }
+
+    /// Les membres acceptés.
+    pub fn membres(&self) -> impl Iterator<Item = Identifiant> + '_ {
+        self.membres.iter().flatten().copied()
+    }
+
+    /// Encode la paire en JSON.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`] si `sortie` ne suffit pas.
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{\"annuaire\":\"");
+        ecrivain.pousser(self.annuaire.texte().as_str().as_bytes());
+        ecrivain.pousser(b"\",\"membres\":[");
+        for (rang, membre) in self.membres.iter().flatten().enumerate() {
+            if rang > 0 {
+                ecrivain.pousser(b",");
+            }
+            ecrivain.pousser(b"\"");
+            ecrivain.pousser(membre.texte().as_str().as_bytes());
+            ecrivain.pousser(b"\"");
+        }
+        ecrivain.pousser(b"]}");
+        ecrivain.achever()
+    }
+
+    /// Décode une paire.
+    ///
+    /// # Erreurs
+    ///
+    /// Celles du cadrage ; [`Erreur::IdentifiantInvalide`] pour ce qui n'est
+    /// pas un `n-…` ; [`Erreur::TropDElements`] au-delà de [`MEMBRES_MAX`].
+    pub fn decoder(octets: &[u8]) -> Result<Self, Erreur> {
+        let mut lecteur = ouvrir(octets, CHAMP_ANNUAIRE)?;
+        let annuaire = n_de(&mut lecteur)?;
+        lecteur.attendre(b',', "une virgule")?;
+        champ(&mut lecteur, "membres")?;
+        let mut textes = [""; MEMBRES_MAX];
+        let combien = tableau_de_chaines(&mut lecteur, &mut textes)?;
+        let mut membres = [None; MEMBRES_MAX];
+        for (place, texte) in membres.iter_mut().zip(textes.iter().take(combien)) {
+            *place = Some(
+                Identifiant::analyser_genre(Genre::Annuaire, texte).map_err(|_| {
+                    Erreur::IdentifiantInvalide {
+                        position: lecteur.position(),
+                    }
+                })?,
+            );
+        }
+        fermer(&mut lecteur)?;
+        Ok(Self { annuaire, membres })
+    }
+}
+
+/// Lit une chaîne qui doit être un `n-…`.
+fn n_de(lecteur: &mut Lecteur<'_>) -> Result<Identifiant, Erreur> {
+    let position = lecteur.position();
+    Identifiant::analyser_genre(Genre::Annuaire, lecteur.chaine()?)
+        .map_err(|_| Erreur::IdentifiantInvalide { position })
 }
 
 /// Écrit un entier en décimal, sans allocation : vingt chiffres suffisent à

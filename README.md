@@ -243,6 +243,14 @@ racines aussitôt, sans redémarrer. Sans adresse candidate, rien n'est publié
 et les racines gardent la dernière (`docs/annuaires.md` §2 quater). Les racines, elles,
 servent `GET /v1/racines` : leur identité et leurs locateurs (décision 56).
 
+**Une paire se règle des deux côtés** (0.36.0, décision 70) : chaque membre
+d'un annuaire à deux membres nomme l'autre par `--peer <hôte:port>` et
+`--peer-key <sa clé publique>`. Un membre qui l'oublie — ou dont le
+`--peer-key` n'est la clé d'aucun autre membre accepté — l'apprend des
+racines et le dit : `PAIRE MAL RÉGLÉE (sans-peer)` (ou `peer-inconnu`) au
+journal, dès qu'il l'apprend puis toutes les dix minutes, et
+`"paire":"sans-peer"` dans `GET /v1/version`. Il continue de servir.
+
 `asl-server --identity-certificate <clé>` imprime le certificat d'identité
 d'une clé (`openssl x509 -noout -text` pour l'inspecter).
 

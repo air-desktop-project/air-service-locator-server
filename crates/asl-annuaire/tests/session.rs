@@ -111,6 +111,37 @@ fn un_identifiant_qui_n_est_pas_un_service_est_refuse() {
 }
 
 #[test]
+fn une_session_suit_son_service_renomme_et_garde_tout_le_reste() {
+    // **DÉCISION 69** : la convergence d'une paire remplace un `s-…` ; la
+    // session vivante passe sous le gagnant, et la réponse le dit.
+    let points = [PointEcoute::nouveau(Protocole::Tcp, port(49152))];
+    let (mut session, _) = Session::ouvrir(
+        service(),
+        bail(),
+        &annonce(&points, &[publique()]),
+        vu(publique()),
+        instant(0),
+    )
+    .expect("ouverture");
+    let avant = session.etat(instant(10));
+    let gagnant = Identifiant::depuis_entropie(Genre::Service, [0x33; 16]);
+    assert_eq!(session.renommer(gagnant), Ok(()));
+    assert_eq!(session.service(), gagnant);
+    assert_eq!(session.reponse().expect("réponse valide").service, gagnant);
+    assert_eq!(session.etat(instant(10)), avant, "rien d'autre ne bouge");
+
+    // Un identifiant d'un autre genre est refusé, et la session ne bouge pas.
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0x33; 16]);
+    assert_eq!(
+        session.renommer(machine),
+        Err(Faute::PasUnService {
+            obtenu: Genre::Machine
+        })
+    );
+    assert_eq!(session.service(), gagnant);
+}
+
+#[test]
 fn un_daemon_purement_udp_n_a_rien_a_sonder() {
     let points = [PointEcoute::nouveau(Protocole::Udp, port(53))];
     let (_, ordres) = Session::ouvrir(

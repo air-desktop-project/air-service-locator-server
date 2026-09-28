@@ -302,6 +302,35 @@ impl Session {
         Ok((session, ordres))
     }
 
+    /// Le service a changé d'identifiant sous elle : la session le suit.
+    ///
+    /// # POURQUOI UNE SESSION CHANGE D'IDENTIFIANT (0.36.0, décision 69)
+    ///
+    /// Entre deux membres d'une paire — ou deux racines —, le même
+    /// `(machine, nom)` peut avoir été déclaré des deux côtés sous deux `s-…`.
+    /// La réplication garde le plus ancien (`replication.md` §3.2). Si le
+    /// perdant était celui sous lequel un daemon est connecté ICI, sa session
+    /// doit passer sous le gagnant : sinon on le chercherait sous le gagnant,
+    /// on ne le trouverait pas, et il serait dit `parti` alors qu'il est là.
+    ///
+    /// **Rien d'autre ne change** : ni le bail, ni les verdicts, ni les
+    /// adresses. La réponse que rend [`Session::reponse`] porte désormais le
+    /// nouvel identifiant ; le daemon l'apprend à sa prochaine annonce.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Faute::PasUnService`] si l'identifiant n'en est pas un — la session
+    /// reste alors sous l'ancien.
+    pub fn renommer(&mut self, service: Identifiant) -> Result<(), Faute> {
+        if service.genre() != Genre::Service {
+            return Err(Faute::PasUnService {
+                obtenu: service.genre(),
+            });
+        }
+        self.service = service;
+        Ok(())
+    }
+
     /// Le daemon a donné signe de vie.
     ///
     /// # Erreurs

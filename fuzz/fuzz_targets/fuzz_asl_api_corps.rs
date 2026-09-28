@@ -130,6 +130,24 @@ const fn invisible(caractere: char) -> bool {
 }
 
 fuzz_target!(|octets: &[u8]| {
+    // ── LA PAIRE (0.36.0, décision 70) : ce qui se lit se réécrit et se relit
+    // à l'identique.
+    if let Ok(declaration) = asl_api::annuaire::DeclarationDePair::decoder(octets) {
+        let mut sortie = [0_u8; 64];
+        let combien = declaration.encoder(&mut sortie).expect("elle tient");
+        assert_eq!(
+            asl_api::annuaire::DeclarationDePair::decoder(&sortie[..combien]),
+            Ok(declaration)
+        );
+    }
+    if let Ok(paire) = asl_api::annuaire::PaireRendue::decoder(octets) {
+        let mut sortie = [0_u8; 256];
+        let combien = paire.encoder(&mut sortie).expect("elle tient");
+        assert_eq!(
+            asl_api::annuaire::PaireRendue::decoder(&sortie[..combien]),
+            Ok(paire)
+        );
+    }
     // ── 10. LES ANNUAIRES LOCAUX ────────────────────────────────────────────
     if let Ok(declaration) = asl_api::annuaire::DeclarationDAnnuaire::decoder(octets) {
         assert!(
@@ -148,6 +166,7 @@ fuzz_target!(|octets: &[u8]| {
                 adresse: adresse.texte(),
                 locateurs: &[],
                 expire_a: Some(u64::MAX),
+                paire: None,
             };
             let mut sortie = [0_u8; 512];
             let combien = rendue.encoder(&mut sortie).expect("elle tient");

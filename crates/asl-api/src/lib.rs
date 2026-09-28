@@ -630,6 +630,11 @@ pub enum Ressource<'a> {
     /// confiance. Un préfixe IPv6 qui change chez un particulier ne demande
     /// ainsi rien à personne.
     FederationLocateurs,
+    /// `/v1/federation/paire` — **le membre dit son `--peer`, les racines
+    /// lui disent les membres acceptés de son annuaire** (`PUT`, 0.36.0,
+    /// décision 70). Il en conclut si sa paire est bien réglée ; les racines
+    /// en tirent la même conclusion, pour l'écran de l'annuaire.
+    FederationPaire,
     /// `/v1/racines` — **l'identité et les locateurs des racines** (décision
     /// 56, 0.30.0), sans exigence : c'est ce qu'un client qui n'a encore rien
     /// doit pouvoir lire, et la connexion qui le porte est déjà vérifiée par
@@ -705,7 +710,8 @@ impl Ressource<'_> {
             | Self::MembreAnnuaire { .. } => &[Methode::Delete],
             Self::PousseeAppareil { .. }
             | Self::DescriptionAppareil { .. }
-            | Self::FederationLocateurs => &[Methode::Put],
+            | Self::FederationLocateurs
+            | Self::FederationPaire => &[Methode::Put],
             Self::Domaine { .. } => &[Methode::Get, Methode::Delete],
             Self::AliasDomaine { .. }
             | Self::DomaineMachine { .. }
@@ -788,9 +794,10 @@ impl Ressource<'_> {
             Self::PairPreuve | Self::PairOperations { .. } | Self::PairInstantane => {
                 Exigence::Racine
             }
-            Self::FederationMachines { .. } | Self::FederationEtat | Self::FederationLocateurs => {
-                Exigence::AnnuaireLocal
-            }
+            Self::FederationMachines { .. }
+            | Self::FederationEtat
+            | Self::FederationLocateurs
+            | Self::FederationPaire => Exigence::AnnuaireLocal,
             _ => Exigence::Appareil,
         }
     }
@@ -1219,6 +1226,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         }),
         ["v1", "federation", "etat"] => Ok(Ressource::FederationEtat),
         ["v1", "federation", "locateurs"] => Ok(Ressource::FederationLocateurs),
+        ["v1", "federation", "paire"] => Ok(Ressource::FederationPaire),
         ["v1", "racines"] => Ok(Ressource::Racines),
         _ => Err(Erreur::RessourceInconnue),
     }

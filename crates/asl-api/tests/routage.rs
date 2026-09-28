@@ -1462,6 +1462,16 @@ fn la_voie_de_l_annuaire_local_se_route_et_exige_un_annuaire_local() {
             .unwrap()
             .sert
     );
+    // **LA PAIRE** (décision 70) : un membre dit son `--peer`, sur sa voie.
+    let paire = resoudre(Methode::Put, b"/v1/federation/paire").unwrap();
+    assert_eq!(paire.ressource, Ressource::FederationPaire);
+    assert!(paire.sert);
+    assert_eq!(paire.exigence, Exigence::AnnuaireLocal);
+    assert!(
+        !resoudre(Methode::Get, b"/v1/federation/paire")
+            .unwrap()
+            .sert
+    );
     // **LES RACINES** (décision 56) : publiques, en lecture seule.
     let racines = resoudre(Methode::Get, b"/v1/racines").unwrap();
     assert_eq!(racines.ressource, Ressource::Racines);

@@ -60,6 +60,39 @@ impl Vivier {
         );
     }
 
+    /// Déplace l'annonce rangée sous `perdant` sous `gagnant`, et rend `true`
+    /// si elle a bougé.
+    ///
+    /// # POURQUOI (0.36.0, décision 69)
+    ///
+    /// La réplication garde, pour un même `(machine, nom)`, l'identifiant le
+    /// plus ancien. Si le perdant était celui sous lequel un daemon est
+    /// connecté ici, tout ce qui cherche la session — la publication aux
+    /// racines, `GET /v1/ou` — la cherche désormais sous le gagnant : sans ce
+    /// déplacement, le daemon serait dit `parti` alors qu'il est là, jusqu'à
+    /// sa prochaine annonce.
+    ///
+    /// **Une annonce déjà vivante sous le gagnant reste** : c'est la plus
+    /// récente à avoir été posée sous le nom que l'entrepôt tient, et l'autre
+    /// n'a plus de nom. La connexion de l'ancienne n'est pas fermée : un
+    /// daemon qui réannonce retrouve le gagnant.
+    pub fn renommer(&mut self, perdant: Identifiant, gagnant: Identifiant) -> bool {
+        if self.annonces.contains_key(&clef(gagnant)) {
+            return false;
+        }
+        let Some(mut vivante) = self.annonces.remove(&clef(perdant)) else {
+            return false;
+        };
+        if vivante.session.renommer(gagnant).is_err() {
+            // Un gagnant qui n'est pas un service ne vient pas de l'entrepôt ;
+            // l'annonce reste où elle était.
+            self.annonces.insert(clef(perdant), vivante);
+            return false;
+        }
+        self.annonces.insert(clef(gagnant), vivante);
+        true
+    }
+
     /// L'annonce de ce service, si elle est vivante.
     #[must_use]
     pub fn annonce(&self, service: Identifiant) -> Option<&Session> {
@@ -209,6 +242,33 @@ mod tests {
         vivier.poser(service, b"connexion-a", vivante(service));
         assert!(vivier.annonce(service).is_some());
         assert_eq!(vivier.combien(), 1);
+    }
+
+    #[test]
+    fn une_annonce_suit_son_service_renomme_avec_sa_connexion() {
+        // **DÉCISION 69** : la réplication garde l'autre `s-…` pour le même
+        // `(machine, nom)` ; l'annonce vivante passe sous le gagnant, avec sa
+        // connexion, et sa réponse porte le gagnant.
+        let mut vivier = Vivier::nouveau();
+        let (perdant, gagnant) = (un(Genre::Service, 1), un(Genre::Service, 2));
+        vivier.poser(perdant, b"connexion-a", vivante(perdant));
+        assert!(vivier.renommer(perdant, gagnant));
+        assert!(vivier.annonce(perdant).is_none());
+        let session = vivier.annonce(gagnant).expect("sous le gagnant");
+        assert_eq!(session.service(), gagnant);
+        assert_eq!(vivier.connexion_de(gagnant), Some(&b"connexion-a"[..]));
+        assert_eq!(vivier.combien(), 1);
+
+        // Rien sous le perdant : rien ne bouge.
+        assert!(!vivier.renommer(un(Genre::Service, 7), un(Genre::Service, 8)));
+        // Une annonce déjà vivante sous le gagnant reste la sienne.
+        vivier.poser(perdant, b"connexion-b", vivante(perdant));
+        assert!(!vivier.renommer(perdant, gagnant));
+        assert_eq!(vivier.connexion_de(gagnant), Some(&b"connexion-a"[..]));
+        // Un « gagnant » qui n'est pas un service ne vient pas de l'entrepôt :
+        // l'annonce reste où elle était.
+        assert!(!vivier.renommer(perdant, un(Genre::Machine, 3)));
+        assert!(vivier.annonce(perdant).is_some());
     }
 
     #[test]

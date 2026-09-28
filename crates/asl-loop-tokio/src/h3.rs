@@ -364,7 +364,7 @@ impl Preparateur {
 #[derive(Clone)]
 pub struct Fermetures {
     /// Le canal que `au_tour` draine.
-    canal: tokio::sync::mpsc::UnboundedSender<Identifiant>,
+    canal: tokio::sync::mpsc::UnboundedSender<Consigne>,
     /// Le réveil de la boucle ([`Application::reveil`]).
     reveil: Arc<tokio::sync::Notify>,
 }
@@ -377,9 +377,34 @@ impl Fermetures {
     /// Quand le serveur s'éteint, le récepteur est fermé : il n'y a plus
     /// personne pour fermer, et ce n'est pas une faute.
     pub fn fermer(&self, quoi: Identifiant) {
-        let _ = self.canal.send(quoi);
+        let _ = self.canal.send(Consigne::Fermer(quoi));
         self.reveil.notify_one();
     }
+
+    /// Demande que la session vivante rangée sous `perdant` passe sous
+    /// `gagnant` — le même `(machine, nom)`, dont la réplication vient de
+    /// garder l'autre identifiant (0.36.0, décision 69).
+    ///
+    /// **Par le même canal que les fermetures**, et pour la même raison : le
+    /// tireur et les fédérateurs n'ont pas le vivier, la boucle l'a.
+    pub fn renommer(&self, perdant: Identifiant, gagnant: Identifiant) {
+        let _ = self.canal.send(Consigne::Renommer { perdant, gagnant });
+        self.reveil.notify_one();
+    }
+}
+
+/// Ce que le tireur et les fédérateurs demandent à la boucle.
+#[derive(Debug, Clone, Copy)]
+enum Consigne {
+    /// Fermer les connexions de cette machine ou de cet appareil.
+    Fermer(Identifiant),
+    /// Déplacer une session vivante d'un `s-…` perdant au gagnant.
+    Renommer {
+        /// L'identifiant qui a perdu.
+        perdant: Identifiant,
+        /// Celui qui reste.
+        gagnant: Identifiant,
+    },
 }
 
 /// La voie entre racines, telle que l'exploitant l'a réglée.
@@ -669,6 +694,9 @@ struct Service<'a> {
     /// racines — comptes, appareils, domaines, droits… — leur est renvoyé par
     /// `421`, avant toute lecture.
     local: bool,
+    /// Côté annuaire local : ce qu'il a conclu de sa paire, pour
+    /// `GET /v1/version` (0.36.0, décision 70).
+    paire: Option<asl_api::annuaire::EtatDePaire>,
 }
 
 impl ams_h3::Service for Service<'_> {
@@ -715,7 +743,11 @@ impl Service<'_> {
             // **ET LA POSTURE AVEC ELLE** (2026-09-24) : elle vient du
             // réglage, que seul cet étage tient, et une application doit
             // pouvoir demander un code d'invitation AVANT d'essuyer un refus.
-            Besoin::Version => Trouvaille::Version(env!("CARGO_PKG_VERSION"), self.politique),
+            // **ET LA PAIRE, CHEZ UN MEMBRE** (0.36.0, décision 70) : ce que
+            // les fédérateurs ont conclu des racines et de `--peer`.
+            Besoin::Version => {
+                Trouvaille::Version(env!("CARGO_PKG_VERSION"), self.politique, self.paire)
+            }
 
             // **UNE MACHINE D'UN DOMAINE CONFIÉ S'ANNONCE AILLEURS** (0.28.0) :
             // `421`, avec l'annuaire local et où le joindre. Sa machine est
@@ -735,6 +767,7 @@ impl Service<'_> {
             Besoin::MachinesFederees { apres } => self.rassembler_les_machines_federees(*apres),
             Besoin::EtatFedere { entrees } => self.ranger_un_etat_federe(entrees),
             Besoin::PublierLocateurs { corps } => self.publier_mes_locateurs(corps),
+            Besoin::DeclarerPaire { pair } => self.declarer_ma_paire(*pair),
             // **LA LISTE EMBARQUÉE, TELLE QUELLE** (décision 56) : la clé
             // voyage avec l'identifiant, et c'est la connexion vérifiée par
             // clé qui la signe.
@@ -3034,7 +3067,7 @@ pub struct Annuaire<'a> {
     /// cette boucle qui les tient. Il applique l'opération à l'entrepôt partagé,
     /// puis NOMME ce qu'il faut fermer ; `au_tour` le verse dans [`Self::revoques`],
     /// et la fermeture suit le même chemin qu'une révocation locale.
-    fermetures: Option<tokio::sync::mpsc::UnboundedReceiver<Identifiant>>,
+    fermetures: Option<tokio::sync::mpsc::UnboundedReceiver<Consigne>>,
     /// Le réveil de la boucle ([`Application::reveil`]) : tout ce qui arrive
     /// par canal le signale en arrivant — instantanés lus (décision 28),
     /// verdicts de sonde, fermetures demandées par le tireur. **Un seul pour
@@ -3098,6 +3131,9 @@ pub struct Annuaire<'a> {
     publies: Option<Arc<crate::federation::ServicesPublies>>,
     /// Quand la boucle a publié pour la dernière fois.
     derniere_publication: u64,
+    /// Côté annuaire local : ce que les fédérateurs concluent de la paire
+    /// (décision 70) — `None` sur une racine.
+    paire_jugee: Option<Arc<crate::federation::PaireJugee>>,
 }
 
 impl<'a> Annuaire<'a> {
@@ -3177,6 +3213,7 @@ impl<'a> Annuaire<'a> {
             expiration_federee_us: crate::federation::EXPIRATION_US,
             dernier_balayage_federe: 0,
             publies: None,
+            paire_jugee: None,
             derniere_publication: 0,
         }
     }
@@ -3210,6 +3247,12 @@ impl<'a> Annuaire<'a> {
     /// fédérateurs le poussent aux racines (`crate::federation`).
     pub fn publier_l_etat_dans(&mut self, publies: Arc<crate::federation::ServicesPublies>) {
         self.publies = Some(publies);
+    }
+
+    /// Côté annuaire local : ce que les fédérateurs concluent de la paire,
+    /// que `GET /v1/version` rend (0.36.0, décision 70).
+    pub fn dire_la_paire_depuis(&mut self, jugee: Arc<crate::federation::PaireJugee>) {
+        self.paire_jugee = Some(jugee);
     }
 
     /// Publie l'état des services de nos machines fédérées, au plus tous les
@@ -3722,9 +3765,19 @@ impl Application for Annuaire<'_> {
         // une annonce retirée par l'autre racine tombe sur cette boucle comme
         // une révocation locale (§3.3).
         if let Some(fermetures) = &mut self.fermetures {
-            while let Ok(quoi) = fermetures.try_recv() {
-                if !self.revoques.contains(&quoi) {
-                    self.revoques.push(quoi);
+            while let Ok(consigne) = fermetures.try_recv() {
+                match consigne {
+                    Consigne::Fermer(quoi) => {
+                        if !self.revoques.contains(&quoi) {
+                            self.revoques.push(quoi);
+                        }
+                    }
+                    // **LA SESSION SUIT LE GAGNANT** (décision 69) : la
+                    // publication aux racines et `GET /v1/ou` la cherchent
+                    // sous l'identifiant que l'entrepôt tient désormais.
+                    Consigne::Renommer { perdant, gagnant } => {
+                        self.vivier.renommer(perdant, gagnant);
+                    }
                 }
             }
         }
@@ -3895,6 +3948,7 @@ impl Application for Annuaire<'_> {
             // `publier_l_etat_dans` qui fait d'un annuaire un annuaire local
             // (`--federation`), et rien d'autre ne le fait.
             local: self.publies.is_some(),
+            paire: self.paire_jugee.as_ref().and_then(|jugee| jugee.etat()),
         };
         if let Err(faute) = conducteur.on_readable(&mut Pont(connexion), &mut service, flux) {
             Self::condamner(connexion, &faute);

@@ -818,7 +818,7 @@ l'empêcherait de comprendre.
 | `DELETE /v1/machines/{m}/alias` | Le retire. |
 | `DELETE /v1/domaines/{d}` | Supprime un domaine : ses machines détachées, son alias, ses groupes et les droits qui le visent retirés. **`409` si c'est mon dernier.** Propriétaire seulement ; le domaine racine ne se supprime pas. |
 | `POST /v1/annuaires` | **Déclare MON annuaire local** : `{"adresse":"hôte:port"}` — ASCII imprimable, sans `"` ni `\`, un port de 1 à 65 535 ; `201` `{"code":"XXXXX-XXXXX","expire_a":<ms>}`, un code d'inscription — dix symboles, à usage unique, comme un code d'enrôlement, **valable vingt-quatre heures** (0.27.0). L'annuaire le présente aux racines avec sa clé d'identité (`POST /v1/annuaires/inscription`) ; l'inscription est alors **en attente**. |
-| `GET /v1/annuaires` | Mes annuaires locaux et l'état de leur inscription : `attendue` (un code déclaré, pas encore présenté ni expiré — `adresse`, `expire_a`), `en attente`, `acceptée`, `refusée`, `retirée` (`membre`, `annuaire` — son titulaire —, `adresse`, et `locateurs` s'il en a publié : décision 57, 0.30.0). |
+| `GET /v1/annuaires` | Mes annuaires locaux et l'état de leur inscription : `attendue` (un code déclaré, pas encore présenté ni expiré — `adresse`, `expire_a`), `en attente`, `acceptée`, `refusée`, `retirée` (`membre`, `annuaire` — son titulaire —, `adresse`, et `locateurs` s'il en a publié : décision 57, 0.30.0). **Et `paire`** (0.36.0, décision 70) : `seul`, `reglee`, `sans-peer` ou `peer-inconnu`, ce que ce membre conclut de sa paire — absent tant qu'il ne l'a pas dit à cette racine. |
 | `DELETE /v1/annuaires/{n}` | Retire l'inscription de mon annuaire local — son second avec lui ; ses domaines reviennent aux racines. **Un administrateur des racines le peut aussi** : c'est révoquer une inscription acceptée (0.27.0). |
 | `POST /v1/annuaires/{n}/membres` | **Déclare le second membre** de mon annuaire local accepté — sa paire de secours (2026-09-27, décision 49) : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription, que la seconde machine présente avec **sa** clé. `409` si l'annuaire a déjà deux membres ; `404` s'il n'est pas à moi ou pas accepté. |
 | `DELETE /v1/annuaires/{n}/membres/{n2}` | Retire le second membre. Nommer ici le titulaire, c'est retirer l'annuaire entier, comme `DELETE /v1/annuaires/{n}`. `404` pour un membre d'un autre annuaire. |
@@ -874,7 +874,13 @@ rien à comparer. Répondre ici serait affirmer ce qui n'a pas été mesuré.
 
 ```jsonc
 {"version": "0.2.0", "posture": "optional"}   // required | optional | invitation
+{"version": "0.36.0", "posture": "optional", "paire": "sans-peer"}   // un membre d'annuaire local
 ```
+
+**Et `paire`, chez un membre d'annuaire local** (0.36.0, décision 70) : ce
+qu'il conclut de sa paire — `seul`, `reglee`, `sans-peer`, `peer-inconnu`
+(§3 ter). Absent chez une racine, et tant que le membre n'a pas entendu les
+racines. Une chaîne, comme `posture` : les lecteurs d'hier la sautent.
 
 **Elle n'exige rien, et c'est la sixième ressource dans ce cas.** Ceux qui ont
 besoin de la lire sont précisément ceux qui n'ont pas encore de clé :
@@ -2169,7 +2175,33 @@ PUT  /v1/federation/locateurs    {"locateurs":["[IPv6]:port","IPv4:port",…]} �
              retrait : l'adresse déclarée sert de nouveau ;
         400  un locateur de travers, ou plus de quatre ;
         404  l'inscription n'est plus acceptée
+PUT  /v1/federation/paire        {"pair":"n-…"} — le n-… de la clé de son --peer-key —,
+             ou {"pair":null} sans --peer (0.36.0, décision 70)
+        200  {"annuaire":"n-titulaire","membres":["n-titulaire","n-second"]} :
+             son annuaire et ses membres ACCEPTÉS, lui compris ;
+        400  un corps de travers ; 404  l'inscription n'est plus acceptée
 ```
+
+**La paire, jugée par le membre** (0.36.0, décision 70). À chaque tour — dix
+secondes —, le membre dit son `--peer` et apprend les membres acceptés de son
+annuaire ; **c'est lui qui juge**, et il n'en refuse pas de servir :
+
+| Mot | Quand |
+|---|---|
+| `seul` | aucun autre membre accepté, pas de `--peer` |
+| `reglee` | `--peer` désigne l'autre membre accepté |
+| `sans-peer` | un autre membre est accepté, et ce membre tourne sans `--peer` — **le titulaire comme le second** : chacun l'apprend des racines |
+| `peer-inconnu` | `--peer` désigne une clé qui n'est celle d'aucun autre membre accepté |
+
+Les deux derniers se disent **au journal** dès qu'on les apprend, puis toutes
+les dix minutes tant qu'ils durent — `asl-server : PAIRE MAL RÉGLÉE (sans-peer) :
+les racines disent que cet annuaire local (n-…) a un autre membre accepté, n-…,
+et ce membre tourne SANS --peer — …` —, et **`GET /v1/version`** du membre porte
+`"paire":"<mot>"`. Les racines jugent de même, des mêmes données, et
+**`GET /v1/annuaires`** (et `GET /v1/inscriptions`) rend `"paire":"<mot>"` pour
+chaque membre qui le leur a dit depuis qu'elles tournent — c'est ce que l'écran
+de l'annuaire affiche. Une racine d'avant la 0.36.0 répond `404` : le membre le
+dit une fois par session, et continue.
 
 **Le `s-…` d'une `EntreeDEtat` est celui du membre qui rapporte** (constaté le 2026-09-28) : chaque membre d'une paire frappe le sien pour le même `(machine, nom)`, la racine les range par membre, et `GET /v1/ou` rend celui du rapport retenu. Une paire qui se réplique (`--peer`) converge vers un seul au premier rattrapage ; une paire qui ne se parle pas en garde deux, et le `s-…` rendu change à chaque bascule. Défaut, pistes et questions : `annuaires.md` §2 ter, « L'identifiant d'un service dans une paire ». **Décidé (2026-09-28, Thierry ; décisions 65 et 66)** : un seul `s-…` par service, dérivé de la machine et du nom — à coder ; le format de l'entrée ne change pas.
 

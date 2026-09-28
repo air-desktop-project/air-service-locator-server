@@ -854,6 +854,13 @@ pub enum Besoin<'a> {
         /// Le corps JSON, tel que reçu.
         corps: &'a [u8],
     },
+    /// `PUT /v1/federation/paire` — l'annuaire local de cette connexion dit
+    /// son `--peer`, et apprend les membres acceptés de son annuaire (0.36.0,
+    /// décision 70).
+    DeclarerPaire {
+        /// Le `n-…` de son `--peer-key`, s'il en a un.
+        pair: Option<Identifiant>,
+    },
     /// `GET /v1/racines` — l'identité et les locateurs des racines
     /// (décision 56). Sans exigence.
     Racines,
@@ -1012,7 +1019,15 @@ pub enum Trouvaille {
     /// donc du même étage, et elle sort par la même ressource parce qu'elle
     /// répond à la même question — « que sert cet annuaire, et puis-je y
     /// ouvrir un compte ? ».
-    Version(&'static str, asl_auth::Politique),
+    ///
+    /// **Et, chez un membre d'annuaire local, ce qu'il conclut de sa paire**
+    /// (0.36.0, décision 70) : `None` chez une racine, ou tant qu'il n'a pas
+    /// encore entendu les racines.
+    Version(
+        &'static str,
+        asl_auth::Politique,
+        Option<asl_api::annuaire::EtatDePaire>,
+    ),
     /// De quoi décider d'une résolution.
     Resolution(Resolution),
     /// De quoi décider d'une LISTE de résolutions.
@@ -1215,6 +1230,8 @@ pub enum Trouvaille {
     Ailleurs(alloc::vec::Vec<u8>),
     /// Les racines, **chacune déjà encodée** (décision 56).
     Racines(alloc::vec::Vec<alloc::vec::Vec<u8>>),
+    /// L'annuaire d'un membre et ses membres acceptés (0.36.0, décision 70).
+    Paire(asl_api::annuaire::PaireRendue),
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -1869,6 +1886,12 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         Ressource::FederationMachines { apres } => Besoin::MachinesFederees { apres },
         Ressource::FederationEtat => lire_un_etat_federe(corps),
         Ressource::FederationLocateurs => lire_une_publication_de_locateurs(corps),
+        Ressource::FederationPaire => match asl_api::annuaire::DeclarationDePair::decoder(corps) {
+            Ok(declaration) => Besoin::DeclarerPaire {
+                pair: declaration.pair,
+            },
+            Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
+        },
         Ressource::Racines => Besoin::Racines,
         Ressource::EtatAnnuaire => lire_une_demande_d_etat(session, corps),
         Ressource::Inscriptions => Besoin::InscriptionsEnAttente,
@@ -2913,6 +2936,28 @@ pub fn repondre<'o>(
                 sortie,
             ),
         },
+        // **`200` et la paire** ; `404` si l'annuaire n'est plus membre
+        // (0.36.0, décision 70).
+        Besoin::DeclarerPaire { .. } => match trouvaille {
+            Trouvaille::Paire(paire) => {
+                // Deux `n-…` et le titulaire tiennent toujours dans
+                // [`PAIRE_CORPS_MAX`] : l'encodage ne peut pas manquer de place.
+                let mut corps = [0_u8; PAIRE_CORPS_MAX];
+                let combien = paire.encoder(&mut corps).unwrap_or(0);
+                composer(
+                    StatusCode::OK,
+                    JSON_MEDIA,
+                    corps.get(..combien).unwrap_or_default(),
+                    sortie,
+                )
+            }
+            _ => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+        },
         // **`204` publiés** ; `404` si l'annuaire n'est plus membre.
         Besoin::PublierLocateurs { .. } => match trouvaille {
             Trouvaille::Fait => composer(StatusCode::NO_CONTENT, OCTETS_MEDIA, b"", sortie),
@@ -3081,7 +3126,9 @@ pub fn repondre<'o>(
         // cette ressource n'exige aucune preuve, donc `Rien` rend `404` et non
         // `500` — un `500` qu'un inconnu peut fabriquer n'en est plus un.
         Besoin::Version => match trouvaille {
-            Trouvaille::Version(version, posture) => rendre_la_version(version, *posture, sortie),
+            Trouvaille::Version(version, posture, paire) => {
+                rendre_la_version(version, *posture, *paire, sortie)
+            }
             Trouvaille::Rien => composer(
                 StatusCode::NOT_FOUND,
                 PROBLEME_MEDIA,
@@ -3260,12 +3307,20 @@ fn rendre_ou_l_on_est_vu(vu: asl_proto::VuDepuis, sortie: &mut [u8]) -> Reponse<
 /// deux sens sous un même nom dans deux réponses voisines, c'est le genre
 /// d'ambiguïté qui se paie en bogue d'application. `posture` est le mot dont
 /// la documentation se sert déjà partout pour ce concept.
+///
+/// # ET LA PAIRE, CHEZ UN MEMBRE D'ANNUAIRE LOCAL (0.36.0, décision 70)
+///
+/// `"paire":"sans-peer"` — ou `seul`, `reglee`, `peer-inconnu` : ce que le
+/// membre a conclu des racines et de son `--peer`. **Une chaîne**, parce
+/// que les lecteurs d'hier (`asl diagnose`, les applications) sautent un champ
+/// inconnu s'il porte une chaîne, et refuseraient un objet.
 fn rendre_la_version<'a>(
     version: &str,
     posture: asl_auth::Politique,
+    paire: Option<asl_api::annuaire::EtatDePaire>,
     sortie: &'a mut [u8],
 ) -> Reponse<'a> {
-    let mut corps = Corps::<VU_CORPS_MAX>::neuf();
+    let mut corps = Corps::<VERSION_CORPS_MAX>::neuf();
     corps.pousser(br#"{"version":""#);
     corps.pousser(version.as_bytes());
     corps.pousser(br#"","posture":""#);
@@ -3277,9 +3332,22 @@ fn rendre_la_version<'a>(
         asl_auth::Politique::AttestationFacultative => b"optional".as_slice(),
         asl_auth::Politique::Invitation => b"invitation".as_slice(),
     });
+    if let Some(paire) = paire {
+        corps.pousser(br#"","paire":""#);
+        corps.pousser(paire.mot().as_bytes());
+    }
     corps.pousser(br#""}"#);
     composer(StatusCode::OK, JSON_MEDIA, corps.rendu(), sortie)
 }
+
+/// Ce que le corps de `GET /v1/version` peut faire : une version, une
+/// posture, un mot de paire, et le balisage — cent vingt-huit, avec de la
+/// marge.
+const VERSION_CORPS_MAX: usize = 128;
+
+/// Ce que la réponse de `PUT /v1/federation/paire` peut faire : trois `n-…`
+/// de vingt-huit caractères, et le balisage.
+const PAIRE_CORPS_MAX: usize = 160;
 
 /// Ce qu'un corps de `/v1/replication` peut faire, en octets.
 ///
@@ -5989,7 +6057,11 @@ mod creations {
         let (statut, rendu) = rendre(
             &mut session,
             &Besoin::Version,
-            &Trouvaille::Version("0.2.0-essai", asl_auth::Politique::AttestationFacultative),
+            &Trouvaille::Version(
+                "0.2.0-essai",
+                asl_auth::Politique::AttestationFacultative,
+                None,
+            ),
         );
         assert_eq!(statut, StatusCode::OK);
         assert_eq!(
@@ -6008,6 +6080,34 @@ mod creations {
             rendre(&mut session, &Besoin::Version, &Trouvaille::Fait).0,
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    #[test]
+    fn la_version_d_un_membre_dit_sa_paire_par_un_mot() {
+        // **DÉCISION 70** : chez un membre d'annuaire local, ce qu'il conclut
+        // de sa paire, en chaîne — les lecteurs d'hier la sautent.
+        let mut session = Session::new(liaison());
+        for (paire, mot) in [
+            (asl_api::annuaire::EtatDePaire::SansPeer, "sans-peer"),
+            (asl_api::annuaire::EtatDePaire::PeerInconnu, "peer-inconnu"),
+            (asl_api::annuaire::EtatDePaire::Reglee, "reglee"),
+            (asl_api::annuaire::EtatDePaire::Seul, "seul"),
+        ] {
+            let (statut, rendu) = rendre(
+                &mut session,
+                &Besoin::Version,
+                &Trouvaille::Version(
+                    "0.36.0",
+                    asl_auth::Politique::AttestationFacultative,
+                    Some(paire),
+                ),
+            );
+            assert_eq!(statut, StatusCode::OK);
+            assert_eq!(
+                alloc::string::String::from_utf8_lossy(&rendu),
+                alloc::format!(r#"{{"version":"0.36.0","posture":"optional","paire":"{mot}"}}"#)
+            );
+        }
     }
 
     #[test]
@@ -6036,7 +6136,7 @@ mod creations {
             let (statut, rendu) = rendre(
                 &mut session,
                 &Besoin::Version,
-                &Trouvaille::Version("1.0.0", politique),
+                &Trouvaille::Version("1.0.0", politique, None),
             );
             assert_eq!(statut, StatusCode::OK);
             assert_eq!(&rendu[..], attendu, "posture {politique:?}");
@@ -9593,6 +9693,50 @@ mod voie_de_l_annuaire_local {
         assert_eq!(reponse.status(), StatusCode::OK);
         assert_eq!(champ(&reponse, b"content-type"), Some(OCTETS_MEDIA));
         assert_eq!(reponse.body(), &[9_u8; 5]);
+        let mut sortie = [0_u8; 256];
+        let reponse = repondre(&mut session, &quoi, &Trouvaille::Rien, None, &mut sortie);
+        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn un_membre_dit_son_pair_et_apprend_sa_paire() {
+        // **DÉCISION 70** : `PUT /v1/federation/paire`, sur la voie de
+        // l'annuaire local ; la réponse est l'annuaire et ses membres.
+        let (mut session, _) = session_prouvee(CleTrouvee::AnnuaireLocal);
+        let declarer = tete(b"PUT", b"/v1/federation/paire");
+        let n = Identifiant::depuis_entropie(asl_id::Genre::Annuaire, [0x44; 16]);
+        let corps = alloc::format!(r#"{{"pair":"{}"}}"#, n.texte());
+        let quoi = besoin(&session, &declarer, corps.as_bytes());
+        assert_eq!(quoi, Besoin::DeclarerPaire { pair: Some(n) });
+        assert_eq!(
+            besoin(&session, &declarer, br#"{"pair":null}"#),
+            Besoin::DeclarerPaire { pair: None }
+        );
+        assert_eq!(
+            besoin(&session, &declarer, br#"{"pair":"m-rien"}"#),
+            Besoin::Deja(StatusCode::BAD_REQUEST)
+        );
+        // Un inconnu n'y a pas droit.
+        let inconnu = Session::new(liaison());
+        assert_eq!(
+            besoin(&inconnu, &declarer, br#"{"pair":null}"#),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+        let mut sortie = [0_u8; 512];
+        let paire = asl_api::annuaire::PaireRendue::nouvelle(n, &[n]);
+        let reponse = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Paire(paire),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert_eq!(champ(&reponse, b"content-type"), Some(JSON_MEDIA));
+        assert_eq!(
+            reponse.body(),
+            alloc::format!(r#"{{"annuaire":"{0}","membres":["{0}"]}}"#, n.texte()).as_bytes()
+        );
         let mut sortie = [0_u8; 256];
         let reponse = repondre(&mut session, &quoi, &Trouvaille::Rien, None, &mut sortie);
         assert_eq!(reponse.status(), StatusCode::NOT_FOUND);

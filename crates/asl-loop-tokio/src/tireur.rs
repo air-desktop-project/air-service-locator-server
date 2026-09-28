@@ -494,6 +494,16 @@ impl Tireur {
                     for quoi in effets.a_fermer {
                         self.fermetures.fermer(quoi);
                     }
+                    // **LA SESSION VIVANTE SUIT LE `s-…` QUI RESTE** (0.36.0,
+                    // décision 69) : la boucle la déplace, et le journal le dit
+                    // — c'est la convergence d'un service vue d'ici.
+                    for (perdant, gagnant) in effets.remplaces {
+                        (self.journal)(format!(
+                            "service {perdant} remplacé par {gagnant}, plus ancien, venu de \
+                             {pair} : l'annonce vivante le suit"
+                        ));
+                        self.fermetures.renommer(perdant, gagnant);
+                    }
                 }
                 Applique::Fin { curseur } => {
                     (self.journal)(format!(
