@@ -450,14 +450,16 @@ que ce que lui seul disait.
 
 ### L'identifiant d'un service dans une paire — un défaut constaté, et les pistes
 
-**Proposé le 2026-09-28, décidé le même jour en partie (Thierry ; décisions 65
-à 70)** : cette sous-section décrit un défaut vu en production, pose
+**Proposé le 2026-09-28, décidé le même jour (Thierry ; décisions 65
+à 72)** : cette sous-section décrit un défaut vu en production, pose
 l'invariant, compare les pistes et en recommande une. Les réponses sont au §7
 (questions 14 à 20) : **I1, I2 et I3 sont voulus, la piste est A1**, un `s-…`
 prévisible est accepté, les droits par service fédéré sont voulus, le défaut de
-l'opération perdue et le garde-fou `--peer` sont décidés. **Reste ouverte la
-question 17** — le périmètre de la dérivation et la migration des `s-…`
-existants —, et la question 21 (le service `asl-directory`) en découle.
+l'opération perdue et le garde-fou `--peer` sont décidés ; la question 17 l'est aussi
+(décision 72) : **la dérivation vaut pour tous les services**, et chaque `s-…`
+existant change une fois, à la migration. **Reste ouverte la question 21** —
+les sous-questions du service `asl-directory`, accepté dans son principe
+(décision 71).
 
 #### Le constat (2026-09-28, 0.35.1)
 
@@ -710,8 +712,8 @@ A2 ne vaut mieux que si l'on veut qu'un service change d'identité en changeant
 d'hébergeur — et coûte au second membre de connaître le titulaire.
 
 **Décidé (2026-09-28, Thierry ; décisions 65 à 67)** : la recommandation est
-suivie — A1, un `s-…` prévisible accepté. Ce qui reste à trancher est son
-périmètre (question 17).
+suivie — A1, un `s-…` prévisible accepté —, **pour tous les services**, avec
+la migration déterministe ci-dessus (décision 72).
 
 ## 4. S'enregistrer, puis se faire connaître
 
@@ -1229,10 +1231,15 @@ Rassemblé, plutôt que dispersé.
     | **P2 — les domaines hébergés seulement** | Les services déclarés dans un annuaire local ; les racines gardent l'aléa pour les leurs. | Seuls les annuaires locaux migrent — peu de services, et aucun droit à réécrire (un droit sur un service fédéré est impossible aujourd'hui). Rien ne bouge aux racines. | Presque rien aujourd'hui. | **La décision 66 n'est pas tenue** pour un service né aux racines : confier son domaine à un annuaire local lui donne un `s-…` dérivé, donc un autre. Et deux règles d'identité coexistent, selon l'endroit où le service est né. |
     | **P3 — les nouveaux services seulement** | Tout service déclaré après la version qui dérive, partout. | **Aucun ne change** : ils gardent leur aléa, et leur identité n'est dérivée nulle part. | Aucune migration. | Les services d'avant ne gagnent ni I3 ni l'absence de conflit, pour toujours ; un service né aléatoire qui déménage change de `s-…`. |
 
-    **Proposé : P1** — c'est la seule qui tienne la décision 66 pour tous, et
-    sa migration, déterministe, est locale à chaque entrepôt. Ce qu'elle coûte
-    est un changement visible, une fois, de chaque `s-…` existant. **Ouverte** :
-    Thierry a demandé cette explication avant de trancher.
+    **Décidé (2026-09-28, Thierry ; décision 72)** : **P1, tous les
+    services** — ceux annoncés directement aux racines compris. Chaque `s-…`
+    existant change **une fois, au premier démarrage de la version qui
+    dérive** : chaque entrepôt — les deux racines, chaque membre — fait sa
+    migration **seul, de façon déterministe**, et arrive au même résultat que
+    les autres ; les droits qui visent un ancien `s-…` sont **réécrits dans la
+    même transaction**. C'est la seule réponse qui tienne la décision 66 pour
+    tous ; son prix, un changement visible et unique de chaque `s-…`, est
+    accepté.
 18. **Un droit par service, sur un service fédéré.** Il est impossible
     aujourd'hui : les racines ne rangent pas les services des domaines hébergés,
     donc `POST /v1/droits` ne trouve pas la machine d'un tel `s-…`
