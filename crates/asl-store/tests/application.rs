@@ -23,7 +23,7 @@ use asl_id::{Genre, Identifiant};
 use asl_registre::{
     Appareil, Attestation, Autorisation, Cadre, Capacites, Cause, Compte, Description, Effacement,
     Enrolement, Estampille, JetonPoussee, JetonRange, Machine, NomRange, Operation, Plateforme,
-    PointDePoussee, PointRange, Portee, Provenance, Service, Systeme,
+    PointDePoussee, PointRange, Portee, Provenance, Service, Systeme, service_derive,
 };
 use asl_store::{Applique, Entrepot, MotifDeRefus};
 
@@ -677,8 +677,9 @@ fn conflits() -> Vec<(Estampille, Operation)> {
                 enregistrement: enrolement(est(autre(), 111), m4),
             },
         ),
-        // Ligne 7 — le même service (m1, "svc") des deux côtés. Le plus ancien
-        // reste : s1.
+        // Ligne 7 — le même service (m1, "svc") des deux côtés, sous deux
+        // aléas (deux pairs d'avant la 0.37.0) : un seul se range, sous le
+        // dérivé, avec l'estampille la plus ancienne.
         (
             est(pair(), 112),
             Operation::Service {
@@ -1511,12 +1512,33 @@ fn l_invariant_de_convergence() {
         Some([0xA1; 32]),
         "à code égal, la première consommation lie sa clé"
     );
-    // Ligne 7 : le plus ancien service reste.
+    // Ligne 7 : UN seul service, sous son `s-…` dérivé (0.37.0, décision
+    // 72) — les deux aléas du fil ne sont qu'indicatifs —, et l'estampille
+    // la plus ancienne.
+    let derive = service_derive(un(Genre::Machine, 1), b"svc");
     assert_eq!(
         base.service_par_nom(un(Genre::Machine, 1), "svc")
             .expect("lisible"),
-        Some(un(Genre::Service, 1)),
-        "le service le plus ancien reste"
+        Some(derive),
+        "un seul service, sous le dérivé"
+    );
+    assert_eq!(
+        base.service(derive)
+            .expect("lisible")
+            .expect("là")
+            .estampille,
+        est(pair(), 112),
+        "l'estampille la plus ancienne reste"
+    );
+    assert!(
+        base.service(un(Genre::Service, 1))
+            .expect("lisible")
+            .is_none()
+    );
+    assert!(
+        base.service(un(Genre::Service, 2))
+            .expect("lisible")
+            .is_none()
     );
     // Ligne 8 : la description la plus récente.
     let desc = base
@@ -2810,7 +2832,7 @@ fn un_droit_sur_une_machine_ne_vaut_que_tant_que_son_donneur_en_a_le_pouvoir() {
             enregistrement: machine(est(pair(), 10), proprietaire, "nas"),
         },
     );
-    let depot = un(Genre::Service, 1);
+    let depot = service_derive(nas, b"depot");
     appliquer(
         &base,
         est(pair(), 11),
@@ -3101,7 +3123,7 @@ fn les_machines_federees_se_remplacent_en_bloc_et_portent_les_services_d_une_pai
     };
     let _ = base.appliquer(pair(), &service_de_m1(10), false);
     assert!(
-        base.service(un(Genre::Service, 7))
+        base.service(service_derive(m1, b"depot"))
             .expect("une lecture")
             .is_none()
     );
@@ -3125,7 +3147,7 @@ fn les_machines_federees_se_remplacent_en_bloc_et_portent_les_services_d_une_pai
     // L'autre membre de la paire rapporte un service de m1 : il se range.
     let _ = base.appliquer(pair(), &service_de_m1(11), false);
     assert!(
-        base.service(un(Genre::Service, 7))
+        base.service(service_derive(m1, b"depot"))
             .expect("une lecture")
             .is_some()
     );
@@ -3239,10 +3261,21 @@ fn un_service_du_pair_recu_avant_sa_machine_attend_puis_se_range() {
         .expect("rangées");
     assert_eq!(rangement.rejoues, 1);
     assert!(rangement.effets.remplaces.is_empty());
+    // Sous le DÉRIVÉ (0.37.0) — ni l'un ni l'autre aléa du fil —, avec
+    // l'estampille du plus ancien.
+    let derive = service_derive(m1, b"depot");
     assert_eq!(
         base.service_par_nom(m1, "depot").expect("lisible"),
-        Some(s_ancien)
+        Some(derive)
     );
+    assert_eq!(
+        base.service(derive)
+            .expect("lisible")
+            .expect("rangé")
+            .estampille,
+        est(pair(), 11)
+    );
+    assert!(base.service(s_ancien).expect("lisible").is_none());
     assert!(base.service(s_recent).expect("lisible").is_none());
     // Celle dont la machine ne vient pas attend encore, sans rien retenir.
     assert_eq!(base.services_en_attente().expect("lisible"), 1);
@@ -3266,10 +3299,12 @@ fn un_service_du_pair_recu_avant_sa_machine_attend_puis_se_range() {
 }
 
 #[test]
-fn un_service_qui_perd_la_convergence_nomme_son_gagnant() {
-    // **DÉCISION 69, LE DÉFAUT (b)** : l'entrepôt ne tient pas le vivier ; il
-    // NOMME le `s-…` perdant et le gagnant, et la boucle déplace la session.
-    let (base, fichier) = entrepot("service-remplace");
+fn un_service_venu_d_un_pair_d_avant_la_derivation_se_range_sous_le_derive() {
+    // **DÉCISION 72** : le `s-…` du fil n'est qu'indicatif. Un pair encore en
+    // 0.36.0 porte un aléa ; il se range sous le dérivé — le nôtre —, rien ne
+    // se remplace, aucune session n'a à bouger, et l'effet NOMME l'écart pour
+    // le journal. Des deux estampilles, la plus petite reste.
+    let (base, fichier) = entrepot("service-reidentifie");
     base.se_savoir_annuaire_local();
     let proprietaire = un(Genre::Utilisateur, 1);
     let m1 = un(Genre::Machine, 1);
@@ -3280,16 +3315,18 @@ fn un_service_qui_perd_la_convergence_nomme_son_gagnant() {
     base.ranger_les_machines_federees(&[federee])
         .expect("rangées");
     // Ce membre a déclaré `depot` lui-même : sa propre estampille.
-    let local = un(Genre::Service, 1);
-    base.declarer_service(local, Provenance::Ici, m1, nom("depot"))
+    let local = base
+        .declarer_service(Provenance::Ici, m1, nom("depot"))
         .expect("déclaré");
+    assert_eq!(local, service_derive(m1, b"depot"));
     let tenue = base
         .service(local)
         .expect("lisible")
         .expect("déclaré")
         .estampille;
-    // Le pair l'avait déclaré avant — une estampille plus petite.
-    let gagnant = un(Genre::Service, 2);
+    // Le pair l'avait déclaré avant — une estampille plus petite —, sous un
+    // aléa : il tourne encore en 0.36.0.
+    let alea = un(Genre::Service, 2);
     let plus_ancienne = Estampille {
         compteur: tenue.compteur,
         racine: Identifiant::depuis_entropie(Genre::Annuaire, [0x00; 16]),
@@ -3301,7 +3338,7 @@ fn un_service_qui_perd_la_convergence_nomme_son_gagnant() {
             &Cadre::Operation {
                 estampille: plus_ancienne,
                 operation: Operation::Service {
-                    service: gagnant,
+                    service: alea,
                     enregistrement: service(plus_ancienne, m1, "depot"),
                 },
             },
@@ -3311,15 +3348,25 @@ fn un_service_qui_perd_la_convergence_nomme_son_gagnant() {
     let Applique::Faite { effets, .. } = fait else {
         panic!("appliquée : {fait:?}");
     };
-    assert_eq!(effets.remplaces, vec![(local, gagnant)]);
+    assert!(effets.remplaces.is_empty(), "rien ne se remplace");
+    assert_eq!(effets.reidentifies, vec![(alea, local)]);
     assert_eq!(
         base.service_par_nom(m1, "depot").expect("lisible"),
-        Some(gagnant)
+        Some(local)
+    );
+    assert_eq!(base.service(alea).expect("lisible"), None);
+    assert_eq!(
+        base.service(local)
+            .expect("lisible")
+            .expect("là")
+            .estampille,
+        plus_ancienne,
+        "la plus petite estampille reste"
     );
 
     // **PAR LE REJEU AUSSI** : m2 était là, `depot` s'y est déclaré ici ; elle
-    // sort de nos domaines, le pair rapporte son `depot` plus ancien — gardé
-    // —, et quand elle revient, le rejeu le fait gagner.
+    // sort de nos domaines, le pair rapporte son `depot` — gardé SOUS LE
+    // DÉRIVÉ —, et quand elle revient, le rejeu ne remplace rien.
     let m2 = un(Genre::Machine, 2);
     let federee_2 = asl_registre::MachineFederee {
         machine: m2,
@@ -3327,8 +3374,8 @@ fn un_service_qui_perd_la_convergence_nomme_son_gagnant() {
     };
     base.ranger_les_machines_federees(&[federee, federee_2])
         .expect("rangées");
-    let local_2 = un(Genre::Service, 3);
-    base.declarer_service(local_2, Provenance::Ici, m2, nom("depot"))
+    let local_2 = base
+        .declarer_service(Provenance::Ici, m2, nom("depot"))
         .expect("déclaré");
     let rangement = base
         .ranger_les_machines_federees(&[federee])
@@ -3348,16 +3395,30 @@ fn un_service_qui_perd_la_convergence_nomme_son_gagnant() {
             true,
         )
         .expect("appliquée");
-    assert!(matches!(fait, Applique::Faite { .. }));
+    let Applique::Faite { effets, .. } = fait else {
+        panic!("appliquée : {fait:?}");
+    };
+    assert_eq!(effets.reidentifies, vec![(ancien, local_2)]);
     assert_eq!(base.services_en_attente().expect("lisible"), 1);
     let rangement = base
         .ranger_les_machines_federees(&[federee, federee_2])
         .expect("rangées");
     assert_eq!(rangement.rejoues, 1);
-    assert_eq!(rangement.effets.remplaces, vec![(local_2, ancien)]);
+    assert!(rangement.effets.remplaces.is_empty());
+    assert!(
+        rangement.effets.reidentifies.is_empty(),
+        "gardé sous le dérivé, il n'a plus rien à dire"
+    );
     assert_eq!(
         base.service_par_nom(m2, "depot").expect("lisible"),
-        Some(ancien)
+        Some(local_2)
+    );
+    assert_eq!(
+        base.service(local_2)
+            .expect("lisible")
+            .expect("là")
+            .estampille,
+        plus_ancienne
     );
     let _ = std::fs::remove_file(&fichier);
 }

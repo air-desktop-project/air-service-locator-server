@@ -504,6 +504,17 @@ impl Tireur {
                         ));
                         self.fermetures.renommer(perdant, gagnant);
                     }
+                    // **UN PAIR QUI N'EST PAS ENCORE EN 0.37.0 SE VOIT ICI**
+                    // (décision 72) : son `s-…` est un aléa, le nôtre est
+                    // dérivé. Le service se range sous le dérivé — rien ne se
+                    // dédouble —, et la ligne dit l'écart de version.
+                    for (sur_le_fil, derive) in effets.reidentifies {
+                        (self.journal)(format!(
+                            "service {sur_le_fil} venu de {pair} rangé sous {derive}, son \
+                             identifiant dérivé : ce pair n'est pas encore en 0.37.0 \
+                             (décision 72) — mettez-le à jour"
+                        ));
+                    }
                 }
                 Applique::Fin { curseur } => {
                     (self.journal)(format!(

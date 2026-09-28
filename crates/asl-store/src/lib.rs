@@ -74,6 +74,7 @@ mod domaines;
 mod droits;
 mod federation;
 mod groupes;
+mod identifiants;
 
 pub use annuaires::{
     DecisionDInscription, DeclarationAttendue, DeclarationDAnnuaire, EtatDInscription, MembreLu,
@@ -83,6 +84,7 @@ pub use domaines::SuppressionDeDomaine;
 pub use droits::{Acces, EcritureDeDroit, Voulu};
 pub use federation::Rangement;
 pub use groupes::{EcritureDeGroupe, GroupeLu};
+pub use identifiants::MigrationDesIdentifiants;
 
 const COMPTES: TableDefinition<'_, &[u8], &[u8; COMPTE_OCTETS]> = TableDefinition::new("comptes");
 
@@ -296,14 +298,25 @@ const CLEF_DES_RETIREES: &str = "operations-retirees-jusqu-a";
 /// que le banc a démentie le 2026-09-21.
 const CLEF_DE_L_ECRIT: &str = "derniere-ecriture";
 
-/// Le format de cet entrepôt : le troisième, celui des dates.
+/// Le format de cet entrepôt : le quatrième, celui des `s-…` dérivés.
 ///
 /// Le premier n'était pas numéroté — il n'y avait rien d'autre —, et c'est son
 /// absence qui le désigne. Le second est celui de l'estampille (0.5.0 à
 /// 0.10.1). Le troisième ajoute `révoqué le` à l'appareil, `effacé le` et sa
 /// cause au compte (`docs/modele.md` §2.1, §2.2, 2026-09-18) — et chacun se
 /// reprend depuis le précédent, à l'ouverture, dans une transaction.
-const FORMAT: u64 = 3;
+///
+/// **Le quatrième (0.37.0, décision 72) ne change la taille d'aucun
+/// enregistrement : il change le SENS d'une clé.** Un service est rangé sous
+/// son `s-…` dérivé de `(machine, nom)`, et plus sous un aléa. C'est ce que
+/// le numéro dit, et c'est pourquoi il bouge : **une 0.36.0 refuse d'ouvrir un
+/// entrepôt migré** ([`Faute::Format`]) plutôt que d'y frapper de nouveau des
+/// `s-…` au hasard, que rien ne migrerait plus ensuite. Le retour arrière passe
+/// par la sauvegarde d'avant la mise à jour.
+const FORMAT: u64 = 4;
+
+/// Le format d'avant la dérivation des `s-…` (0.11.0 à 0.36.0).
+const FORMAT_SANS_DERIVATION: u64 = 3;
 
 /// Le format d'avant les dates.
 const FORMAT_SANS_DATES: u64 = 2;
@@ -449,6 +462,22 @@ pub enum Faute {
         /// Ce que la base annonce.
         lu: u64,
     },
+    /// Deux services rangés pour le même `(machine, nom)` : la migration des
+    /// `s-…` (décision 72) refuse de choisir entre eux (`identifiants.rs`).
+    Doublon {
+        /// La machine qui les sert.
+        machine: Identifiant,
+        /// Les deux `s-…` qui se disputent son nom.
+        services: (Identifiant, Identifiant),
+    },
+    /// Deux services différents dérivent au même `s-…` — une collision de
+    /// SHA-256 sur 128 bits : la migration refuse, et le dit.
+    Collision {
+        /// Le `s-…` dérivé qu'ils partageraient.
+        derive: Identifiant,
+        /// Les deux `s-…` d'hier.
+        services: (Identifiant, Identifiant),
+    },
 }
 
 impl core::fmt::Display for Faute {
@@ -466,6 +495,23 @@ impl core::fmt::Display for Faute {
             Self::Format { lu } => write!(
                 sortie,
                 "l'entrepôt est au format {lu}, que ce binaire ne connaît pas (il connaît {FORMAT})"
+            ),
+            Self::Doublon {
+                machine,
+                services: (premier, second),
+            } => write!(
+                sortie,
+                "migration des identifiants de service refusée : {premier} et {second} sont deux \
+                 services de {machine} sous le même nom — l'entrepôt ne devrait en tenir qu'un ; \
+                 rien n'a été écrit"
+            ),
+            Self::Collision {
+                derive,
+                services: (premier, second),
+            } => write!(
+                sortie,
+                "migration des identifiants de service refusée : {premier} et {second} dérivent \
+                 tous deux en {derive} — rien n'a été écrit"
             ),
         }
     }
@@ -729,6 +775,11 @@ pub struct EffetsVivants {
     /// daemon connecté ICI serait cherché sous le gagnant, pas trouvé, et dit
     /// `parti`.
     pub remplaces: Vec<(Identifiant, Identifiant)>,
+    /// Les opérations `service` venues d'un pair sous un `s-…` qui n'est pas
+    /// le dérivé : `(celui du fil, le dérivé)`. **Rangées sous le dérivé**
+    /// (0.37.0, décision 72) ; c'est le signe d'un pair pas encore en 0.37.0,
+    /// et le journal d'exploitation le dit.
+    pub reidentifies: Vec<(Identifiant, Identifiant)>,
 }
 
 /// Pourquoi une opération a été refusée (`docs/replication.md` §3, §5.3, §7).
@@ -871,6 +922,9 @@ pub struct Entrepot {
     /// Combien d'autorisations d'hier sont devenues des droits à l'ouverture
     /// (décision 41) — une fois.
     autorisations_converties: usize,
+    /// Ce que la migration des `s-…` a fait à CETTE ouverture (0.37.0,
+    /// décision 72) — `None` quand l'entrepôt était déjà au format 4, ou neuf.
+    migration: Option<MigrationDesIdentifiants>,
     /// **Cet entrepôt est-il celui d'un annuaire LOCAL ?** (0.36.0, décision
     /// 69) Alors une opération `service` dont la machine n'est pas encore
     /// reçue des racines est GARDÉE, et rejouée quand la machine arrive —
@@ -962,6 +1016,7 @@ impl Entrepot {
         let premiers_domaines;
         let groupes_deduits;
         let autorisations_converties;
+        let migration;
         let mut dates_de_reprise = 0_usize;
         {
             let ecriture = base.begin_write()?;
@@ -972,12 +1027,15 @@ impl Entrepot {
             // La date de la reprise : celle que reçoivent les appareils déjà
             // révoqués, faute de mieux.
             let quand = maintenant_ms();
-            match format {
-                Some(FORMAT) => {}
+            // **LE FORMAT S'ÉCRIT EN FIN DE TRANSACTION**, après la migration
+            // des `s-…` qui le fait passer à 4 : chaque reprise mène au format
+            // d'avant, la migration fait le dernier pas.
+            let a_migrer = match format {
+                Some(FORMAT) => false,
+                Some(FORMAT_SANS_DERIVATION) => true,
                 Some(FORMAT_SANS_DATES) => {
                     dates_de_reprise = reprendre_les_dates(&ecriture, quand)?;
-                    let mut table = ecriture.open_table(RACINE)?;
-                    table.insert(CLEF_DU_FORMAT, FORMAT)?;
+                    true
                 }
                 Some(lu) => return Err(Faute::Format { lu }),
                 None => {
@@ -990,10 +1048,10 @@ impl Entrepot {
                     if ancienne {
                         dates_de_reprise = reprendre(&ecriture, racine, quand)?;
                     }
-                    let mut table = ecriture.open_table(RACINE)?;
-                    table.insert(CLEF_DU_FORMAT, FORMAT)?;
+                    // Une base neuve n'a rien à migrer, et ne le dit pas.
+                    ancienne
                 }
-            }
+            };
             ecriture.open_table(COMPTES)?;
             ecriture.open_table(MACHINES)?;
             ecriture.open_table(APPAREILS)?;
@@ -1051,6 +1109,8 @@ impl Entrepot {
             // Et les services du pair qui attendent leur machine (0.36.0,
             // décision 69) : une table neuve, vide chez une racine.
             ecriture.open_table(federation::SERVICES_EN_ATTENTE)?;
+            // Et la correspondance des `s-…` d'hier (0.37.0, décision 72).
+            ecriture.open_table(identifiants::SERVICES_RENOMMES)?;
             ecriture.open_table(droits::DROITS_PAR_GROUPE)?;
             ecriture.open_table(droits::DROITS_ACCORDES)?;
             ecriture.open_table(droits::DROITS_PAR_ELEMENT)?;
@@ -1082,6 +1142,17 @@ impl Entrepot {
             } else {
                 reestampiller(&ecriture, RACINE_SANS_IDENTITE, racine)?
             };
+            // **LES `s-…` PASSENT SOUS LEUR DÉRIVÉ** (0.37.0, décision 72) :
+            // une fois, APRÈS toutes les reprises — les droits convertis
+            // compris, qui peuvent viser un service —, et le format 4 le dit.
+            migration = if a_migrer {
+                Some(identifiants::migrer(&ecriture)?)
+            } else {
+                None
+            };
+            ecriture
+                .open_table(RACINE)?
+                .insert(CLEF_DU_FORMAT, FORMAT)?;
             // **La dernière écriture, pour une base qui ne la portait pas.**
             // Ce n'est pas une reprise de FORMAT — la clé s'ajoute à une table
             // qui existe déjà, et son absence se lit « pas encore connue ».
@@ -1127,6 +1198,7 @@ impl Entrepot {
             premiers_domaines,
             groupes_deduits,
             autorisations_converties,
+            migration,
             local: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -1158,6 +1230,15 @@ impl Entrepot {
     #[must_use]
     pub fn est_annuaire_local(&self) -> bool {
         self.local.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Ce que la migration des `s-…` a fait à cette ouverture (0.37.0,
+    /// décision 72) : `Some` une fois, à la première ouverture d'un entrepôt
+    /// d'avant la dérivation — même s'il ne tenait aucun service —, `None`
+    /// ensuite. C'est au journal d'exploitation de le dire.
+    #[must_use]
+    pub const fn migration_des_identifiants(&self) -> Option<MigrationDesIdentifiants> {
+        self.migration
     }
 
     /// Combien d'autorisations d'hier sont devenues des droits à l'ouverture
@@ -2757,22 +2838,27 @@ impl Entrepot {
 
     // ── Les services ────────────────────────────────────────────────────────
 
-    /// Déclare ce service sur cette machine, sous ce nom.
+    /// Déclare ce service sur cette machine, sous ce nom, et rend son `s-…`.
     ///
     /// **Un service ne bouge jamais et ne se retire jamais** (`replication.md`
     /// §3.2) : il n'y a pas de renommage, et `(machine, nom)` est unique.
     ///
+    /// **Son `s-…` se calcule, il ne se tire pas** (0.37.0, décision 66) :
+    /// [`asl_registre::service_derive`]. L'appelant ne le choisit donc pas —
+    /// c'est ce qui garantit que tout entrepôt, racine ou membre, range le
+    /// même pour le même `(machine, nom)`.
+    ///
     /// # Errors
     ///
-    /// [`Faute::Existe`] si le service existe, ou si un autre tient déjà ce
-    /// nom sur cette machine ; [`Faute::Base`] si la base refuse.
+    /// [`Faute::Existe`] si ce nom est déjà tenu sur cette machine ;
+    /// [`Faute::Base`] si la base refuse.
     pub fn declarer_service(
         &self,
-        quel: Identifiant,
         provenance: Provenance,
         machine: Identifiant,
         nom: NomRange,
-    ) -> Result<(), Faute> {
+    ) -> Result<Identifiant, Faute> {
+        let quel = asl_registre::service_derive(machine, nom.octets());
         let clef_service = clef(quel);
         let clef_nom = clef_de_nom(machine, nom.octets());
         let ecriture = self.base.begin_write()?;
@@ -2807,7 +2893,7 @@ impl Entrepot {
             )?;
         }
         self.commettre_une_operation(ecriture, journalisee)?;
-        Ok(())
+        Ok(quel)
     }
 
     /// Rend ce service, s'il existe.
@@ -4773,15 +4859,28 @@ fn appliquer_cle_revoquee(
     Ok(())
 }
 
-/// `service` — insérer ; si `(machine, nom)` est déjà tenu, le plus ancien
-/// reste (`docs/replication.md` §3.2, §5.2).
+/// `service` — **ré-identifié par dérivation**, puis insérer ; si `(machine,
+/// nom)` est déjà tenu sous le même `s-…`, la plus petite estampille reste
+/// (`docs/replication.md` §3.2, §5.2 ; 0.37.0, décision 72).
+///
+/// # LE `s-…` DU FIL N'EST QU'INDICATIF
+///
+/// Le service se range sous [`asl_registre::service_derive`]`(machine, nom)`,
+/// quel que soit l'identifiant que l'opération porte : celui d'un pair en
+/// 0.37.0 est le même, celui d'un pair encore en 0.36.0 est un aléa, que la
+/// correspondance retient pour ses droits ([`identifiants::reidentifier`]).
+/// Deux entrepôts qui ont vu le même `(machine, nom)` tiennent donc le même
+/// `s-…` — **le conflit « le même service déclaré des deux côtés » ne se
+/// présente plus** : il ne reste qu'à garder, des deux estampilles, la plus
+/// petite, pour que les deux enregistrements soient les mêmes octets.
 fn appliquer_service(
     ecriture: &WriteTransaction,
-    quel: Identifiant,
+    sur_le_fil: Identifiant,
     enregistrement: &Service,
     garder: bool,
     effets: &mut EffetsVivants,
 ) -> Result<(), Faute> {
+    let quel = identifiants::reidentifier(ecriture, sur_le_fil, enregistrement, effets)?;
     let clef_service = clef(quel);
     let clef_nom = clef_de_nom(enregistrement.machine, enregistrement.nom.octets());
     // **UN SERVICE D'UNE MACHINE QU'ON N'A PAS NE SE DÉCLARE PAS** : les
@@ -4805,52 +4904,73 @@ fn appliquer_service(
         // elle est ici. [`Entrepot::ranger_les_machines_federees`] la rejoue
         // quand la machine arrive. Chez une racine, elle s'ignore, comme
         // avant : sa machine est partie (voir
-        // [`Entrepot::se_savoir_annuaire_local`]).
+        // [`Entrepot::se_savoir_annuaire_local`]). **Gardée sous le dérivé.**
         if garder {
             federation::garder_en_attente(ecriture, quel, enregistrement)?;
         }
         return Ok(());
     }
-    let mut services = ecriture.open_table(SERVICES)?;
-    let mut par_nom = ecriture.open_table(SERVICES_PAR_NOM)?;
-
-    if let Some(tenu) = par_nom.get(clef_nom.as_slice())? {
-        let tenu = tenu.value().to_vec();
-        if tenu == clef_service.as_slice() {
-            return Ok(());
-        }
-        let estampille_tenu = match services.get(tenu.as_slice())? {
-            Some(brut) => Service::lire(brut.value())?.estampille,
-            None => Estampille {
-                compteur: u64::MAX,
-                racine: enregistrement.estampille.racine,
-            },
-        };
-        // **LE PLUS ANCIEN RESTE**, l'autre s'efface. Si l'entrant est plus
-        // ancien, il prend la place ; sinon il ne s'écrit pas du tout.
-        if enregistrement.estampille < estampille_tenu {
-            services.remove(tenu.as_slice())?;
-            // **ET LA SESSION VIVANTE SUIT** (0.36.0, décision 69) : la
-            // boucle la déplace du perdant au gagnant.
-            effets.remplaces.push((depuis_clef(&tenu)?, quel));
-        } else {
-            return Ok(());
-        }
-    } else if services.get(clef_service.as_slice())?.is_some() {
-        // L'identifiant existe déjà sous un autre nom : un service ne bouge
-        // jamais, donc rien à faire.
-        return Ok(());
-    }
-
     let service = Service {
         provenance: Provenance::Ici,
         ..*enregistrement
     };
-    let mut octets = [0_u8; SERVICE_OCTETS];
-    service.ecrire(&mut octets);
-    services.insert(clef_service.as_slice(), &octets)?;
-    par_nom.insert(clef_nom.as_slice(), clef_service.as_slice())?;
-    Ok(())
+    let tenu = ecriture
+        .open_table(SERVICES_PAR_NOM)?
+        .get(clef_nom.as_slice())?
+        .map(|tenu| tenu.value().to_vec());
+    match tenu {
+        Some(tenu) if tenu == clef_service.as_slice() => {
+            // **LE MÊME `s-…` DES DEUX CÔTÉS** : la plus petite estampille
+            // reste, et les deux entrepôts finissent avec les mêmes octets.
+            let mut services = ecriture.open_table(SERVICES)?;
+            let plus_ancien = match services.get(clef_service.as_slice())? {
+                Some(brut) => Service::lire(brut.value())?.estampille > service.estampille,
+                None => true,
+            };
+            if plus_ancien {
+                let mut octets = [0_u8; SERVICE_OCTETS];
+                service.ecrire(&mut octets);
+                services.insert(clef_service.as_slice(), &octets)?;
+            }
+            Ok(())
+        }
+        Some(tenu) => {
+            // **TENU SOUS UN AUTRE `s-…`** — un entrepôt migré n'en a pas :
+            // tous ses services sont sous leur dérivé. Si cela arrivait, le
+            // dérivé l'emporte, avec ce qui le nomme, et la session suit
+            // (0.36.0, décision 69).
+            let ancien = depuis_clef(&tenu)?;
+            let garde = match ecriture.open_table(SERVICES)?.get(tenu.as_slice())? {
+                Some(brut) => {
+                    let avant = Service::lire(brut.value())?;
+                    if avant.estampille < service.estampille {
+                        avant
+                    } else {
+                        service
+                    }
+                }
+                None => service,
+            };
+            identifiants::renommer(ecriture, ancien, quel, &garde)?;
+            effets.remplaces.push((ancien, quel));
+            Ok(())
+        }
+        None => {
+            let mut services = ecriture.open_table(SERVICES)?;
+            if services.get(clef_service.as_slice())?.is_some() {
+                // Le dérivé est déjà tenu sous un autre nom : une collision
+                // de SHA-256, que la migration aurait refusée. Rien à faire.
+                return Ok(());
+            }
+            let mut octets = [0_u8; SERVICE_OCTETS];
+            service.ecrire(&mut octets);
+            services.insert(clef_service.as_slice(), &octets)?;
+            ecriture
+                .open_table(SERVICES_PAR_NOM)?
+                .insert(clef_nom.as_slice(), clef_service.as_slice())?;
+            Ok(())
+        }
+    }
 }
 
 /// Le titulaire de cet alias : la plus ancienne réclamation courante.
@@ -5738,7 +5858,7 @@ mod essais {
     //! base d'avant, et que cette clé est privée. L'exposer pour l'éprouver
     //! serait élargir la surface publique au bénéfice d'un seul essai.
 
-    use redb::{Database, ReadableDatabase, ReadableTableMetadata};
+    use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
     use super::{CLEF_DE_L_ECRIT, CLEF_DES_RETIREES, Entrepot, Identifiant, Provenance, RACINE};
     use asl_id::Genre;
@@ -5767,6 +5887,75 @@ mod essais {
             table.remove(CLEF_DE_L_ECRIT).expect("retirée");
         }
         ecriture.commit().expect("commis");
+    }
+
+    #[test]
+    fn une_base_qui_tient_deux_services_pour_un_nom_refuse_la_migration() {
+        // **L'INVARIANT `(machine, nom)` → UN SERVICE** que la migration des
+        // `s-…` (décision 72) vérifie avant d'écrire : une base de la 0.36.0
+        // (format 3) où un second enregistrement porte le même `(machine,
+        // nom)` sous un autre aléa — ce que rien ne devait laisser faire. Elle
+        // refuse, le dit, et ne touche à rien : la base reste au format 3.
+        let ou = chemin("doublon");
+        let machine = Identifiant::depuis_entropie(Genre::Machine, [1; 16]);
+        let second = Identifiant::depuis_entropie(Genre::Service, [2; 16]);
+        let premier;
+        {
+            let base = Entrepot::ouvrir(&ou, racine()).expect("neuve");
+            premier = base
+                .declarer_service(
+                    Provenance::Ici,
+                    machine,
+                    asl_registre::NomRange::nouveau("depot").expect("un nom"),
+                )
+                .expect("déclaré");
+        }
+        {
+            let base = Database::open(&ou).expect("ouvrable");
+            let ecriture = base.begin_write().expect("écrivable");
+            {
+                let mut services = ecriture.open_table(super::SERVICES).expect("la table");
+                let brut = *services
+                    .get(super::clef(premier).as_slice())
+                    .expect("lisible")
+                    .expect("là")
+                    .value();
+                services
+                    .insert(super::clef(second).as_slice(), &brut)
+                    .expect("doublé");
+                ecriture
+                    .open_table(RACINE)
+                    .expect("la table racine")
+                    .insert(super::CLEF_DU_FORMAT, super::FORMAT_SANS_DERIVATION)
+                    .expect("format 3");
+            }
+            ecriture.commit().expect("commis");
+        }
+        let refus = Entrepot::ouvrir(&ou, racine()).err();
+        assert!(
+            matches!(
+                refus,
+                Some(super::Faute::Doublon { machine: m, .. }) if m == machine
+            ),
+            "{refus:?}"
+        );
+        let dit = refus.map(|faute| faute.to_string()).unwrap_or_default();
+        assert!(dit.contains("rien n'a été écrit"), "{dit}");
+        {
+            let base = Database::open(&ou).expect("ouvrable");
+            let lecture = base.begin_read().expect("lisible");
+            assert_eq!(
+                lecture
+                    .open_table(RACINE)
+                    .expect("la table racine")
+                    .get(super::CLEF_DU_FORMAT)
+                    .expect("lisible")
+                    .map(|lu| lu.value()),
+                Some(super::FORMAT_SANS_DERIVATION),
+                "rien n'a été écrit"
+            );
+        }
+        let _ = std::fs::remove_file(&ou);
     }
 
     #[test]

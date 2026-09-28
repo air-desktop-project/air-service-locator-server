@@ -14,7 +14,7 @@ use asl_id::{Genre, Identifiant};
 use asl_registre::{
     AliasRange, Attestation, Cadre, Capacites, Cause, Compte, Effacement, EntreeJournal,
     Estampille, JetonRange, NomRange, Operation, Plateforme, PointRange, Portee, Provenance,
-    Systeme, Verdict,
+    Systeme, Verdict, service_derive,
 };
 use asl_store::{Efface, Entrepot, Faute, RACINE_SANS_IDENTITE, Rattrapage, Retrait};
 
@@ -194,7 +194,7 @@ fn chaque_ecriture_avance_le_compteur_et_laisse_une_operation() {
     let thierry = un(Genre::Utilisateur, 1);
     let grenier = un(Genre::Machine, 2);
     let iphone = un(Genre::Appareil, 3);
-    let depot = un(Genre::Service, 4);
+    let depot = service_derive(grenier, b"depot");
     let accordee = un(Genre::Autorisation, 5);
     let code = empreinte("4K9M2P7R1T");
 
@@ -231,8 +231,11 @@ fn chaque_ecriture_avance_le_compteur_et_laisse_une_operation() {
         .expect("le code");
     base.lier_cle(grenier, [0x42; 32], code, enrolement.estampille)
         .expect("9");
-    base.declarer_service(depot, Provenance::Ici, grenier, nom("depot"))
-        .expect("10");
+    assert_eq!(
+        base.declarer_service(Provenance::Ici, grenier, nom("depot"))
+            .expect("10"),
+        depot
+    );
     // **LE BÉNÉFICIAIRE EXISTE** : une autorisation d'hier devient un droit à
     // son groupe personnel, qui naît avec son compte.
     base.creer_compte(un(Genre::Utilisateur, 6), Provenance::Ici, None)
@@ -605,7 +608,7 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
     let thierry = un(Genre::Utilisateur, 1);
     let grenier = un(Genre::Machine, 2);
     let iphone = un(Genre::Appareil, 3);
-    let depot = un(Genre::Service, 4);
+    let depot = service_derive(grenier, b"depot");
     let accordee = un(Genre::Autorisation, 5);
     let code = empreinte("4K9M2P7R1T");
     let en_attente = empreinte("ABCDEFGH23");
@@ -643,8 +646,11 @@ fn l_instantane_reconstitue_chaque_enregistrement_sous_ses_estampilles_d_origine
         .expect("le code");
     base.lier_cle(grenier, [0x42; 32], code, enrolement.estampille)
         .expect("9");
-    base.declarer_service(depot, Provenance::Ici, grenier, nom("depot"))
-        .expect("10");
+    assert_eq!(
+        base.declarer_service(Provenance::Ici, grenier, nom("depot"))
+            .expect("10"),
+        depot
+    );
     // Le bénéficiaire existe : le droit converti vise son groupe personnel.
     let lea = un(Genre::Utilisateur, 6);
     base.creer_compte(lea, Provenance::Ici, None).expect("11");
@@ -1029,8 +1035,10 @@ fn une_base_ancienne_est_reprise_sans_rien_perdre() {
     let portable = un(Genre::Machine, 11);
     let iphone = un(Genre::Appareil, 20);
     let pixel = un(Genre::Appareil, 21);
-    let depot = un(Genre::Service, 30);
-    let imap = un(Genre::Service, 31);
+    // **LES `s-…` DE LA FIXTURE ÉTAIENT DES ALÉAS** : la reprise les fait
+    // passer sous leur dérivé (0.37.0, décision 72), avec le reste.
+    let depot = service_derive(grenier, b"depot");
+    let imap = service_derive(grenier, b"imap");
     let accordee = un(Genre::Autorisation, 40);
     let retiree = un(Genre::Autorisation, 41);
 
@@ -1788,7 +1796,7 @@ fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
 
     let compte = un(Genre::Utilisateur, 2);
     let machine = un(Genre::Machine, 3);
-    let service = un(Genre::Service, 4);
+    let service = service_derive(machine, b"depot");
     let appareil = un(Genre::Appareil, 5);
     let autorisation = un(Genre::Autorisation, 6);
     let clef = empreinte("0123456789");
@@ -1796,8 +1804,11 @@ fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
     base.creer_compte(compte, venu, None).expect("écrit");
     base.creer_machine(machine, venu, compte, nom("grenier"), TOUT)
         .expect("écrit");
-    base.declarer_service(service, venu, machine, nom("depot"))
-        .expect("écrit");
+    assert_eq!(
+        base.declarer_service(venu, machine, nom("depot"))
+            .expect("écrit"),
+        service
+    );
     base.creer_appareil(appareil, venu, compte, [2; 33], Attestation::Aucune)
         .expect("écrit");
     base.poser_jeton(
@@ -1893,9 +1904,11 @@ fn rompre_efface_les_services_les_autorisations_les_appareils_et_les_codes() {
 fn un_service_se_relit_par_son_identifiant_et_par_son_nom() {
     let (base, chemin) = entrepot("service");
     let machine = un(Genre::Machine, 1);
-    let quel = un(Genre::Service, 1);
-    base.declarer_service(quel, Provenance::Ici, machine, nom("imap"))
+    let quel = base
+        .declarer_service(Provenance::Ici, machine, nom("imap"))
         .expect("écrit");
+    // **DÉRIVÉ, ET NON TIRÉ** (0.37.0, décision 66).
+    assert_eq!(quel, service_derive(machine, b"imap"));
 
     let service = base.service(quel).expect("lisible").expect("là");
     assert_eq!(service.machine, machine);
@@ -1916,26 +1929,30 @@ fn deux_machines_peuvent_servir_le_meme_nom_mais_pas_une_machine_deux_fois() {
     let (base, chemin) = entrepot("homonymes");
     let une = un(Genre::Machine, 1);
     let autre = un(Genre::Machine, 2);
-    base.declarer_service(un(Genre::Service, 1), Provenance::Ici, une, nom("imap"))
+    let premier = base
+        .declarer_service(Provenance::Ici, une, nom("imap"))
         .expect("écrit");
-    base.declarer_service(un(Genre::Service, 2), Provenance::Ici, autre, nom("imap"))
+    let second = base
+        .declarer_service(Provenance::Ici, autre, nom("imap"))
         .expect("écrit");
+    assert_ne!(premier, second, "deux machines, deux dérivés");
     assert!(matches!(
-        base.declarer_service(un(Genre::Service, 3), Provenance::Ici, une, nom("imap")),
+        base.declarer_service(Provenance::Ici, une, nom("imap")),
         Err(Faute::Existe)
     ));
-    assert!(matches!(
-        base.declarer_service(un(Genre::Service, 1), Provenance::Ici, une, nom("pop")),
-        Err(Faute::Existe)
-    ));
+    assert!(
+        base.declarer_service(Provenance::Ici, une, nom("pop"))
+            .is_ok(),
+        "un autre nom, un autre service"
+    );
 
     assert_eq!(
         base.service_par_nom(une, "imap").expect("lisible"),
-        Some(un(Genre::Service, 1))
+        Some(premier)
     );
     assert_eq!(
         base.service_par_nom(autre, "imap").expect("lisible"),
-        Some(un(Genre::Service, 2))
+        Some(second)
     );
     let _ = std::fs::remove_file(&chemin);
 }
@@ -2671,14 +2688,9 @@ fn les_services_d_une_machine_se_retrouvent_par_intervalle() {
     let une = un(Genre::Machine, 10);
     let autre = un(Genre::Machine, 11);
 
-    for (marque, machine, texte) in [(20, une, "depot"), (21, une, "imap"), (22, autre, "depot")] {
+    for (machine, texte) in [(une, "depot"), (une, "imap"), (autre, "depot")] {
         entrepot
-            .declarer_service(
-                un(Genre::Service, marque),
-                Provenance::Ici,
-                machine,
-                nom(texte),
-            )
+            .declarer_service(Provenance::Ici, machine, nom(texte))
             .expect("il s'écrit");
     }
 
@@ -3010,8 +3022,8 @@ fn garnir_un_compte(base: &Entrepot, graine: u8) -> Garni {
         un(Genre::Machine, graine ^ 0x0F),
     ];
     let services = [
-        un(Genre::Service, graine),
-        un(Genre::Service, graine ^ 0x0F),
+        service_derive(machines[0], b"svc0"),
+        service_derive(machines[0], b"svc1"),
     ];
     let accordee = un(Genre::Autorisation, graine);
     let recue = un(Genre::Autorisation, graine ^ 0x0F);
@@ -3062,13 +3074,11 @@ fn garnir_un_compte(base: &Entrepot, graine: u8) -> Garni {
     )
     .expect("clé");
     for (rang, quel) in services.iter().enumerate() {
-        base.declarer_service(
-            *quel,
-            Provenance::Ici,
-            machines[0],
-            nom(&format!("svc{rang}")),
-        )
-        .expect("service");
+        assert_eq!(
+            base.declarer_service(Provenance::Ici, machines[0], nom(&format!("svc{rang}")))
+                .expect("service"),
+            *quel
+        );
     }
     let code = empreinte("4K9M2P7R1T");
     base.emettre_enrolement(&code, Provenance::Ici, machines[1], u64::MAX)

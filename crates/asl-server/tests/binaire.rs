@@ -2695,3 +2695,65 @@ async fn un_annuaire_local_publie_ses_locateurs_et_les_racines_les_repliquent() 
         let _ = std::fs::remove_file(base);
     }
 }
+
+// ── LA MIGRATION DES `s-…` AU DÉMARRAGE (0.37.0, décision 72) ──────────────
+
+/// Attend que le journal porte une ligne qui contient tous ces morceaux.
+fn attendre_la_ligne(journal: &std::sync::Mutex<Vec<String>>, morceaux: &[&str]) -> bool {
+    for _ in 0..100_u32 {
+        if journal_dit(journal, morceaux) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn la_migration_des_services_se_dit_au_journal_une_fois() {
+    // L'entrepôt de la 0.36.0 (la fixture d'`asl-store` : trois services
+    // sous des aléas, un droit sur l'un, un service du pair en attente) est
+    // migré au premier démarrage, et le journal le dit avec les nombres ; au
+    // second, il n'y a plus rien à dire.
+    let (cle, _, _, _) = identite("migration-a1");
+    let base =
+        std::env::temp_dir().join(format!("asl-bin-{}-migration-a1.redb", std::process::id()));
+    let _ = std::fs::remove_file(&base);
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../asl-store/tests/fixtures/entrepot-0.36.0.redb"),
+        &base,
+    )
+    .expect("la fixture se copie");
+    let cle_texte = cle.to_str().expect("un chemin UTF-8");
+
+    let (mut serveur, _, journal) = lancer_et_lire(&base, &["--identity-key", cle_texte]);
+    assert!(
+        attendre_la_ligne(
+            &journal,
+            &[
+                "migration A1 : 3 service(s) ré-identifié(s) sur 3",
+                "1 droit(s) les suivent",
+                "1 service(s) du pair en attente re-dérivé(s)",
+                "format 4",
+            ]
+        ),
+        "la migration se dit : {:?}",
+        journal.lock().map(|lignes| lignes.clone())
+    );
+    eteindre(&mut serveur);
+
+    let (mut serveur, _, journal) = lancer_et_lire(&base, &["--identity-key", cle_texte]);
+    assert!(
+        attendre_la_ligne(&journal, &["orphelins"]),
+        "le serveur a fini de dire son démarrage"
+    );
+    assert!(
+        !journal_dit(&journal, &["migration A1"]),
+        "une fois seulement : {:?}",
+        journal.lock().map(|lignes| lignes.clone())
+    );
+    eteindre(&mut serveur);
+    let _ = std::fs::remove_file(&base);
+    let _ = std::fs::remove_file(&cle);
+}

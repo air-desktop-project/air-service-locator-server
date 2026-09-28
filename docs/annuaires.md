@@ -461,6 +461,16 @@ existant change une fois, à la migration. **La question 21** — le service
 `asl-directory`, accepté dans son principe (décision 71) — **est tranchée
 aussi** (décisions 73 à 78, puis 79 à 85) : §2 quinquies.
 
+**Fait en 0.37.0 (décisions 65, 66, 67 et 72).** Un `s-…` est désormais
+`SHA-256("asl/service/1" ‖ m (16 octets) ‖ nom)` tronqué à seize octets
+(`modele.md` §2.4 : la forme exacte et son vecteur) ; tout annuaire le calcule
+à l'annonce comme à l'application d'une opération de son pair, et chaque
+entrepôt a migré les siens seul, à son premier démarrage en 0.37.0
+(`replication.md` §11, point 5). Pour le service du constat ci-dessous,
+`essai-federation` sur `m-32Q2JXER1HTVRZQ956T7V3GE0S`, speedy et helium
+rendront tous deux **`s-7ANMGMZPJ3EGA41WA129KAJTWE`** — ni `s-0DV…` ni
+`s-6AQ…`. Ce qui suit est l'analyse qui a mené là, telle qu'elle a été écrite.
+
 #### Le constat (2026-09-28, 0.35.1)
 
 L'essai de bascule de la paire speedy (`n-7MSV5RPCXBZH25PQM4ZPE5X87P`, titulaire)
@@ -499,7 +509,7 @@ tenus à terme** ; ils ne le sont pas pendant que les membres ne se parlent pas
 celui des deux identifiants qui perd **disparaît** pour qui l'avait vu — ici
 `s-6AQ…`, que speedy a rendu aux clients pendant plus d'une journée.
 
-#### Comment un `s-…` naît aujourd'hui (lu dans le code de la 0.35.1)
+#### Comment un `s-…` naissait (lu dans le code de la 0.35.1 ; dérivé depuis la 0.37.0)
 
 | Où | Ce que fait le code |
 |---|---|
@@ -627,14 +637,19 @@ Deux variantes :
 **Migration.** Les entrepôts tiennent des `s-…` aléatoires. **La dérivation
 permet une migration sans coordination** : chaque entrepôt — les deux racines,
 les deux membres — recalcule le `s-…` de chacun de ses services à la reprise
-(`replication.md` §11.4), dans une transaction, et **arrive au même résultat que
+(`replication.md` §11, point 5), dans une transaction, et **arrive au même résultat que
 les autres** sans leur parler. Les droits qui visent un ancien `s-…` (seuls des
 services tenus aux racines peuvent en avoir) se réécrivent dans la même
 transaction. Une opération `service` venue d'un pair pas encore migré se range
 sous l'identifiant recalculé depuis `(machine, nom)`, pas sous celui qu'elle
 porte ; une opération `droit` qui nomme un ancien `s-…` demande une table de
 correspondance tenue le temps de la transition — ou des racines mises à jour
-ensemble. Aux racines, `EtatFedere` est en mémoire : rien à migrer, les deux
+ensemble. **Fait en 0.37.0 : les deux** — la correspondance (table
+`services-renommes`) traduit ce qu'un pair pas encore migré envoie ; et, dans
+l'autre sens, un droit sur un service accordé par une racine migrée n'entre
+pas chez une racine encore en 0.36.0, d'où la règle de déploiement : les deux
+racines à la suite, sans droit « Un service » accordé entre les deux
+(`README.md`, « Déployer la 0.37.0 »). Aux racines, `EtatFedere` est en mémoire : rien à migrer, les deux
 rapports convergent dès que les deux membres sont à jour. **Coût visible** :
 chaque `s-…` existant change UNE fois ; c'est un changement de format
 d'enregistrement, donc un cran mineur.
@@ -739,7 +754,7 @@ d'hébergeur — et coûte au second membre de connaître le titulaire.
 
 **Décidé (2026-09-28, Thierry ; décisions 65 à 67)** : la recommandation est
 suivie — A1, un `s-…` prévisible accepté —, **pour tous les services**, avec
-la migration déterministe ci-dessus (décision 72).
+la migration déterministe ci-dessus (décision 72). **Fait en 0.37.0.**
 
 ## 2 quinquies. Le service `asl-directory` — un annuaire local se résout comme un service
 
@@ -1584,12 +1599,14 @@ Rassemblé, plutôt que dispersé.
     (2026-09-28, Thierry ; décision 66)** : **oui, A1** — le `s-…` est dérivé
     de la machine et du nom, et le titulaire n'entre pas dans le calcul. La
     forme exacte (`SHA-256("asl/service/1" ‖ m-… ‖ nom)` tronqué à 128 bits,
-    §2 ter) est celle que la PR de code arrêtera.
+    §2 ter) est celle que la PR de code arrêtera. **Fait en 0.37.0** : `m-…`
+    y entre par ses seize octets, le nom par ses octets UTF-8, sans longueur
+    ni séparateur (`modele.md` §2.4).
 16. **Un `s-…` prévisible est-il acceptable ?** Dérivé, il se recalcule depuis
     `m-…` et le nom : qui voit un `s-…` sans voir le nom peut deviner ce nom par
     essais. **Décidé (2026-09-28, Thierry ; décision 67)** : **oui**. Aucun verbe
     ne s'ouvre (C9) ; `asl-id` dira que « 128 bits ne se devinent pas » vaut pour
-    tous les genres sauf `s-`, qui se calcule.
+    tous les genres sauf `s-`, qui se calcule. **Fait en 0.37.0.**
 17. **Sur quels services la dérivation s'applique-t-elle, et que devient un
     `s-…` qui existe déjà ?** La piste est tranchée par la décision 66 (A1) ; ce
     qui reste ouvert est le **périmètre**, et avec lui la **migration**. Trois
@@ -1609,7 +1626,7 @@ Rassemblé, plutôt que dispersé.
     les autres ; les droits qui visent un ancien `s-…` sont **réécrits dans la
     même transaction**. C'est la seule réponse qui tienne la décision 66 pour
     tous ; son prix, un changement visible et unique de chaque `s-…`, est
-    accepté.
+    accepté. **Fait en 0.37.0** (`replication.md` §11, point 5).
 18. **Un droit par service, sur un service fédéré.** Il est impossible
     aujourd'hui : les racines ne rangent pas les services des domaines hébergés,
     donc `POST /v1/droits` ne trouve pas la machine d'un tel `s-…`

@@ -741,7 +741,6 @@ async fn une_autorisation_ouvre_le_service_d_un_autre_compte() {
         machine_enrolee(&base, quelle, proprietaire, cle_publique, TOUT);
     }
     base.declarer_service(
-        Identifiant::depuis_entropie(Genre::Service, [0xA1; 16]),
         Provenance::Ici,
         machine_a,
         asl_registre::NomRange::nouveau("imap").expect("il tient"),
@@ -791,7 +790,6 @@ async fn avec_l_autorisation_le_meme_service_cesse_d_etre_introuvable() {
         machine_enrolee(&base, quelle, proprietaire, cle_publique, TOUT);
     }
     base.declarer_service(
-        Identifiant::depuis_entropie(Genre::Service, [0xA1; 16]),
         Provenance::Ici,
         machine_a,
         asl_registre::NomRange::nouveau("imap").expect("il tient"),
@@ -7722,19 +7720,19 @@ async fn la_federation_de_bout_en_bout() {
     let _ = std::fs::remove_file(&fichier);
 }
 
-// ── LA CONVERGENCE D'UNE PAIRE ET LE VIVIER (décision 69) ──────────────────
+// ── LA CONVERGENCE D'UNE PAIRE ET LE VIVIER (décisions 69 et 72) ──────────
 
 #[tokio::test]
-async fn une_session_vivante_suit_le_service_qui_gagne_la_convergence() {
-    // **LE DÉFAUT (b) DE LA DÉCISION 69, REPRODUIT PUIS CORRIGÉ.** Un membre
-    // tient un daemon sous le `s-…` qu'il a frappé ; l'opération de son pair
-    // arrive, plus ancienne, pour le même `(machine, nom)` : l'entrepôt garde
-    // celle du pair. Tant que la session vivante reste rangée sous le perdant,
-    // la publication aux racines cherche le gagnant, ne le trouve pas, et dit
-    // le daemon `parti` alors qu'il est connecté. Le tireur nomme le
-    // remplacement ; la boucle déplace la session ; le gagnant est publié
-    // vivant, sa réponse portant son identifiant. L'essai tient le rôle du
-    // tireur, comme `une_fermeture_demandee_par_le_tireur_ferme_sans_attendre`.
+async fn une_session_vivante_ne_bouge_pas_quand_un_pair_d_avant_la_derivation_declare_le_meme_service()
+ {
+    // **CE QUE LA DÉCISION 72 FAIT DU DÉFAUT (b) DE LA DÉCISION 69.** Un
+    // membre tient un daemon sous le `s-…` DÉRIVÉ ; l'opération de son pair,
+    // encore en 0.36.0, arrive, plus ancienne, pour le même `(machine, nom)`,
+    // sous un ALÉA. En 0.36.0, l'entrepôt aurait gardé celle du pair et la
+    // session aurait dû suivre ; en 0.37.0, le service est RÉ-IDENTIFIÉ par
+    // dérivation : rien ne se remplace, la session reste où elle est, le
+    // daemon reste publié vivant sous le dérivé — jamais `parti` —, et
+    // l'effet nomme l'écart pour le journal. L'essai tient le rôle du tireur.
     let (racine, identite) = banc("convergence-vivier");
     let (base, fichier) = entrepot("convergence-vivier");
     // La machine est enrôlée AUX RACINES ; ce membre la reçoit d'elles.
@@ -7824,14 +7822,19 @@ async fn une_session_vivante_suit_le_service_qui_gagne_la_convergence() {
         racine: pair,
     };
     assert!(plus_ancienne < tenue);
-    let gagnant = Identifiant::depuis_entropie(Genre::Service, [0xC8; 16]);
+    assert_eq!(
+        frappe,
+        asl_registre::service_derive(machine, b"depot"),
+        "le `s-…` frappé à l'annonce est le dérivé"
+    );
+    let alea = Identifiant::depuis_entropie(Genre::Service, [0xC8; 16]);
     let fait = entrepot_local
         .appliquer(
             pair,
             &asl_registre::Cadre::Operation {
                 estampille: plus_ancienne,
                 operation: asl_registre::Operation::Service {
-                    service: gagnant,
+                    service: alea,
                     enregistrement: asl_registre::Service {
                         provenance: Provenance::Ici,
                         estampille: plus_ancienne,
@@ -7846,32 +7849,187 @@ async fn une_session_vivante_suit_le_service_qui_gagne_la_convergence() {
     let asl_store::Applique::Faite { effets, .. } = fait else {
         panic!("appliquée : {fait:?}");
     };
-    assert_eq!(effets.remplaces, vec![(frappe, gagnant)]);
+    assert!(effets.remplaces.is_empty(), "rien ne se remplace");
+    assert_eq!(effets.reidentifies, vec![(alea, frappe)]);
+    assert_eq!(
+        entrepot_local
+            .service_par_nom(machine, "depot")
+            .expect("lisible"),
+        Some(frappe)
+    );
 
-    // **LE DÉFAUT** : le gagnant est publié `parti`, le daemon connecté.
-    attendre((gagnant, false), &mut daemon).await;
-
-    // **LA CORRECTION** : le tireur nomme, la boucle déplace.
-    for (perdant, gagnant) in effets.remplaces {
-        fermetures.renommer(perdant, gagnant);
-    }
-    let reponse = attendre((gagnant, true), &mut daemon)
+    // **LE DAEMON RESTE VIVANT, sous le dérivé** — la publication suivante le
+    // dit, et sa réponse ne porte pas l'aléa du pair.
+    let _ = &fermetures;
+    let reponse = attendre((frappe, true), &mut daemon)
         .await
         .expect("vivant, avec sa réponse");
     let reponse = String::from_utf8_lossy(&reponse);
     assert!(
-        reponse.contains(gagnant.texte().as_str()),
-        "la réponse publiée porte le gagnant : {reponse}"
+        reponse.contains(frappe.texte().as_str()),
+        "la réponse publiée porte le dérivé : {reponse}"
     );
     assert!(
-        !reponse.contains(frappe.texte().as_str()),
-        "et plus le perdant : {reponse}"
+        !reponse.contains(alea.texte().as_str()),
+        "et jamais l'aléa du pair : {reponse}"
     );
 
     let _ = dire_stop.send(());
     let _ = tache.await;
     let _ = std::fs::remove_file(&fichier);
     let _ = std::fs::remove_file(&fichier_racines);
+}
+
+#[tokio::test]
+async fn les_deux_membres_d_une_paire_rendent_le_meme_service_sans_se_parler() {
+    // **I1 DE BOUT EN BOUT, SANS `--peer`** (décisions 65 et 66) : le cas du
+    // 2026-09-28, où speedy et helium, qui ne se répliquaient pas, avaient
+    // chacun frappé le sien. Deux membres, deux entrepôts, aucune voie entre
+    // eux ; le même daemon s'annonce à l'un, puis à l'autre : le même `s-…`,
+    // le dérivé, dans les deux réponses.
+    let (aux_racines, fichier_racines) = entrepot("paire-derivee-racines");
+    let compte = Identifiant::depuis_entropie(Genre::Utilisateur, [0xD1; 16]);
+    let machine = Identifiant::depuis_entropie(Genre::Machine, [0xD1; 16]);
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0xD1; 32]);
+    machine_enrolee(
+        &aux_racines,
+        machine,
+        compte,
+        secrete.publique().octets(),
+        TOUT,
+    );
+    let enregistrement = aux_racines
+        .machine(machine)
+        .expect("lisible")
+        .expect("enrôlée");
+    let derive = asl_registre::service_derive(machine, b"depot");
+
+    let mut rendus = Vec::new();
+    for membre in ["paire-derivee-speedy", "paire-derivee-helium"] {
+        let (racine, identite) = banc(membre);
+        let (base, fichier) = entrepot(membre);
+        base.se_savoir_annuaire_local();
+        base.ranger_les_machines_federees(&[asl_registre::MachineFederee {
+            machine,
+            enregistrement,
+        }])
+        .expect("reçue des racines");
+        let (adresse, dire_stop, tache) = lever(identite, base).await;
+        let mut daemon = connecter(&racine, adresse).await;
+        let (statut, corps) = annoncer_depot(&mut daemon, machine, &secrete).await;
+        assert_eq!(statut, b"200", "{corps}");
+        rendus.push(corps);
+        let _ = dire_stop.send(());
+        let _ = tache.await;
+        let _ = std::fs::remove_file(&fichier);
+    }
+    for corps in &rendus {
+        assert!(
+            corps.contains(derive.texte().as_str()),
+            "chaque membre rend le dérivé {derive} : {corps}"
+        );
+    }
+    let _ = std::fs::remove_file(&fichier_racines);
+}
+
+#[tokio::test]
+async fn un_daemon_qui_se_reannonce_apres_la_migration_retrouve_le_derive_et_n_est_pas_parti() {
+    // **LE REDÉMARRAGE EN 0.37.0** : l'entrepôt de la 0.36.0 (la fixture
+    // d'`asl-store`, `s-…` tirés) est migré à l'ouverture ; le daemon qui
+    // était connecté se reconnecte et se ré-annonce. Il retrouve SON service
+    // — sous le dérivé, pas un second —, il est publié vivant, et rien n'est
+    // publié sous l'aléa d'hier : aucun `parti` qui ne soit vrai.
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../asl-store/tests/fixtures/entrepot-0.36.0.redb");
+    let chemin = std::env::temp_dir().join(format!(
+        "asl-bout-{}-reannonce-migree.redb",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&chemin);
+    std::fs::copy(&fixture, &chemin).expect("la fixture se copie");
+    let base = Entrepot::ouvrir(
+        &chemin,
+        Identifiant::depuis_entropie(Genre::Annuaire, [0xEE; 16]),
+    )
+    .expect("migrée à l'ouverture");
+    let migration = base.migration_des_identifiants().expect("elle a eu lieu");
+    assert_eq!(migration.reidentifies, 3);
+    let grenier = Identifiant::analyser("m-1P7N24PMJSC1KPWXBWGE59364Z").expect("le grenier");
+    let alea_d_hier = Identifiant::analyser("s-52N6RBFFP5SK9XNRF8XZVFT10B").expect("l'aléa");
+    let derive = asl_registre::service_derive(grenier, b"depot");
+    let secrete = asl_cle::CleSecrete::depuis_entropie([0x10; 32]);
+    // Le rôle d'un membre : la boucle publie les services des machines
+    // reçues des racines, et c'est cette publication que l'essai lit.
+    let enregistrement = base.machine(grenier).expect("lisible").expect("le grenier");
+    base.se_savoir_annuaire_local();
+    base.ranger_les_machines_federees(&[asl_registre::MachineFederee {
+        machine: grenier,
+        enregistrement,
+    }])
+    .expect("reçue");
+
+    let (racine, identite) = banc("reannonce-migree");
+    let publies = Arc::new(asl_loop_tokio::ServicesPublies::nouvelle());
+    let (adresse, dire_stop, tache) = lever_complet(
+        identite,
+        base,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            publies: Some(Arc::clone(&publies)),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+    let mut daemon = connecter(&racine, adresse).await;
+    let (statut, corps) = annoncer_depot(&mut daemon, grenier, &secrete).await;
+    assert_eq!(statut, b"200", "{corps}");
+    assert!(
+        corps.contains(derive.texte().as_str()),
+        "le daemon retrouve le dérivé : {corps}"
+    );
+    assert!(!corps.contains(alea_d_hier.texte().as_str()), "{corps}");
+
+    // Ce que la boucle publie : `depot` vivant sous le dérivé, et l'aléa
+    // d'hier nulle part.
+    let mut flux = 12_u64;
+    let mut vivant = false;
+    for _ in 0..60_u32 {
+        let (_, liste) = publies.lire();
+        assert!(
+            liste.iter().all(|publie| publie.service != alea_d_hier),
+            "l'aléa d'hier n'est plus publié"
+        );
+        if liste
+            .iter()
+            .any(|publie| publie.service == derive && publie.reponse.is_some())
+        {
+            vivant = true;
+            break;
+        }
+        let _ = lire_json(&mut daemon, flux, b"/v1/vu").await;
+        flux = flux.saturating_add(4);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        vivant,
+        "le daemon ré-annoncé est publié vivant sous le dérivé"
+    );
+    let (_, liste) = publies.lire();
+    assert_eq!(
+        liste
+            .iter()
+            .filter(|publie| publie.machine == grenier && publie.nom.octets() == b"depot")
+            .count(),
+        1,
+        "un seul `depot` : rien ne s'est dédoublé"
+    );
+
+    let _ = dire_stop.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_file(&chemin);
 }
 
 // ── L'IDENTITÉ PAR LA CLÉ (décisions 53 à 58) ──────────────────────────────

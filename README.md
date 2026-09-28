@@ -552,6 +552,74 @@ systemctl edit asl-server
   racine apprend en envoyant — un point mort, un hôte trop sollicité — reste
   en mémoire, chez elle.
 
+### Déployer la 0.37.0 — les `s-…` deviennent dérivés
+
+**Ce qui change** (`docs/replication.md` décisions 66 et 72, §11 point 5) : le
+`s-…` d'un service n'est plus tiré au hasard, il est calculé depuis la machine
+et le nom — `SHA-256("asl/service/1" ‖ m ‖ nom)`, seize octets. **Chaque `s-…`
+existant change une fois**, au premier démarrage de la 0.37.0 : l'entrepôt
+migre seul, dans une transaction, et passe au format 4.
+
+**Avant chaque machine : une sauvegarde, service arrêté.**
+
+```sh
+sudo systemctl stop asl-server
+sudo cp -a /var/lib/asl-server/annuaire.redb \
+    /var/lib/asl-server/annuaire.redb.avant-0.37.0-$(date +%Y%m%d-%H%M%S)
+sudo dpkg -i asl-server_0.37.0_amd64.deb
+sudo systemctl start asl-server
+```
+
+**L'ordre : les deux racines, l'une après l'autre ; puis les deux membres de
+chaque paire, l'un après l'autre.**
+
+- **Les racines à la suite, et aucun droit « Un service » accordé entre les
+  deux.** Une racine migrée accorde un droit sur le `s-…` dérivé ; une racine
+  encore en 0.36.0 tient le même service sous l'aléa d'hier, ne le trouve
+  pas, et **refuse ce droit pour de bon** — sa propre migration ne le
+  rattrape pas. Tout le reste passe dans les deux sens (services, droits d'une
+  racine d'avant vers une racine migrée, instantanés) ; aucun service ne se
+  dédouble ni ne se perd. Au 2026-09-29, aucune des deux copies de production
+  éprouvées (speedy, argon) ne tenait de droit sur un service.
+- **Les racines d'abord**, parce qu'elles disent ensuite quels membres ne sont
+  pas encore à jour (ci-dessous). L'ordre n'est pas une condition de
+  justesse : un membre migré face à des racines en 0.36.0 fonctionne aussi.
+- **Les deux membres d'une paire à la suite.** Entre les deux, chaque membre
+  rapporte aux racines son `s-…` pour le même service — le dérivé d'un côté,
+  l'aléa de l'autre —, et la racine rend celui du rapport retenu, comme en
+  0.36.0. Dès que le second est à jour, il n'y en a plus qu'un, identique
+  partout.
+- **La version minimale du pair est la 0.36.0**, que la production porte déjà.
+
+**Ce qu'on voit au journal** (`journalctl -u asl-server`) :
+
+- au démarrage de chaque machine, une fois :
+  `asl-server : migration A1 : N service(s) ré-identifié(s) sur M — chaque
+  s-… est désormais dérivé de (machine, nom) ; D droit(s) les suivent, A
+  service(s) du pair en attente re-dérivé(s). …` — même quand N vaut zéro, ce
+  qui dit que la migration a eu lieu ;
+- chez une racine ou un membre migré dont le pair ne l'est pas encore, pour
+  chaque service que ce pair lui envoie : `service s-… venu de n-… rangé sous
+  s-…, son identifiant dérivé : ce pair n'est pas encore en 0.37.0 (décision
+  72) — mettez-le à jour` ;
+- chez une racine, tant qu'un membre n'est pas à jour : `fédération : n-…
+  rapporte N service(s), dont V vivant(s) — accepté ; K sous un identifiant
+  qui n'est pas le dérivé : ce membre n'est pas encore en 0.37.0 (décision
+  72)`. La ligne revient sans ce complément quand le membre est migré.
+
+**Les daemons n'ont rien à faire** : ils se reconnectent et se ré-annoncent
+d'eux-mêmes, retrouvent leur service sous son `s-…` dérivé — `asl announce`
+l'affiche —, et ne sont jamais rapportés `parti` pour autant. Les applications
+relisent les listes ; un droit « Un service » suit son service.
+
+**Le retour arrière n'est pas un simple `dpkg -i` de la 0.36.0** : une 0.36.0
+refuse d'ouvrir un entrepôt migré (`l'entrepôt est au format 4, que ce binaire
+ne connaît pas (il connaît 3)`), plutôt que d'y frapper de nouveau des aléas
+que rien ne migrerait plus. **Gardez la sauvegarde** ; revenir, c'est arrêter
+le service, remettre la sauvegarde en place, installer la 0.36.0 et
+redémarrer. Ce qui a été écrit sur cette machine depuis la mise à jour est
+perdu pour elle — et revient de son pair par la réplication, s'il l'a reçu.
+
 ### Frapper la clé d'exploitation, et émettre (depuis 0.15.0)
 
 Les deux gestes sont dans le même binaire, et **aucun ne tourne sur un banc** :

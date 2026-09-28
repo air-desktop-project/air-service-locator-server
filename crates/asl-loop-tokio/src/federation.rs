@@ -102,9 +102,9 @@ pub struct EtatFedere {
     /// `machine ‖ nom` → membre → ce qu'il en a dit.
     tenus: HashMap<Vec<u8>, HashMap<Identifiant, Tenue>>,
     /// Ce que chaque membre a rapporté la dernière fois — `(entrées,
-    /// vivantes)` —, pour que le journal ne dise un rapport qu'à la première
-    /// fois et quand il change.
-    derniers_rapports: HashMap<Identifiant, (usize, usize)>,
+    /// vivantes, non dérivées)` —, pour que le journal ne dise un rapport
+    /// qu'à la première fois et quand il change.
+    derniers_rapports: HashMap<Identifiant, (usize, usize, usize)>,
     /// Ce que chaque membre a conclu de sa paire, la dernière fois qu'il l'a
     /// dit (0.36.0, décision 70) — pour `GET /v1/annuaires`. **En mémoire,
     /// comme le reste** : une racine qui redémarre l'apprend au tour suivant
@@ -254,13 +254,19 @@ impl EtatFedere {
 
     /// Note ce qu'un membre vient de rapporter ; rend `true` si c'est la
     /// première fois, ou si le compte a changé — ce que le journal doit dire.
+    ///
+    /// `non_derivees` compte les entrées dont le `s-…` n'est pas le dérivé
+    /// de `(machine, nom)` : celles d'un membre d'avant la 0.37.0
+    /// (décision 72).
     pub fn noter_un_rapport(
         &mut self,
         membre: Identifiant,
         entrees: usize,
         vivantes: usize,
+        non_derivees: usize,
     ) -> bool {
-        self.derniers_rapports.insert(membre, (entrees, vivantes)) != Some((entrees, vivantes))
+        let compte = (entrees, vivantes, non_derivees);
+        self.derniers_rapports.insert(membre, compte) != Some(compte)
     }
 
     /// Note ce qu'un membre conclut de sa paire ; rend `true` si c'est la
@@ -1184,10 +1190,13 @@ mod essais {
     fn un_rapport_ne_se_dit_qu_a_la_premiere_fois_et_quand_il_change() {
         let mut etat = EtatFedere::nouveau();
         let membre = id(Genre::Annuaire, 1);
-        assert!(etat.noter_un_rapport(membre, 1, 1));
-        assert!(!etat.noter_un_rapport(membre, 1, 1));
-        assert!(etat.noter_un_rapport(membre, 1, 0));
-        assert!(etat.noter_un_rapport(id(Genre::Annuaire, 2), 1, 0));
+        assert!(etat.noter_un_rapport(membre, 1, 1, 0));
+        assert!(!etat.noter_un_rapport(membre, 1, 1, 0));
+        assert!(etat.noter_un_rapport(membre, 1, 0, 0));
+        assert!(etat.noter_un_rapport(id(Genre::Annuaire, 2), 1, 0, 0));
+        // Un membre d'avant la 0.37.0 (décision 72) : l'écart se redit.
+        assert!(etat.noter_un_rapport(membre, 1, 0, 1));
+        assert!(!etat.noter_un_rapport(membre, 1, 0, 1));
     }
 
     #[test]

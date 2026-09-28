@@ -309,6 +309,18 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                 entrepot.autorisations_converties(),
             );
         }
+        // **ET LA MIGRATION DES `s-…`** (0.37.0, décision 72) : une fois, à la
+        // première ouverture d'un entrepôt d'avant la dérivation — même vide,
+        // pour que l'exploitant voie qu'elle a eu lieu.
+        if let Some(migration) = entrepot.migration_des_identifiants() {
+            eprintln!(
+                "asl-server : migration A1 : {} service(s) ré-identifié(s) sur {} — chaque s-… \
+                 est désormais dérivé de (machine, nom) ; {} droit(s) les suivent, {} \
+                 service(s) du pair en attente re-dérivé(s). Une fois, dans une transaction ; \
+                 l'entrepôt est au format 4, qu'une 0.36.0 refuse d'ouvrir.",
+                migration.reidentifies, migration.services, migration.droits, migration.en_attente,
+            );
+        }
         // **LA RÈGLE DES ORPHELINS SE DIT AU DÉMARRAGE**, et « jamais » aussi
         // (`replication.md` §8) : c'est là qu'on relit ce qu'on croyait avoir
         // réglé.

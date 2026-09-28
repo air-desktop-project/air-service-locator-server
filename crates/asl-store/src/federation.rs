@@ -108,6 +108,30 @@ pub(crate) fn garder_en_attente(
     Ok(())
 }
 
+/// Re-dérive le `s-…` de chaque service en attente (la migration de la
+/// décision 72). La clé — `machine ‖ nom` — ne change pas. Rend combien ont
+/// changé.
+pub(crate) fn rederiver_les_services_en_attente(
+    ecriture: &WriteTransaction,
+) -> Result<usize, Faute> {
+    let mut table = ecriture.open_table(SERVICES_EN_ATTENTE)?;
+    let mut changees = Vec::new();
+    for entree in table.iter()? {
+        let (tenue, valeur) = entree?;
+        let (quel, service) = lire_en_attente(valeur.value())?;
+        let derive = asl_registre::service_derive(service.machine, service.nom.octets());
+        if quel != derive {
+            let mut neuve = clef(derive).to_vec();
+            neuve.extend_from_slice(valeur.value().get(IDENTIFIANT_OCTETS..).unwrap_or_default());
+            changees.push((tenue.value().to_vec(), neuve));
+        }
+    }
+    for (tenue, neuve) in &changees {
+        table.insert(tenue.as_slice(), neuve.as_slice())?;
+    }
+    Ok(changees.len())
+}
+
 /// Relit une entrée en attente : l'identifiant, puis le service.
 fn lire_en_attente(octets: &[u8]) -> Result<(Identifiant, Service), Faute> {
     let (tete, corps) = octets

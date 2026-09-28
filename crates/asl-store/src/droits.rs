@@ -186,6 +186,32 @@ pub(crate) fn oublier_ce_qui_vise(
     Ok(partis)
 }
 
+/// Ce qui visait `ancien` vise désormais `derive` — la migration des `s-…`
+/// (décision 72). **Rien d'autre ne change** : ni l'identifiant du droit, ni
+/// son estampille, ni son retrait. Rend combien.
+pub(crate) fn renommer_l_element(
+    ecriture: &WriteTransaction,
+    ancien: Identifiant,
+    derive: Identifiant,
+) -> Result<usize, Faute> {
+    let mut suivis = 0_usize;
+    for droit in sous(ecriture, DROITS_PAR_ELEMENT, ancien)? {
+        if let Some(avant) = droit_dans(ecriture, droit)? {
+            oublier(ecriture, droit)?;
+            ranger(
+                ecriture,
+                droit,
+                &Droit {
+                    element: derive,
+                    ..avant
+                },
+            )?;
+            suivis = suivis.saturating_add(1);
+        }
+    }
+    Ok(suivis)
+}
+
 /// Ce que l'effacement d'un compte fait des droits : **ceux qu'il a accordés,
 /// et ceux qui visent son compte** — ceux qui visent ses domaines, ses
 /// machines, ses services et ceux que ses groupes recevaient partent avec
@@ -258,17 +284,19 @@ pub(crate) fn appliquer_droit(
     droit: Identifiant,
     enregistrement: &Droit,
 ) -> Result<(), Faute> {
-    if !peut_entrer(ecriture, enregistrement)? {
+    // **UN `s-…` D'HIER SE TRADUIT** (0.37.0, décision 72) : un pair pas
+    // encore migré nomme le service sous son ancien identifiant, que la
+    // correspondance connaît — le nôtre d'avant la migration, ou celui que
+    // son opération `service` nous a appris.
+    let enregistrement = Droit {
+        provenance: Provenance::Ici,
+        element: crate::identifiants::traduire(ecriture, enregistrement.element)?,
+        ..*enregistrement
+    };
+    if !peut_entrer(ecriture, &enregistrement)? {
         return Ok(());
     }
-    inserer(
-        ecriture,
-        droit,
-        &Droit {
-            provenance: Provenance::Ici,
-            ..*enregistrement
-        },
-    )?;
+    inserer(ecriture, droit, &enregistrement)?;
     Ok(())
 }
 

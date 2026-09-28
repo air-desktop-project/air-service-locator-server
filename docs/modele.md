@@ -610,12 +610,30 @@ Ce qu'un daemon annonce. **Identifié par le couple (machine, nom).**
 
 | Champ | Ce que c'est |
 |---|---|
-| `identifiant` | `s-` + 26 caractères. Attribué à la première annonce — **tiré au hasard par l'annuaire qui la reçoit**, ce qui, dans une paire d'annuaire local, donne un `s-…` par membre tant que les deux ne se répliquent pas, puis converge vers celui de la plus petite estampille de Lamport — pas vers le plus ancien dans le temps : défaut constaté le 2026-09-28, pistes dans `annuaires.md` §2 ter. **Décidé (2026-09-28, Thierry ; décisions 65 et 66)** : un seul `s-…` par service, stable à travers bascules, redémarrages et changements d'hébergeur, **dérivé de la machine et du nom** (A1) — un `s-…` prévisible est accepté (décision 67). **Pour tous les services**, ceux des racines compris : chaque `s-…` existant change une fois, au premier démarrage de la version qui dérive, par une migration que chaque entrepôt fait seul, droits réécrits dans la même transaction (décision 72). À coder. |
+| `identifiant` | `s-` + 26 caractères. **Dérivé de la machine et du nom** (A1 ; décisions 65, 66, 67 et 72 — **fait en 0.37.0**) : les seize premiers octets de `SHA-256("asl/service/1" ‖ m (16 octets) ‖ nom (UTF-8))`, la forme exacte au paragraphe qui suit. Il n'est plus tiré : tout annuaire — racine, membre d'une paire, l'hébergeur d'hier et celui de demain — calcule le même pour le même `(machine, nom)`, sans rien échanger ; il est stable à travers bascules, redémarrages et changements d'hébergeur. Un `s-…` prévisible est accepté (décision 67). Jusqu'à la 0.36.0 il était **tiré au hasard par l'annuaire qui recevait la première annonce** (défaut constaté le 2026-09-28, `annuaires.md` §2 ter) ; chaque `s-…` existant a changé une fois, au premier démarrage de la 0.37.0 (`replication.md` §11, point 5). |
 | `machine` | La machine qui le porte. |
 | `nom` | Choisi par le daemon, 1 à 64 caractères. C'est ce que son client connaît. |
 | `points d'écoute` | Un ou plusieurs `(protocole, port)`. |
 | `candidats` | Voir §3. |
 | `bail` | Voir §4. |
+
+**La forme exacte du `s-…` dérivé** (0.37.0, `crates/asl-registre/src/derivation.rs`,
+figée par ses vecteurs d'essai) :
+
+```
+s-… = SHA-256( "asl/service/1" ‖ m ‖ nom )[0..16]
+```
+
+- `"asl/service/1"` : les treize octets ASCII, sans terminateur ;
+- `m` : les **seize octets** du `m-…` — jamais son texte, qui n'est pas unique
+  (Crockford rattrape `I`, `L`, `O`) ;
+- `nom` : les octets UTF-8 du nom, sans longueur ni terminateur ;
+- les seize premiers octets du condensat forment le corps du `s-…`.
+
+La chaîne et `m` ont une longueur fixe, le nom est tout ce qui suit : deux
+couples différents donnent deux messages différents, sans qu'un séparateur ou
+une longueur préfixée soit nécessaire. Vecteur : `m-32Q2JXER1HTVRZQ956T7V3GE0S`
+et `essai-federation` donnent **`s-7ANMGMZPJ3EGA41WA129KAJTWE`**.
 
 **Un service porte PLUSIEURS points d'écoute**, et non un seul : un daemon qui
 sert en TCP et en UDP est un seul service, pas deux. Le contraire obligerait son
@@ -635,7 +653,10 @@ l'application le signale.
 annuaire local accepté a un service nommé `asl-directory`, **sous le `n-…` de
 son titulaire** et non sous un `m-…` ; personne ne l'annonce, les racines le
 synthétisent de l'inscription et des voies de ses membres, et son `s-…` se
-dérive du `n-…` sous une chaîne de séparation propre (`"asl/annuaire/1"`).
+dérive du `n-…` sous une chaîne de séparation propre (`"asl/annuaire/1"`),
+par la même forme : `SHA-256("asl/annuaire/1" ‖ n (16 octets) ‖
+"asl-directory")[0..16]` — la fonction commune, `asl_registre::deriver`,
+existe depuis la 0.37.0 ; l'`asl-directory` lui-même reste à coder.
 **Le nom est réservé** : un daemon qui l'annonce est refusé. Il se résout par
 `GET /v1/ou/{n-…}/asl-directory`, en rendant l'adresse et l'identité de chaque
 membre vivant, et seulement à un cercle étroit — son propriétaire, les

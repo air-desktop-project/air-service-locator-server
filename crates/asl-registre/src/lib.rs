@@ -38,6 +38,7 @@
 
 use asl_id::{Genre, Identifiant};
 
+mod derivation;
 mod domaine;
 mod droit;
 mod federation;
@@ -45,6 +46,7 @@ mod groupe;
 mod inscription;
 pub mod localisateur;
 
+pub use derivation::{SEPARATION_SERVICE, deriver, service_derive};
 pub use domaine::{
     ALIAS_DE_COMPTE_BRUT_MAX, ALIAS_DE_COMPTE_OCTETS_MIN, ALIAS_DE_DOMAINE_BRUT_MAX,
     ALIAS_DE_DOMAINE_OCTETS_MAX, ALIAS_DE_DOMAINE_RANGE_OCTETS, ALIAS_DE_MACHINE_BRUT_MAX,

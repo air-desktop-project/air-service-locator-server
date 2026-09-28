@@ -2320,24 +2320,21 @@ impl Service<'_> {
         // première annonce d'un nom le crée. L'exiger d'abord obligerait à
         // passer par l'application mobile pour lancer un daemon, ce qu'aucun
         // déploiement automatisé ne peut faire.
+        //
+        // **SON `s-…` SE CALCULE** (0.37.0, décision 66) : l'entrepôt le
+        // dérive de `(machine, nom)`, et tout annuaire — racine ou membre
+        // d'une paire — rend le même au même daemon, sans se parler.
         let nom = annonce.service.as_str();
         let service = match self.entrepot.service_par_nom(qui, nom).ok()? {
             Some(deja) => deja,
-            None => {
-                let neuf = Identifiant::depuis_entropie(
-                    asl_id::Genre::Service,
-                    (self.tirer_un_identifiant)()?,
-                );
-                self.entrepot
-                    .declarer_service(
-                        neuf,
-                        asl_registre::Provenance::Ici,
-                        qui,
-                        asl_registre::NomRange::nouveau(nom).ok()?,
-                    )
-                    .ok()?;
-                neuf
-            }
+            None => self
+                .entrepot
+                .declarer_service(
+                    asl_registre::Provenance::Ici,
+                    qui,
+                    asl_registre::NomRange::nouveau(nom).ok()?,
+                )
+                .ok()?,
         };
 
         // ── LA SESSION VIVANTE ──────────────────────────────────────────────
