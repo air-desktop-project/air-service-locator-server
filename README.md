@@ -384,9 +384,30 @@ ferme.
 La cible de déploiement est **Ubuntu**, et c'est elle qui décide du format.
 
 ```sh
-scripts/paquet.sh                    # asl-server_<version>_amd64.deb
-sudo dpkg -i asl-server_0.34.0_amd64.deb
+scripts/paquet.sh                    # asl-server_<version>_<architecture>.deb
+sudo dpkg -i asl-server_0.35.1_amd64.deb
 ```
+
+**Le paquet existe en `amd64` et en `arm64`** — un PC ou un Raspberry Pi
+(`docs/annuaires.md` §7, question 13). `scripts/paquet.sh` construit celui de
+la machine où il tourne ; la CI construit les deux, chacun sur sa propre
+architecture, les éprouve avec `scripts/check-paquet.sh`, et les publie en
+artefacts `asl-server-amd64-deb` et `asl-server-arm64-deb`. Une machine sans
+Rust — un Raspberry Pi — reçoit donc le paquet sans rien construire :
+
+```sh
+# le dernier run vert de main (ou celui d'une PR : --branch <branche>)
+run=$(gh run list -R air-desktop-project/air-service-locator-server \
+      --workflow ci --branch main --status success --limit 1 \
+      --json databaseId --jq '.[0].databaseId')
+gh run download "$run" -R air-desktop-project/air-service-locator-server \
+    -n asl-server-arm64-deb -D deb-arm64
+scp deb-arm64/asl-server_*_arm64.deb le-pi:
+ssh le-pi sudo dpkg -i asl-server_*_arm64.deb
+```
+
+Un artefact de GitHub expire au bout de 90 jours : passé ce délai, relancez le
+run, ou construisez sur une machine de la même architecture.
 
 **`asl-server` a vocation à tourner sur Linux, macOS et Windows.** Aujourd'hui :
 Linux est la cible déployée, et **macOS se construit et tourne** — le binaire

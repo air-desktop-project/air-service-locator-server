@@ -269,14 +269,55 @@ jobs:
   # JOB SÉPARÉ : il construit en `release`, ce qu'aucun autre ne fait, et
   # `dpkg-dev` n'est utile qu'à lui. Le noyer dans la vérification ordinaire
   # rendrait cette dernière deux minutes plus lente pour tout le monde.
+  #
+  # **DEUX ARCHITECTURES, CHACUNE SUR SA MACHINE** (`annuaires.md` §7, question
+  # 13) : un membre d'annuaire local peut être un PC ou un Raspberry Pi. Le
+  # paquet `arm64` se construit sur le runner `ubuntu-24.04-arm` de GitHub —
+  # gratuit pour un dépôt public, comme les autres — et NON par compilation
+  # croisée : `paquet.sh` prend l'architecture de `dpkg --print-architecture`,
+  # `dpkg-shlibdeps` lit le binaire avec les outils de la machine, et l'étape 10
+  # de `check-paquet.sh` EXÉCUTE ce qu'elle déballe. Croisé, le binaire serait
+  # empaqueté sans avoir jamais tourné.
+  #
+  # **ET LE PAQUET EST PUBLIÉ EN ARTEFACT** : déployer un membre ne doit pas
+  # exiger une toolchain sur la machine qui le reçoit — helium n'a pas Rust.
+  # `gh run download <run> -n asl-server-arm64-deb` le récupère (README,
+  # « Installer un annuaire »).
   paquet:
-    name: le paquet Debian
-    runs-on: ubuntu-latest
+    name: le paquet Debian (${{ matrix.architecture }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Une architecture qui casse ne doit pas taire le verdict de l'autre.
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-latest
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
 
+      # Les images `arm` de GitHub ne promettent pas `rustup` comme les images
+      # x86 : on l'installe s'il manque, sans toolchain — c'est
+      # `rust-toolchain.toml` qui choisit la sienne, à l'étape suivante.
+      - name: rustup, s'il manque
+        run: |
+          if ! command -v rustup > /dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+
       - name: la toolchain du dépôt
         run: rustup show active-toolchain || rustup toolchain install
+
+      # **LA MACHINE EST CELLE QU'ON CROIT.** Un runner qui changerait d'image
+      # fabriquerait, sous le nom `arm64`, un paquet d'une autre architecture.
+      - name: l'architecture de la machine
+        run: |
+          test "$(dpkg --print-architecture)" = "${{ matrix.architecture }}"
+          uname -m
 
       # `dpkg-shlibdeps` LIT LE BINAIRE pour en calculer les dépendances : sans
       # `dpkg-dev`, `check-paquet.sh` s'abstient au lieu d'échouer, et son
@@ -284,8 +325,32 @@ jobs:
       - name: dpkg-dev
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev
 
+      # C4 SUR L'AUTRE ARCHITECTURE. Le graphe construit dépend de la cible —
+      # `cpufeatures`, les implémentations assembleur des primitives RustCrypto
+      # —, et la vérification ordinaire ne le lit que sur x86_64.
+      - name: check-sans-c
+        if: matrix.architecture != 'amd64'
+        run: ./scripts/check-sans-c.sh
+
       - name: check-paquet
         run: ./scripts/check-paquet.sh
+
+      # `check-paquet.sh` éprouve un paquet construit dans un répertoire
+      # jetable ; celui-ci est le même, reconstruit sans rien recompiler, et
+      # gardé. Son champ `Architecture` est relu : c'est lui que `dpkg`
+      # confrontera à la machine qui l'installe.
+      - name: le paquet à déployer
+        run: |
+          ./scripts/paquet.sh --sortie dist
+          dpkg-deb --field dist/asl-server_*_${{ matrix.architecture }}.deb Architecture \
+            | grep -qx '${{ matrix.architecture }}'
+          target/release/asl-server --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asl-server-${{ matrix.architecture }}-deb
+          path: dist/asl-server_*_${{ matrix.architecture }}.deb
+          if-no-files-found: error
 
   # ── Le 100 % de couverture sur ce qui ne fait pas d'entrée-sortie (C2) ─────
   #

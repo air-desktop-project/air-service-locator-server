@@ -909,11 +909,22 @@ Rassemblé, plutôt que dispersé.
     qu'elles ne tiennent pas. Et **pas la clé `n-…`** : elle prouve l'annuaire
     aux racines, elle ne tourne pas, et la garder distincte du TLS est la règle
     des racines (`modele.md` §2.7).~~
-13. **Le paquet pour les deux architectures.** Un membre peut être un PC ou
+13. ~~**Le paquet pour les deux architectures.** Un membre peut être un PC ou
     un Raspberry Pi — helium est `aarch64`, sous Ubuntu 26.04. **Le paquet
     `asl-server` doit exister en `amd64` ET en `arm64`** avant qu'une paire
     se déploie ; rien dans le code ne l'empêche (C4 : pas une ligne de C), mais
-    `scripts/paquet.sh` ne fabrique aujourd'hui que le premier.
+    `scripts/paquet.sh` ne fabrique aujourd'hui que le premier.~~ **Résolu le
+    2026-09-28 (0.35.1)** : le job « le paquet Debian » de la CI tourne sur
+    deux machines, `ubuntu-latest` et `ubuntu-24.04-arm`, et chacune construit
+    NATIVEMENT le paquet de son architecture avec `scripts/paquet.sh`, qui la
+    lit de `dpkg --print-architecture` — aucune ligne du script n'a changé.
+    Pas de compilation croisée : `check-paquet.sh` exécute le binaire qu'il
+    déballe, et un binaire croisé serait empaqueté sans avoir jamais tourné.
+    Sur `arm64`, `check-sans-c.sh` relit le graphe construit, qui dépend de la
+    cible : C4 y tient aussi. Chaque paquet est publié en artefact —
+    `asl-server-amd64-deb`, `asl-server-arm64-deb` —, si bien qu'un membre se
+    déploie sans toolchain sur la machine qui le reçoit (README, « Installer
+    un annuaire »).
 11. ~~**Les groupes généraux.**~~ **Décidé le 2026-09-26** : dès la v1, avec
     les droits (`modele.md` §2.12, §2.13). Restent ouverts les droits
     négatifs, l'imbrication des groupes et leurs bornes (`modele.md` §6).
