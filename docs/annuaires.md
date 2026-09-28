@@ -745,8 +745,9 @@ la migration déterministe ci-dessus (décision 72).
 
 **Accepté dans son principe le 2026-09-28 (Thierry ; décision 71), ses
 sous-questions tranchées le même jour (Thierry ; décisions 73 à 78), puis ses
-suites (Thierry ; décisions 79 à 85)** — la question 21 du §7, où chaque
-sous-question garde sa réponse, et les questions 22 à 25.
+suites (Thierry ; décisions 79 à 85), et deux points que la spécification avait
+laissés (2026-09-29, Thierry ; décisions 86 et 87)** — la question 21 du §7, où
+chaque sous-question garde sa réponse, et les questions 22 à 28.
 
 **Le motif.** Un port n'est pas une constante : `--port` vaut 6630 par défaut
 (`crates/asl-server/src/reglages.rs`), et rien n'oblige un annuaire à s'y
@@ -770,7 +771,8 @@ logique :
 | **Dans une paire** | **UN SEUL** `asl-directory` par annuaire logique — sous le `n-…` du titulaire —, vivant si l'un des membres l'est (décision 52), qui rend **l'adresse de chaque membre vivant avec SON `n-…`** : le client doit épingler la bonne clé, parce que chaque membre présente **la sienne** (décision 59, la forme du `421`). | 75 |
 | **Les racines** | **Pas d'`asl-directory` pour elles** : `GET /v1/racines` joue ce rôle (ci-dessous). | 76, 85 |
 | **Qui le résout** | **Pas public** : il porte l'adresse de la maison. **Le cercle étroit** : le propriétaire de l'annuaire, les administrateurs des racines, et les comptes qui tiennent un droit sur au moins un domaine que cet annuaire héberge. **`localiser` seul donne les adresses** ; `voir` dit qu'il existe et qu'il est vivant, sans elles (ci-dessous, « Le cercle »). | 77, 79, 80 |
-| **Où il se voit** | **Sur la tuile de l'annuaire** (« Mon annuaire local ») dans les applications : vivant ou parti, et ses adresses si l'utilisateur tient `localiser`. **Nulle part dans les listes de services par machine**, et aucune recherche générale ne le rend : on le résout par son `n-…`. | 84 |
+| **Qui le lit** | **Les machines** — daemons, `asl` —, sur la voie machine. **Pas les applications** : elles ne le lisent pas, et il n'est **pas servi sur la voie appareil**. Aucune recherche générale ne le rend : on le résout par son `n-…`. | 84, 86 |
+| **Où son état se voit** | **Sur la tuile de l'annuaire** (« Mon annuaire local ») dans les applications, **lu dans `GET /v1/annuaires`** : chaque membre y porte `voie` — `ouverte` ou `tombee`, vu par la racine qui répond —, à côté de ses locateurs et de `paire` (ci-dessous, « L'état de l'annuaire dans les applications »). **Nulle part dans les listes de services par machine.** | 84, 86 |
 | **Le `421` et `GET /v1/annuaires`** | **Restent tels quels** — le `421` compris dans son cercle, plus large (ci-dessous). | 78, 79 |
 
 ### Pas de sonde « depuis l'extérieur » en v1 — ce que « vivant » veut dire
@@ -849,11 +851,14 @@ GET /v1/ou/n-7MSV5RPCXBZH25PQM4ZPE5X87P/asl-directory
   qui exige une mesure (C6) que la v1 ne fait pas (ci-dessus). Le chemin est
   nouveau — un `n-…` à la place du `m-…` —, aucun client déployé ne le demande :
   il peut rendre sa propre forme, et c'est celle, déjà lue partout, du `421`.
-- **Sur les deux voies.** La résolution est servie sur la voie machine, comme
-  toute résolution (une machine qui porte `lecture`, `protocole.md` §3), **et
-  sur la voie appareil**, comme la recherche par alias de domaine
-  (`protocole.md` §2.2) : c'est ce que la tuile de l'annuaire lit
-  (décision 84). La même règle, le même cercle, le même délai sur les deux.
+- **Sur la voie machine seulement** (décision 86). La résolution est servie
+  comme toute résolution, à une machine qui porte `lecture` (`protocole.md`
+  §3) : c'est le moyen des **machines** — un daemon, `asl where`. **Elle n'est
+  pas servie sur la voie appareil** : les applications ne la lisent pas, et
+  la tuile de l'annuaire tient son état de `GET /v1/annuaires` (ci-dessous).
+  La spécification de la 0.35.3 l'ouvrait aussi sur la voie appareil ;
+  Thierry l'a refusé le 2026-09-29 — une route de moins à garder sous C9, et
+  l'application a déjà, sur son écran, la vue qui porte les membres.
 - **Aucune forme « toutes les instances »** : `GET /v1/ou?service=asl-directory`
   ne rend aucun annuaire (décision 84) — on résout par `n-…`. Le tableau de
   cette forme est fait de réponses d'annonce, que ce corps n'est pas.
@@ -869,7 +874,7 @@ qui le disait « le cercle du `421` » :
 3. **tout compte qui tient un droit sur au moins un domaine que cet annuaire
    héberge**, par l'un de ses groupes (`modele.md` §2.13) : **`localiser`**
    donne la réponse entière ; **`voir`** — ou `administrer`, qui l'emporte —
-   donne la réponse sans adresses (décision 80). **`rattacher` seul ne donne
+   donne la réponse sans adresses (décisions 80 et 87). **`rattacher` seul ne donne
    rien**, et un droit sur **une seule machine ou un seul service** du domaine
    non plus : le cercle ne compte que les droits sur un domaine hébergé.
 
@@ -878,6 +883,20 @@ cercle est **calculé à la lecture** : aucun droit ne s'écrit sur
 l'`asl-directory`, et aucun ne se retire à part ; il suit les domaines hébergés
 et leurs droits, comme un droit sur une machine suit le pouvoir de celui qui
 l'a accordé (décision 44).
+
+**`administrer` n'emporte PAS `localiser` — la règle est stricte.** **Décidé
+(2026-09-29, Thierry ; décision 87)** : la décision 44 ne change pas —
+`administrer` emporte `rattacher` et `voir`, rien de plus. **Un administrateur
+d'un domaine hébergé reçoit donc la réponse réduite** de `asl-directory`,
+`{"service":"s-…","annuaire":"n-…"}`, sans `adresses` ni `identites`. **S'il
+veut les adresses, il s'accorde `localiser`** sur ce domaine, explicitement :
+il le peut, puisqu'administrer un domaine, c'est gérer les droits accordés sur
+lui (`modele.md` §2.13, « Qui accorde ») — à l'un de ses groupes, le sien
+compris. **C'est un geste conscient, et il est tracé** : le droit s'écrit avec
+`accordé par` et `accordé le`, se voit dans la liste des droits du domaine, et
+se retire comme tout droit. Faire emporter `localiser` par `administrer` aurait
+donné l'adresse de la maison à chaque administrateur sans que personne ne l'ait
+jamais décidé ; la règle stricte oblige ce choix à s'écrire.
 
 **Le `421` NE change PAS, et son cercle est plus large — c'est voulu.** Une
 racine renvoie en `421` **toute machine rattachée à un domaine confié**, quel
@@ -892,6 +911,61 @@ une machine rangée dans le domaine connaît forcément l'adresse de l'annuaire,
 mais **le COMPTE qui la possède ne peut pas résoudre `asl-directory`** sans le
 droit. Le `421` guide une machine vers l'endroit où elle doit s'annoncer ;
 l'`asl-directory` répond à un compte, selon ses droits.
+
+### L'état de l'annuaire dans les applications — `GET /v1/annuaires`, pas `asl-directory`
+
+**Décidé (2026-09-29, Thierry ; décision 86)** : **les applications ne lisent
+pas `asl-directory`**. `GET /v1/annuaires` — la vue du propriétaire (et
+`GET /v1/inscriptions`, celle des administrateurs des racines) — porte déjà,
+membre par membre, `membre`, `annuaire`, `adresse`, `locateurs` et, depuis la
+0.36.0, `paire` (décision 70). **Elle gagne, par membre, `voie`** : ce que la
+racine qui répond sait de la voie de fédération de ce membre vers elle.
+
+```jsonc
+{"membre":"n-7MSV…","annuaire":"n-7MSV…","etat":"acceptée",
+ "adresse":"speedy.example:6630","locateurs":["[2a01:…]:6630"],
+ "paire":"reglee","voie":"ouverte"}
+{"membre":"n-4EQR…","annuaire":"n-7MSV…","etat":"acceptée",
+ "adresse":"helium.example:6630","paire":"reglee","voie":"tombee"}
+```
+
+| `voie` | Ce que la racine qui répond a constaté |
+|---|---|
+| `ouverte` | La voie de ce membre vers **cette** racine tient : il a prouvé sa clé et parlé depuis moins de l'expiration d'un rapport — **trente secondes au plus**, la règle des services fédérés (décisions 52 et 74). C'est exactement ce qui rend l'`asl-directory` vivant. |
+| `tombee` | Elle a tenu depuis que cette racine tourne, et s'est tue au-delà de cette expiration, ou s'est fermée. |
+| *(absent)* | **Pas encore de rapport de ce membre depuis le démarrage de cette racine** — comme `paire` ; et pour toute inscription qui n'est pas `acceptée`. L'état vivant n'est jamais écrit (§3) : une racine qui redémarre ne distingue pas « tombée » de « pas encore revenue », et ne l'affirme donc pas (C6). |
+
+- **Une chaîne, pas un booléen** — la forme de `paire`. Les décodeurs des
+  clients déployés ne sautent sans casser qu'une clé inconnue dont la valeur
+  est une chaîne ou un entier ; un `true` ferait échouer la lecture de toute la
+  liste chez un client d'hier. `"voie":"ouverte"` se saute, comme `paire` l'a
+  été en 0.36.0. Les mots sont en ASCII, sans accent, comme `reglee`.
+- **Vu par CETTE racine.** L'état vivant ne se réplique pas entre racines
+  (§3) : chacune juge avec les voies qu'elle tient, et deux racines peuvent
+  différer le temps qu'une voie s'ouvre ou tombe. L'application dit l'état tel
+  que la racine qui lui répond le voit.
+- **La même règle que l'`asl-directory`** : l'annuaire est vivant pour une
+  racine si l'un de ses membres a `"voie":"ouverte"` chez elle, et c'est
+  alors, et alors seulement, que `GET /v1/ou/{n-…}/asl-directory` y rend `200`.
+  **Même honnêteté** (décision 83) : `ouverte` dit qu'une voie sortante tient,
+  pas que la maison est joignable du dehors.
+
+**Ce que la tuile affiche** (« Mon annuaire local ») : **vivant** si au moins
+un membre a `"voie":"ouverte"` ; **parti** si aucun n'est ouvert et qu'au
+moins un est `tombee` ; **pas de nouvelles** si aucun membre accepté ne porte
+`voie` — la racine vient de redémarrer, ou aucun membre ne lui a parlé depuis.
+Par membre, elle peut dire lequel tient — le titulaire, ou son second —, à
+côté de `paire` (décision 70). Les adresses qu'elle montre sont celles que la
+liste porte déjà — `locateurs`, sinon `adresse` — : le propriétaire les a
+déclarées ou son annuaire les a publiées, aucun droit nouveau n'entre en jeu.
+
+**Conséquence assumée** : **un compte qui tient `localiser` (ou `voir`) sur un
+domaine hébergé, sans être le propriétaire de l'annuaire, ne voit pas l'état
+de l'annuaire dans l'application** — il n'a pas de tuile « Mon annuaire
+local », et `GET /v1/annuaires` ne lui rend pas l'annuaire d'un autre. Ses
+machines, elles, le résolvent par `asl-directory` sur la voie machine, selon
+ses droits. Le montrer plus tard sur la fiche du domaine (« Hébergé par ») est
+la question 28 (§7).
 
 ### Les racines sur un autre port — `GET /v1/racines`, pas `asl-directory`
 
@@ -944,7 +1018,9 @@ client (ci-dessous) — et, côté serveur, un annuaire local nomme ses racines 
   résolution ordinaire, pour tout port — sans attendre qu'une annonce mal
   adressée rende un `421`.
 - **Son état vivant ou parti se voit** sur la tuile de l'annuaire, dans les
-  applications, sans écran spécial (décision 84).
+  applications, sans écran spécial (décision 84) — lu dans `GET /v1/annuaires`,
+  par le champ `voie` de chaque membre (décision 86), la même règle que
+  l'`asl-directory` ; lui reste le moyen des machines.
 - **Il prépare la question 12** (§7) : résoudre à la maison sans passer par les
   racines demande d'abord de savoir où est l'annuaire de la maison, et sous
   quelle clé.
@@ -962,14 +1038,23 @@ client (ci-dessous) — et, côté serveur, un annuaire local nomme ses racines 
   quels membres parlent), ses adresses d'après les locateurs publiés ou, à
   défaut, l'adresse déclarée — la source d'`annonce_mal_adressee`, filtrée aux
   membres vivants.
-- **La route** `GET /v1/ou/{n-…}/asl-directory`, sur la voie machine et sur la
-  voie appareil : `asl-api` accepte un `n-…` à la place du `m-…` pour ce seul
+- **La route** `GET /v1/ou/{n-…}/asl-directory`, **sur la voie machine
+  seulement** (décision 86) : `asl-api` accepte un `n-…` à la place du `m-…` pour ce seul
   nom ; le corps `RenvoiRendu` plus `service` avec `localiser`, `service` et
   `annuaire` seuls avec `voir` ; `404` pour tout le reste, sous C9.
-  `GET /v1/ou?service=asl-directory` ne rend aucun annuaire.
+  `GET /v1/ou?service=asl-directory` ne rend aucun annuaire. Sur la voie
+  appareil, le chemin n'existe pas.
 - **Le cercle étroit** (décisions 79 et 80) calculé dans `asl-auth` : une cible
-  qui n'est pas une machine, deux niveaux de réponse, éprouvés à 100 % (C2).
-  **Le `421` ne change pas.**
+  qui n'est pas une machine, deux niveaux de réponse, éprouvés à 100 % (C2) —
+  **`administrer` sans `localiser` reçoit la réponse réduite** (décision 87),
+  un cas d'essai à part. **Le `421` ne change pas.**
+- **Le champ `voie` dans `GET /v1/annuaires` et `GET /v1/inscriptions`**
+  (décision 86) : par membre accepté, `"ouverte"` ou `"tombee"` d'après les
+  voies que cette racine tient (la même source qui fait vivre
+  l'`asl-directory`), absent tant que le membre ne lui a pas parlé depuis
+  qu'elle tourne ; une chaîne, écrite par `InscriptionRendue` comme `paire`,
+  éprouvée par `asl-api/tests/corps.rs` et la cible de fuzz des corps. Un cran
+  mineur : un champ, ajout compatible.
 - **Le nom réservé** : `403` et une ligne au journal pour toute annonce
   d'`asl-directory`, aux racines comme dans un annuaire local.
 
@@ -990,10 +1075,13 @@ client (ci-dessous) — et, côté serveur, un annuaire local nomme ses racines 
   accordées ».
 
 **Applications** (Android, iOS) : **sur la tuile de l'annuaire** (« Mon
-annuaire local »), l'`asl-directory` — vivant ou parti, et ses adresses avec
-leurs `n-…` si l'utilisateur tient `localiser` —, lu par
-`GET /v1/ou/{n-…}/asl-directory` sur la voie appareil ; rien dans les listes de
-services par machine.
+annuaire local »), son état — **vivant**, **parti** ou **pas de nouvelles** —
+**lu dans `GET /v1/annuaires`**, par le champ `voie` de chaque membre
+(décision 86), et, par membre, lequel tient, à côté de `paire`. **Elles ne
+lisent pas `asl-directory`** : il n'est pas servi sur la voie appareil. Le
+décodeur de la liste doit accepter `voie` absent (racine d'avant, ou pas de
+nouvelles) et un mot inconnu (le dire tel quel plutôt que refuser la liste).
+Rien dans les listes de services par machine.
 
 ---
 
@@ -1653,7 +1741,8 @@ Rassemblé, plutôt que dispersé.
       **Décidé (2026-09-28, Thierry ; décision 78)** : un annuaire se trouve
       comme n'importe quel service, sans attendre un `421` ; son état vivant ou
       parti se voit — **sur la tuile de l'annuaire**, dans les applications,
-      sans écran spécial (décision 84, question 23) ; il prépare la question 12
+      sans écran spécial (décision 84, question 23), lu dans
+      `GET /v1/annuaires` (décision 86, question 26) ; il prépare la question 12
       (résoudre à la maison sans racines). **Le `421` et `GET /v1/annuaires`
       restent tels quels.**
 22. **Une sonde de l'`asl-directory` depuis l'extérieur — REPORTÉE.** (§2
@@ -1674,9 +1763,11 @@ Rassemblé, plutôt que dispersé.
     adresses si l'utilisateur tient `localiser`. **Pas de place dans les
     listes de services par machine**, et **une recherche générale « tous les
     `asl-directory` » ne rend rien** : `GET /v1/ou?service=asl-directory` ne
-    rend aucun annuaire ; on résout par `n-…`. La tuile lit
-    `GET /v1/ou/{n-…}/asl-directory`, servi aussi sur la voie appareil (§2
-    quinquies).
+    rend aucun annuaire ; on résout par `n-…`. ~~La tuile lit
+    `GET /v1/ou/{n-…}/asl-directory`, servi aussi sur la voie appareil.~~
+    **Réécrit le 2026-09-29 (Thierry ; décision 86, question 26)** : la tuile
+    lit l'état dans `GET /v1/annuaires`, et `asl-directory` n'est servi que
+    sur la voie machine (§2 quinquies).
 24. ~~**Le cercle de l'`asl-directory`, aligné sur celui du `421`**~~ **Décidé
     (2026-09-28, Thierry ; décisions 79 et 80)** : **le cercle étroit.** Le
     résolvent le propriétaire de l'annuaire, les administrateurs des racines,
@@ -1699,6 +1790,33 @@ Rassemblé, plutôt que dispersé.
     racine : **une racine nouvelle exige une nouvelle version du client**.
     **Ordre d'essai** : d'abord les locateurs appris, puis ceux de la liste
     embarquée en secours ; l'amorçage reste garanti par la racine sur 6630.
+26. ~~**Les applications lisent-elles `asl-directory` ?**~~ La spécification
+    de la 0.35.3 l'ouvrait sur la voie appareil pour la tuile de l'annuaire.
+    **Décidé (2026-09-29, Thierry ; décision 86)** : **non.**
+    `GET /v1/ou/{n-…}/asl-directory` reste sur la voie machine — le moyen des
+    daemons et d'`asl`. **`GET /v1/annuaires` gagne, par membre, `voie`** —
+    `"ouverte"` ou `"tombee"`, une chaîne comme `paire`, vu par la racine qui
+    répond, absent tant que ce membre ne lui a pas parlé depuis qu'elle tourne
+    —, et la tuile « Mon annuaire local » en tire vivant, parti ou pas de
+    nouvelles (§2 quinquies, « L'état de l'annuaire dans les applications »).
+    **Conséquence assumée** : qui tient un droit sur un domaine hébergé sans
+    être propriétaire de l'annuaire n'a pas de tuile, et ne voit pas cet état
+    dans l'application (question 28).
+27. ~~**`administrer` emporte-t-il `localiser` sur l'`asl-directory` ?**~~
+    **Décidé (2026-09-29, Thierry ; décision 87)** : **non, la règle est
+    stricte** — la décision 44 ne change pas. Un administrateur d'un domaine
+    hébergé reçoit la réponse réduite, sans adresses ; il peut s'accorder
+    `localiser` sur ce domaine, explicitement — un geste conscient, tracé
+    comme tout droit (§2 quinquies, « Le cercle »).
+28. **L'état de l'annuaire sur la fiche d'un domaine hébergé — OUVERTE.**
+    Un compte qui tient `voir` ou `localiser` sur un domaine hébergé par
+    l'annuaire d'un autre ne voit pas l'état de cet annuaire dans
+    l'application (décision 86). Plus tard, la fiche du domaine (« Hébergé
+    par ») pourra le montrer : il faudra alors dire d'où l'application le tient
+    — un champ sur la vue du domaine, calculé selon le même cercle que
+    l'`asl-directory` (décisions 79, 80 et 87) —, sans rouvrir
+    `asl-directory` sur la voie appareil. À trancher quand un tel partage
+    existera réellement.
 
 ## 8. L'annuaire `ordinaire` et la confiance bilatérale — une suite nommée
 
