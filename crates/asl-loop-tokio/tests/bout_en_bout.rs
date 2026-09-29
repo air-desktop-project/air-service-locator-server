@@ -212,6 +212,9 @@ struct ClesDeLExploitant {
     paire: Option<Arc<asl_loop_tokio::PaireJugee>>,
     /// Par la porte d'essai : où partent les sondes par l'écho.
     detour_d_echo: Option<SocketAddr>,
+    /// Par la porte d'essai, côté racine : l'adresse IPv4 qu'elle croit
+    /// observée chez tout membre (décision 107).
+    ipv4_des_membres: Option<std::net::Ipv4Addr>,
 }
 
 #[allow(
@@ -295,6 +298,9 @@ async fn lever_complet(
         }
         if let Some(ou) = cles.detour_d_echo {
             application.detourner_l_echo_pour_un_essai(ou);
+        }
+        if let Some(habit) = cles.ipv4_des_membres {
+            application.habiller_l_ipv4_des_membres_pour_un_essai(habit);
         }
         if let Some(rendre) = cles.fermetures {
             let _ = rendre.send(application.fermetures());
@@ -6883,7 +6889,7 @@ async fn lever_un_annuaire_local(
     pair: Option<Identifiant>,
 ) -> AnnuaireLocal {
     lever_un_annuaire_local_qui_sonde(
-        nom, confiance, vers, identite, cadence_ms, locateurs, pair, None, None,
+        nom, confiance, vers, identite, cadence_ms, locateurs, pair, None, None, None,
     )
     .await
 }
@@ -6905,6 +6911,7 @@ async fn lever_un_annuaire_local_qui_sonde(
     pair: Option<Identifiant>,
     sondeur: Option<&'static asl_cle::CleSecrete>,
     detour_d_echo: Option<SocketAddr>,
+    visite_ipv4: Option<SocketAddr>,
 ) -> AnnuaireLocal {
     // Le certificat que l'annuaire local présente est celui de son banc ; la
     // clé qu'il prouve aux racines est `identite` — le binaire tient les deux
@@ -6954,6 +6961,7 @@ async fn lever_un_annuaire_local_qui_sonde(
         locateurs: Arc::clone(&locateurs),
         pair,
         paire: Arc::clone(&paire),
+        visite_ipv4,
     };
     AnnuaireLocal {
         adresse,
@@ -8242,6 +8250,16 @@ async fn monter_une_scene_d_annuaire_detournee(
     nom: &str,
     detour_d_echo: Option<SocketAddr>,
 ) -> SceneDAnnuaire {
+    monter_une_scene_d_annuaire_habillee(nom, detour_d_echo, None).await
+}
+
+/// La même, dont la racine croit voir tout membre depuis cette adresse IPv4
+/// (décision 107).
+async fn monter_une_scene_d_annuaire_habillee(
+    nom: &str,
+    detour_d_echo: Option<SocketAddr>,
+    ipv4_des_membres: Option<std::net::Ipv4Addr>,
+) -> SceneDAnnuaire {
     let (racine, identite) = banc(nom);
     let (base, fichier) = entrepot(nom);
     let exploitant_cle = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
@@ -8261,6 +8279,7 @@ async fn monter_une_scene_d_annuaire_detournee(
             // (décision 91) — la même que celle du banc, comme le binaire.
             identite: Some(identite),
             detour_d_echo,
+            ipv4_des_membres,
             ..ClesDeLExploitant::default()
         },
     )
@@ -8454,6 +8473,17 @@ impl SceneDAnnuaire {
     /// Speedy se lève et fédère, ses locateurs publiés.
     /// Speedy, qui sonde les échos vers ce faux écho — de sa clé, `0x51`.
     async fn lever_speedy_qui_sonde(&self, nom: &str, detour: SocketAddr) -> AnnuaireLocal {
+        self.lever_speedy_qui_visite(nom, detour, None).await
+    }
+
+    /// Le même, qui visite aussi la racine en IPv4 à cette adresse
+    /// (décision 107).
+    async fn lever_speedy_qui_visite(
+        &self,
+        nom: &str,
+        detour: SocketAddr,
+        visite_ipv4: Option<SocketAddr>,
+    ) -> AnnuaireLocal {
         lever_un_annuaire_local_qui_sonde(
             nom,
             asl_loop_tokio::Confiance::par_identite(&[self.identite.publique()]),
@@ -8466,6 +8496,7 @@ impl SceneDAnnuaire {
                 [0x51; 32],
             )))),
             Some(detour),
+            visite_ipv4,
         )
         .await
     }
@@ -10324,6 +10355,209 @@ async fn l_echo_d_une_machine_hebergee_se_sonde_chez_l_annuaire_local_et_se_dit_
     assert!(
         objet.contains("\"echo_via\":\"nat\""),
         "au port du bail, sans adresse locale : nat : {objet}"
+    );
+
+    drop(chez_speedy);
+    speedy_local.arreter().await;
+    scene.arreter().await;
+}
+
+/// Relit `GET /v1/machines` jusqu'à ce que la machine y porte ce fragment.
+async fn attendre_dans_l_echo(
+    appareil: &mut ams_quic_client::Client,
+    flux: &mut u64,
+    machine: Identifiant,
+    fragment: &str,
+) -> String {
+    let depart = std::time::Instant::now();
+    loop {
+        let (statut, liste) = lire_json(appareil, suivant(flux), b"/v1/machines").await;
+        assert_eq!(statut, b"200", "{liste}");
+        let objet = liste
+            .split("},{")
+            .find(|objet| objet.contains(machine.texte().as_str()))
+            .unwrap_or_default()
+            .to_owned();
+        if objet.contains(fragment) {
+            return objet;
+        }
+        assert!(
+            depart.elapsed() < std::time::Duration::from_secs(10),
+            "la machine n'a jamais porté « {fragment} » : {objet}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// La scène de la décision 107 : le grenier d'alice, dans son domaine confié
+/// à speedy, annonce son écho À SPEEDY avec une passerelle qui confirme
+/// l'adresse externe `externe` ; la racine croit voir speedy depuis `vue`.
+/// Rend la scène, speedy, et le grenier.
+async fn monter_l_echo_derriere_la_box(
+    nom: &str,
+    vue: std::net::Ipv4Addr,
+    externe: &str,
+) -> (
+    SceneDAnnuaire,
+    AnnuaireLocal,
+    Identifiant,
+    ams_quic_client::Client,
+) {
+    // Deux faux échos : l'un croit speedy (la sonde de l'intérieur), l'autre
+    // la racine (la sonde du dehors).
+    let speedy = Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie([0x51; 32])));
+    let reglage = Arc::new(std::sync::Mutex::new(None));
+    let echo_speedy = un_faux_echo(speedy, Arc::clone(&reglage)).await;
+    let echo_racine = un_faux_echo(banc(nom).1, Arc::clone(&reglage)).await;
+    let mut scene = monter_une_scene_d_annuaire_habillee(nom, Some(echo_racine), Some(vue)).await;
+    let cle_g = asl_cle::CleSecrete::depuis_entropie([0xE9; 32]);
+    let flux = suivant(&mut scene.flux_alice);
+    let grenier = machine_du_compte(
+        &mut scene.alice,
+        flux,
+        &scene.racine,
+        scene.adresse,
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        &cle_g,
+    )
+    .await;
+    let flux = suivant(&mut scene.flux_alice);
+    assert_eq!(
+        poser_json(
+            &mut scene.alice,
+            flux,
+            format!("/v1/machines/{}/domaine", grenier.texte()).as_bytes(),
+            format!("{{\"domaine\":\"{}\"}}", scene.domaine_a.texte()).as_bytes(),
+        )
+        .await,
+        b"204"
+    );
+    *reglage.lock().expect("le réglage") = Some((grenier, [0xE9; 32]));
+    // Speedy visite la racine « en IPv4 » : ici, à la même adresse que sa
+    // voie — ce qui compte est que la visite se fasse, et se dise.
+    let speedy_local = scene
+        .lever_speedy_qui_visite(&format!("{nom}-speedy"), echo_speedy, Some(scene.adresse))
+        .await;
+    speedy_local.attendre_la_machine(grenier).await;
+    let mut chez_speedy = connecter(&speedy_local.racine, speedy_local.adresse).await;
+    authentifier(&mut chez_speedy, grenier, &cle_g, 0, 4).await;
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"asl-echo","points":[{{"protocole":"udp","port":6633}}],"passerelle":{{"port":6633,"via":"upnp","externe":"{externe}"}}}}"#,
+        grenier.texte()
+    );
+    let (statut, rendu) = poster(
+        &mut chez_speedy,
+        8,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"200", "{}", String::from_utf8_lossy(&rendu));
+    (scene, speedy_local, grenier, chez_speedy)
+}
+
+#[tokio::test]
+async fn derriere_la_box_d_un_annuaire_local_la_racine_sonde_l_ipv4_qu_elle_a_vue_et_que_l_echo_confirme()
+ {
+    // ── CE QUE CET ESSAI PROUVE (décision 107, 0.45.0) ──────────────────────
+    //
+    // Le bail de l'écho est chez speedy, qui ne voit pas l'adresse de la box.
+    // Speedy fait voir la sienne à la racine (sa visite, sa voie) ; l'écho
+    // confirme la même adresse externe. La racine sonde alors, du dehors,
+    // `adresse observée:port accordé` : `verifie`, `echo_via: upnp`,
+    // `echo_depuis: exterieur`, `echo_par` à la racine. Et speedy dit sa
+    // visite au journal.
+    let nom = "echo-box-concordante";
+    let livebox = std::net::Ipv4Addr::new(203, 0, 113, 7);
+    let (mut scene, speedy_local, grenier, chez_speedy) =
+        monter_l_echo_derriere_la_box(nom, livebox, "203.0.113.7").await;
+    let racine_n = asl_cle::identifiant_de_racine(&scene.identite.publique());
+    let objet = attendre_dans_l_echo(
+        &mut scene.alice,
+        &mut scene.flux_alice,
+        grenier,
+        &format!("\"echo_par\":\"{}\"", racine_n.texte()),
+    )
+    .await;
+    assert!(objet.contains("\"echo\":\"verifie\""), "{objet}");
+    assert!(
+        objet.contains("\"echo_via\":\"upnp\""),
+        "par la redirection : {objet}"
+    );
+    assert!(objet.contains("\"echo_depuis\":\"exterieur\""), "{objet}");
+    {
+        let journal = JOURNAL.lock().expect("le journal n'est pas empoisonné");
+        assert!(
+            journal
+                .iter()
+                .any(|ligne| ligne.contains("vue en IPv4 depuis 127.0.0.1 (visite)")),
+            "speedy dit sa visite"
+        );
+        assert!(
+            journal.iter().any(|ligne| ligne.contains(&format!(
+                "écho de {} : la box dit 203.0.113.7",
+                grenier.texte()
+            )) && ligne.contains("sonde du dehors en IPv4, udp 6633")),
+            "la racine dit qu'elle sonde"
+        );
+    }
+
+    drop(chez_speedy);
+    speedy_local.arreter().await;
+    scene.arreter().await;
+}
+
+#[tokio::test]
+async fn derriere_une_autre_box_la_racine_ne_sonde_pas_l_ipv4_et_le_dit() {
+    // ── CE QUE CET ESSAI PROUVE (décision 107, 0.45.0) ──────────────────────
+    //
+    // La box de l'écho dit une adresse, la racine voit speedy depuis une
+    // autre : une autre box, ou un double NAT. Aucune sonde vers l'adresse
+    // que l'écho confirme ; la racine le dit à son journal, et l'état reste
+    // celui que speedy rapporte (la sonde de l'intérieur).
+    let nom = "echo-box-discordante";
+    let (mut scene, speedy_local, grenier, chez_speedy) =
+        monter_l_echo_derriere_la_box(nom, std::net::Ipv4Addr::new(198, 51, 100, 9), "203.0.113.7")
+            .await;
+    let objet = attendre_dans_l_echo(
+        &mut scene.alice,
+        &mut scene.flux_alice,
+        grenier,
+        &format!("\"echo_par\":\"{}\"", scene.n_speedy.texte()),
+    )
+    .await;
+    assert!(objet.contains("\"echo\":\"verifie\""), "{objet}");
+    let attendue = format!(
+        "écho de {} : la box dit 203.0.113.7, l'annuaire local {} nous parle depuis \
+         198.51.100.9 — autre box, ou double NAT — pas de sonde en IPv4",
+        grenier.texte(),
+        scene.n_speedy.texte()
+    );
+    let depart = std::time::Instant::now();
+    while !JOURNAL
+        .lock()
+        .expect("le journal n'est pas empoisonné")
+        .contains(&attendue)
+    {
+        assert!(
+            depart.elapsed() < std::time::Duration::from_secs(10),
+            "la racine n'a jamais dit : {attendue}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    // Et jamais la racine n'a prouvé l'écho : son constat du dehors
+    // l'emporterait sur celui de speedy.
+    let objet = attendre_dans_l_echo(
+        &mut scene.alice,
+        &mut scene.flux_alice,
+        grenier,
+        "\"echo\":\"verifie\"",
+    )
+    .await;
+    assert!(
+        objet.contains(&format!("\"echo_par\":\"{}\"", scene.n_speedy.texte())),
+        "{objet}"
     );
 
     drop(chez_speedy);

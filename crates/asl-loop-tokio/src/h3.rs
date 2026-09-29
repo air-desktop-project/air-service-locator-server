@@ -3378,6 +3378,7 @@ fn passerelle_rapportee(passerelle: asl_proto::Passerelle) -> asl_registre::Pass
             asl_proto::ViaPasserelle::Pcp => 2,
             asl_proto::ViaPasserelle::Natpmp => 3,
         },
+        externe: passerelle.externe,
     }
 }
 
@@ -3390,6 +3391,7 @@ fn passerelle_lue(rapportee: asl_registre::PasserelleRapportee) -> Option<asl_pr
             2 => asl_proto::ViaPasserelle::Pcp,
             _ => asl_proto::ViaPasserelle::Natpmp,
         },
+        externe: rapportee.externe,
     })
 }
 
@@ -3721,6 +3723,10 @@ pub struct Annuaire<'a> {
     /// candidat réflexif — voir [`Annuaire::detourner_l_echo_pour_un_essai`].
     #[cfg(feature = "porte-d-essai")]
     detour_d_echo: Option<SocketAddr>,
+    /// L'adresse IPv4 que la porte d'essai fait croire observée chez tout
+    /// membre — voir [`Annuaire::habiller_l_ipv4_des_membres_pour_un_essai`].
+    #[cfg(feature = "porte-d-essai")]
+    ipv4_d_essai: Option<core::net::Ipv4Addr>,
     /// Côté racine : l'état des services que les annuaires locaux
     /// rapportent (0.28.0). **En mémoire, et seulement ici** (C13 amendée) —
     /// ni l'entrepôt ni la voie entre racines ne le voient.
@@ -3817,6 +3823,8 @@ impl<'a> Annuaire<'a> {
             lenteur_de_sonde: None,
             #[cfg(feature = "porte-d-essai")]
             detour_d_echo: None,
+            #[cfg(feature = "porte-d-essai")]
+            ipv4_d_essai: None,
             etat_federe: crate::federation::EtatFedere::nouveau(),
             expiration_federee_us: crate::federation::EXPIRATION_US,
             dernier_balayage_federe: 0,
@@ -3969,6 +3977,34 @@ impl<'a> Annuaire<'a> {
     )]
     const fn detour_d_echo(&self) -> Option<SocketAddr> {
         None
+    }
+
+    /// **La porte d'essai de la visite IPv4** (décision 107) : l'adresse
+    /// IPv4 qu'on retient d'un membre est celle-ci, et non la boucle locale
+    /// d'où l'essai parle — une adresse globale, que la règle de la sonde
+    /// du dehors accepte. Tout le reste du chemin est le vrai.
+    #[cfg(feature = "porte-d-essai")]
+    pub const fn habiller_l_ipv4_des_membres_pour_un_essai(&mut self, ipv4: core::net::Ipv4Addr) {
+        self.ipv4_d_essai = Some(ipv4);
+    }
+
+    /// L'adresse d'où un membre parle, telle qu'on la retient.
+    #[cfg(feature = "porte-d-essai")]
+    fn adresse_de_membre(&self, pair: SocketAddr) -> std::net::IpAddr {
+        match (self.ipv4_d_essai, pair.ip().to_canonical()) {
+            (Some(habit), std::net::IpAddr::V4(_)) => std::net::IpAddr::V4(habit),
+            (_, vue) => vue,
+        }
+    }
+
+    /// Sans la porte d'essai : celle qu'on voit.
+    #[cfg(not(feature = "porte-d-essai"))]
+    #[expect(
+        clippy::unused_self,
+        reason = "la même signature que sous la porte d'essai"
+    )]
+    fn adresse_de_membre(&self, pair: SocketAddr) -> std::net::IpAddr {
+        pair.ip()
     }
 
     /// Recueille les instantanés lus hors de la boucle, et remplit leurs flux.
@@ -4415,6 +4451,91 @@ impl Annuaire<'_> {
         }
     }
 
+    /// **Les candidats d'une sonde du dehors, dans l'ordre** : la passerelle
+    /// que le membre rapporte d'abord, puis le bail — l'adresse que le membre
+    /// a vue, au port observé, **si elle est globale**.
+    ///
+    /// **La passerelle, à quelle adresse.** Sans adresse externe, ou avec
+    /// celle que le membre a vue : l'adresse vue, comme avant (décision 97).
+    /// Avec une AUTRE adresse externe — le bail IPv6 chez un annuaire local,
+    /// un port redirigé en IPv4 (décision 107) —, l'adresse IPv4 que CETTE
+    /// racine a observée chez le membre qui rapporte, **si la box de l'écho
+    /// la confirme** ; sinon rien vers elle, et le journal le dit, au
+    /// changement.
+    fn cibles_du_dehors(
+        &mut self,
+        machine: Identifiant,
+        lue: &crate::federation::LueFederee,
+        lu: &asl_proto::Reponse<'_>,
+    ) -> Vec<(asl_proto::Candidat, asl_api::corps::ViaDEcho)> {
+        let udp = |adresse, port| asl_proto::Candidat {
+            protocole: asl_proto::Protocole::Udp,
+            adresse,
+            port,
+            origine: asl_proto::Origine::Reflexif,
+        };
+        let vue = lu.vu_depuis.adresse;
+        let mut cibles = Vec::new();
+        match lue.passerelle.and_then(passerelle_lue) {
+            Some(passerelle)
+                if passerelle
+                    .externe
+                    .is_some_and(|externe| std::net::IpAddr::V4(externe) != vue.to_canonical()) =>
+            {
+                let externe = passerelle
+                    .externe
+                    .unwrap_or(core::net::Ipv4Addr::UNSPECIFIED);
+                let observee = self.etat_federe.ipv4_de(
+                    lue.membre,
+                    maintenant(),
+                    crate::federation::IPV4_VUE_US,
+                );
+                let decision = asl_annuaire::sonder_l_ipv4(externe, observee);
+                let dit = match decision {
+                    asl_annuaire::SondeIpv4::Sonder(adresse) => format!(
+                        "écho de {machine} : la box dit {adresse}, et {} nous parle depuis \
+                         elle — sonde du dehors en IPv4, udp {}",
+                        lue.membre,
+                        passerelle.port.valeur()
+                    ),
+                    asl_annuaire::SondeIpv4::PasVue => format!(
+                        "écho de {machine} : la box dit {externe}, mais l'annuaire local {} ne \
+                         nous a pas parlé en IPv4 depuis trente minutes — pas de sonde en IPv4",
+                        lue.membre
+                    ),
+                    asl_annuaire::SondeIpv4::Discordante { observee } => format!(
+                        "écho de {machine} : la box dit {externe}, l'annuaire local {} nous \
+                         parle depuis {observee} — autre box, ou double NAT — pas de sonde en \
+                         IPv4",
+                        lue.membre
+                    ),
+                    asl_annuaire::SondeIpv4::NonGlobale => format!(
+                        "écho de {machine} : adresse externe {externe} non globale — pas de \
+                         sonde en IPv4"
+                    ),
+                };
+                if self.echos.ipv4_dits.get(&machine) != Some(&dit) {
+                    (self.voie.journal)(&dit);
+                    self.echos.ipv4_dits.insert(machine, dit);
+                }
+                if let asl_annuaire::SondeIpv4::Sonder(adresse) = decision {
+                    cibles.push((
+                        udp(std::net::IpAddr::V4(adresse), passerelle.port),
+                        via_de_passerelle(passerelle.via),
+                    ));
+                }
+            }
+            Some(passerelle) if passerelle.port != lu.vu_depuis.port => {
+                cibles.push((udp(vue, passerelle.port), via_de_passerelle(passerelle.via)))
+            }
+            _ => {}
+        }
+        if asl_annuaire::adresse_globale(vue) {
+            cibles.push((udp(vue, lu.vu_depuis.port), via_du_bail(lu.derriere_nat)));
+        }
+        cibles
+    }
+
     /// **Les racines sondent aussi, du dehors, l'écho d'une machine d'un
     /// domaine hébergé** (décision 92 ; E8) : vers l'adresse et le port que
     /// le membre a vus, **si l'adresse est globale**, une fois par
@@ -4429,6 +4550,9 @@ impl Annuaire<'_> {
         );
         self.echos
             .du_dehors
+            .retain(|machine, _| federes.iter().any(|(quelle, _)| quelle == machine));
+        self.echos
+            .ipv4_dits
             .retain(|machine, _| federes.iter().any(|(quelle, _)| quelle == machine));
         let Some(identite) = self.voie.identite else {
             return;
@@ -4453,7 +4577,11 @@ impl Annuaire<'_> {
             else {
                 continue;
             };
-            let cible = SocketAddr::new(lu.vu_depuis.adresse, lu.vu_depuis.port.valeur());
+            let cibles = self.cibles_du_dehors(machine, &lue, &lu);
+            let Some((premiere, _)) = cibles.first() else {
+                continue;
+            };
+            let cible = SocketAddr::new(premiere.adresse, premiere.port.valeur());
             let derniere = self
                 .echos
                 .du_dehors
@@ -4483,30 +4611,6 @@ impl Annuaire<'_> {
                     constat,
                 },
             );
-            // La passerelle que le membre rapporte d'abord — l'adresse, elle,
-            // reste celle qu'il a vue —, puis le bail.
-            let passerelle = lue.passerelle.and_then(passerelle_lue);
-            let mut cibles = Vec::new();
-            if let Some(passerelle) = passerelle.filter(|p| p.port != lu.vu_depuis.port) {
-                cibles.push((
-                    asl_proto::Candidat {
-                        protocole: asl_proto::Protocole::Udp,
-                        adresse: lu.vu_depuis.adresse,
-                        port: passerelle.port,
-                        origine: asl_proto::Origine::Reflexif,
-                    },
-                    via_de_passerelle(passerelle.via),
-                ));
-            }
-            cibles.push((
-                asl_proto::Candidat {
-                    protocole: asl_proto::Protocole::Udp,
-                    adresse: lu.vu_depuis.adresse,
-                    port: lu.vu_depuis.port,
-                    origine: asl_proto::Origine::Reflexif,
-                },
-                via_du_bail(lu.derriere_nat),
-            ));
             lancer_une_sonde_d_echo(
                 SondeDEcho {
                     service: lue.service,
@@ -4730,6 +4834,9 @@ impl Application for Annuaire<'_> {
     }
 
     fn a_la_lecture(&mut self, connexion: &mut Connection, flux: StreamId, pair: SocketAddr) {
+        // D'où ce pair parle, tel qu'on le retiendrait d'un membre (décision
+        // 107) — lu avant d'emprunter l'état de la connexion.
+        let adresse = self.adresse_de_membre(pair);
         let clef = connexion.local_id().as_bytes().to_vec();
         self.lue_ce_tour = Some(clef.clone());
         let Some(etat) = self.connexions.get_mut(&clef) else {
@@ -4803,6 +4910,19 @@ impl Application for Annuaire<'_> {
         {
             (self.voie.journal)(&format!(
                 "voie depuis {racine} ouverte : l'autre racine a prouvé sa clé — elle tire d'ici"
+            ));
+        }
+        // **L'ADRESSE IPv4 DE LA BOX D'UN MEMBRE, OBSERVÉE** (décision 107) :
+        // sa visite, ou sa voie si elle est en IPv4, sa clé prouvée. C'est la
+        // seule adresse qu'on sondera en IPv4 pour un écho qu'il rapporte.
+        if let Some(membre) = session.annuaire_local()
+            && self
+                .etat_federe
+                .noter_une_ipv4(membre, adresse, maintenant())
+        {
+            (self.voie.journal)(&format!(
+                "fédération : {membre} nous parle en IPv4 depuis {} — l'adresse de sa box",
+                adresse.to_canonical()
             ));
         }
         // **CE QUE LA REQUÊTE A PRÉPARÉ PART SUR SON PROPRE FLUX**, tout de

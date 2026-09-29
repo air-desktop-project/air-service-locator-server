@@ -1046,8 +1046,8 @@ pub struct Annonce<'a> {
     pub adresses_locales: &'a [IpAddr],
     /// **Ce que la box a accordé à l'écho** — le port seul, et par quoi
     /// (décision 97 ; E21). Propre à l'annonce `asl-echo` : refusé sur toute
-    /// autre. L'adresse n'y est jamais : l'annuaire emploie celle qu'il a
-    /// observée.
+    /// autre. L'annuaire emploie l'adresse qu'il a observée ; `externe`,
+    /// quand elle y est, ne fait que confirmer (décision 107).
     pub passerelle: Option<Passerelle>,
 }
 
@@ -1087,13 +1087,20 @@ impl ViaPasserelle {
 }
 
 /// Le port que la passerelle a accordé à l'écho, et par quoi :
-/// `"passerelle":{"port":51377,"via":"upnp"}`.
+/// `"passerelle":{"port":51377,"via":"upnp"}` — et, depuis la 0.45.0,
+/// l'adresse externe que la box a dite : `"externe":"193.250.159.198"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Passerelle {
     /// Le port externe accordé.
     pub port: Port,
     /// Par quoi.
     pub via: ViaPasserelle,
+    /// **L'adresse externe que la box a dite** (décision 107), écrite par un
+    /// écho dont le bail va à un annuaire local sans trou IPv6. **Une
+    /// confirmation, jamais une cible** : une racine ne sonde que l'adresse
+    /// qu'elle a elle-même observée chez le membre, et seulement si elle est
+    /// celle-ci. Une IPv4, toujours.
+    pub externe: Option<core::net::Ipv4Addr>,
 }
 
 impl<'a> Annonce<'a> {

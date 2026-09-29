@@ -270,6 +270,7 @@ fn avec_passerelle<'a>(
         .avec_passerelle(asl_proto::Passerelle {
             port: port(port_accorde),
             via: asl_proto::ViaPasserelle::Upnp,
+            externe: None,
         })
         .expect("l'écho porte une passerelle")
 }
@@ -353,4 +354,61 @@ fn une_passerelle_nouvelle_fait_resonder_l_echo() {
         .reannoncer(&avec_passerelle(&points, &locale, 51_377), vu(), instant(3))
         .expect("réannonce");
     assert!(ordres.est_vide());
+}
+
+// ── L'adresse externe confirmée (décision 107, 0.45.0) ──────────────────────
+
+#[test]
+fn une_adresse_externe_autre_que_l_observee_ne_fait_pas_de_candidat_ici() {
+    let points = [udp()];
+    let box_ = Ipv4Addr::new(193, 250, 159, 198);
+    let avec_externe = |externe: Ipv4Addr| {
+        annonce("asl-echo", &points, &[])
+            .avec_passerelle(asl_proto::Passerelle {
+                port: port(6633),
+                via: asl_proto::ViaPasserelle::Upnp,
+                externe: Some(externe),
+            })
+            .expect("l'écho porte une passerelle")
+    };
+    // Un bail IPv6 chez un annuaire local, un port redirigé en IPv4 : la
+    // passerelle est tenue, mais aucun candidat `[IPv6]:port IPv4`.
+    let (session, _) =
+        Session::ouvrir(service(), bail(), &avec_externe(box_), vu(), instant(0)).unwrap();
+    assert_eq!(session.passerelle().and_then(|p| p.externe), Some(box_));
+    let candidats = candidats_de(&session);
+    assert_eq!(candidats.len(), 1, "le bail seul : {candidats:?}");
+    assert_eq!(candidats[0].port, port(53211));
+
+    // Un bail IPv4 depuis l'adresse même que la box dit — vue au travers
+    // d'une socket double pile : la passerelle passe en tête.
+    let vu_v4 = VuDepuis {
+        adresse: IpAddr::V6(box_.to_ipv6_mapped()),
+        port: port(53211),
+    };
+    let (session, _) =
+        Session::ouvrir(service(), bail(), &avec_externe(box_), vu_v4, instant(0)).unwrap();
+    let candidats = candidats_de(&session);
+    assert_eq!(candidats.len(), 2);
+    assert_eq!(candidats[0].port, port(6633));
+}
+
+#[test]
+fn une_racine_ne_sonde_l_ipv4_que_si_elle_l_a_vue_et_que_la_box_la_confirme() {
+    use asl_annuaire::{SondeIpv4, sonder_l_ipv4};
+    let livebox = Ipv4Addr::new(193, 250, 159, 198);
+    let autre = Ipv4Addr::new(203, 0, 113, 7);
+    assert_eq!(
+        sonder_l_ipv4(livebox, Some(livebox)),
+        SondeIpv4::Sonder(livebox)
+    );
+    assert_eq!(sonder_l_ipv4(livebox, None), SondeIpv4::PasVue);
+    assert_eq!(
+        sonder_l_ipv4(livebox, Some(autre)),
+        SondeIpv4::Discordante { observee: autre }
+    );
+    let privee = Ipv4Addr::new(192, 168, 1, 1);
+    assert_eq!(sonder_l_ipv4(privee, Some(privee)), SondeIpv4::NonGlobale);
+    let partagee = Ipv4Addr::new(100, 64, 0, 1);
+    assert_eq!(sonder_l_ipv4(partagee, None), SondeIpv4::NonGlobale);
 }

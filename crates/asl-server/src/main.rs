@@ -584,14 +584,19 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
             }
             for cible in &federation.racines {
                 let adresse = &cible.adresse;
+                let confiance = match cible.identite {
+                    // `<locateur>=<n-…>` : l'identité est dite.
+                    Some(identite) => Confiance::par_identifiants(&[identite]),
+                    None => confiance_embarquee(adresse, "--federation <locateur>=<n-…>")?,
+                };
+                // **LA VISITE IPv4** (décision 107) : l'adresse IPv4 embarquée
+                // de cette racine, si la voie n'est pas déjà en IPv4.
+                let visite_ipv4 =
+                    asl_loop_tokio::racines::visite_ipv4_pour(adresse, confiance.identites());
                 let federateur = asl_loop_tokio::Federateur {
                     entrepot: Arc::clone(&entrepot),
                     adresse: adresse.clone(),
-                    confiance: match cible.identite {
-                        // `<locateur>=<n-…>` : l'identité est dite.
-                        Some(identite) => Confiance::par_identifiants(&[identite]),
-                        None => confiance_embarquee(adresse, "--federation <locateur>=<n-…>")?,
-                    },
+                    confiance,
                     identite: identite::lire_secrete(&reglages.identite)?,
                     keepalive_us: reglages.keepalive_s.saturating_mul(1_000_000),
                     idle_us: reglages.inactivite_us(),
@@ -608,6 +613,7 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                     locateurs: Arc::clone(&locateurs),
                     pair: cle_du_pair.as_ref().map(asl_cle::identifiant_de_racine),
                     paire: Arc::clone(&paire),
+                    visite_ipv4,
                 };
                 federateurs.push(tokio::spawn(federateur.federer_sans_fin()));
             }

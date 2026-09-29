@@ -103,12 +103,20 @@ pub const REPONSE_FEDEREE_OCTETS_MAX: usize = 4_096;
 pub const ENTREE_D_ETAT_OCTETS_MIN: usize = IDENTIFIANT_OCTETS + IDENTIFIANT_OCTETS + 1 + 1;
 
 /// Ce qu'une entrée occupe au plus.
-pub const ENTREE_D_ETAT_OCTETS_MAX: usize =
-    ENTREE_D_ETAT_OCTETS_MIN + NOM_OCTETS_MAX + 2 + REPONSE_FEDEREE_OCTETS_MAX + PASSERELLE_OCTETS;
+pub const ENTREE_D_ETAT_OCTETS_MAX: usize = ENTREE_D_ETAT_OCTETS_MIN
+    + NOM_OCTETS_MAX
+    + 2
+    + REPONSE_FEDEREE_OCTETS_MAX
+    + PASSERELLE_OCTETS
+    + EXTERNE_OCTETS;
 
 /// Ce que la passerelle d'un écho occupe : le port sur deux octets, `via` sur
 /// un (0.44.0).
 const PASSERELLE_OCTETS: usize = 3;
+
+/// Ce que l'adresse externe d'une box occupe : une IPv4, en octets de réseau
+/// (0.45.0, décision 107).
+const EXTERNE_OCTETS: usize = 4;
 
 /// Le drapeau d'un service qu'aucun daemon ne tient en ce moment.
 const PARTI: u8 = 0;
@@ -122,6 +130,12 @@ const VIVANT: u8 = 1;
 /// se déploient avant les annuaires locaux.
 const VIVANT_AVEC_PASSERELLE: u8 = 2;
 
+/// Le drapeau d'un **écho vivant dont la box a accordé un port ET dit son
+/// adresse externe** (0.45.0, décision 107) — sa réponse, la passerelle,
+/// puis l'adresse. **Une racine d'avant la 0.45.0 refuse ce drapeau**, et le
+/// rapport entier avec lui : les racines se déploient d'abord.
+const VIVANT_AVEC_EXTERNE: u8 = 3;
+
 /// Le port qu'une box a accordé à un écho, tel qu'un annuaire local le
 /// rapporte (décision 97) : le port, et par quoi — `1` UPnP, `2` PCP,
 /// `3` NAT-PMP. Ce module ne tire pas `asl-proto` ; l'étage 3 traduit.
@@ -131,6 +145,10 @@ pub struct PasserelleRapportee {
     pub port: u16,
     /// Par quoi, de `1` à `3`.
     pub via: u8,
+    /// L'adresse externe que la box a dite à l'écho, s'il l'a écrite
+    /// (décision 107) : une confirmation, que la racine compare à ce
+    /// qu'elle a observé chez le membre — jamais une cible.
+    pub externe: Option<core::net::Ipv4Addr>,
 }
 
 /// L'état d'un service, tel que l'annuaire local le rapporte à une racine.
@@ -159,10 +177,12 @@ impl<'a> EntreeDEtat<'a> {
                 reponse
                     .len()
                     .saturating_add(2)
-                    .saturating_add(if self.passerelle.is_some() {
-                        PASSERELLE_OCTETS
-                    } else {
-                        0
+                    .saturating_add(match self.passerelle {
+                        Some(PasserelleRapportee {
+                            externe: Some(_), ..
+                        }) => PASSERELLE_OCTETS.saturating_add(EXTERNE_OCTETS),
+                        Some(_) => PASSERELLE_OCTETS,
+                        None => 0,
                     })
             }))
     }
@@ -227,10 +247,12 @@ impl<'a> EntreeDEtat<'a> {
             Some(reponse) => {
                 poser_un(
                     sortie.get_mut(tranche(1)).unwrap_or_default(),
-                    if self.passerelle.is_some() {
-                        VIVANT_AVEC_PASSERELLE
-                    } else {
-                        VIVANT
+                    match self.passerelle {
+                        Some(PasserelleRapportee {
+                            externe: Some(_), ..
+                        }) => VIVANT_AVEC_EXTERNE,
+                        Some(_) => VIVANT_AVEC_PASSERELLE,
+                        None => VIVANT,
                     },
                 );
                 // Bornée ci-dessus par REPONSE_FEDEREE_OCTETS_MAX : elle tient
@@ -254,6 +276,12 @@ impl<'a> EntreeDEtat<'a> {
                         sortie.get_mut(tranche(1)).unwrap_or_default(),
                         passerelle.via,
                     );
+                    if let Some(externe) = passerelle.externe {
+                        poser(
+                            sortie.get_mut(tranche(EXTERNE_OCTETS)).unwrap_or_default(),
+                            &externe.octets(),
+                        );
+                    }
                 }
             }
         }
@@ -313,7 +341,7 @@ impl<'a> EntreeDEtat<'a> {
                 },
                 fin_du_nom.saturating_add(1),
             )),
-            drapeau @ (VIVANT | VIVANT_AVEC_PASSERELLE) => {
+            drapeau @ (VIVANT | VIVANT_AVEC_PASSERELLE | VIVANT_AVEC_EXTERNE) => {
                 let debut_longueur = fin_du_nom.saturating_add(1);
                 let debut_reponse = debut_longueur.saturating_add(2);
                 exiger(debut_reponse)?;
@@ -359,15 +387,42 @@ impl<'a> EntreeDEtat<'a> {
                 if !(1..=3).contains(&via) {
                     return Err(Faute::Etiquette { lue: via });
                 }
+                if drapeau == VIVANT_AVEC_PASSERELLE {
+                    return Ok((
+                        Self {
+                            service,
+                            machine,
+                            nom,
+                            reponse,
+                            passerelle: Some(PasserelleRapportee {
+                                port,
+                                via,
+                                externe: None,
+                            }),
+                        },
+                        fin,
+                    ));
+                }
+                let fin_externe = fin.saturating_add(EXTERNE_OCTETS);
+                exiger(fin_externe)?;
+                let mut quatre = [0_u8; EXTERNE_OCTETS];
+                poser(
+                    &mut quatre,
+                    octets.get(fin..fin_externe).unwrap_or_default(),
+                );
                 Ok((
                     Self {
                         service,
                         machine,
                         nom,
                         reponse,
-                        passerelle: Some(PasserelleRapportee { port, via }),
+                        passerelle: Some(PasserelleRapportee {
+                            port,
+                            via,
+                            externe: Some(core::net::Ipv4Addr::from(quatre)),
+                        }),
                     },
-                    fin,
+                    fin_externe,
                 ))
             }
             lue => Err(Faute::Etiquette { lue }),
@@ -461,6 +516,7 @@ mod tests {
             passerelle: Some(PasserelleRapportee {
                 port: 51_377,
                 via: 1,
+                externe: None,
             }),
             ..entree(Some(reponse.as_slice()))
         };
@@ -500,6 +556,48 @@ mod tests {
         assert_eq!(
             EntreeDEtat::lire(&sortie[..n]).map(|(lue, _)| lue.passerelle),
             Ok(None)
+        );
+    }
+
+    #[test]
+    fn un_echo_rapporte_l_adresse_externe_de_sa_box_et_elle_se_relit() {
+        let reponse = br#"{"service":"s-x"}"#;
+        let voulue = EntreeDEtat {
+            passerelle: Some(PasserelleRapportee {
+                port: 6_633,
+                via: 1,
+                externe: Some(core::net::Ipv4Addr::new(193, 250, 159, 198)),
+            }),
+            ..entree(Some(reponse.as_slice()))
+        };
+        let mut sortie = [0_u8; 256];
+        let n = voulue.ecrire(&mut sortie).expect("elle s'écrit");
+        assert_eq!(n, voulue.octets());
+        assert_eq!(n, entree(Some(reponse.as_slice())).octets() + 3 + 4);
+        assert_eq!(sortie[n - 4..n], [193, 250, 159, 198]);
+        assert_eq!(EntreeDEtat::lire(&sortie[..n]), Ok((voulue, n)));
+        // Tronquée dans l'adresse.
+        assert_eq!(
+            EntreeDEtat::lire(&sortie[..n - 1]),
+            Err(Faute::Tronquee {
+                attendus: n,
+                obtenus: n - 1
+            })
+        );
+        // Tronquée dans la passerelle, avant l'adresse : la même faute.
+        assert_eq!(
+            EntreeDEtat::lire(&sortie[..n - 5]),
+            Err(Faute::Tronquee {
+                attendus: n - 4,
+                obtenus: n - 5
+            })
+        );
+        // Un moyen inconnu, sous ce drapeau aussi.
+        let mut inconnu = sortie;
+        inconnu[n - 5] = 0;
+        assert_eq!(
+            EntreeDEtat::lire(&inconnu[..n]),
+            Err(Faute::Etiquette { lue: 0 })
         );
     }
 
@@ -557,7 +655,11 @@ mod tests {
         let pleine = [b'x'; REPONSE_FEDEREE_OCTETS_MAX];
         let longue = EntreeDEtat {
             nom: NomRange::nouveau(&"n".repeat(NOM_OCTETS_MAX)).expect("il tient"),
-            passerelle: Some(PasserelleRapportee { port: 1, via: 3 }),
+            passerelle: Some(PasserelleRapportee {
+                port: 1,
+                via: 3,
+                externe: Some(core::net::Ipv4Addr::new(203, 0, 113, 7)),
+            }),
             ..entree(Some(pleine.as_slice()))
         };
         assert_eq!(longue.octets(), ENTREE_D_ETAT_OCTETS_MAX);

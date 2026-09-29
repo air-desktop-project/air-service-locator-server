@@ -96,6 +96,10 @@ pub struct Echos {
     /// Côté racine : par machine d'un domaine hébergé, la sonde du dehors
     /// (décision 92).
     pub du_dehors: std::collections::HashMap<Identifiant, DuDehors>,
+    /// Côté racine : par machine d'un domaine hébergé, ce que le journal a
+    /// dit en dernier de la sonde en IPv4 (décision 107) — pour ne le redire
+    /// qu'au changement.
+    pub ipv4_dits: std::collections::HashMap<Identifiant, String>,
 }
 
 /// Un constat de l'écho, et quand.

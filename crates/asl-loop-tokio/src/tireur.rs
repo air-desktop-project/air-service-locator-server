@@ -792,6 +792,13 @@ impl Connexion {
         Ok(connexion)
     }
 
+    /// Ferme la connexion proprement (`NO_ERROR`), et dit-le au pair : il
+    /// n'a pas à attendre l'inactivité pour l'oublier.
+    pub(crate) async fn fermer(mut self) {
+        self.quic.close_with(0, maintenant());
+        let _ = self.emettre().await;
+    }
+
     /// La cadence de maintien : c'est elle qui tient le mapping ouvert (§2.3).
     pub(crate) fn maintenir(&mut self, keepalive_us: u64) {
         self.quic.set_keepalive(keepalive_us, maintenant());

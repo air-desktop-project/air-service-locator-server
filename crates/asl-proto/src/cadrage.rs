@@ -668,10 +668,14 @@ impl<'a> Annonce<'a> {
         if let Some(passerelle) = self.passerelle {
             let _ = write!(
                 ecrivain,
-                ",\"passerelle\":{{\"port\":{},\"via\":\"{}\"}}",
+                ",\"passerelle\":{{\"port\":{},\"via\":\"{}\"",
                 passerelle.port.valeur(),
                 passerelle.via.texte()
             );
+            if let Some(externe) = passerelle.externe {
+                let _ = write!(ecrivain, ",\"externe\":\"{externe}\"");
+            }
+            ecrivain.pousser(b"}");
         }
         ecrivain.pousser(b"}");
 
@@ -679,12 +683,14 @@ impl<'a> Annonce<'a> {
     }
 }
 
-/// Décode `{"port":…,"via":"…"}` — les deux champs, dans n'importe quel
-/// ordre, ni doublon ni inconnu.
+/// Décode `{"port":…,"via":"…"}`, et `"externe":"a.b.c.d"` s'il y est
+/// (décision 107) — dans n'importe quel ordre, ni doublon ni inconnu.
+/// `externe` est une IPv4 en notation pointée, et rien d'autre.
 fn decoder_passerelle(lecteur: &mut Lecteur<'_>) -> Result<Passerelle, Erreur> {
     lecteur.attendre(b'{', "un objet")?;
     let mut port: Option<Port> = None;
     let mut via: Option<ViaPasserelle> = None;
+    let mut externe: Option<core::net::Ipv4Addr> = None;
     loop {
         let position_cle = lecteur.position;
         let cle = lecteur.chaine()?;
@@ -698,7 +704,16 @@ fn decoder_passerelle(lecteur: &mut Lecteur<'_>) -> Result<Passerelle, Erreur> {
                 port = Some(Port::depuis_u16(borne)?);
             }
             "via" if via.is_none() => via = Some(ViaPasserelle::analyser(lecteur.chaine()?)?),
-            "port" | "via" => {
+            "externe" if externe.is_none() => {
+                let position = lecteur.position;
+                externe = Some(
+                    lecteur
+                        .chaine()?
+                        .parse()
+                        .map_err(|_| Erreur::AdresseInvalide { position })?,
+                );
+            }
+            "port" | "via" | "externe" => {
                 return Err(Erreur::ChampEnDouble {
                     position: position_cle,
                 });
@@ -727,6 +742,7 @@ fn decoder_passerelle(lecteur: &mut Lecteur<'_>) -> Result<Passerelle, Erreur> {
     Ok(Passerelle {
         port: port.ok_or(Erreur::ChampManquant { nom: "port" })?,
         via: via.ok_or(Erreur::ChampManquant { nom: "via" })?,
+        externe,
     })
 }
 
