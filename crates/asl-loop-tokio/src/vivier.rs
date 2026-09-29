@@ -186,6 +186,17 @@ impl Vivier {
         avant.saturating_sub(self.annonces.len())
     }
 
+    /// Les échos vivants : chaque session `asl-echo`, pour la cadence de
+    /// quinze minutes (décision 92).
+    #[must_use]
+    pub fn echos(&self) -> Vec<Session> {
+        self.annonces
+            .values()
+            .map(|vivante| vivante.session)
+            .filter(Session::est_un_echo)
+            .collect()
+    }
+
     /// Combien d'annonces vivent.
     #[must_use]
     pub fn combien(&self) -> usize {

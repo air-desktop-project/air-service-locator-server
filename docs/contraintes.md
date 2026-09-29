@@ -218,7 +218,11 @@ En pratique :
   89 et 92, `protocole.md` §3 quater) : le point UDP de l'`asl-echo`, qui
   répond par une signature de la clé de la machine. Il devient `joignable`
   quand, et seulement quand, cette signature a été vérifiée — c'est une
-  mesure, et C6 la permet.
+  mesure, et C6 la permet. **Codé en 0.43.0** : `asl_annuaire::Session` ne sonde
+  un point UDP que s'il est celui d'une annonce `asl-echo` ; `asl-proto`, qui
+  ne connaît pas le nom du service, accepte depuis une mesure sur tout point
+  UDP — `asl` ≤ 0.22.3 refuse donc l'objet d'annonce d'un écho mesuré, et
+  lui seul (`protocole.md` §3 quater).
 - **Un appareil qui se tait n'est pas mort.** La règle des orphelins
   (`modele.md` §2.1, 2026-09-18) n'efface un compte que quand tous ses
   appareils sont **révoqués** — un fait constaté —, jamais parce qu'aucun ne

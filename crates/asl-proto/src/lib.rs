@@ -133,6 +133,19 @@ pub const NOM_MAX: usize = 64;
 /// asl-directory` écrira ce nom-là.
 pub const NOM_ASL_DIRECTORY: &str = "asl-directory";
 
+/// Le nom du service de l'écho (`protocole.md` §3 quater ; décisions 89 et
+/// 90). **RÉSERVÉ À SA FORME** : une annonce sous ce nom porte exactement un
+/// point, en UDP, et c'est celui que l'annuaire sonde par l'écho. Le même
+/// que `asl_echo::NOM_SERVICE` ; `asl-session` tient leur égalité.
+pub const NOM_ASL_ECHO: &str = "asl-echo";
+
+/// Ces points sont-ils ceux qu'une annonce `asl-echo` doit porter — un seul,
+/// en UDP ?
+#[must_use]
+pub fn forme_d_echo(points: &[PointEcoute]) -> bool {
+    matches!(points, [point] if point.protocole == Protocole::Udp)
+}
+
 /// Le nombre maximal de points d'écoute dans une annonce.
 ///
 /// **Une borne existe parce que le compte vient du réseau.** Huit suffit
@@ -376,8 +389,10 @@ pub enum Erreur {
     },
     /// Un verdict de mesure porte sur un point qui ne se sonde pas.
     ///
-    /// **C'est C6 dans un type** : l'annuaire n'a rien pu mesurer sur un point
-    /// UDP, donc il ne peut ni le dire joignable ni le dire injoignable.
+    /// **Plus rendue depuis 0.43.0**, et gardée pour les lecteurs qui la
+    /// nomment : elle refusait un verdict mesuré sur un point UDP, et le point
+    /// UDP de l'`asl-echo` se mesure désormais (`protocole.md` §3 quater ;
+    /// l'exception de C6).
     VerdictImpossible,
     /// Un champ qui ne peut pas accompagner ce verdict.
     ///
@@ -1530,14 +1545,16 @@ fn valider_joignabilite(entrees: &[Joignabilite]) -> Result<(), Erreur> {
             return Err(Erreur::PointEnDouble);
         }
 
-        // C6 : un point qui ne se sonde pas n'a pas pu être mesuré.
-        let mesure = matches!(
-            entree.verdict,
-            Verdict::Joignable { .. } | Verdict::Injoignable { .. }
-        );
-        if mesure && !entree.point.protocole.se_sonde() {
-            return Err(Erreur::VerdictImpossible);
-        }
+        // **UN POINT UDP PEUT ÊTRE MESURÉ, DEPUIS 0.43.0 : CELUI DE L'ÉCHO**
+        // (`protocole.md` §3 quater, décisions 89 et 92 ; C6, son exception).
+        // L'`asl-echo` répond par une signature de la clé de la machine, et
+        // son point UDP est `joignable` quand, et seulement quand, elle a été
+        // vérifiée. Ce lecteur ne connaît pas le nom du service — une
+        // poussée ne le porte pas —, donc il accepte un verdict mesuré sur
+        // tout point UDP ; c'est l'annuaire qui ne le pose que sur l'écho
+        // (`asl_annuaire::Session`). Jusqu'à 0.42.0, ce lecteur le refusait
+        // (`VerdictImpossible`) : `asl` ≤ 0.22.3 refuse donc l'objet d'annonce
+        // d'un `asl-echo` mesuré, et celui-là seul.
     }
 
     Ok(())

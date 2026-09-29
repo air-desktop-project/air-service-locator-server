@@ -11,8 +11,9 @@
 //! # Les propriétés
 //!
 //! 1. **Rien ne panique.**
-//! 2. **UN POINT UDP N'EST JAMAIS `joignable` NI `injoignable`.** Il ne se sonde
-//!    pas, donc rien n'a pu être mesuré à son sujet.
+//! 2. **UN VERDICT MESURÉ PORTE SA DATE**, quel que soit le protocole : depuis
+//!    0.43.0, le point UDP de l'`asl-echo` se mesure (l'exception de C6), et
+//!    ce lecteur ne connaît pas le nom du service.
 //! 3. **UN `joignable` PORTE TOUJOURS SA DATE ET SON CANDIDAT.** Le type le rend
 //!    structurellement vrai ; ce qu'on vérifie ici est qu'aucun chemin du
 //!    décodeur ne fabrique l'inverse.
@@ -26,7 +27,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use asl_id::Genre;
-use asl_proto::{MESSAGE_MAX, POINTS_MAX, Protocole, Reponse, TamponsReponse, Verdict};
+use asl_proto::{MESSAGE_MAX, POINTS_MAX, Reponse, TamponsReponse, Verdict};
 
 fuzz_target!(|donnees: &[u8]| {
     let mut tampons = TamponsReponse::nouveaux();
@@ -52,20 +53,10 @@ fuzz_target!(|donnees: &[u8]| {
         match entree.verdict {
             // PROPRIÉTÉ 2 et 3.
             Verdict::Joignable { candidat, a } => {
-                assert_eq!(
-                    entree.point.protocole,
-                    Protocole::Tcp,
-                    "un point UDP a été dit joignable"
-                );
                 assert_eq!(entree.verdict.mesure_a(), Some(a));
                 assert_ne!(candidat.port.valeur(), 0);
             }
             Verdict::Injoignable { a } => {
-                assert_eq!(
-                    entree.point.protocole,
-                    Protocole::Tcp,
-                    "un point UDP a été dit injoignable"
-                );
                 assert_eq!(entree.verdict.mesure_a(), Some(a));
             }
             // Les deux verdicts qui n'affirment aucune mesure n'en portent

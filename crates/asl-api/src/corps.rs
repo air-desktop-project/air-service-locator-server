@@ -1108,6 +1108,10 @@ pub struct MachineRendue<'a> {
     /// encore ; on rend donc « attendue » pour l'une comme pour l'autre, plutôt
     /// qu'une distinction qu'on inventerait.
     pub enrolee: bool,
+    /// **L'état de son écho** (`protocole.md` §3 quater ; décisions 91 et
+    /// 92), absent quand elle n'annonce pas d'`asl-echo` — « pas d'écho »,
+    /// ni un échec ni un succès.
+    pub echo: Option<EtatDEcho>,
 }
 
 impl<'a> MachineRendue<'a> {
@@ -1162,7 +1166,11 @@ impl<'a> MachineRendue<'a> {
             }
             .as_bytes(),
         );
-        ecrivain.pousser(b"\"}");
+        ecrivain.pousser(b"\"");
+        if let Some(echo) = &self.echo {
+            echo.ecrire(&mut ecrivain);
+        }
+        ecrivain.pousser(b"}");
         ecrivain.achever()
     }
 
@@ -1183,6 +1191,7 @@ impl<'a> MachineRendue<'a> {
         let mut alias: Option<&str> = None;
         let mut capacites = None;
         let mut enrolee = None;
+        let mut echo = EchoLu::default();
 
         loop {
             lecteur.sauter_blancs();
@@ -1228,6 +1237,7 @@ impl<'a> MachineRendue<'a> {
                     };
                     poser(&mut enrolee, etat, position)?;
                 }
+                autre if echo.lire(autre, &mut lecteur, position)? => {}
                 _ => return Err(Erreur::ChampInconnu { position }),
             }
 
@@ -1247,7 +1257,201 @@ impl<'a> MachineRendue<'a> {
             alias,
             capacites: capacites.ok_or(Erreur::ChampManquant { nom: "capacites" })?,
             enrolee: enrolee.ok_or(Erreur::ChampManquant { nom: "cle" })?,
+            echo: echo.achever()?,
         })
+    }
+}
+
+// ── L'état d'écho d'une machine (décisions 91 et 92) ────────────────────────
+
+/// Ce que l'annuaire a constaté de l'écho d'une machine : le mot de `echo`.
+///
+/// **Des chaînes sur le fil, et un mot inconnu se dit tel quel** chez les
+/// lecteurs déployés (décision 86) : les applications lisent la machine par
+/// clés, et `asl domain` saute une clé inconnue quelle que soit sa valeur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotDEcho {
+    /// Une réponse est venue, signée de la clé que l'annuaire tient pour la
+    /// machine : **preuve de clé vérifiée**.
+    Verifie,
+    /// Aucune réponse, ou une réponse illisible.
+    Injoignable,
+    /// Une réponse bien formée, **signée d'une autre clé** — quelqu'un
+    /// d'autre répond à cette adresse. Sur le fil de l'annonce, c'est
+    /// `injoignable` ; ici, c'est dit.
+    AutreCle,
+    /// Pas encore sondé.
+    EnCours,
+}
+
+impl MotDEcho {
+    /// Le mot, tel qu'il sort.
+    #[must_use]
+    pub const fn mot(self) -> &'static str {
+        match self {
+            Self::Verifie => "verifie",
+            Self::Injoignable => "injoignable",
+            Self::AutreCle => "autre_cle",
+            Self::EnCours => "en_cours",
+        }
+    }
+
+    /// Lit un mot.
+    #[must_use]
+    pub fn depuis_mot(mot: &str) -> Option<Self> {
+        [
+            Self::Verifie,
+            Self::Injoignable,
+            Self::AutreCle,
+            Self::EnCours,
+        ]
+        .into_iter()
+        .find(|connu| connu.mot() == mot)
+    }
+}
+
+/// D'où l'annuaire a sondé (la règle de `sonde_locale`, décision 60).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepuisDEcho {
+    /// Du dehors : la preuve dit qu'on joint la machine depuis l'Internet.
+    Exterieur,
+    /// De l'intérieur — la machine même, ou son réseau : la preuve dit que
+    /// la clé est là, pas qu'on la joint du dehors.
+    Interieur,
+}
+
+impl DepuisDEcho {
+    /// Le mot, tel qu'il sort.
+    #[must_use]
+    pub const fn mot(self) -> &'static str {
+        match self {
+            Self::Exterieur => "exterieur",
+            Self::Interieur => "interieur",
+        }
+    }
+
+    /// Lit un mot.
+    #[must_use]
+    pub fn depuis_mot(mot: &str) -> Option<Self> {
+        [Self::Exterieur, Self::Interieur]
+            .into_iter()
+            .find(|connu| connu.mot() == mot)
+    }
+}
+
+/// L'état d'écho d'une machine, tel que `GET /v1/machines` et
+/// `GET /v1/domaines/{d}` le rendent :
+///
+/// ```jsonc
+/// "echo":"verifie","echo_a":1789217751000,"echo_par":"n-…","echo_depuis":"exterieur"
+/// ```
+///
+/// **Des chaînes et des entiers seulement** (décision 86). **Pas d'adresse** :
+/// l'état dit qu'on a prouvé, pas où ; l'adresse reste derrière `localiser`.
+/// `echo_a`, `echo_par` et `echo_depuis` sont absents sur `en_cours`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EtatDEcho {
+    /// Le constat.
+    pub mot: MotDEcho,
+    /// L'instant de la mesure, en millisecondes d'époque.
+    pub a: Option<u64>,
+    /// L'annuaire qui a sondé.
+    pub par: Option<Identifiant>,
+    /// D'où.
+    pub depuis: Option<DepuisDEcho>,
+}
+
+impl EtatDEcho {
+    /// Pas encore sondé : le mot seul.
+    pub const EN_COURS: Self = Self {
+        mot: MotDEcho::EnCours,
+        a: None,
+        par: None,
+        depuis: None,
+    };
+
+    /// Écrit ses champs, chacun précédé d'une virgule.
+    pub(crate) fn ecrire(&self, ecrivain: &mut asl_proto::cadrage::Ecrivain<'_>) {
+        ecrivain.pousser(b",\"echo\":\"");
+        ecrivain.pousser(self.mot.mot().as_bytes());
+        ecrivain.pousser(b"\"");
+        if let Some(a) = self.a {
+            let mut chiffres = [0_u8; 20];
+            ecrivain.pousser(b",\"echo_a\":");
+            ecrivain.pousser(crate::annuaire::ecrire_un_entier(a, &mut chiffres));
+        }
+        if let Some(par) = self.par {
+            ecrivain.pousser(b",\"echo_par\":\"");
+            ecrivain.pousser(par.texte().as_str().as_bytes());
+            ecrivain.pousser(b"\"");
+        }
+        if let Some(depuis) = self.depuis {
+            ecrivain.pousser(b",\"echo_depuis\":\"");
+            ecrivain.pousser(depuis.mot().as_bytes());
+            ecrivain.pousser(b"\"");
+        }
+    }
+}
+
+/// Les quatre champs de l'écho, à mesure qu'un décodeur les rencontre.
+#[derive(Default)]
+pub(crate) struct EchoLu {
+    mot: Option<MotDEcho>,
+    a: Option<u64>,
+    par: Option<Identifiant>,
+    depuis: Option<DepuisDEcho>,
+}
+
+impl EchoLu {
+    /// Ce champ est-il l'un des quatre ? Alors il est lu, et `true`.
+    pub(crate) fn lire(
+        &mut self,
+        champ: &str,
+        lecteur: &mut Lecteur<'_>,
+        position: usize,
+    ) -> Result<bool, Erreur> {
+        match champ {
+            "echo" => {
+                let ou = lecteur.position();
+                let mot = MotDEcho::depuis_mot(lecteur.chaine()?).ok_or(Erreur::JsonAttendu {
+                    position: ou,
+                    attendu: "un mot d'écho",
+                })?;
+                poser(&mut self.mot, mot, position)?;
+            }
+            "echo_a" => poser(&mut self.a, lecteur.entier()?, position)?,
+            "echo_par" => poser(
+                &mut self.par,
+                lire_genre(lecteur, Genre::Annuaire)?,
+                position,
+            )?,
+            "echo_depuis" => {
+                let ou = lecteur.position();
+                let depuis =
+                    DepuisDEcho::depuis_mot(lecteur.chaine()?).ok_or(Erreur::JsonAttendu {
+                        position: ou,
+                        attendu: "exterieur ou interieur",
+                    })?;
+                poser(&mut self.depuis, depuis, position)?;
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// L'état lu, s'il y en a un. **Les trois autres champs sans `echo`**
+    /// sont refusés : ils ne diraient rien de quoi.
+    pub(crate) fn achever(self) -> Result<Option<EtatDEcho>, Erreur> {
+        match self.mot {
+            Some(mot) => Ok(Some(EtatDEcho {
+                mot,
+                a: self.a,
+                par: self.par,
+                depuis: self.depuis,
+            })),
+            None if self.a.is_none() && self.par.is_none() && self.depuis.is_none() => Ok(None),
+            None => Err(Erreur::ChampManquant { nom: "echo" }),
+        }
     }
 }
 

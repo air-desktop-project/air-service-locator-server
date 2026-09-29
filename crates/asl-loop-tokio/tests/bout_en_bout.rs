@@ -210,6 +210,8 @@ struct ClesDeLExploitant {
     /// Côté annuaire local : ce que les fédérateurs concluent de la paire
     /// (décision 70), que `GET /v1/version` rend.
     paire: Option<Arc<asl_loop_tokio::PaireJugee>>,
+    /// Par la porte d'essai : où partent les sondes par l'écho.
+    detour_d_echo: Option<SocketAddr>,
 }
 
 #[allow(
@@ -290,6 +292,9 @@ async fn lever_complet(
         }
         if let Some(lenteur) = cles.lenteur_de_sonde {
             application.retarder_les_verdicts_pour_un_essai(lenteur);
+        }
+        if let Some(ou) = cles.detour_d_echo {
+            application.detourner_l_echo_pour_un_essai(ou);
         }
         if let Some(rendre) = cles.fermetures {
             let _ = rendre.send(application.fermetures());
@@ -6877,6 +6882,30 @@ async fn lever_un_annuaire_local(
     locateurs: &[&str],
     pair: Option<Identifiant>,
 ) -> AnnuaireLocal {
+    lever_un_annuaire_local_qui_sonde(
+        nom, confiance, vers, identite, cadence_ms, locateurs, pair, None, None,
+    )
+    .await
+}
+
+/// Le même, qui **sonde les échos** : sa clé d'identité signe les sondes
+/// (le binaire la tient toujours ; les autres essais s'en passent), et la
+/// porte d'essai les envoie vers ce faux écho.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "un harnais d'essai, la même raison que `lever_complet`"
+)]
+async fn lever_un_annuaire_local_qui_sonde(
+    nom: &str,
+    confiance: asl_loop_tokio::Confiance,
+    vers: SocketAddr,
+    identite: asl_cle::CleSecrete,
+    cadence_ms: u64,
+    locateurs: &[&str],
+    pair: Option<Identifiant>,
+    sondeur: Option<&'static asl_cle::CleSecrete>,
+    detour_d_echo: Option<SocketAddr>,
+) -> AnnuaireLocal {
     // Le certificat que l'annuaire local présente est celui de son banc ; la
     // clé qu'il prouve aux racines est `identite` — le binaire tient les deux
     // sous la même clé.
@@ -6898,6 +6927,8 @@ async fn lever_un_annuaire_local(
             fermetures: Some(rendre_fermetures),
             entrepot_partage: Some(rendre_entrepot),
             paire: Some(Arc::clone(&paire)),
+            identite: sondeur,
+            detour_d_echo,
             ..ClesDeLExploitant::default()
         },
     )
@@ -8202,6 +8233,14 @@ struct SceneDAnnuaire {
 }
 
 async fn monter_une_scene_d_annuaire(nom: &str) -> SceneDAnnuaire {
+    monter_une_scene_d_annuaire_detournee(nom, None).await
+}
+
+/// La même, dont les sondes par l'écho partent vers ce faux écho.
+async fn monter_une_scene_d_annuaire_detournee(
+    nom: &str,
+    detour_d_echo: Option<SocketAddr>,
+) -> SceneDAnnuaire {
     let (racine, identite) = banc(nom);
     let (base, fichier) = entrepot(nom);
     let exploitant_cle = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
@@ -8220,6 +8259,7 @@ async fn monter_une_scene_d_annuaire(nom: &str) -> SceneDAnnuaire {
             // La clé d'identité de la racine, qui signe les jetons d'écho
             // (décision 91) — la même que celle du banc, comme le binaire.
             identite: Some(identite),
+            detour_d_echo,
             ..ClesDeLExploitant::default()
         },
     )
@@ -8411,6 +8451,24 @@ fn objet_du_membre(liste: &str, membre: Identifiant) -> String {
 
 impl SceneDAnnuaire {
     /// Speedy se lève et fédère, ses locateurs publiés.
+    /// Speedy, qui sonde les échos vers ce faux écho — de sa clé, `0x51`.
+    async fn lever_speedy_qui_sonde(&self, nom: &str, detour: SocketAddr) -> AnnuaireLocal {
+        lever_un_annuaire_local_qui_sonde(
+            nom,
+            asl_loop_tokio::Confiance::par_identite(&[self.identite.publique()]),
+            self.adresse,
+            asl_cle::CleSecrete::depuis_entropie([0x51; 32]),
+            200,
+            &["[2001:db8::51]:6630"],
+            None,
+            Some(Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie(
+                [0x51; 32],
+            )))),
+            Some(detour),
+        )
+        .await
+    }
+
     async fn lever_speedy(&self, nom: &str) -> AnnuaireLocal {
         lever_un_annuaire_local(
             nom,
@@ -9873,5 +9931,332 @@ async fn un_jeton_d_echo_se_delivre_a_qui_localise_l_echo_et_ne_sert_qu_a_sa_cle
         assert_eq!(corps, &refus[0].1, "C9 : la même réponse, octet pour octet");
     }
 
+    scene.arreter().await;
+}
+
+/// Ce que l'essai règle pour le faux écho : la machine, et la graine de la
+/// clé dont il signe.
+type ReglageDEcho = Arc<std::sync::Mutex<Option<(Identifiant, [u8; 32])>>>;
+
+/// Un faux écho, sur la boucle locale : il lit une sonde d'annuaire, la croit
+/// sous la clé de `racine`, et répond pour la machine et de la clé que
+/// l'essai règle dans `qui` — la bonne, ou une autre. Rien de réglé : silence.
+async fn un_faux_echo(racine: &'static asl_cle::CleSecrete, qui: ReglageDEcho) -> SocketAddr {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("une socket");
+    let ou = socket.local_addr().expect("une adresse");
+    tokio::spawn(async move {
+        let mut tampon = [0_u8; 512];
+        let n = asl_cle::identifiant_de_racine(&racine.publique());
+        while let Ok((lus, source)) = socket.recv_from(&mut tampon).await {
+            let Some((machine, graine)) = *qui.lock().expect("le réglage") else {
+                continue;
+            };
+            let Ok(sonde) = asl_echo::SondeAnnuaire::lire(&tampon[..lus]) else {
+                continue;
+            };
+            let maintenant = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
+            let cle_de = |quel| (quel == n).then(|| racine.publique());
+            if let Ok(acceptee) = sonde.accepter(machine, &cle_de, maintenant) {
+                let reponse =
+                    acceptee.repondre(source, &asl_cle::CleSecrete::depuis_entropie(graine));
+                let _ = socket.send_to(&reponse.octets(), source).await;
+            }
+        }
+    });
+    ou
+}
+
+/// Annonce `asl-echo` sur cette connexion, avec ces points : le statut.
+async fn annoncer_l_echo(
+    daemon: &mut ams_quic_client::Client,
+    flux: u64,
+    machine: Identifiant,
+    points: &str,
+) -> (Vec<u8>, String) {
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"asl-echo","points":{points}}}"#,
+        machine.texte()
+    );
+    let (statut, rendu) = poster(
+        daemon,
+        flux,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    (statut, String::from_utf8_lossy(&rendu).into_owned())
+}
+
+/// Relit `GET /v1/machines` jusqu'à ce que la machine y porte ce mot d'écho.
+async fn attendre_l_echo(
+    appareil: &mut ams_quic_client::Client,
+    flux: &mut u64,
+    machine: Identifiant,
+    mot: &str,
+) -> String {
+    let depart = std::time::Instant::now();
+    loop {
+        let (statut, liste) = lire_json(appareil, suivant(flux), b"/v1/machines").await;
+        assert_eq!(statut, b"200", "{liste}");
+        let objet = liste
+            .split("},{")
+            .find(|objet| objet.contains(machine.texte().as_str()))
+            .unwrap_or_default()
+            .to_owned();
+        if objet.contains(&format!("\"echo\":\"{mot}\"")) {
+            return objet;
+        }
+        assert!(
+            depart.elapsed() < std::time::Duration::from_secs(10),
+            "l'écho n'est jamais devenu « {mot} » : {objet}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
+async fn l_annuaire_sonde_l_echo_et_dit_son_etat_au_proprietaire_et_a_qui_voit() {
+    // ── CE QUE CET ESSAI PROUVE (décisions 90 à 92, 0.43.0) ─────────────────
+    //
+    // 1. **Le nom est réservé à sa forme** : deux points, ou un point TCP,
+    //    `400`.
+    // 2. **L'annuaire sonde l'écho** d'une sonde signée de sa clé d'identité ;
+    //    l'écho répond de la clé de la machine, et l'annuaire la vérifie sous
+    //    celle qu'il tient : le point UDP devient `joignable` sur le fil — lu
+    //    par `asl_proto` —, et la machine porte `echo: verifie`, `echo_a`,
+    //    `echo_par` (cette racine), `echo_depuis` (`interieur` : la boucle
+    //    locale), pour son propriétaire et pour qui a `voir` sur le domaine.
+    // 3. **Une autre clé répond** : `autre_cle` sur la machine, `injoignable`
+    //    sur le fil.
+    // 4. **Pas d'écho, pas de champ** ; et qui n'a rien ne voit rien.
+    let nom = "sonde-par-l-echo";
+    let reglage = Arc::new(std::sync::Mutex::new(None));
+    let echo = un_faux_echo(banc(nom).1, Arc::clone(&reglage)).await;
+    let mut scene = monter_une_scene_d_annuaire_detournee(nom, Some(echo)).await;
+    let chez_bob = asl_registre::premier_domaine(scene.compte_b);
+    let racine_n = asl_cle::identifiant_de_racine(&scene.identite.publique());
+
+    // Le grenier d'alice, rangé chez bob : bob y tient `voir` et plus, sans
+    // droit écrit (décision 103).
+    let cle_g = asl_cle::CleSecrete::depuis_entropie([0xE7; 32]);
+    let flux = suivant(&mut scene.flux_alice);
+    let grenier = machine_du_compte(
+        &mut scene.alice,
+        flux,
+        &scene.racine,
+        scene.adresse,
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        &cle_g,
+    )
+    .await;
+    let compte_alice = scene.compte_a;
+    let mut bob = std::mem::replace(
+        &mut scene.bob,
+        connecter(&scene.racine, scene.adresse).await,
+    );
+    let mut flux_bob = scene.flux_bob;
+    let _ = accorder(
+        &mut bob,
+        &mut flux_bob,
+        compte_alice,
+        chez_bob,
+        r#"["rattacher"]"#,
+    )
+    .await;
+    let flux = suivant(&mut scene.flux_alice);
+    assert_eq!(
+        poser_json(
+            &mut scene.alice,
+            flux,
+            format!("/v1/machines/{}/domaine", grenier.texte()).as_bytes(),
+            format!("{{\"domaine\":\"{}\"}}", chez_bob.texte()).as_bytes(),
+        )
+        .await,
+        b"204"
+    );
+
+    // ── 4. PAS D'ÉCHO, PAS DE CHAMP ─────────────────────────────────────────
+    let (statut, liste) = lire_json(
+        &mut scene.alice,
+        suivant(&mut scene.flux_alice),
+        b"/v1/machines",
+    )
+    .await;
+    assert_eq!(statut, b"200", "{liste}");
+    assert!(
+        !liste.contains("\"echo\""),
+        "rien d'annoncé, rien à dire : {liste}"
+    );
+
+    // ── 1. LE NOM RÉSERVÉ À SA FORME ────────────────────────────────────────
+    let mut daemon = connecter(&scene.racine, scene.adresse).await;
+    authentifier(&mut daemon, grenier, &cle_g, 0, 4).await;
+    for (flux, points) in [
+        (
+            8,
+            r#"[{"protocole":"udp","port":41877},{"protocole":"udp","port":41878}]"#,
+        ),
+        (12, r#"[{"protocole":"tcp","port":41877}]"#),
+    ] {
+        let (statut, rendu) = annoncer_l_echo(&mut daemon, flux, grenier, points).await;
+        assert_eq!(statut, b"400", "{points} : {rendu}");
+    }
+
+    // ── 2. VÉRIFIÉ ──────────────────────────────────────────────────────────
+    *reglage.lock().expect("le réglage") = Some((grenier, [0xE7; 32]));
+    let (statut, rendu) = annoncer_l_echo(
+        &mut daemon,
+        16,
+        grenier,
+        r#"[{"protocole":"udp","port":41877}]"#,
+    )
+    .await;
+    assert_eq!(statut, b"200", "{rendu}");
+    let objet = attendre_l_echo(&mut scene.alice, &mut scene.flux_alice, grenier, "verifie").await;
+    assert!(objet.contains("\"echo_a\":"), "{objet}");
+    assert!(
+        objet.contains(&format!("\"echo_par\":\"{}\"", racine_n.texte())),
+        "{objet}"
+    );
+    assert!(objet.contains("\"echo_depuis\":\"interieur\""), "{objet}");
+    assert!(
+        !objet.contains("127.0.0.1"),
+        "pas d'adresse dans l'état : {objet}"
+    );
+
+    // Sur le fil de l'annonce, `joignable` — et le lecteur d'aujourd'hui le
+    // lit. Bob localise par son domaine.
+    let (_, mut bob_lit, mut flux_bl, _) = une_machine_prouvee(
+        &scene,
+        &mut bob,
+        &mut flux_bob,
+        br#"{"nom":"console","capacites":["lecture"]}"#,
+        0xB3,
+    )
+    .await;
+    let cible = format!("/v1/ou/{}/asl-echo", grenier.texte());
+    let (statut, corps) = lire_json(&mut bob_lit, suivant(&mut flux_bl), cible.as_bytes()).await;
+    assert_eq!(statut, b"200", "{corps}");
+    let mut tampons = asl_proto::cadrage::TamponsReponse::nouveaux();
+    let lue = asl_proto::Reponse::decoder(corps.as_bytes(), &mut tampons).expect("elle se lit");
+    assert!(
+        matches!(
+            lue.joignabilite[0].verdict,
+            asl_proto::Verdict::Joignable { .. }
+        ),
+        "le point UDP de l'écho, joignable : {corps}"
+    );
+    // Qui a `voir` sur le domaine lit l'état ; qui n'a rien, rien.
+    let (statut, domaine) = lire_json(
+        &mut bob,
+        suivant(&mut flux_bob),
+        format!("/v1/domaines/{}", chez_bob.texte()).as_bytes(),
+    )
+    .await;
+    assert_eq!(statut, b"200", "{domaine}");
+    assert!(domaine.contains("\"echo\":\"verifie\""), "{domaine}");
+    let (mut dan, mut flux_dan, _) = un_compte(&scene, 0xD6).await;
+    let (statut, _) = lire_json(
+        &mut dan,
+        suivant(&mut flux_dan),
+        format!("/v1/domaines/{}", chez_bob.texte()).as_bytes(),
+    )
+    .await;
+    assert_eq!(statut, b"404", "hors droit, rien");
+
+    // ── 3. UNE AUTRE CLÉ RÉPOND ─────────────────────────────────────────────
+    *reglage.lock().expect("le réglage") = Some((grenier, [0x66; 32]));
+    let mut autre = connecter(&scene.racine, scene.adresse).await;
+    authentifier(&mut autre, grenier, &cle_g, 0, 4).await;
+    let (statut, rendu) = annoncer_l_echo(
+        &mut autre,
+        8,
+        grenier,
+        r#"[{"protocole":"udp","port":41879}]"#,
+    )
+    .await;
+    assert_eq!(statut, b"200", "{rendu}");
+    attendre_l_echo(
+        &mut scene.alice,
+        &mut scene.flux_alice,
+        grenier,
+        "autre_cle",
+    )
+    .await;
+    let (_, corps) = lire_json(&mut bob_lit, suivant(&mut flux_bl), cible.as_bytes()).await;
+    assert!(
+        corps.contains("\"verdict\":\"injoignable\""),
+        "sur le fil, une autre clé est injoignable : {corps}"
+    );
+
+    scene.arreter().await;
+}
+
+#[tokio::test]
+async fn l_echo_d_une_machine_hebergee_se_sonde_chez_l_annuaire_local_et_se_dit_aux_racines() {
+    // ── CE QUE CET ESSAI PROUVE (décision 92, 0.43.0) ───────────────────────
+    //
+    // Le grenier d'alice est dans son domaine, confié à speedy : il annonce
+    // son écho À SPEEDY, qui le sonde d'une sonde signée de SA clé
+    // d'identité, vérifie la réponse sous la clé que les racines lui ont
+    // transmise, et rapporte l'objet d'annonce aux racines. Les racines
+    // rendent alors l'état à alice : `verifie`, `echo_par` au `n-…` de
+    // speedy. L'adresse de speedy est la boucle locale : pas globale, donc
+    // aucune sonde du dehors ne part des racines (décision 92).
+    let speedy = Box::leak(Box::new(asl_cle::CleSecrete::depuis_entropie([0x51; 32])));
+    let reglage = Arc::new(std::sync::Mutex::new(None));
+    let echo = un_faux_echo(speedy, Arc::clone(&reglage)).await;
+    let mut scene = monter_une_scene_d_annuaire("echo-heberge").await;
+    let cle_g = asl_cle::CleSecrete::depuis_entropie([0xE8; 32]);
+    let flux = suivant(&mut scene.flux_alice);
+    let grenier = machine_du_compte(
+        &mut scene.alice,
+        flux,
+        &scene.racine,
+        scene.adresse,
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        &cle_g,
+    )
+    .await;
+    let flux = suivant(&mut scene.flux_alice);
+    assert_eq!(
+        poser_json(
+            &mut scene.alice,
+            flux,
+            format!("/v1/machines/{}/domaine", grenier.texte()).as_bytes(),
+            format!("{{\"domaine\":\"{}\"}}", scene.domaine_a.texte()).as_bytes(),
+        )
+        .await,
+        b"204"
+    );
+    *reglage.lock().expect("le réglage") = Some((grenier, [0xE8; 32]));
+    let speedy_local = scene
+        .lever_speedy_qui_sonde("echo-heberge-speedy", echo)
+        .await;
+    speedy_local.attendre_la_machine(grenier).await;
+    let mut chez_speedy = connecter(&speedy_local.racine, speedy_local.adresse).await;
+    authentifier(&mut chez_speedy, grenier, &cle_g, 0, 4).await;
+    let (statut, rendu) = annoncer_l_echo(
+        &mut chez_speedy,
+        8,
+        grenier,
+        r#"[{"protocole":"udp","port":41877}]"#,
+    )
+    .await;
+    assert_eq!(statut, b"200", "{rendu}");
+    let objet = attendre_l_echo(&mut scene.alice, &mut scene.flux_alice, grenier, "verifie").await;
+    assert!(
+        objet.contains(&format!("\"echo_par\":\"{}\"", scene.n_speedy.texte())),
+        "c'est speedy qui a sondé : {objet}"
+    );
+    assert!(objet.contains("\"echo_depuis\":"), "{objet}");
+
+    drop(chez_speedy);
+    speedy_local.arreter().await;
     scene.arreter().await;
 }

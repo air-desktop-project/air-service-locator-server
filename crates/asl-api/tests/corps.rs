@@ -1519,6 +1519,7 @@ fn une_machine_rendue(nom: &str, capacites: Capacites, enrolee: bool) -> Machine
         alias: None,
         capacites,
         enrolee,
+        echo: None,
     }
 }
 
@@ -3065,12 +3066,19 @@ mod domaines {
                 proprietaire: u,
                 nom: Some("grenier"),
                 alias: Some("Le grenier"),
+                echo: Some(asl_api::corps::EtatDEcho {
+                    mot: asl_api::corps::MotDEcho::Verifie,
+                    a: Some(1_789_217_751_000),
+                    par: Some(n),
+                    depuis: Some(asl_api::corps::DepuisDEcho::Interieur),
+                }),
             },
             MachineDeDomaine {
                 machine: m,
                 proprietaire: u,
                 nom: None,
                 alias: None,
+                echo: None,
             },
         ];
         let e = Identifiant::depuis_entropie(Genre::Ensemble, [5; 16]);
@@ -3107,10 +3115,12 @@ mod domaines {
         );
         assert!(
             texte.ends_with(&format!(
-                ",\"machines\":[{{\"machine\":\"{m}\",\"proprietaire\":\"{u}\",\"nom\":\"grenier\",\"alias\":\"Le grenier\"}},\
+                ",\"machines\":[{{\"machine\":\"{m}\",\"proprietaire\":\"{u}\",\"nom\":\"grenier\",\"alias\":\"Le grenier\",\
+                 \"echo\":\"verifie\",\"echo_a\":1789217751000,\"echo_par\":\"{n}\",\"echo_depuis\":\"interieur\"}},\
                  {{\"machine\":\"{m}\",\"proprietaire\":\"{u}\"}}]}}",
                 m = m.texte().as_str(),
-                u = u.texte().as_str()
+                u = u.texte().as_str(),
+                n = n.texte().as_str()
             )),
             "{texte}"
         );
@@ -4012,4 +4022,112 @@ mod annuaires {
             Err(Erreur::MessageTropLong { .. })
         ));
     }
+}
+
+// ── L'état d'écho d'une machine (décisions 91 et 92, 0.43.0) ────────────────
+
+#[test]
+fn l_etat_d_echo_se_rend_en_chaines_et_en_entiers_et_se_relit() {
+    use asl_api::corps::{DepuisDEcho, EtatDEcho, MotDEcho};
+    let n = Identifiant::depuis_entropie(Genre::Annuaire, [0x4E; 16]);
+    let sans = une_machine_rendue("grenier", Capacites::default(), true);
+    assert!(
+        !core::str::from_utf8(&encoder_machine(&sans))
+            .unwrap()
+            .contains("echo")
+    );
+    for (mot, texte) in [
+        (MotDEcho::Verifie, "verifie"),
+        (MotDEcho::Injoignable, "injoignable"),
+        (MotDEcho::AutreCle, "autre_cle"),
+        (MotDEcho::EnCours, "en_cours"),
+    ] {
+        assert_eq!(mot.mot(), texte);
+        assert_eq!(MotDEcho::depuis_mot(texte), Some(mot));
+    }
+    assert_eq!(MotDEcho::depuis_mot("joignable"), None);
+    for (depuis, texte) in [
+        (DepuisDEcho::Exterieur, "exterieur"),
+        (DepuisDEcho::Interieur, "interieur"),
+    ] {
+        assert_eq!(depuis.mot(), texte);
+        assert_eq!(DepuisDEcho::depuis_mot(texte), Some(depuis));
+    }
+    assert_eq!(DepuisDEcho::depuis_mot("dehors"), None);
+
+    let mesure = MachineRendue {
+        echo: Some(EtatDEcho {
+            mot: MotDEcho::AutreCle,
+            a: Some(1_789_217_751_000),
+            par: Some(n),
+            depuis: Some(DepuisDEcho::Exterieur),
+        }),
+        ..sans
+    };
+    let octets = encoder_machine(&mesure);
+    let texte = core::str::from_utf8(&octets).unwrap();
+    assert!(
+        texte.ends_with(&format!(
+            r#""cle":"enrolee","echo":"autre_cle","echo_a":1789217751000,"echo_par":"{}","echo_depuis":"exterieur"}}"#,
+            n.texte().as_str()
+        )),
+        "{texte}"
+    );
+    assert_eq!(MachineRendue::decoder(&octets), Ok(mesure));
+    let en_cours = MachineRendue {
+        echo: Some(EtatDEcho::EN_COURS),
+        ..sans
+    };
+    let octets = encoder_machine(&en_cours);
+    assert!(
+        core::str::from_utf8(&octets)
+            .unwrap()
+            .ends_with(r#""echo":"en_cours"}"#)
+    );
+    assert_eq!(MachineRendue::decoder(&octets), Ok(en_cours));
+}
+
+#[test]
+fn l_etat_d_echo_refuse_un_mot_inconnu_ou_des_champs_sans_echo() {
+    let m = Identifiant::depuis_entropie(Genre::Machine, [0x44; 16]);
+    let debut = format!(
+        r#"{{"machine":"{}","nom":"grenier","capacites":[],"cle":"enrolee""#,
+        m.texte().as_str()
+    );
+    for (suite, voulu) in [
+        (r#","echo":"joignable"}"#, "mot"),
+        (r#","echo":"verifie","echo_depuis":"dehors"}"#, "depuis"),
+        (r#","echo":"verifie","echo":"verifie"}"#, "double"),
+        (r#","echo_a":1}"#, "sans echo"),
+        (r#","echo_depuis":"exterieur"}"#, "sans echo"),
+        (r#","echo_par":"m-00000000000000000000000000"}"#, "genre"),
+        (r#","echo":7}"#, "pas une chaîne"),
+        (r#","echo":"verifie","echo_a":"x"}"#, "pas un entier"),
+        (r#","echo":"verifie","echo_a":1,"echo_a":2}"#, "double"),
+        (r#","echo":"verifie","echo_depuis":7}"#, "pas une chaîne"),
+        (
+            r#","echo":"verifie","echo_depuis":"interieur","echo_depuis":"interieur"}"#,
+            "double",
+        ),
+    ] {
+        let octets = format!("{debut}{suite}");
+        assert!(
+            MachineRendue::decoder(octets.as_bytes()).is_err(),
+            "{voulu} : {octets}"
+        );
+    }
+    let n = Identifiant::depuis_entropie(Genre::Annuaire, [0x4E; 16]);
+    let deux_par = format!(
+        r#"{debut},"echo":"verifie","echo_par":"{n}","echo_par":"{n}"}}"#,
+        n = n.texte().as_str()
+    );
+    assert!(
+        MachineRendue::decoder(deux_par.as_bytes()).is_err(),
+        "double"
+    );
+    let par_seul = format!(r#"{debut},"echo_par":"{}"}}"#, n.texte().as_str());
+    assert_eq!(
+        MachineRendue::decoder(par_seul.as_bytes()),
+        Err(Erreur::ChampManquant { nom: "echo" })
+    );
 }

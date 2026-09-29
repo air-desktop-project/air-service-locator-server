@@ -19,7 +19,8 @@
 //!    passent par les validations d'`asl-proto` : si l'une échouait, c'est que
 //!    la session aurait fabriqué un état que le protocole refuse.
 //! 3. **C6 : aucun point UDP n'est jamais dit mesuré**, quelle que soit la suite
-//!    d'événements.
+//!    d'événements — **sauf celui de l'`asl-echo`** (0.43.0), l'exception
+//!    que C6 nomme : hors de l'écho, la règle reste entière.
 //! 4. **UNE SESSION CLOSE RESTE CLOSE.** Aucun événement ne la ressuscite.
 //! 5. **L'EXPIRATION EST MONOTONE** : une session expirée à un instant l'est
 //!    encore plus tard. Sans cela, un service clignoterait — `parti`, puis
@@ -94,6 +95,9 @@ struct Entree {
     adresses: Vec<AdresseBrute>,
     vu: AdresseBrute,
     evenements: Vec<Evenement>,
+    /// Le service est-il l'`asl-echo` ? (0.43.0.) Alors son point UDP se
+    /// mesure — l'exception de C6 —, et seulement lui.
+    echo: bool,
 }
 
 fn adresse(brute: &AdresseBrute) -> IpAddr {
@@ -134,6 +138,7 @@ fn sans_doublons(points: Vec<PointEcoute>) -> Vec<PointEcoute> {
 
 /// Les invariants qui doivent tenir après CHAQUE événement.
 fn verifier(session: &Session, maintenant: Instant, deja_close: bool) {
+    let echo = session.est_un_echo();
     // PROPRIÉTÉ 2 : la réponse et la poussée restent constructibles.
     let reponse = session
         .reponse()
@@ -150,8 +155,8 @@ fn verifier(session: &Session, maintenant: Instant, deja_close: bool) {
             Verdict::Joignable { .. } | Verdict::Injoignable { .. }
         );
         assert!(
-            !mesure || entree.point.protocole == Protocole::Tcp,
-            "un point UDP a été dit mesuré"
+            !mesure || entree.point.protocole == Protocole::Tcp || echo,
+            "un point UDP a été dit mesuré hors de l'écho"
         );
     }
 
@@ -179,7 +184,8 @@ fuzz_target!(|entree: Entree| {
     let Ok(bail) = Bail::nouveau(entree.keepalive, entree.inactivite) else {
         return;
     };
-    let nom = NomService::analyser("x").expect("nom constant valide");
+    let nom = NomService::analyser(if entree.echo { "asl-echo" } else { "x" })
+        .expect("nom constant valide");
     let machine = Identifiant::depuis_entropie(Genre::Machine, [0x11; 16]);
     let service = Identifiant::depuis_entropie(Genre::Service, [0x22; 16]);
 

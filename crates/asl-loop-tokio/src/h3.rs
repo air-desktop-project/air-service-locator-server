@@ -691,6 +691,8 @@ struct Service<'a> {
     entrepot: &'a Entrepot,
     /// Ce qui vit.
     vivier: &'a mut Vivier,
+    /// Ce que les sondes par l'écho ont constaté (décision 92).
+    echos: &'a mut crate::sonde::Echos,
     /// L'identifiant local de la connexion, pour attribuer les annonces.
     connexion: Vec<u8>,
     /// De quoi tirer un identifiant de service, si l'annonce en crée un.
@@ -705,6 +707,9 @@ struct Service<'a> {
     /// Ce que la porte d'essai ajoute avant chaque verdict.
     #[cfg(feature = "porte-d-essai")]
     lenteur_de_sonde: Option<std::time::Duration>,
+    /// Où la porte d'essai envoie les sondes par l'écho.
+    #[cfg(feature = "porte-d-essai")]
+    detour_d_echo: Option<SocketAddr>,
     /// Combien de sondes sont en vol, pour ne pas en lancer sans fin.
     en_vol: &'a mut usize,
     /// D'où l'on VOIT ce pair.
@@ -2437,7 +2442,10 @@ impl Service<'_> {
         // point, et bloquerait la boucle entière — qui n'a qu'une tâche.
         //
         // Les verdicts reviennent par le canal, et `au_tour` les applique.
-        self.lancer_les_sondes(service, &vivante, &_ordres);
+        // **UN ÉCHO QUI S'ANNONCE REPART DE ZÉRO** : un redémarrage tire un
+        // autre port, et le constat d'avant ne vaut plus pour lui.
+        self.echos.constats.remove(&service);
+        self.lancer_les_sondes(qui, service, &vivante, &_ordres);
 
         let mut sortie = alloc_reponse();
         let combien = vivante.reponse().ok()?.encoder(&mut sortie).ok()?;
@@ -2688,6 +2696,98 @@ impl Service<'_> {
             .is_some()
     }
 
+    /// **L'état d'écho de cette machine** (décisions 91 et 92), tel que
+    /// `GET /v1/machines` et `GET /v1/domaines/{d}` le rendent — `None` sans
+    /// `asl-echo` annoncé.
+    ///
+    /// - **Un écho dont cette racine tient le bail** : le constat de sa
+    ///   sonde, ou `en_cours` ; `echo_par` est cette racine, `echo_depuis`
+    ///   dit si l'adresse observée est de l'Internet (`exterieur`) ou d'un
+    ///   réseau privé, de la boucle locale (`interieur`).
+    /// - **Une machine d'un domaine hébergé** : le constat de la sonde du
+    ///   dehors de cette racine s'il y en a un (décision 92 : `exterieur`,
+    ///   `echo_par` à cette racine) ; sinon, ce que le membre rapporte — le
+    ///   verdict du point UDP de l'écho dans son objet d'annonce, sous son
+    ///   `n-…`, de l'intérieur ou non selon la règle de `sonde_locale`. **Un
+    ///   membre ne rapporte pas `autre_cle`** : son rapport est l'objet
+    ///   d'annonce, qui n'a que `injoignable` pour le dire.
+    fn etat_d_echo(&self, machine: Identifiant) -> Option<asl_api::corps::EtatDEcho> {
+        use asl_api::corps::{DepuisDEcho, EtatDEcho, MotDEcho};
+        let ici = self
+            .voie
+            .identite
+            .map(|cle| asl_cle::identifiant_de_racine(&cle.publique()));
+        if self.confiee_a_un_annuaire_local(machine) {
+            let lue = self.etat_federe.lire(
+                machine,
+                asl_proto::NOM_ASL_ECHO.as_bytes(),
+                maintenant(),
+                self.expiration_federee_us,
+            )?;
+            let reponse = lue.reponse.as_deref()?;
+            if let Some(constat) = self
+                .echos
+                .du_dehors
+                .get(&machine)
+                .and_then(|dehors| dehors.constat)
+            {
+                return Some(EtatDEcho {
+                    mot: constat.resultat.mot(),
+                    a: Some(constat.a),
+                    par: ici,
+                    depuis: Some(DepuisDEcho::Exterieur),
+                });
+            }
+            let mut tampons = asl_proto::cadrage::TamponsReponse::nouveaux();
+            let lu = asl_proto::Reponse::decoder(reponse, &mut tampons).ok()?;
+            let verdict = lu
+                .joignabilite
+                .iter()
+                .find(|entree| entree.point.protocole == asl_proto::Protocole::Udp)?
+                .verdict;
+            let (mot, a) = match verdict {
+                asl_proto::Verdict::Joignable { a, .. } => (MotDEcho::Verifie, a),
+                asl_proto::Verdict::Injoignable { a } => (MotDEcho::Injoignable, a),
+                _ => return Some(EtatDEcho::EN_COURS),
+            };
+            let depuis = if self.sonde_de_l_interieur(lue.membre, reponse) {
+                DepuisDEcho::Interieur
+            } else {
+                DepuisDEcho::Exterieur
+            };
+            return Some(EtatDEcho {
+                mot,
+                a: Some(a.millisecondes()),
+                par: Some(lue.membre),
+                depuis: Some(depuis),
+            });
+        }
+        let service = self
+            .entrepot
+            .service_par_nom(machine, asl_proto::NOM_ASL_ECHO)
+            .ok()
+            .flatten()?;
+        let vivante = self.vivier.annonce(service)?;
+        if !vivante.est_un_echo() {
+            return None;
+        }
+        Some(match self.echos.constats.get(&service) {
+            Some(constat) => EtatDEcho {
+                mot: constat.resultat.mot(),
+                a: Some(constat.a),
+                par: ici,
+                depuis: Some(
+                    if asl_annuaire::adresse_globale(vivante.vu_depuis().adresse) {
+                        DepuisDEcho::Exterieur
+                    } else {
+                        DepuisDEcho::Interieur
+                    },
+                ),
+            },
+            None => EtatDEcho::EN_COURS,
+        })
+    }
+
     /// Le membre s'est-il sondé de l'intérieur ? La règle est
     /// [`crate::federation::sonde_de_l_interieur`] ; ici, on lit l'adresse
     /// d'où il a vu venir le daemon, et celles où on le joint.
@@ -2736,6 +2836,7 @@ impl Service<'_> {
                         lecture: machine.lecture,
                     },
                     enrolee: machine.cle.is_some(),
+                    echo: self.etat_d_echo(quelle),
                 };
                 let mut sortie = alloc_reponse();
                 let combien = rendue.encoder(&mut sortie).ok()?;
@@ -2936,6 +3037,7 @@ impl Service<'_> {
     /// propre réseau, avec notre IP.
     fn lancer_les_sondes(
         &mut self,
+        machine: Identifiant,
         service: Identifiant,
         vivante: &asl_annuaire::Session,
         ordres: &asl_annuaire::Ordres,
@@ -2945,6 +3047,30 @@ impl Service<'_> {
                 // **ON NE SONDE PAS, ET C'EST HONNÊTE** : le verdict reste
                 // `en_cours`, ce qui est exactement la vérité.
                 break;
+            }
+            // **L'ÉCHO SE SONDE PAR L'ÉCHO** (décision 92) : un datagramme
+            // signé par l'annuaire qui tient le bail, et une réponse signée
+            // de la clé de la machine.
+            if vivante.est_un_echo() {
+                let cle = cle_de_machine(self.entrepot, machine);
+                let defi = (self.tirer_un_identifiant)();
+                if let (Some(identite), Some(cle), Some(defi)) = (self.voie.identite, cle, defi)
+                    && let Some(sonde) = SondeDEcho::du_bail(vivante, machine, point, cle)
+                {
+                    self.echos
+                        .sondes
+                        .insert(service, (machine, maintenant().saturating_div(1_000)));
+                    lancer_une_sonde_d_echo(
+                        sonde,
+                        identite,
+                        defi,
+                        &self.rapports,
+                        &self.reveil_de_la_boucle,
+                        self.en_vol,
+                        self.detour_d_echo(),
+                    );
+                }
+                continue;
             }
             let mut candidats = [asl_proto::Candidat {
                 protocole: point.protocole,
@@ -2985,6 +3111,8 @@ impl Service<'_> {
                         maintenant().saturating_div(1_000),
                     ),
                     maintenant: instant(),
+                    echo: None,
+                    dehors: None,
                 });
                 // **Déposé AVANT de réveiller** : sans ce signal, le verdict
                 // attendait le prochain paquet de n'importe qui — le
@@ -3082,6 +3210,22 @@ impl Service<'_> {
 }
 
 impl Service<'_> {
+    /// Où la porte d'essai envoie les sondes par l'écho, s'il y en a une.
+    #[cfg(feature = "porte-d-essai")]
+    const fn detour_d_echo(&self) -> Option<SocketAddr> {
+        self.detour_d_echo
+    }
+
+    /// Sans la porte d'essai : jamais de détour.
+    #[cfg(not(feature = "porte-d-essai"))]
+    #[expect(
+        clippy::unused_self,
+        reason = "la même signature que sous la porte d'essai"
+    )]
+    const fn detour_d_echo(&self) -> Option<SocketAddr> {
+        None
+    }
+
     /// Rassemble de quoi décider d'un jeton d'écho, et le signe
     /// (`POST /v1/echo/jetons`, décision 91).
     ///
@@ -3157,6 +3301,119 @@ impl Service<'_> {
         };
         Trouvaille::JetonEcho(Box::new(asl_session::JetonRassemble { resolution, jeton }))
     }
+}
+
+/// La clé que l'entrepôt tient pour cette machine — celle qui a authentifié
+/// son bail ; chez un annuaire local, celle que `GET /v1/federation/machines`
+/// lui a transmise.
+fn cle_de_machine(entrepot: &Entrepot, machine: Identifiant) -> Option<ClePublique> {
+    entrepot
+        .machine(machine)
+        .ok()
+        .flatten()
+        .and_then(|lue| lue.cle)
+        .and_then(|liee| ClePublique::depuis_octets(liee.cle).ok())
+}
+
+/// Une sonde par l'écho, prête à partir.
+struct SondeDEcho {
+    /// Le service d'écho — celui du bail, ou celui qu'un membre rapporte.
+    service: Identifiant,
+    /// Sa machine.
+    machine: Identifiant,
+    /// Le point UDP de l'écho.
+    point: asl_proto::PointEcoute,
+    /// Le candidat sondé, que le verdict `joignable` porte.
+    candidat: asl_proto::Candidat,
+    /// La clé de la machine, contre laquelle la réponse se vérifie.
+    cle: ClePublique,
+    /// Côté racine, pour une sonde du dehors : la machine.
+    dehors: Option<Identifiant>,
+}
+
+impl SondeDEcho {
+    /// La sonde d'un écho dont on tient le bail : **vers le seul candidat
+    /// réflexif**, adresse et port observés.
+    fn du_bail(
+        vivante: &asl_annuaire::Session,
+        machine: Identifiant,
+        point: asl_proto::PointEcoute,
+        cle: ClePublique,
+    ) -> Option<Self> {
+        let mut candidats = [asl_proto::Candidat {
+            protocole: point.protocole,
+            adresse: core::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED),
+            port: point.port,
+            origine: asl_proto::Origine::Reflexif,
+        }; asl_proto::ADRESSES_MAX + 1];
+        let combien = vivante.candidats(point, &mut candidats);
+        let candidat = candidats
+            .get(..combien)
+            .unwrap_or_default()
+            .iter()
+            .copied()
+            .find(|candidat| sonde::sondable_par_l_echo(*candidat).is_some())?;
+        Some(Self {
+            service: vivante.service(),
+            machine,
+            point,
+            candidat,
+            cle,
+            dehors: None,
+        })
+    }
+}
+
+/// Lance une sonde par l'écho : le datagramme signé par la clé d'identité de
+/// cet annuaire, trois envois depuis une socket éphémère, et le verdict par
+/// le canal des rapports.
+fn lancer_une_sonde_d_echo(
+    sonde: SondeDEcho,
+    identite: &CleSecrete,
+    defi: [u8; 16],
+    rapports: &tokio::sync::mpsc::UnboundedSender<Verdict>,
+    reveil: &Arc<tokio::sync::Notify>,
+    en_vol: &mut usize,
+    detour: Option<SocketAddr>,
+) {
+    let annuaire = asl_cle::identifiant_de_racine(&identite.publique());
+    let defi = asl_echo::DefiEcho::depuis_octets(defi);
+    let Ok(datagramme) = asl_echo::SondeAnnuaire::signer(
+        defi,
+        annuaire,
+        sonde.machine,
+        maintenant().saturating_div(1_000),
+        identite,
+    ) else {
+        return;
+    };
+    let octets = datagramme.octets();
+    let Some(cible) = sonde::sondable_par_l_echo(sonde.candidat) else {
+        return;
+    };
+    let cible = detour.unwrap_or(cible);
+    let rapports = rapports.clone();
+    let reveil = Arc::clone(reveil);
+    *en_vol = en_vol.saturating_add(1);
+    tokio::spawn(async move {
+        let attendu = sonde::Attendu {
+            defi,
+            machine: sonde.machine,
+            sondeur: annuaire,
+            cle: sonde.cle,
+        };
+        let resultat = sonde::prouver(cible, &octets, &attendu).await;
+        let _ = rapports.send(Verdict {
+            service: sonde.service,
+            point: sonde.point,
+            aboutie: (resultat == sonde::ResultatEcho::Verifie).then_some(sonde.candidat),
+            quand: asl_proto::Horodatage::depuis_millisecondes(maintenant().saturating_div(1_000)),
+            maintenant: instant(),
+            echo: Some(resultat),
+            dehors: sonde.dehors,
+        });
+        reveil.notify_one();
+    });
 }
 
 /// Un service encodé sous ses deux formes (décision 104) : l'entière, et
@@ -3242,6 +3499,9 @@ pub struct Annuaire<'a> {
     entrepot: &'a Entrepot,
     /// Toutes les annonces vivantes.
     vivier: Vivier,
+    /// Ce que les sondes par l'écho ont constaté, et quand elles sont
+    /// parties — en mémoire, comme le vivier (décision 92).
+    echos: crate::sonde::Echos,
     /// Par où les sondes rapportent.
     rapports: tokio::sync::mpsc::UnboundedSender<Verdict>,
     /// Ce qu'elles rapportent, recueilli à chaque tour.
@@ -3368,6 +3628,10 @@ pub struct Annuaire<'a> {
     /// Ce que la porte d'essai ajoute avant chaque verdict de sonde.
     #[cfg(feature = "porte-d-essai")]
     lenteur_de_sonde: Option<std::time::Duration>,
+    /// Où la porte d'essai envoie les sondes par l'écho, à la place du
+    /// candidat réflexif — voir [`Annuaire::detourner_l_echo_pour_un_essai`].
+    #[cfg(feature = "porte-d-essai")]
+    detour_d_echo: Option<SocketAddr>,
     /// Côté racine : l'état des services que les annuaires locaux
     /// rapportent (0.28.0). **En mémoire, et seulement ici** (C13 amendée) —
     /// ni l'entrepôt ni la voie entre racines ne le voient.
@@ -3424,6 +3688,7 @@ impl<'a> Annuaire<'a> {
             connexions: HashMap::new(),
             entrepot: entrepot.as_ref(),
             vivier: Vivier::nouveau(),
+            echos: crate::sonde::Echos::default(),
             rapports,
             verdicts,
             en_vol: 0,
@@ -3461,6 +3726,8 @@ impl<'a> Annuaire<'a> {
             preparations,
             #[cfg(feature = "porte-d-essai")]
             lenteur_de_sonde: None,
+            #[cfg(feature = "porte-d-essai")]
+            detour_d_echo: None,
             etat_federe: crate::federation::EtatFedere::nouveau(),
             expiration_federee_us: crate::federation::EXPIRATION_US,
             dernier_balayage_federe: 0,
@@ -3582,6 +3849,31 @@ impl<'a> Annuaire<'a> {
     #[cfg(feature = "porte-d-essai")]
     pub const fn retarder_les_verdicts_pour_un_essai(&mut self, lenteur: std::time::Duration) {
         self.lenteur_de_sonde = Some(lenteur);
+    }
+
+    /// **La porte d'essai de l'écho** : les sondes par l'écho partent vers
+    /// cette adresse, et non vers le candidat réflexif. Un essai ne tient pas
+    /// la socket de sa connexion QUIC ; il tient un faux écho à côté, qui
+    /// répond de la clé de la machine — tout le reste du chemin est le vrai.
+    #[cfg(feature = "porte-d-essai")]
+    pub const fn detourner_l_echo_pour_un_essai(&mut self, ou: SocketAddr) {
+        self.detour_d_echo = Some(ou);
+    }
+
+    /// Où la porte d'essai envoie les sondes par l'écho, s'il y en a une.
+    #[cfg(feature = "porte-d-essai")]
+    const fn detour_d_echo(&self) -> Option<SocketAddr> {
+        self.detour_d_echo
+    }
+
+    /// Sans la porte d'essai : jamais de détour.
+    #[cfg(not(feature = "porte-d-essai"))]
+    #[expect(
+        clippy::unused_self,
+        reason = "la même signature que sous la porte d'essai"
+    )]
+    const fn detour_d_echo(&self) -> Option<SocketAddr> {
+        None
     }
 
     /// Recueille les instantanés lus hors de la boucle, et remplit leurs flux.
@@ -3975,6 +4267,152 @@ impl<'a> Annuaire<'a> {
     }
 }
 
+impl Annuaire<'_> {
+    /// **Toutes les quinze minutes tant que le bail tient** (décision 92 ;
+    /// E9) : un datagramme de 384 octets par écho, pour que « constaté à » ne
+    /// vieillisse pas et qu'un pare-feu fermé depuis se voie. Et l'on oublie
+    /// ce qu'on retenait des échos partis.
+    fn resonder_les_echos(&mut self) {
+        let vivants = self.vivier.echos();
+        self.echos
+            .sondes
+            .retain(|service, _| vivants.iter().any(|session| session.service() == *service));
+        self.echos
+            .constats
+            .retain(|service, _| vivants.iter().any(|session| session.service() == *service));
+        let Some(identite) = self.voie.identite else {
+            return;
+        };
+        let ms = maintenant().saturating_div(1_000);
+        let detour = self.detour_d_echo();
+        for session in &vivants {
+            let service = session.service();
+            let Some(&(machine, derniere)) = self.echos.sondes.get(&service) else {
+                continue;
+            };
+            if ms.saturating_sub(derniere) < asl_annuaire::CADENCE_D_ECHO_MS {
+                continue;
+            }
+            let Some(cle) = cle_de_machine(self.entrepot, machine) else {
+                continue;
+            };
+            for point in session.a_resonder().a_sonder() {
+                if self.en_vol >= sonde::EN_VOL_MAX {
+                    return;
+                }
+                let (Some(defi), Some(sonde)) = (
+                    (self.tirer_un_identifiant)(),
+                    SondeDEcho::du_bail(session, machine, point, cle),
+                ) else {
+                    continue;
+                };
+                self.echos.sondes.insert(service, (machine, ms));
+                lancer_une_sonde_d_echo(
+                    sonde,
+                    identite,
+                    defi,
+                    &self.rapports,
+                    &self.reveil_de_la_boucle,
+                    &mut self.en_vol,
+                    detour,
+                );
+            }
+        }
+    }
+
+    /// **Les racines sondent aussi, du dehors, l'écho d'une machine d'un
+    /// domaine hébergé** (décision 92 ; E8) : vers l'adresse et le port que
+    /// le membre a vus, **si l'adresse est globale**, une fois par
+    /// changement et au plus toutes les quinze minutes, dans la borne des
+    /// sondes en vol. Chez un annuaire local, rien n'est rapporté : rien ne
+    /// part.
+    fn sonder_les_echos_du_dehors(&mut self) {
+        let federes = self.etat_federe.vivants_du_nom(
+            asl_proto::NOM_ASL_ECHO.as_bytes(),
+            maintenant(),
+            self.expiration_federee_us,
+        );
+        self.echos
+            .du_dehors
+            .retain(|machine, _| federes.iter().any(|(quelle, _)| quelle == machine));
+        let Some(identite) = self.voie.identite else {
+            return;
+        };
+        let detour = self.detour_d_echo();
+        for (machine, lue) in federes {
+            if self.en_vol >= sonde::EN_VOL_MAX {
+                return;
+            }
+            let Some(reponse) = lue.reponse.as_deref() else {
+                continue;
+            };
+            let mut tampons = asl_proto::cadrage::TamponsReponse::nouveaux();
+            let Ok(lu) = asl_proto::Reponse::decoder(reponse, &mut tampons) else {
+                continue;
+            };
+            let Some(point) = lu
+                .joignabilite
+                .iter()
+                .map(|entree| entree.point)
+                .find(|point| point.protocole == asl_proto::Protocole::Udp)
+            else {
+                continue;
+            };
+            let cible = SocketAddr::new(lu.vu_depuis.adresse, lu.vu_depuis.port.valeur());
+            let derniere = self
+                .echos
+                .du_dehors
+                .get(&machine)
+                .map(|dehors| (dehors.cible, dehors.lancee));
+            if !asl_annuaire::sonder_du_dehors(cible, derniere, instant()) {
+                continue;
+            }
+            let (Some(cle), Some(defi)) = (
+                cle_de_machine(self.entrepot, machine),
+                (self.tirer_un_identifiant)(),
+            ) else {
+                continue;
+            };
+            // Une autre adresse : le constat d'avant ne vaut plus pour elle.
+            let constat = self
+                .echos
+                .du_dehors
+                .get(&machine)
+                .filter(|dehors| dehors.cible == cible)
+                .and_then(|dehors| dehors.constat);
+            self.echos.du_dehors.insert(
+                machine,
+                crate::sonde::DuDehors {
+                    cible,
+                    lancee: instant(),
+                    constat,
+                },
+            );
+            lancer_une_sonde_d_echo(
+                SondeDEcho {
+                    service: lue.service,
+                    machine,
+                    point,
+                    candidat: asl_proto::Candidat {
+                        protocole: asl_proto::Protocole::Udp,
+                        adresse: lu.vu_depuis.adresse,
+                        port: lu.vu_depuis.port,
+                        origine: asl_proto::Origine::Reflexif,
+                    },
+                    cle,
+                    dehors: Some(machine),
+                },
+                identite,
+                defi,
+                &self.rapports,
+                &self.reveil_de_la_boucle,
+                &mut self.en_vol,
+                detour,
+            );
+        }
+    }
+}
+
 impl Application for Annuaire<'_> {
     fn au_tour(&mut self, _maintenant: u64) -> crate::quic::Consignes {
         // **LES VERDICTS ARRIVENT ICI, ET NULLE PART AILLEURS.** Une sonde est
@@ -3984,6 +4422,33 @@ impl Application for Annuaire<'_> {
         let mut a_pousser = Vec::new();
         while let Ok(verdict) = self.verdicts.try_recv() {
             self.en_vol = self.en_vol.saturating_sub(1);
+            // **UNE SONDE DU DEHORS NE TOUCHE PAS AU VIVIER** (décision 92) :
+            // le bail est chez l'annuaire local ; on retient le constat pour
+            // l'état de la machine, et c'est tout.
+            if let Some(machine) = verdict.dehors {
+                if let (Some(resultat), Some(dehors)) =
+                    (verdict.echo, self.echos.du_dehors.get_mut(&machine))
+                {
+                    dehors.constat = Some(crate::sonde::ConstatDEcho {
+                        resultat,
+                        a: verdict.quand.millisecondes(),
+                    });
+                }
+                continue;
+            }
+            // **LE CONSTAT DE L'ÉCHO** — `autre_cle` compris, que le verdict
+            // sur le fil ne dit pas (il y est `injoignable`).
+            if let Some(resultat) = verdict.echo
+                && self.vivier.annonce(verdict.service).is_some()
+            {
+                self.echos.constats.insert(
+                    verdict.service,
+                    crate::sonde::ConstatDEcho {
+                        resultat,
+                        a: verdict.quand.millisecondes(),
+                    },
+                );
+            }
             // **ON NE POUSSE QUE CE QUI A CHANGÉ.** `appliquer` refuse un
             // verdict tardif — le service peut être parti, réannoncé, ou déjà
             // mesuré autrement —, et pousser un état inchangé ferait du bruit
@@ -4003,6 +4468,10 @@ impl Application for Annuaire<'_> {
         // Et l'on oublie ce qui a expiré — une annonce dont la connexion est
         // tombée sans qu'on l'apprenne n'a personne pour la retirer.
         self.vivier.oublier_les_expirees(instant());
+        // **LES ÉCHOS SE RESONDENT TOUTES LES QUINZE MINUTES**, et les racines
+        // sondent du dehors ceux des domaines hébergés (décision 92).
+        self.resonder_les_echos();
+        self.sonder_les_echos_du_dehors();
         // **CÔTÉ ANNUAIRE LOCAL, ON PUBLIE** ; côté racine, on oublie ce
         // qu'aucun membre ne confirme plus (0.28.0).
         self.publier();
@@ -4171,10 +4640,13 @@ impl Application for Annuaire<'_> {
             a_fermer: &mut self.revoques,
             entrepot: self.entrepot,
             vivier: &mut self.vivier,
+            echos: &mut self.echos,
             rapports: self.rapports.clone(),
             reveil_de_la_boucle: Arc::clone(&self.reveil_de_la_boucle),
             #[cfg(feature = "porte-d-essai")]
             lenteur_de_sonde: self.lenteur_de_sonde,
+            #[cfg(feature = "porte-d-essai")]
+            detour_d_echo: self.detour_d_echo,
             en_vol: &mut self.en_vol,
             connexion: clef.clone(),
             tirer_un_identifiant: self.tirer_un_identifiant,

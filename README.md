@@ -765,6 +765,38 @@ journalctl -u asl-server --since -2min | grep 'nom rangé sous'
 restent, et la 0.39.2 les lit comme des services nés aux racines — ce
 qu'elle sait faire depuis la décision 99.
 
+### Déployer la 0.43.0 — la sonde par l'écho, et l'état d'écho
+
+**Ce qui change** (`docs/protocole.md` §3 quater, décisions 90 et 92) :
+
+- une annonce `asl-echo` doit porter **un seul point, en UDP** — sinon `400` ;
+- l'annuaire qui tient le bail d'un écho le **sonde par l'écho** — une sonde
+  signée de sa clé d'identité, depuis une socket UDP éphémère, trois envois
+  d'une seconde, vers l'adresse et le port observés —, à l'annonce et tous
+  les quarts d'heure ; le point UDP devient `joignable` quand la clé de la
+  machine a signé ;
+- les racines sondent aussi, **du dehors**, l'écho qu'un annuaire local
+  rapporte, si l'adresse qu'il a vue est globale ;
+- `GET /v1/machines` et `GET /v1/domaines/{d}` portent `echo`, `echo_a`,
+  `echo_par`, `echo_depuis` pour toute machine qui annonce un écho.
+
+**Ce qu'il faut savoir des clients** : `asl` ≤ 0.22.3 ne lit pas l'objet
+d'annonce d'un écho mesuré (`asl where m-… asl-echo`, la ligne de l'écho dans
+`asl domain`), et rien d'autre ; les applications lisent tout. Le client qui
+épingle ce commit lit tout.
+
+**L'ordre : les deux racines, puis la paire.** Les racines d'abord, pour
+qu'elles disent l'état des échos que les membres rapporteront ; une racine
+encore en 0.42.0 sert les rapports tels quels, sans état. Rien n'est rangé, rien
+n'est répliqué : le retour arrière est un `dpkg -i` de la 0.42.0.
+
+```sh
+# nitrogen, puis argon, puis speedy et helium
+sudo dpkg -i asl-server_0.43.0_amd64.deb
+sudo systemctl restart asl-server
+asl-server --version            # 0.43.0
+```
+
 ### Déployer la 0.42.0 — le jeton d'écho
 
 **Ce qui change** (`docs/protocole.md` §3 quater, décision 91) : les racines

@@ -112,12 +112,15 @@ fn le_verdict_de_nat_a_trois_etats() {
     assert_eq!(VerdictNat::analyser("Non"), Err(Erreur::VerdictNatInconnu));
 }
 
-// ── C6 : un point UDP ne se mesure pas ──────────────────────────────────────
+// ── C6, et son exception : le point UDP de l'écho se mesure (0.43.0) ───────
 
 #[test]
-fn un_point_udp_ne_peut_etre_ni_joignable_ni_injoignable() {
-    // C'est l'invariant que ce type existe pour tenir : l'annuaire n'a rien
-    // mesuré, donc il ne peut rien affirmer.
+fn un_point_udp_peut_etre_mesure_depuis_l_echo() {
+    // L'`asl-echo` répond par une signature de la clé de la machine
+    // (`protocole.md` §3 quater) : son point UDP est `joignable` quand elle a
+    // été vérifiée, `injoignable` sinon. Le lecteur ne connaît pas le nom du
+    // service, il accepte donc la mesure sur tout point UDP ; c'est
+    // l'annuaire qui ne la pose que sur l'écho.
     let candidat = Candidat {
         protocole: Protocole::Udp,
         adresse: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 4)),
@@ -137,14 +140,19 @@ fn un_point_udp_ne_peut_etre_ni_joignable_ni_injoignable() {
             point: PointEcoute::nouveau(Protocole::Udp, port(49152)),
             verdict,
         }];
+        let reponse = Reponse::nouvelle(service(), bail(), vu_depuis(), VerdictNat::Non, &entrees)
+            .expect("une mesure sur UDP se lit");
+        let mut sortie = [0_u8; asl_proto::MESSAGE_MAX];
+        let n = reponse.encoder(&mut sortie).expect("elle s'écrit");
+        let mut tampons = asl_proto::TamponsReponse::nouveaux();
         assert_eq!(
-            Reponse::nouvelle(service(), bail(), vu_depuis(), VerdictNat::Non, &entrees),
-            Err(Erreur::VerdictImpossible),
+            Reponse::decoder(&sortie[..n], &mut tampons).map(|lue| lue.joignabilite[0].verdict),
+            Ok(verdict),
             "{verdict:?}"
         );
     }
 
-    // Les deux verdicts qui n'affirment aucune mesure passent, eux.
+    // Les deux verdicts qui n'affirment aucune mesure passent aussi.
     for verdict in [
         Verdict::NonSonde {
             raison: RaisonNonSonde::ProtocoleNonSondable,

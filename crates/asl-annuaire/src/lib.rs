@@ -216,6 +216,11 @@ pub struct Session {
     joignabilite: [Joignabilite; POINTS_MAX],
     nombre_points: usize,
     depart: Option<MotifDeDepart>,
+    /// **Est-ce l'`asl-echo` ?** (`protocole.md` §3 quater, décisions 90 et
+    /// 92.) Alors son point UDP se sonde — par l'écho, qui répond d'une
+    /// signature —, et son candidat réflexif porte le port OBSERVÉ : l'écho
+    /// tient son bail sur la socket où il écoute.
+    echo: bool,
 }
 
 /// Ce que l'annuaire doit FAIRE après avoir décidé.
@@ -296,6 +301,7 @@ impl Session {
             }; POINTS_MAX],
             nombre_points: 0,
             depart: None,
+            echo: annonce.service.as_str() == asl_proto::NOM_ASL_ECHO,
         };
 
         let ordres = session.poser_points(annonce.points);
@@ -365,6 +371,7 @@ impl Session {
         self.avancer(maintenant)?;
 
         let migration = vu_depuis != self.vu_depuis;
+        self.echo = annonce.service.as_str() == asl_proto::NOM_ASL_ECHO;
         self.vu_depuis = vu_depuis;
 
         let nombre_adresses = annonce.adresses_locales.len().min(ADRESSES_MAX);
@@ -403,7 +410,7 @@ impl Session {
     ) -> Result<bool, Faute> {
         self.avancer(maintenant)?;
 
-        if !point.protocole.se_sonde() {
+        if !self.se_sonde(point) {
             return Err(Faute::PointNonSondable { point });
         }
 
@@ -502,6 +509,43 @@ impl Session {
         self.service
     }
 
+    /// Est-ce l'`asl-echo` ?
+    #[must_use]
+    pub const fn est_un_echo(&self) -> bool {
+        self.echo
+    }
+
+    /// D'où l'annuaire voit ce pair.
+    #[must_use]
+    pub const fn vu_depuis(&self) -> VuDepuis {
+        self.vu_depuis
+    }
+
+    /// Ce point se sonde-t-il, pour cette session ?
+    #[must_use]
+    pub const fn se_sonde(&self, point: PointEcoute) -> bool {
+        se_sonde(self.echo, point)
+    }
+
+    /// **Les points à resonder** — ceux de l'écho seulement, toutes les
+    /// quinze minutes tant que le bail tient (décision 92 ; E9). Le verdict
+    /// d'avant reste rendu jusqu'à ce que le nouveau arrive : « constaté à »
+    /// vieillit, il ne s'efface pas.
+    #[must_use]
+    pub fn a_resonder(&self) -> Ordres {
+        let mut ordres = Ordres::RIEN;
+        if self.echo {
+            for (ordre, entree) in ordres
+                .a_sonder
+                .iter_mut()
+                .zip(self.joignabilite.get(..self.nombre_points).unwrap_or(&[]))
+            {
+                *ordre = Some(entree.point);
+            }
+        }
+        ordres
+    }
+
     /// Le verdict de NAT.
     #[must_use]
     pub const fn derriere_nat(&self) -> VerdictNat {
@@ -529,11 +573,18 @@ impl Session {
             }
         };
 
+        // **POUR L'ÉCHO, LE PORT OBSERVÉ** (décision 90) : sa socket est
+        // celle du bail, et c'est ce port que le NAT a ouvert. Pour tout
+        // autre service, la règle d'en tête tient.
         poser(
             Candidat {
                 protocole: point.protocole,
                 adresse: self.vu_depuis.adresse,
-                port: point.port,
+                port: if self.echo {
+                    self.vu_depuis.port
+                } else {
+                    point.port
+                },
                 origine: Origine::Reflexif,
             },
             &mut compte,
@@ -599,7 +650,7 @@ impl Session {
             .zip(ordres.a_sonder.iter_mut())
             .zip(points.iter())
         {
-            let verdict = if point.protocole.se_sonde() {
+            let verdict = if se_sonde(self.echo, *point) {
                 *ordre = Some(*point);
                 Verdict::EnCours
             } else {
@@ -619,6 +670,7 @@ impl Session {
 
     /// Remplace les points en GARDANT le verdict de ceux qui n'ont pas bougé.
     fn poser_points_en_gardant(&mut self, points: &[PointEcoute]) -> Ordres {
+        let echo = self.echo;
         let anciens = self.joignabilite;
         let anciens_nombre = self.nombre_points;
 
@@ -640,7 +692,7 @@ impl Session {
                 // Le point n'a pas bougé : son verdict non plus. Le remettre à
                 // `EnCours` perdrait une mesure déjà faite.
                 Some(entree) => entree.verdict,
-                None if point.protocole.se_sonde() => {
+                None if se_sonde(echo, *point) => {
                     *ordre = Some(*point);
                     Verdict::EnCours
                 }
@@ -657,6 +709,66 @@ impl Session {
         }
         self.nombre_points = compte;
         ordres
+    }
+}
+
+/// Ce point se sonde-t-il ? TCP toujours ; UDP pour l'écho seulement — c'est
+/// l'exception de C6 (`contraintes.md`), et elle tient ici.
+const fn se_sonde(echo: bool, point: PointEcoute) -> bool {
+    // Deux protocoles : ce qui n'est pas TCP est UDP.
+    point.protocole.se_sonde() || echo
+}
+
+/// Toutes les combien l'annuaire resonde un écho tant que son bail tient, et
+/// toutes les combien, au plus, une racine sonde du dehors l'écho d'une
+/// machine d'un domaine hébergé : **quinze minutes** (décision 92 ; E8, E9).
+pub const CADENCE_D_ECHO_MS: u64 = 15 * 60 * 1_000;
+
+/// Cette adresse est-elle **globale** — joignable de l'Internet ? Ni privée,
+/// ni de bouclage, ni lien-local, ni ULA, ni partagée (`100.64.0.0/10`), ni
+/// non spécifiée ou multidiffusion ; une IPv4 enfouie (`::ffff:a.b.c.d`) se
+/// juge comme elle-même ; en IPv6, `2000::/3` seulement.
+///
+/// **C'est la borne des sondes des racines vers un écho qu'un annuaire local
+/// leur rapporte** (décision 92) : l'adresse est désignée par un tiers, et
+/// une racine n'envoie rien vers ce qui n'est pas l'Internet.
+#[must_use]
+pub fn adresse_globale(adresse: IpAddr) -> bool {
+    match adresse.to_canonical() {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || a == 0
+                || (a == 100 && (b & 0xC0) == 64))
+        }
+        IpAddr::V6(v6) => {
+            let [premier, ..] = v6.segments();
+            (premier & 0xE000) == 0x2000
+        }
+    }
+}
+
+/// **Une racine doit-elle sonder, du dehors, l'écho à cette adresse ?**
+/// (Décision 92 ; E8.) Seulement vers une adresse globale, et une fois par
+/// changement — une autre adresse, un autre port — ou au plus toutes les
+/// [`CADENCE_D_ECHO_MS`].
+#[must_use]
+pub fn sonder_du_dehors(
+    cible: core::net::SocketAddr,
+    derniere: Option<(core::net::SocketAddr, Instant)>,
+    maintenant: Instant,
+) -> bool {
+    if !adresse_globale(cible.ip()) {
+        return false;
+    }
+    match derniere {
+        None => true,
+        Some((avant, quand)) => avant != cible || maintenant.depuis(quand) >= CADENCE_D_ECHO_MS,
     }
 }
 

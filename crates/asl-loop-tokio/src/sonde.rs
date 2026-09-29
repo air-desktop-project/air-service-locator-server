@@ -72,6 +72,160 @@ pub struct Verdict {
     pub quand: Horodatage,
     /// L'instant de la mesure, pour la machine à états.
     pub maintenant: Instant,
+    /// **Pour une sonde par l'écho, ce qu'elle a constaté** — et c'est ce que
+    /// l'état par machine dit (`protocole.md` §3 quater) ; `aboutie` n'est
+    /// posé que sur [`ResultatEcho::Verifie`]. `None` pour un trois-temps.
+    pub echo: Option<ResultatEcho>,
+    /// **Une sonde d'une racine, du dehors, vers l'écho d'une machine d'un
+    /// domaine hébergé** (décision 92) : la machine. Son verdict ne touche
+    /// pas au vivier — le bail est chez l'annuaire local.
+    pub dehors: Option<Identifiant>,
+}
+
+/// Ce que l'annuaire retient des sondes par l'écho, en mémoire — jamais
+/// rangé ni répliqué : c'est un état vivant, comme le vivier.
+#[derive(Debug, Default)]
+pub struct Echos {
+    /// Par service d'écho tenu ici, le dernier constat.
+    pub constats: std::collections::HashMap<Identifiant, ConstatDEcho>,
+    /// Par service d'écho tenu ici, sa machine et l'instant de la dernière
+    /// sonde lancée, en millisecondes — pour la cadence de quinze minutes.
+    pub sondes: std::collections::HashMap<Identifiant, (Identifiant, u64)>,
+    /// Côté racine : par machine d'un domaine hébergé, la sonde du dehors
+    /// (décision 92).
+    pub du_dehors: std::collections::HashMap<Identifiant, DuDehors>,
+}
+
+/// Un constat de l'écho, et quand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConstatDEcho {
+    /// Ce qui a été constaté.
+    pub resultat: ResultatEcho,
+    /// Quand, en millisecondes d'époque.
+    pub a: u64,
+}
+
+/// Ce qu'une racine a sondé du dehors, vers l'écho d'une machine hébergée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DuDehors {
+    /// L'adresse sondée — celle que le membre a vue.
+    pub cible: SocketAddr,
+    /// Quand la sonde est partie.
+    pub lancee: Instant,
+    /// Ce qu'elle a constaté, une fois revenue.
+    pub constat: Option<ConstatDEcho>,
+}
+
+/// Ce qu'une sonde par l'écho constate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultatEcho {
+    /// Une réponse signée de la clé attendue : **preuve de clé vérifiée**.
+    Verifie,
+    /// Rien, ou rien de lisible, en trois envois.
+    Injoignable,
+    /// Une réponse bien formée, pour ce défi et ce sondeur, mais signée d'une
+    /// AUTRE clé ou au nom d'une autre machine : quelqu'un d'autre répond à
+    /// cette adresse.
+    AutreCle,
+}
+
+impl ResultatEcho {
+    /// Le mot de l'état par machine.
+    #[must_use]
+    pub const fn mot(self) -> asl_api::corps::MotDEcho {
+        match self {
+            Self::Verifie => asl_api::corps::MotDEcho::Verifie,
+            Self::Injoignable => asl_api::corps::MotDEcho::Injoignable,
+            Self::AutreCle => asl_api::corps::MotDEcho::AutreCle,
+        }
+    }
+}
+
+/// Combien d'envois : **trois**, d'une seconde chacun — trois secondes en
+/// tout, [`ATTENTE`] (décision 92). L'UDP perd, et un seul envoi confondrait
+/// perte et silence.
+pub const ENVOIS_D_ECHO: u32 = 3;
+
+/// L'attente de chaque envoi.
+pub const ATTENTE_PAR_ENVOI: core::time::Duration = core::time::Duration::from_secs(1);
+
+/// Le point qu'on a le droit de sonder par l'écho, s'il y en a un : le
+/// candidat **réflexif**, en UDP — l'adresse et le port d'où le bail nous
+/// parle. Jamais une adresse annoncée, pour la raison d'en tête.
+#[must_use]
+pub fn sondable_par_l_echo(candidat: Candidat) -> Option<SocketAddr> {
+    if candidat.origine != Origine::Reflexif || candidat.protocole != Protocole::Udp {
+        return None;
+    }
+    Some(SocketAddr::new(candidat.adresse, candidat.port.valeur()))
+}
+
+/// Ce que la réponse doit prouver : le défi de la sonde, la machine visée,
+/// l'annuaire qui sonde, et la clé que l'annuaire tient pour la machine.
+pub struct Attendu {
+    /// Le défi envoyé.
+    pub defi: asl_echo::DefiEcho,
+    /// La machine visée.
+    pub machine: Identifiant,
+    /// L'annuaire qui sonde — celui qui a signé.
+    pub sondeur: Identifiant,
+    /// La clé de la machine, telle que l'annuaire la tient.
+    pub cle: asl_cle::ClePublique,
+}
+
+/// **Sonde un écho** : depuis une socket UDP ÉPHÉMÈRE — pas le port
+/// d'écoute de l'annuaire, sans quoi la sonde passerait le pare-feu à état
+/// que le bail a ouvert et ne mesurerait que le bail (décision 92) —, trois
+/// envois d'une seconde vers `ou`, et la première réponse qui prouve.
+///
+/// **Seule la source sondée est lue** : un datagramme d'ailleurs est ignoré.
+/// Une réponse pour un autre défi ou un autre sondeur n'est pas la nôtre, et
+/// l'on attend encore ; une réponse d'une autre machine, ou dont la signature
+/// ne tient pas, fait [`ResultatEcho::AutreCle`] si rien de mieux ne vient.
+pub async fn prouver(ou: SocketAddr, sonde: &[u8], attendu: &Attendu) -> ResultatEcho {
+    let locale: SocketAddr = if ou.is_ipv6() {
+        SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0))
+    } else {
+        SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0))
+    };
+    let Ok(socket) = tokio::net::UdpSocket::bind(locale).await else {
+        return ResultatEcho::Injoignable;
+    };
+    let mut autre_cle = false;
+    let mut tampon = [0_u8; 512];
+    for _ in 0..ENVOIS_D_ECHO {
+        let _ = socket.send_to(sonde, ou).await;
+        let echeance = tokio::time::Instant::now()
+            .checked_add(ATTENTE_PAR_ENVOI)
+            .unwrap_or_else(tokio::time::Instant::now);
+        while let Ok(Ok((lus, source))) =
+            tokio::time::timeout_at(echeance, socket.recv_from(&mut tampon)).await
+        {
+            if source.ip().to_canonical() != ou.ip().to_canonical() || source.port() != ou.port() {
+                continue;
+            }
+            let Ok(reponse) = asl_echo::Reponse::lire(tampon.get(..lus).unwrap_or_default()) else {
+                continue;
+            };
+            match reponse.verifier(
+                &attendu.defi,
+                attendu.machine,
+                attendu.sondeur,
+                &attendu.cle,
+            ) {
+                Ok(()) => return ResultatEcho::Verifie,
+                Err(asl_echo::RefusReponse::AutreMachine | asl_echo::RefusReponse::Signature) => {
+                    autre_cle = true;
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    if autre_cle {
+        ResultatEcho::AutreCle
+    } else {
+        ResultatEcho::Injoignable
+    }
 }
 
 /// Le candidat qu'on a le droit de sonder, s'il y en a un.
@@ -169,6 +323,138 @@ mod tests {
             sondable(quoi).map(|ou| ou.to_string()),
             Some("[2001:db8::1]:443".to_owned())
         );
+    }
+
+    #[test]
+    fn seul_le_reflexif_en_udp_se_sonde_par_l_echo() {
+        use super::sondable_par_l_echo;
+        let quoi = un_candidat(Origine::Reflexif, Protocole::Udp, "203.0.113.4");
+        assert_eq!(
+            sondable_par_l_echo(quoi).map(|ou| ou.to_string()),
+            Some("203.0.113.4:443".to_owned())
+        );
+        for (origine, protocole) in [
+            (Origine::Annonce, Protocole::Udp),
+            (Origine::Reflexif, Protocole::Tcp),
+        ] {
+            assert_eq!(
+                sondable_par_l_echo(un_candidat(origine, protocole, "192.168.1.20")),
+                None
+            );
+        }
+    }
+
+    /// Un faux écho sur la boucle locale : il lit la sonde, la croit sous la
+    /// clé de la racine, et répond signé de `cle` — la bonne, ou une autre.
+    async fn un_echo(
+        machine: asl_id::Identifiant,
+        racine: &'static asl_cle::CleSecrete,
+        cle: asl_cle::CleSecrete,
+    ) -> std::net::SocketAddr {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("une socket");
+        let ou = socket.local_addr().expect("une adresse");
+        tokio::spawn(async move {
+            let mut tampon = [0_u8; 512];
+            while let Ok((lus, source)) = socket.recv_from(&mut tampon).await {
+                let Ok(sonde) = asl_echo::SondeAnnuaire::lire(&tampon[..lus]) else {
+                    continue;
+                };
+                let n = asl_cle::identifiant_de_racine(&racine.publique());
+                let cle_de = |quel| (quel == n).then(|| racine.publique());
+                let maintenant = sonde.emise_a();
+                if let Ok(acceptee) = sonde.accepter(machine, &cle_de, maintenant) {
+                    let _ = socket
+                        .send_to(&acceptee.repondre(source, &cle).octets(), source)
+                        .await;
+                }
+            }
+        });
+        ou
+    }
+
+    fn attendu_de(
+        machine: asl_id::Identifiant,
+        racine: &asl_cle::CleSecrete,
+        cle: &asl_cle::CleSecrete,
+    ) -> (super::Attendu, [u8; asl_echo::REQUETE_OCTETS]) {
+        let defi = asl_echo::DefiEcho::depuis_octets([0x5E; 16]);
+        let n = asl_cle::identifiant_de_racine(&racine.publique());
+        let sonde = asl_echo::SondeAnnuaire::signer(defi, n, machine, 1_789_217_751_000, racine)
+            .expect("une sonde");
+        (
+            super::Attendu {
+                defi,
+                machine,
+                sondeur: n,
+                cle: cle.publique(),
+            },
+            sonde.octets(),
+        )
+    }
+
+    #[tokio::test]
+    async fn un_echo_qui_signe_de_la_bonne_cle_est_verifie_et_d_une_autre_autre_cle() {
+        static RACINE: std::sync::LazyLock<asl_cle::CleSecrete> =
+            std::sync::LazyLock::new(|| asl_cle::CleSecrete::depuis_entropie([0x11; 32]));
+        let machine = asl_id::Identifiant::depuis_entropie(asl_id::Genre::Machine, [0x70; 16]);
+        let cle = asl_cle::CleSecrete::depuis_entropie([0x33; 32]);
+
+        let ou = un_echo(
+            machine,
+            &RACINE,
+            asl_cle::CleSecrete::depuis_entropie([0x33; 32]),
+        )
+        .await;
+        let (attendu, sonde) = attendu_de(machine, &RACINE, &cle);
+        assert_eq!(
+            super::prouver(ou, &sonde, &attendu).await,
+            super::ResultatEcho::Verifie
+        );
+
+        let ailleurs = un_echo(
+            machine,
+            &RACINE,
+            asl_cle::CleSecrete::depuis_entropie([0x66; 32]),
+        )
+        .await;
+        assert_eq!(
+            super::prouver(ailleurs, &sonde, &attendu).await,
+            super::ResultatEcho::AutreCle,
+            "quelqu'un d'autre répond à cette adresse"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_echo_muet_est_injoignable_apres_trois_envois() {
+        let racine = asl_cle::CleSecrete::depuis_entropie([0x11; 32]);
+        let machine = asl_id::Identifiant::depuis_entropie(asl_id::Genre::Machine, [0x70; 16]);
+        let muet = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("une socket");
+        let ou = muet.local_addr().expect("une adresse");
+        let (attendu, sonde) = attendu_de(machine, &racine, &racine);
+        let depart = std::time::Instant::now();
+        assert_eq!(
+            super::prouver(ou, &sonde, &attendu).await,
+            super::ResultatEcho::Injoignable
+        );
+        assert!(
+            depart.elapsed() >= super::ATTENTE,
+            "trois envois d'une seconde"
+        );
+        let mut recus = 0;
+        let mut tampon = [0_u8; 512];
+        while let Ok(Ok(_)) = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            muet.recv_from(&mut tampon),
+        )
+        .await
+        {
+            recus += 1;
+        }
+        assert_eq!(recus, 3, "trois envois, de 384 octets");
     }
 
     #[tokio::test]
