@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use asl_api::annuaire::{DeclarationDePair, EtatDePaire, PaireRendue};
+use asl_api::annuaire::{DeclarationDePair, EtatDePaire, EtatDeVoie, PaireRendue};
 use asl_cle::CleSecrete;
 use asl_id::Identifiant;
 use asl_registre::{EntreeDEtat, MACHINE_FEDEREE_OCTETS, MachineFederee, NomRange};
@@ -110,6 +110,23 @@ pub struct EtatFedere {
     /// comme le reste** : une racine qui redémarre l'apprend au tour suivant
     /// de chaque membre, dix secondes au plus.
     paires: HashMap<Identifiant, EtatDePaire>,
+    /// La voie de chaque membre qui a parlé à cette racine depuis qu'elle
+    /// tourne (0.38.0, décision 86) : ce qui fait vivre l'`asl-directory` et
+    /// que `GET /v1/annuaires` dit par `voie`. **En mémoire, jamais oubliée
+    /// tant que la racine tourne** : `tombee` dit qu'elle a tenu.
+    voies: HashMap<Identifiant, VoieDeMembre>,
+}
+
+/// Ce qu'une racine a vu de la voie d'un membre.
+#[derive(Debug, Clone)]
+struct VoieDeMembre {
+    /// Quand il a parlé pour la dernière fois, en microsecondes.
+    dernier_mot: u64,
+    /// La connexion sur laquelle il a parlé — c'est sa fermeture, et non
+    /// celle d'une connexion d'avant qui traînerait, qui fait tomber la voie.
+    connexion: Vec<u8>,
+    /// Cette connexion s'est-elle fermée depuis ?
+    fermee: bool,
 }
 
 /// Ce qu'une racine rend d'un service fédéré.
@@ -280,6 +297,49 @@ impl EtatFedere {
     #[must_use]
     pub fn paire_de(&self, membre: Identifiant) -> Option<EtatDePaire> {
         self.paires.get(&membre).copied()
+    }
+
+    /// Ce membre vient de parler, sur cette connexion, sa clé prouvée et
+    /// son inscription acceptée (décision 86).
+    pub fn noter_une_parole(&mut self, membre: Identifiant, connexion: &[u8], maintenant: u64) {
+        self.voies.insert(
+            membre,
+            VoieDeMembre {
+                dernier_mot: maintenant,
+                connexion: connexion.to_vec(),
+                fermee: false,
+            },
+        );
+    }
+
+    /// Cette connexion de ce membre s'est fermée. **Seule celle sur laquelle
+    /// il a parlé en dernier fait tomber la voie** : une connexion d'avant
+    /// une reprise, qui se ferme après que la nouvelle a parlé, ne dit rien.
+    pub fn noter_une_fermeture(&mut self, membre: Identifiant, connexion: &[u8]) {
+        if let Some(voie) = self.voies.get_mut(&membre)
+            && voie.connexion == connexion
+        {
+            voie.fermee = true;
+        }
+    }
+
+    /// La voie de ce membre vers cette racine : `ouverte` s'il a parlé
+    /// depuis moins de `expiration` microsecondes sur une connexion qui
+    /// tient ; `tombee` si elle a tenu et s'est tue ou fermée ; **rien** s'il
+    /// n'a pas parlé depuis que cette racine tourne (C6).
+    #[must_use]
+    pub fn voie_de(
+        &self,
+        membre: Identifiant,
+        maintenant: u64,
+        expiration: u64,
+    ) -> Option<EtatDeVoie> {
+        let voie = self.voies.get(&membre)?;
+        if !voie.fermee && voie.dernier_mot.saturating_add(expiration) >= maintenant {
+            Some(EtatDeVoie::Ouverte)
+        } else {
+            Some(EtatDeVoie::Tombee)
+        }
     }
 }
 
@@ -1041,6 +1101,53 @@ mod essais {
             None
         );
         assert_eq!(jugee.etat(), Some(EtatDePaire::Reglee));
+    }
+
+    #[test]
+    fn la_voie_d_un_membre_s_ouvre_se_tait_se_ferme_et_ne_s_invente_pas() {
+        let mut etat = EtatFedere::nouveau();
+        let (speedy, helium) = (id(Genre::Annuaire, 1), id(Genre::Annuaire, 2));
+        // **Aucune nouvelle, aucun mot** (C6).
+        assert_eq!(etat.voie_de(speedy, 0, EXPIRATION_US), None);
+        etat.noter_une_parole(speedy, b"c1", 1_000);
+        assert_eq!(
+            etat.voie_de(speedy, 1_000 + EXPIRATION_US, EXPIRATION_US),
+            Some(EtatDeVoie::Ouverte)
+        );
+        // Tue au-delà de l'expiration : tombée.
+        assert_eq!(
+            etat.voie_de(speedy, 1_001 + EXPIRATION_US, EXPIRATION_US),
+            Some(EtatDeVoie::Tombee)
+        );
+        // Elle reparle : ouverte de nouveau.
+        etat.noter_une_parole(speedy, b"c1", 2_000);
+        assert_eq!(
+            etat.voie_de(speedy, 2_000, EXPIRATION_US),
+            Some(EtatDeVoie::Ouverte)
+        );
+        // Une reprise : la nouvelle connexion parle, l'ancienne se ferme
+        // après — la voie tient.
+        etat.noter_une_parole(speedy, b"c2", 3_000);
+        etat.noter_une_fermeture(speedy, b"c1");
+        assert_eq!(
+            etat.voie_de(speedy, 3_000, EXPIRATION_US),
+            Some(EtatDeVoie::Ouverte)
+        );
+        // La connexion qui a parlé se ferme : tombée, tout de suite.
+        etat.noter_une_fermeture(speedy, b"c2");
+        assert_eq!(
+            etat.voie_de(speedy, 3_000, EXPIRATION_US),
+            Some(EtatDeVoie::Tombee)
+        );
+        // Un membre qui ne s'est jamais dit n'a pas de voie à fermer.
+        etat.noter_une_fermeture(helium, b"c3");
+        assert_eq!(etat.voie_de(helium, 3_000, EXPIRATION_US), None);
+        // Balayer les services ne l'oublie pas.
+        etat.oublier_les_perimes(u64::MAX, EXPIRATION_US);
+        assert_eq!(
+            etat.voie_de(speedy, 3_000, EXPIRATION_US),
+            Some(EtatDeVoie::Tombee)
+        );
     }
 
     #[test]

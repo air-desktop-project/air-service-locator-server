@@ -620,6 +620,37 @@ le service, remettre la sauvegarde en place, installer la 0.36.0 et
 redémarrer. Ce qui a été écrit sur cette machine depuis la mise à jour est
 perdu pour elle — et revient de son pair par la réplication, s'il l'a reçu.
 
+### Déployer la 0.38.0 — l'`asl-directory` d'un annuaire local
+
+**Ce qui change** (`docs/annuaires.md` §2 quinquies ; décisions 73 à 87) : les
+racines servent, **sur la voie machine**, `GET /v1/ou/{n-…}/asl-directory` —
+l'annuaire local que ce `n-…` titulaire nomme, synthétisé de son inscription
+et des voies de ses membres, **rien n'est écrit**. `GET /v1/annuaires` gagne,
+par membre accepté, `"voie":"ouverte"` ou `"tombee"`. Toute annonce du nom
+`asl-directory` est refusée, `403`. **Aucune migration, aucun format qui
+change** : un `dpkg -i` et un redémarrage, dans n'importe quel ordre ; la
+0.37.0 et la 0.38.0 se répliquent et fédèrent l'une avec l'autre.
+
+- **Les racines** servent la route et le champ dès qu'elles tournent. Le
+  membre n'a rien à dire de plus : sa voie d'aujourd'hui suffit à le faire
+  vivre (décision 74). Après un redémarrage d'une racine, `voie` est absent
+  et la route rend `404` jusqu'au premier tour de chaque membre — dix secondes
+  au plus.
+- **Les membres** n'ont besoin de la 0.38.0 que pour refuser eux-mêmes une
+  annonce d'`asl-directory` ; une 0.37.0 la prendrait pour un service
+  ordinaire, et le rapporterait aux racines.
+
+**Ce qu'on voit au journal** : `annonce refusée : m-… annonce
+« asl-directory », un nom réservé — les racines le synthétisent pour chaque
+annuaire local (décision 73)`, à chaque tentative.
+
+**Vérifier en production** : pour speedy, le `service` rendu est
+`s-294B4BA9XHXFZ5DQ8Q7T35M7PY` (`n-7MSV5RPCXBZH25PQM4ZPE5X87P`, dérivé sous
+`"asl/annuaire/1"`). **`asl` ne sait pas encore le demander** : `asl where`
+exige un `m-…` et lit une réponse d'annonce — c'est la PR client. D'ici là,
+l'état se lit dans `GET /v1/annuaires` (l'écran « Mon annuaire local » quand
+les applications liront `voie`).
+
 ### Frapper la clé d'exploitation, et émettre (depuis 0.15.0)
 
 Les deux gestes sont dans le même binaire, et **aucun ne tourne sur un banc** :

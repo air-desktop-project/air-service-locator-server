@@ -8139,3 +8139,685 @@ fn identite_de_chaque_adresse(corps: &str) -> Vec<(String, String)> {
     assert_eq!(adresses.len(), identites.len(), "{corps}");
     adresses.into_iter().zip(identites).collect()
 }
+
+// ── L'`asl-directory` (décisions 73 à 87, 0.38.0) ───────────────────────────
+
+/// Le flux suivant d'une connexion : un flux bidirectionnel ouvert par le
+/// client tous les quatre.
+fn suivant(flux: &mut u64) -> u64 {
+    let pris = *flux;
+    *flux = flux.saturating_add(4);
+    pris
+}
+
+/// Une racine de trois secondes d'expiration fédérée ; alice possède, bob
+/// administre les racines ; speedy — l'annuaire d'alice — est accepté, et le
+/// premier domaine d'alice lui est confié.
+struct SceneDAnnuaire {
+    racine: asl_loop_tokio::Confiance,
+    identite: &'static asl_cle::CleSecrete,
+    adresse: SocketAddr,
+    dire_stop: tokio::sync::oneshot::Sender<()>,
+    tache: tokio::task::JoinHandle<Comptes>,
+    fichier: PathBuf,
+    alice: ams_quic_client::Client,
+    flux_alice: u64,
+    bob: ams_quic_client::Client,
+    flux_bob: u64,
+    compte_b: Identifiant,
+    domaine_a: Identifiant,
+    n_speedy: Identifiant,
+}
+
+async fn monter_une_scene_d_annuaire(nom: &str) -> SceneDAnnuaire {
+    let (racine, identite) = banc(nom);
+    let (base, fichier) = entrepot(nom);
+    let exploitant_cle = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
+    let (adresse, dire_stop, tache) = lever_complet(
+        identite,
+        base,
+        asl_proto::Bail::nouveau(10, 30).expect("un bail"),
+        asl_auth::Politique::AttestationFacultative,
+        Attestations::AUCUNE,
+        None,
+        ClesDeLExploitant {
+            exploitant: Some(exploitant_cle.publique()),
+            expiration_federee_us: Some(3_000_000),
+            ..ClesDeLExploitant::default()
+        },
+    )
+    .await;
+    let mut alice = connecter(&racine, adresse).await;
+    let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA1).await;
+    let mut bob = connecter(&racine, adresse).await;
+    let (compte_b, _, _) = creer_un_compte(&mut bob, 0, 0xB1).await;
+    let mut exploitant = connecter(&racine, adresse).await;
+    let liaison = liaison_du_client(&exploitant);
+    let defi = tirer_le_defi(&mut exploitant, 0).await;
+    let (statut, _) = poster(
+        &mut exploitant,
+        4,
+        b"/v1/administrateurs",
+        &corps_d_exploitant(&exploitant_cle, &defi, &liaison, Some(compte_b)),
+        b"application/octet-stream",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+    let (statut, rendu) = poster(
+        &mut alice,
+        8,
+        b"/v1/annuaires",
+        br#"{"adresse":"speedy.maison:6630"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    let speedy = asl_cle::CleSecrete::depuis_entropie([0x51; 32]);
+    let n_speedy = asl_cle::identifiant_de_racine(&speedy.publique());
+    let (statut, _) = se_presenter(
+        &racine,
+        adresse,
+        &speedy,
+        Some(&valeur_json(&rendu, "code")),
+    )
+    .await;
+    assert_eq!(statut, b"200");
+    let (statut, _) = poster(
+        &mut bob,
+        8,
+        format!("/v1/inscriptions/{}/decision", n_speedy.texte()).as_bytes(),
+        br#"{"accepte":true}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+    let domaine_a = asl_registre::premier_domaine(compte_a);
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            12,
+            format!("/v1/domaines/{}/hebergeur", domaine_a.texte()).as_bytes(),
+            format!("{{\"annuaire\":\"{}\"}}", n_speedy.texte()).as_bytes(),
+        )
+        .await,
+        b"204"
+    );
+    SceneDAnnuaire {
+        racine,
+        identite,
+        adresse,
+        dire_stop,
+        tache,
+        fichier,
+        alice,
+        flux_alice: 16,
+        bob,
+        flux_bob: 12,
+        compte_b,
+        domaine_a,
+        n_speedy,
+    }
+}
+
+/// Un compte neuf sur une connexion neuve.
+async fn un_compte(
+    scene: &SceneDAnnuaire,
+    graine: u8,
+) -> (ams_quic_client::Client, u64, Identifiant) {
+    let mut appareil = connecter(&scene.racine, scene.adresse).await;
+    let (compte, _, _) = creer_un_compte(&mut appareil, 0, graine).await;
+    (appareil, 8, compte)
+}
+
+/// Déclare une machine de ce compte avec ces capacités, l'enrôle et la fait
+/// prouver sa clé **sur la même connexion**, qui sert ensuite à demander :
+/// la machine, sa connexion, et le flux suivant.
+async fn une_machine_prouvee(
+    scene: &SceneDAnnuaire,
+    appareil: &mut ams_quic_client::Client,
+    flux: &mut u64,
+    corps: &[u8],
+    graine: u8,
+) -> (
+    Identifiant,
+    ams_quic_client::Client,
+    u64,
+    asl_cle::CleSecrete,
+) {
+    let (statut, rendu) = poster(
+        appareil,
+        suivant(flux),
+        b"/v1/machines",
+        corps,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    let secrete = asl_cle::CleSecrete::depuis_entropie([graine; 32]);
+    let mut connexion = connecter(&scene.racine, scene.adresse).await;
+    let machine = enroler(&mut connexion, 0, &valeur_json(&rendu, "code"), &secrete).await;
+    authentifier(&mut connexion, machine, &secrete, 8, 12).await;
+    (machine, connexion, 16, secrete)
+}
+
+/// Alice accorde ces droits sur cet élément au groupe personnel de ce
+/// compte ; rend le droit.
+async fn accorder(
+    alice: &mut ams_quic_client::Client,
+    flux: &mut u64,
+    a: Identifiant,
+    element: Identifiant,
+    droits: &str,
+) -> Identifiant {
+    let demande = format!(
+        r#"{{"groupe":"{}","element":"{}","droits":{droits},"etiquette":"essai"}}"#,
+        t(asl_registre::groupe_personnel(a)),
+        t(element)
+    );
+    let (statut, rendu) = poster(
+        alice,
+        suivant(flux),
+        b"/v1/droits",
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201", "{}", String::from_utf8_lossy(&rendu));
+    Identifiant::analyser(&valeur_json(&rendu, "droit")).expect("un droit")
+}
+
+/// `GET /v1/ou/{n-…}/asl-directory` : le statut et le corps.
+async fn resoudre_l_annuaire(
+    client: &mut ams_quic_client::Client,
+    flux: &mut u64,
+    annuaire: Identifiant,
+) -> (Vec<u8>, String) {
+    let cible = format!("/v1/ou/{}/asl-directory", annuaire.texte());
+    lire_json(client, suivant(flux), cible.as_bytes()).await
+}
+
+/// Résout jusqu'à ce statut, trois secondes et demie de plus que
+/// l'expiration au plus ; rend le corps.
+async fn resoudre_jusqu_a(
+    client: &mut ams_quic_client::Client,
+    flux: &mut u64,
+    annuaire: Identifiant,
+    voulu: impl Fn(&[u8], &str) -> bool,
+) -> String {
+    let depart = std::time::Instant::now();
+    loop {
+        let (statut, corps) = resoudre_l_annuaire(client, flux, annuaire).await;
+        if voulu(&statut, &corps) {
+            return corps;
+        }
+        assert!(
+            depart.elapsed() < std::time::Duration::from_secs(8),
+            "l'asl-directory n'a pas atteint l'état voulu : {} {corps}",
+            String::from_utf8_lossy(&statut)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// L'objet de ce membre dans une liste de `GET /v1/annuaires`.
+fn objet_du_membre(liste: &str, membre: Identifiant) -> String {
+    let marque = format!("\"membre\":\"{}\"", membre.texte().as_str());
+    liste
+        .split("},{")
+        .find(|objet| objet.contains(&marque))
+        .unwrap_or_else(|| panic!("{membre} n'est pas dans {liste}"))
+        .to_owned()
+}
+
+impl SceneDAnnuaire {
+    /// Speedy se lève et fédère, ses locateurs publiés.
+    async fn lever_speedy(&self, nom: &str) -> AnnuaireLocal {
+        lever_un_annuaire_local(
+            nom,
+            asl_loop_tokio::Confiance::par_identite(&[self.identite.publique()]),
+            self.adresse,
+            asl_cle::CleSecrete::depuis_entropie([0x51; 32]),
+            200,
+            &["[2001:db8::51]:6630"],
+            None,
+        )
+        .await
+    }
+
+    /// Mes annuaires, vus par alice.
+    async fn mes_annuaires(&mut self) -> String {
+        let (statut, liste) = lire_json(
+            &mut self.alice,
+            suivant(&mut self.flux_alice),
+            b"/v1/annuaires",
+        )
+        .await;
+        assert_eq!(statut, b"200", "{liste}");
+        liste
+    }
+
+    async fn arreter(self) {
+        let _ = self.dire_stop.send(());
+        let _ = self.tache.await;
+        let _ = std::fs::remove_file(&self.fichier);
+    }
+}
+
+#[tokio::test]
+async fn l_asl_directory_suit_les_voies_de_la_paire_et_voie_le_dit() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // 1. **Le `s-…` est dérivé sous le titulaire** et la réponse est le corps
+    //    du `421` plus `service` (décisions 73 et 75).
+    // 2. **Deux membres vivants, deux adresses et deux `n-…`** ; le second,
+    //    sans locateur publié, sous son adresse déclarée (décision 81).
+    // 3. **Un membre qui se tait disparaît** en trente secondes au plus (ici
+    //    trois) ; **aucun vivant, `404`** — le même que l'hors-cercle et
+    //    l'inexistant (décision 82, C9).
+    // 4. **`voie`** dans `GET /v1/annuaires` : absente avant toute nouvelle,
+    //    `ouverte`, puis `tombee` ; jamais dans une inscription en attente
+    //    (décision 86).
+    let mut scene = monter_une_scene_d_annuaire("asl-directory-paire").await;
+    let n_speedy = scene.n_speedy;
+    let service = asl_registre::asl_directory_derive(n_speedy);
+
+    // Le portable d'alice, qui lit ; une machine de carole, hors du cercle.
+    let mut alice = std::mem::replace(
+        &mut scene.alice,
+        connecter(&scene.racine, scene.adresse).await,
+    );
+    let mut flux_alice = scene.flux_alice;
+    let (_, mut portable, mut flux_p, _) = une_machine_prouvee(
+        &scene,
+        &mut alice,
+        &mut flux_alice,
+        br#"{"nom":"portable","capacites":["lecture"]}"#,
+        0xD2,
+    )
+    .await;
+    scene.alice = alice;
+    scene.flux_alice = flux_alice;
+    let (mut carole, mut flux_carole, _) = un_compte(&scene, 0xC1).await;
+    let (_, mut intrus, mut flux_i, _) = une_machine_prouvee(
+        &scene,
+        &mut carole,
+        &mut flux_carole,
+        br#"{"nom":"intrus","capacites":["lecture"]}"#,
+        0xD3,
+    )
+    .await;
+
+    // ── ACCEPTÉ, MAIS AUCUNE VOIE : `404`, ET `voie` ABSENTE ────────────────
+    let (statut, rien) = resoudre_l_annuaire(&mut portable, &mut flux_p, n_speedy).await;
+    assert_eq!(statut, b"404", "aucun membre n'a parlé : {rien}");
+    let liste = scene.mes_annuaires().await;
+    assert!(
+        !liste.contains("\"voie\""),
+        "pas de nouvelles depuis le démarrage, pas de mot (C6) : {liste}"
+    );
+
+    // ── SPEEDY FÉDÈRE : UNE ADRESSE, SON `n-…` ──────────────────────────────
+    let speedy_local = scene.lever_speedy("asl-directory-paire-speedy").await;
+    let corps = resoudre_jusqu_a(&mut portable, &mut flux_p, n_speedy, |statut, _| {
+        statut == b"200"
+    })
+    .await;
+    assert_eq!(
+        corps,
+        format!(
+            "{{\"service\":\"{}\",\"annuaire\":\"{n}\",\"adresses\":[\"[2001:db8::51]:6630\"],\
+             \"identites\":\"{n}\"}}",
+            service.texte().as_str(),
+            n = n_speedy.texte().as_str()
+        ),
+        "le corps du `421`, plus le `s-…` dérivé sous le titulaire"
+    );
+    assert!(
+        objet_du_membre(&scene.mes_annuaires().await, n_speedy).contains("\"voie\":\"ouverte\"")
+    );
+
+    // ── HELIUM, SECOND MEMBRE : EN ATTENTE, PUIS ACCEPTÉ ET FÉDÉRÉ ──────────
+    let (statut, rendu) = poster(
+        &mut scene.alice,
+        suivant(&mut scene.flux_alice),
+        format!("/v1/annuaires/{}/membres", n_speedy.texte()).as_bytes(),
+        br#"{"adresse":"helium.maison:6630"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"201");
+    let helium = asl_cle::CleSecrete::depuis_entropie([0x53; 32]);
+    let n_helium = asl_cle::identifiant_de_racine(&helium.publique());
+    let (statut, _) = se_presenter(
+        &scene.racine,
+        scene.adresse,
+        &helium,
+        Some(&valeur_json(&rendu, "code")),
+    )
+    .await;
+    assert_eq!(statut, b"200");
+    // **EN ATTENTE : `voie` N'Y EST PAS**, ni dans la vue des
+    // administrateurs, ni dans celle du propriétaire.
+    let (statut, attente) = lire_json(
+        &mut scene.bob,
+        suivant(&mut scene.flux_bob),
+        b"/v1/inscriptions",
+    )
+    .await;
+    assert_eq!(statut, b"200", "{attente}");
+    assert!(
+        attente.contains(n_helium.texte().as_str()) && !attente.contains("\"voie\""),
+        "{attente}"
+    );
+    assert!(!objet_du_membre(&scene.mes_annuaires().await, n_helium).contains("\"voie\""));
+    let (statut, _) = poster(
+        &mut scene.bob,
+        suivant(&mut scene.flux_bob),
+        format!("/v1/inscriptions/{}/decision", n_helium.texte()).as_bytes(),
+        br#"{"accepte":true}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"204");
+    let helium_local = lever_un_annuaire_local(
+        "asl-directory-paire-helium",
+        asl_loop_tokio::Confiance::par_identite(&[scene.identite.publique()]),
+        scene.adresse,
+        helium,
+        200,
+        // **AUCUN LOCATEUR** : son adresse déclarée sert (décision 81).
+        &[],
+        Some(n_speedy),
+    )
+    .await;
+    let corps = resoudre_jusqu_a(&mut portable, &mut flux_p, n_speedy, |statut, corps| {
+        statut == b"200" && corps.contains("helium")
+    })
+    .await;
+    let mut face_a_face = identite_de_chaque_adresse(&corps);
+    face_a_face.sort();
+    assert_eq!(
+        face_a_face,
+        [
+            (
+                "[2001:db8::51]:6630".to_owned(),
+                n_speedy.texte().as_str().to_owned()
+            ),
+            (
+                "helium.maison:6630".to_owned(),
+                n_helium.texte().as_str().to_owned()
+            ),
+        ],
+        "chaque membre vivant, avec SON `n-…` : {corps}"
+    );
+    let liste = scene.mes_annuaires().await;
+    for membre in [n_speedy, n_helium] {
+        assert!(
+            objet_du_membre(&liste, membre).contains("\"voie\":\"ouverte\""),
+            "{liste}"
+        );
+    }
+    // **LE SECOND NE NOMME PAS L'ANNUAIRE** : sous son `n-…`, rien.
+    let (statut, _) = resoudre_l_annuaire(&mut portable, &mut flux_p, n_helium).await;
+    assert_eq!(statut, b"404");
+
+    // ── HELIUM SE TAIT : UNE SEULE ADRESSE, ET `tombee` ─────────────────────
+    helium_local.federateur.abort();
+    let corps = resoudre_jusqu_a(&mut portable, &mut flux_p, n_speedy, |statut, corps| {
+        statut == b"200" && !corps.contains("helium")
+    })
+    .await;
+    assert_eq!(identite_de_chaque_adresse(&corps).len(), 1, "{corps}");
+    let liste = scene.mes_annuaires().await;
+    assert!(objet_du_membre(&liste, n_helium).contains("\"voie\":\"tombee\""));
+    assert!(objet_du_membre(&liste, n_speedy).contains("\"voie\":\"ouverte\""));
+
+    // ── SPEEDY SE TAIT AUSSI : `404`, LE MÊME QUE L'HORS-CERCLE ET QUE ──────
+    // ── L'INEXISTANT (C9) ───────────────────────────────────────────────────
+    //
+    // Pendant qu'il est vivant, l'hors-cercle reçoit déjà ce `404`.
+    let hors_cercle = resoudre_l_annuaire(&mut intrus, &mut flux_i, n_speedy).await;
+    speedy_local.federateur.abort();
+    let parti = resoudre_jusqu_a(&mut portable, &mut flux_p, n_speedy, |statut, _| {
+        statut == b"404"
+    })
+    .await;
+    let inexistant = asl_cle::identifiant_de_racine(
+        &asl_cle::CleSecrete::depuis_entropie([0x5E; 32]).publique(),
+    );
+    let jamais = resoudre_l_annuaire(&mut portable, &mut flux_p, inexistant).await;
+    assert_eq!(hors_cercle.0, b"404");
+    assert_eq!(hors_cercle, (b"404".to_vec(), parti.clone()));
+    assert_eq!(jamais, (b"404".to_vec(), parti));
+    let liste = scene.mes_annuaires().await;
+    for membre in [n_speedy, n_helium] {
+        assert!(
+            objet_du_membre(&liste, membre).contains("\"voie\":\"tombee\""),
+            "{liste}"
+        );
+    }
+
+    helium_local.arreter().await;
+    speedy_local.arreter().await;
+    scene.arreter().await;
+}
+
+#[tokio::test]
+async fn le_cercle_de_l_asl_directory_et_le_nom_reserve() {
+    // ── CE QUE CET ESSAI PROUVE ─────────────────────────────────────────────
+    //
+    // 1. **Le cercle étroit** (décisions 79, 80, 87) : le propriétaire et un
+    //    administrateur des racines reçoivent tout ; `localiser` sur le
+    //    domaine hébergé, tout ; `voir` seul, ou `administrer` seul, la
+    //    réponse réduite ; `rattacher` seul, un droit sur une machine du
+    //    domaine, ou rien — `404`, le même.
+    // 2. **Le nom est réservé** (décision 73) : une annonce d'`asl-directory`
+    //    est refusée `403` et journalisée, à la racine — avant le `421` — et
+    //    chez l'annuaire local.
+    let mut scene = monter_une_scene_d_annuaire("asl-directory-cercle").await;
+    let n_speedy = scene.n_speedy;
+    let entiere = |corps: &str| corps.contains("\"adresses\":[\"[2001:db8::51]:6630\"]");
+    let reduite = format!(
+        "{{\"service\":\"{}\",\"annuaire\":\"{}\"}}",
+        asl_registre::asl_directory_derive(n_speedy)
+            .texte()
+            .as_str(),
+        n_speedy.texte().as_str()
+    );
+
+    // Le portable d'alice, et le grenier rangé dans le domaine confié.
+    let mut alice = std::mem::replace(
+        &mut scene.alice,
+        connecter(&scene.racine, scene.adresse).await,
+    );
+    let mut flux_alice = scene.flux_alice;
+    let (_, mut portable, mut flux_p, _) = une_machine_prouvee(
+        &scene,
+        &mut alice,
+        &mut flux_alice,
+        br#"{"nom":"portable","capacites":["lecture"]}"#,
+        0xD2,
+    )
+    .await;
+    let (grenier, mut daemon, mut flux_g, cle_g) = une_machine_prouvee(
+        &scene,
+        &mut alice,
+        &mut flux_alice,
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        0xD1,
+    )
+    .await;
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            suivant(&mut flux_alice),
+            format!("/v1/machines/{}/domaine", grenier.texte()).as_bytes(),
+            format!("{{\"domaine\":\"{}\"}}", scene.domaine_a.texte()).as_bytes(),
+        )
+        .await,
+        b"204"
+    );
+    // Bob, administrateur des racines, et sa machine.
+    let mut bob = std::mem::replace(
+        &mut scene.bob,
+        connecter(&scene.racine, scene.adresse).await,
+    );
+    let mut flux_bob = scene.flux_bob;
+    let (_, mut bob_lit, mut flux_bl, _) = une_machine_prouvee(
+        &scene,
+        &mut bob,
+        &mut flux_bob,
+        br#"{"nom":"console","capacites":["lecture"]}"#,
+        0xD4,
+    )
+    .await;
+    // Dan, dont les droits changent au fil de l'essai.
+    let (mut dan, mut flux_dan, compte_d) = un_compte(&scene, 0xD0).await;
+    let (_, mut dan_lit, mut flux_dl, _) = une_machine_prouvee(
+        &scene,
+        &mut dan,
+        &mut flux_dan,
+        br#"{"nom":"curieux","capacites":["lecture"]}"#,
+        0xD5,
+    )
+    .await;
+
+    let speedy_local = scene.lever_speedy("asl-directory-cercle-speedy").await;
+    let corps = resoudre_jusqu_a(&mut portable, &mut flux_p, n_speedy, |statut, _| {
+        statut == b"200"
+    })
+    .await;
+    assert!(entiere(&corps), "le propriétaire reçoit tout : {corps}");
+    let (statut, corps) = resoudre_l_annuaire(&mut bob_lit, &mut flux_bl, n_speedy).await;
+    assert_eq!(statut, b"200", "{corps}");
+    assert!(
+        entiere(&corps),
+        "un administrateur des racines reçoit tout : {corps}"
+    );
+    let _ = scene.compte_b;
+    let (statut, refus) = resoudre_l_annuaire(&mut dan_lit, &mut flux_dl, n_speedy).await;
+    assert_eq!(statut, b"404", "sans droit, rien : {refus}");
+
+    // ── LES DROITS DE DAN, UN À UN ──────────────────────────────────────────
+    let domaine = scene.domaine_a;
+    // `rattacher` seul, et `localiser` sur une seule machine du domaine :
+    // hors du cercle — le même `404`.
+    let rattacher = accorder(
+        &mut alice,
+        &mut flux_alice,
+        compte_d,
+        domaine,
+        r#"["rattacher"]"#,
+    )
+    .await;
+    let sur_la_machine = accorder(
+        &mut alice,
+        &mut flux_alice,
+        compte_d,
+        grenier,
+        r#"["localiser"]"#,
+    )
+    .await;
+    let (statut, corps) = resoudre_l_annuaire(&mut dan_lit, &mut flux_dl, n_speedy).await;
+    assert_eq!(
+        (statut.as_slice(), corps.as_str()),
+        (&b"404"[..], refus.as_str()),
+        "rattacher seul, ou un droit sur une machine, n'ouvre pas le cercle"
+    );
+    // `administrer` seul : la réponse réduite (décision 87).
+    let administrer = accorder(
+        &mut alice,
+        &mut flux_alice,
+        compte_d,
+        domaine,
+        r#"["administrer"]"#,
+    )
+    .await;
+    let (statut, corps) = resoudre_l_annuaire(&mut dan_lit, &mut flux_dl, n_speedy).await;
+    assert_eq!(
+        (statut.as_slice(), corps.as_str()),
+        (&b"200"[..], reduite.as_str()),
+        "administrer n'emporte pas localiser"
+    );
+    // `voir` seul, `administrer` retiré : la réponse réduite (décision 80).
+    let voir = accorder(
+        &mut alice,
+        &mut flux_alice,
+        compte_d,
+        domaine,
+        r#"["voir"]"#,
+    )
+    .await;
+    let cible = format!("/v1/droits/{}", t(administrer));
+    assert_eq!(
+        retirer(&mut alice, suivant(&mut flux_alice), cible.as_bytes()).await,
+        b"204"
+    );
+    let (statut, corps) = resoudre_l_annuaire(&mut dan_lit, &mut flux_dl, n_speedy).await;
+    assert_eq!(
+        (statut.as_slice(), corps.as_str()),
+        (&b"200"[..], reduite.as_str())
+    );
+    // `localiser` sur le domaine : tout.
+    let _ = accorder(
+        &mut alice,
+        &mut flux_alice,
+        compte_d,
+        domaine,
+        r#"["localiser"]"#,
+    )
+    .await;
+    let (statut, corps) = resoudre_l_annuaire(&mut dan_lit, &mut flux_dl, n_speedy).await;
+    assert_eq!(statut, b"200", "{corps}");
+    assert!(entiere(&corps), "localiser donne les adresses : {corps}");
+    let _ = (rattacher, sur_la_machine, voir);
+
+    // ── LE NOM RÉSERVÉ : `403` ET UNE LIGNE AU JOURNAL, PARTOUT ─────────────
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"asl-directory","points":[{{"protocole":"tcp","port":6630}}]}}"#,
+        grenier.texte()
+    );
+    let (statut, corps) = poster(
+        &mut daemon,
+        suivant(&mut flux_g),
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(
+        statut,
+        b"403",
+        "à la racine, avant le `421` : {}",
+        String::from_utf8_lossy(&corps)
+    );
+    speedy_local.attendre_la_machine(grenier).await;
+    // Le même daemon annonce ses services ordinaires chez lui…
+    let mut chez_speedy = connecter(&speedy_local.racine, speedy_local.adresse).await;
+    let (statut, corps) = annoncer_depot(&mut chez_speedy, grenier, &cle_g).await;
+    assert_eq!(statut, b"200", "{corps}");
+    // … mais pas le nom réservé.
+    let (statut, _) = poster(
+        &mut chez_speedy,
+        12,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"403", "chez l'annuaire local aussi");
+    let refusees = JOURNAL
+        .lock()
+        .expect("le journal n'est pas empoisonné")
+        .iter()
+        .filter(|ligne| {
+            ligne.starts_with("annonce refusée")
+                && ligne.contains(grenier.texte().as_str())
+                && ligne.contains("asl-directory")
+        })
+        .count();
+    assert!(refusees >= 2, "les deux refus se journalisent");
+
+    speedy_local.arreter().await;
+    scene.arreter().await;
+}

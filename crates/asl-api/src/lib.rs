@@ -456,6 +456,22 @@ pub enum Ressource<'a> {
         /// Son nom.
         service: NomService<'a>,
     },
+    /// `/v1/ou/{n}/asl-directory` — **où joindre cet annuaire local** : le
+    /// service que les racines synthétisent sous le `n-…` de son titulaire
+    /// (`docs/annuaires.md` §2 quinquies ; décisions 73 à 87, 0.38.0).
+    ///
+    /// **UN `n-…` À LA PLACE DU `m-…`, POUR CE SEUL NOM.** Tout autre nom sous
+    /// un `n-…` reste la faute d'identifiant d'hier (`400`) ; un `m-…` suivi
+    /// de ce nom reste une résolution de machine — que personne n'annonce,
+    /// puisque le nom est réservé ([`asl_proto::NomService::reserve`]).
+    ///
+    /// **La voie machine seulement** (décision 86) : l'exigence est celle de
+    /// [`Ressource::Ou`], une machine qui a prouvé sa clé ; un appareil n'y
+    /// passe pas.
+    OuAnnuaire {
+        /// Le titulaire, qui nomme l'annuaire logique.
+        annuaire: Identifiant,
+    },
     /// `/v1/ou?service={nom}` — **toutes** les instances de ce nom qu'on a le
     /// droit de voir.
     ///
@@ -689,6 +705,7 @@ impl Ressource<'_> {
             | Self::AliasResolu { .. }
             | Self::RechercheAlias { .. }
             | Self::Ou { .. }
+            | Self::OuAnnuaire { .. }
             | Self::OuParNom { .. }
             | Self::PairOperations { .. }
             | Self::PairInstantane
@@ -787,7 +804,9 @@ impl Ressource<'_> {
             | Self::Racines
             | Self::Utilisateur { .. } => Exigence::Aucune,
             Self::Annonce | Self::Poussees => Exigence::MachineAnnonce,
-            Self::Ou { .. } | Self::OuParNom { .. } => Exigence::MachineLecture,
+            Self::Ou { .. } | Self::OuAnnuaire { .. } | Self::OuParNom { .. } => {
+                Exigence::MachineLecture
+            }
             Self::Moi | Self::AppareilsDuProprietaire | Self::Replication => Exigence::Machine,
             Self::MachinesUtilisateur { .. } => Exigence::AppareilOuMachineLecture,
             Self::RechercheDomaines { .. } => Exigence::AppareilOuMachine,
@@ -1028,6 +1047,22 @@ fn identifiant(segment: &str, attendu: Genre) -> Result<Identifiant, Erreur> {
         .map_err(|_| Erreur::IdentifiantInvalide { attendu })
 }
 
+/// `/v1/ou/{cible}/{service}` : une machine et un nom — ou, **pour le seul
+/// nom réservé, un `n-…`** (décision 73) : l'`asl-directory` d'un annuaire
+/// local. Le `n-…` n'est essayé qu'avec ce nom ; partout ailleurs, la cible
+/// est une machine, et la faute d'identifiant reste celle d'hier.
+fn ou<'a>(cible: &str, service: &'a str) -> Result<Ressource<'a>, Erreur> {
+    if service == asl_proto::NOM_ASL_DIRECTORY
+        && let Ok(annuaire) = Identifiant::analyser_genre(Genre::Annuaire, cible)
+    {
+        return Ok(Ressource::OuAnnuaire { annuaire });
+    }
+    Ok(Ressource::Ou {
+        machine: identifiant(cible, Genre::Machine)?,
+        service: NomService::analyser(service).map_err(|_| Erreur::NomInvalide)?,
+    })
+}
+
 /// Le nom de service que porte la chaîne de requête, pour `/v1/ou`.
 ///
 /// **Un seul paramètre est admis**, et il s'appelle `service`. Accepter des
@@ -1212,10 +1247,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "ou"] => Ok(Ressource::OuParNom {
             service: service_de_la_requete(requete)?,
         }),
-        ["v1", "ou", machine, service] => Ok(Ressource::Ou {
-            machine: identifiant(machine, Genre::Machine)?,
-            service: NomService::analyser(service).map_err(|_| Erreur::NomInvalide)?,
-        }),
+        ["v1", "ou", cible, service] => ou(cible, service),
         ["v1", "pair", "preuve"] => Ok(Ressource::PairPreuve),
         ["v1", "pair", "operations"] => Ok(Ressource::PairOperations {
             apres: compteur_de_la_requete(requete)?,

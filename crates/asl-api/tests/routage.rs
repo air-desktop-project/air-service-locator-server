@@ -1497,3 +1497,49 @@ fn la_voie_de_l_annuaire_local_se_route_et_exige_un_annuaire_local() {
         );
     }
 }
+
+// ── L'`asl-directory` sous un `n-…` (décisions 73 et 86, 0.38.0) ────────────
+
+#[test]
+fn l_asl_directory_se_route_sous_un_n_et_sous_ce_seul_nom() {
+    let n = Identifiant::depuis_entropie(Genre::Annuaire, [0x33; 16]);
+    let chemin = format!("/v1/ou/{}/asl-directory", n.texte().as_str());
+    let resolu = resoudre(Methode::Get, chemin.as_bytes()).expect("il se route");
+    assert_eq!(resolu.ressource, Ressource::OuAnnuaire { annuaire: n });
+    assert!(resolu.sert);
+    // **LA VOIE MACHINE** (décision 86) : l'exigence de toute résolution.
+    assert_eq!(resolu.exigence, Exigence::MachineLecture);
+    assert!(!resoudre(Methode::Post, chemin.as_bytes()).unwrap().sert);
+
+    // Un autre nom sous un `n-…` reste la faute d'hier.
+    let n = ident(Genre::Annuaire);
+    assert_eq!(
+        resoudre_get(&format!("/v1/ou/{n}/depot")),
+        Err(Erreur::IdentifiantInvalide {
+            attendu: Genre::Machine
+        })
+    );
+    // Un `m-…` suivi du nom réservé reste une résolution de machine — que
+    // personne ne peut annoncer.
+    let m = ident(Genre::Machine);
+    assert!(matches!(
+        resoudre_get(&format!("/v1/ou/{m}/asl-directory")),
+        Ok(Ressource::Ou { .. })
+    ));
+    // Ni un `u-…`, ni un nom mal écrit : aucun n'ouvre la résolution d'un
+    // annuaire.
+    let u = ident(Genre::Utilisateur);
+    assert_eq!(
+        resoudre_get(&format!("/v1/ou/{u}/asl-directory")),
+        Err(Erreur::IdentifiantInvalide {
+            attendu: Genre::Machine
+        })
+    );
+    assert!(resoudre_get(&format!("/v1/ou/{n}/ASL-directory")).is_err());
+    // Et la recherche par nom reste ce qu'elle est : elle ne rend aucun
+    // annuaire, faute de service de machine sous ce nom (décision 84).
+    assert!(matches!(
+        resoudre_get("/v1/ou?service=asl-directory"),
+        Ok(Ressource::OuParNom { .. })
+    ));
+}

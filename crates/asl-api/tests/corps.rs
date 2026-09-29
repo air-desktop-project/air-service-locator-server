@@ -3365,8 +3365,8 @@ mod groupes {
 
 mod annuaires {
     use asl_api::annuaire::{
-        DecisionDInscription, DeclarationDAnnuaire, DeclarationDePair, EtatDePaire, Hebergeur,
-        InscriptionRendue, LOCATEURS_CORPS_MAX, LOCATEURS_DE_RACINE_MAX, LOCATEURS_MAX,
+        DecisionDInscription, DeclarationDAnnuaire, DeclarationDePair, EtatDePaire, EtatDeVoie,
+        Hebergeur, InscriptionRendue, LOCATEURS_CORPS_MAX, LOCATEURS_DE_RACINE_MAX, LOCATEURS_MAX,
         ListeDeRacines, MEMBRES_MAX, PaireRendue, PublicationDeLocateurs, RACINES_MAX,
         RacineRendue,
     };
@@ -3450,6 +3450,7 @@ mod annuaires {
             locateurs: &[],
             expire_a: None,
             paire: None,
+            voie: None,
         };
         let combien = entiere.encoder(&mut sortie).unwrap();
         assert_eq!(
@@ -3472,6 +3473,7 @@ mod annuaires {
             locateurs: &[],
             expire_a: Some(1_790_000_000_000),
             paire: None,
+            voie: None,
         };
         let combien = attendue.encoder(&mut sortie).unwrap();
         assert_eq!(
@@ -3565,6 +3567,7 @@ mod annuaires {
             locateurs: &["[2001:db8::7]:6630", "192.0.2.7:6630"],
             expire_a: None,
             paire: None,
+            voie: None,
         };
         let combien = rendue.encoder(&mut sortie).unwrap();
         assert!(core::str::from_utf8(&sortie[..combien]).unwrap().ends_with(
@@ -3749,6 +3752,7 @@ mod annuaires {
             locateurs: &[],
             expire_a: None,
             paire: Some(EtatDePaire::SansPeer),
+            voie: None,
         };
         let combien = rendue.encoder(&mut sortie).unwrap();
         assert!(
@@ -3756,6 +3760,55 @@ mod annuaires {
                 .unwrap()
                 .ends_with("\"adresse\":\"speedy:6630\",\"paire\":\"sans-peer\"}")
         );
+    }
+
+    #[test]
+    fn une_inscription_rendue_dit_la_voie_de_son_membre() {
+        // **UNE CHAÎNE ASCII, APRÈS `paire`** (décision 86) : les deux mots,
+        // et rien quand la racine n'a pas de nouvelles.
+        let n = un(Genre::Annuaire, 1);
+        let mut sortie = [0_u8; 512];
+        let rendue = InscriptionRendue {
+            membre: Some(n),
+            annuaire: Some(n),
+            proprietaire: None,
+            etat: "acceptée",
+            adresse: "speedy:6630",
+            locateurs: &[],
+            expire_a: None,
+            paire: Some(EtatDePaire::Reglee),
+            voie: Some(EtatDeVoie::Ouverte),
+        };
+        let combien = rendue.encoder(&mut sortie).unwrap();
+        assert!(
+            core::str::from_utf8(&sortie[..combien])
+                .unwrap()
+                .ends_with("\"paire\":\"reglee\",\"voie\":\"ouverte\"}")
+        );
+        let tombee = InscriptionRendue {
+            paire: None,
+            voie: Some(EtatDeVoie::Tombee),
+            ..rendue
+        };
+        let combien = tombee.encoder(&mut sortie).unwrap();
+        assert!(
+            core::str::from_utf8(&sortie[..combien])
+                .unwrap()
+                .ends_with("\"adresse\":\"speedy:6630\",\"voie\":\"tombee\"}")
+        );
+        let muette = InscriptionRendue {
+            voie: None,
+            ..tombee
+        };
+        let combien = muette.encoder(&mut sortie).unwrap();
+        assert!(
+            !core::str::from_utf8(&sortie[..combien])
+                .unwrap()
+                .contains("voie")
+        );
+        for mot in [EtatDeVoie::Ouverte.mot(), EtatDeVoie::Tombee.mot()] {
+            assert!(mot.bytes().all(|octet| octet.is_ascii_lowercase()));
+        }
     }
 
     #[test]

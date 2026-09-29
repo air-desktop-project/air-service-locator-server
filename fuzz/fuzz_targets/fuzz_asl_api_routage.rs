@@ -96,6 +96,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::Expositions => "/v1/expositions".to_owned(),
         Ressource::Exposition { annuaire } => format!("/v1/expositions/{annuaire}"),
         Ressource::Ou { machine, service } => format!("/v1/ou/{machine}/{service}"),
+        Ressource::OuAnnuaire { annuaire } => format!("/v1/ou/{annuaire}/asl-directory"),
         Ressource::OuParNom { service } => format!("/v1/ou?service={service}"),
         Ressource::PairPreuve => "/v1/pair/preuve".to_owned(),
         Ressource::PairOperations { apres } => format!("/v1/pair/operations?apres={apres}"),

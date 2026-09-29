@@ -8,9 +8,10 @@
 //! renseignent pas par leur durée.
 
 use asl_auth::{
-    Autorisation, Capacites, Cible, Decision, EtatCode, Faute, Machine, Politique, Portee,
-    decider_annonce, decider_attestation, decider_enrolement, decider_gestion,
-    decider_machine_visible, decider_pair, decider_resolution, decider_revocation_d_appareil,
+    Autorisation, Capacites, CercleDAnnuaire, Cible, Decision, DecisionDAnnuaire, EtatCode, Faute,
+    Machine, Politique, Portee, decider_annonce, decider_asl_directory, decider_attestation,
+    decider_enrolement, decider_gestion, decider_machine_visible, decider_pair, decider_resolution,
+    decider_revocation_d_appareil,
 };
 use asl_id::{Genre, Identifiant};
 
@@ -561,4 +562,78 @@ fn un_autre_genre_n_est_jamais_une_racine() {
             "{genre:?}"
         );
     }
+}
+
+// ── L'`asl-directory` : le cercle étroit (décisions 79, 80 et 87) ───────────
+
+/// Le cercle de l'annuaire d'alice, vu d'un demandeur qui tient ces droits.
+fn cercle(administrateur: bool, voir: bool, localiser: bool) -> CercleDAnnuaire {
+    CercleDAnnuaire {
+        proprietaire: alice(),
+        administrateur_des_racines: administrateur,
+        voir,
+        localiser,
+    }
+}
+
+#[test]
+fn le_cercle_de_l_asl_directory_cas_par_cas() {
+    let d_alice = machine(alice(), 1, Capacites::LECTURE);
+    let de_bob = machine(bob(), 2, Capacites::LECTURE);
+    let personne = cercle(false, false, false);
+    // Le propriétaire : tout, sans droit écrit.
+    assert_eq!(
+        decider_asl_directory(&d_alice, &personne),
+        DecisionDAnnuaire::Entiere
+    );
+    // Un administrateur des racines : tout.
+    assert_eq!(
+        decider_asl_directory(&de_bob, &cercle(true, false, false)),
+        DecisionDAnnuaire::Entiere
+    );
+    // `localiser` sur un domaine hébergé (qui emporte `voir`) : tout.
+    assert_eq!(
+        decider_asl_directory(&de_bob, &cercle(false, true, true)),
+        DecisionDAnnuaire::Entiere
+    );
+    // `voir` seul — ou `administrer`, que l'étage 3 compte comme `voir` : la
+    // réponse réduite (décisions 80 et 87).
+    assert_eq!(
+        decider_asl_directory(&de_bob, &cercle(false, true, false)),
+        DecisionDAnnuaire::Reduite
+    );
+    // `rattacher` seul, ou un étranger : rien — le même refus.
+    assert_eq!(
+        decider_asl_directory(&de_bob, &personne),
+        DecisionDAnnuaire::Refuser
+    );
+}
+
+#[test]
+fn sans_lecture_personne_ne_resout_l_asl_directory_pas_meme_le_proprietaire() {
+    for capacites in [Capacites::ANNONCE, Capacites::AUCUNE] {
+        let d_alice = machine(alice(), 1, capacites);
+        for (administrateur, voir, localiser) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, true),
+            (false, true, false),
+        ] {
+            assert_eq!(
+                decider_asl_directory(&d_alice, &cercle(administrateur, voir, localiser)),
+                DecisionDAnnuaire::Refuser
+            );
+        }
+    }
+    // Et ce que la requête désigne n'y entre pas : le cercle de carole ne
+    // donne rien à la machine de bob.
+    let de_bob = machine(bob(), 2, Capacites::LECTURE);
+    let chez_carole = CercleDAnnuaire {
+        proprietaire: carole(),
+        ..cercle(false, false, false)
+    };
+    assert_eq!(
+        decider_asl_directory(&de_bob, &chez_carole),
+        DecisionDAnnuaire::Refuser
+    );
 }

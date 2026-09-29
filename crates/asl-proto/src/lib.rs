@@ -122,6 +122,17 @@ pub const PORT_PAR_DEFAUT: u16 = 6630;
 /// La longueur maximale d'un nom de service, en octets.
 pub const NOM_MAX: usize = 64;
 
+/// Le nom du service qu'un annuaire local tient sous le `n-…` de son
+/// titulaire (`docs/annuaires.md` §2 quinquies ; décision 73, 0.38.0).
+///
+/// **RÉSERVÉ** : les racines le synthétisent de l'inscription et des voies
+/// qu'elles tiennent, et aucun daemon ne peut l'annoncer — ni aux racines ni
+/// à un annuaire local. Une annonce sous ce nom est refusée explicitement
+/// ([`NomService::reserve`]), jamais prise pour une autre. Il vit ici, avec
+/// la grammaire du nom, parce que le client la tire aussi : `asl where n-…
+/// asl-directory` écrira ce nom-là.
+pub const NOM_ASL_DIRECTORY: &str = "asl-directory";
+
 /// Le nombre maximal de points d'écoute dans une annonce.
 ///
 /// **Une borne existe parce que le compte vient du réseau.** Huit suffit
@@ -826,6 +837,14 @@ impl<'a> NomService<'a> {
     #[must_use]
     pub const fn as_str(&self) -> &'a str {
         self.0
+    }
+
+    /// Ce nom est-il réservé — [`NOM_ASL_DIRECTORY`] (décision 73) ? Un
+    /// daemon ne l'annonce pas : l'annuaire le refuse, `403` et une ligne au
+    /// journal.
+    #[must_use]
+    pub fn reserve(&self) -> bool {
+        self.0 == NOM_ASL_DIRECTORY
     }
 }
 

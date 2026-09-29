@@ -408,6 +408,76 @@ pub fn decider_machine_visible(
     Decision::Refuser
 }
 
+// ── L'`asl-directory` d'un annuaire local (décisions 79, 80 et 87) ─────────
+
+/// Ce que l'étage 3 sait du cercle d'un annuaire local, **vu du compte qui
+/// possède la machine qui demande** (C10) — rassemblé à la lecture, jamais
+/// écrit (décision 77).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CercleDAnnuaire {
+    /// Le compte qui possède l'annuaire.
+    pub proprietaire: Identifiant,
+    /// Le demandeur est-il administrateur des racines (le groupe
+    /// d'administrateurs du domaine racine) ?
+    pub administrateur_des_racines: bool,
+    /// Ses droits sur **au moins un domaine que cet annuaire héberge**
+    /// permettent-ils de VOIR — `voir`, `localiser` ou `administrer` ?
+    /// `rattacher` seul, un droit sur une machine ou un service, n'y comptent
+    /// pas (décision 79).
+    pub voir: bool,
+    /// … et de LOCALISER — `localiser`, et rien d'autre ne l'emporte
+    /// (décision 87) ?
+    pub localiser: bool,
+}
+
+/// Ce qu'une résolution d'`asl-directory` rend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecisionDAnnuaire {
+    /// Hors du cercle : `404`, celui de l'inexistant et du parti (C9).
+    Refuser,
+    /// `voir` sans `localiser` : `service` et `annuaire`, sans adresses
+    /// (décision 80).
+    Reduite,
+    /// Le propriétaire, un administrateur des racines, ou `localiser` : la
+    /// réponse entière, adresses et identités.
+    Entiere,
+}
+
+/// Cette machine peut-elle résoudre l'`asl-directory` de cet annuaire, et
+/// que reçoit-elle ?
+///
+/// # LE CERCLE ÉTROIT (décision 79), ET PAS CELUI DU `421`
+///
+/// 1. **La machine doit porter `lecture`**, comme pour toute résolution —
+///    même chez le propriétaire de l'annuaire.
+/// 2. **Le propriétaire et les administrateurs des racines** : tout.
+/// 3. **`localiser` sur au moins un domaine hébergé** : tout (décision 80).
+/// 4. **`voir` — ou `administrer`, qui l'emporte — sans `localiser`** : la
+///    réponse réduite. **`administrer` n'emporte pas `localiser`**
+///    (décision 87) : un administrateur qui veut les adresses s'accorde
+///    `localiser`, et ce geste s'écrit.
+/// 5. **Sinon, non.**
+///
+/// Que l'annuaire soit vivant n'est pas une question d'autorisation :
+/// l'appelant rend le même `404` quand aucun membre n'est vivant.
+#[must_use]
+pub fn decider_asl_directory(demandeur: &Machine, cercle: &CercleDAnnuaire) -> DecisionDAnnuaire {
+    if !demandeur.capacites.lecture {
+        return DecisionDAnnuaire::Refuser;
+    }
+    if demandeur.proprietaire == cercle.proprietaire
+        || cercle.administrateur_des_racines
+        || cercle.localiser
+    {
+        return DecisionDAnnuaire::Entiere;
+    }
+    if cercle.voir {
+        DecisionDAnnuaire::Reduite
+    } else {
+        DecisionDAnnuaire::Refuser
+    }
+}
+
 /// Cette machine peut-elle annoncer un service ?
 #[must_use]
 pub const fn decider_annonce(demandeur: &Machine) -> Decision {

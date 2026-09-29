@@ -282,6 +282,10 @@ pub struct InscriptionRendue<'a> {
     /// depuis qu'elle tourne (0.36.0, décision 70) : l'un des mots
     /// d'[`EtatDePaire`].
     pub paire: Option<EtatDePaire>,
+    /// La voie de fédération de ce membre vers la racine qui répond
+    /// (0.38.0, décision 86) — absente tant qu'il ne lui a pas parlé depuis
+    /// qu'elle tourne, et pour toute inscription qui n'est pas acceptée.
+    pub voie: Option<EtatDeVoie>,
 }
 
 impl InscriptionRendue<'_> {
@@ -331,6 +335,11 @@ impl InscriptionRendue<'_> {
         if let Some(paire) = self.paire {
             ecrivain.pousser(b",\"paire\":\"");
             ecrivain.pousser(paire.mot().as_bytes());
+            ecrivain.pousser(b"\"");
+        }
+        if let Some(voie) = self.voie {
+            ecrivain.pousser(b",\"voie\":\"");
+            ecrivain.pousser(voie.mot().as_bytes());
             ecrivain.pousser(b"\"");
         }
         ecrivain.pousser(b"}");
@@ -392,25 +401,92 @@ impl RenvoiRendu<'_> {
     /// [`Erreur::TamponTropPetit`] si `sortie` ne suffit pas.
     pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
         let mut ecrivain = Ecrivain::nouveau(sortie);
-        ecrivain.pousser(b"{\"annuaire\":\"");
-        ecrivain.pousser(self.annuaire.texte().as_str().as_bytes());
-        ecrivain.pousser(b"\",\"adresses\":[");
-        for (rang, (adresse, _)) in self.adresses.iter().enumerate() {
-            if rang > 0 {
-                ecrivain.pousser(b",");
-            }
-            ecrivain.pousser(b"\"");
-            ecrivain.pousser(adresse.as_bytes());
-            ecrivain.pousser(b"\"");
+        ecrivain.pousser(b"{");
+        ecrire_le_renvoi(&mut ecrivain, self.annuaire, Some(self.adresses));
+        ecrivain.pousser(b"}");
+        ecrivain.achever()
+    }
+}
+
+/// `"annuaire":"n-…"`, puis — s'il y en a à dire — `"adresses":[…]` et
+/// `"identites":"n-… n-…"` : le corps du `421` sans ses accolades, que
+/// [`RenvoiRendu`] et [`AnnuaireResolu`] partagent.
+fn ecrire_le_renvoi(
+    ecrivain: &mut Ecrivain<'_>,
+    annuaire: Identifiant,
+    adresses: Option<&[(&str, Identifiant)]>,
+) {
+    ecrivain.pousser(b"\"annuaire\":\"");
+    ecrivain.pousser(annuaire.texte().as_str().as_bytes());
+    ecrivain.pousser(b"\"");
+    let Some(adresses) = adresses else {
+        return;
+    };
+    ecrivain.pousser(b",\"adresses\":[");
+    for (rang, (adresse, _)) in adresses.iter().enumerate() {
+        if rang > 0 {
+            ecrivain.pousser(b",");
         }
-        ecrivain.pousser(b"],\"identites\":\"");
-        for (rang, (_, identite)) in self.adresses.iter().enumerate() {
-            if rang > 0 {
-                ecrivain.pousser(b" ");
-            }
-            ecrivain.pousser(identite.texte().as_str().as_bytes());
+        ecrivain.pousser(b"\"");
+        ecrivain.pousser(adresse.as_bytes());
+        ecrivain.pousser(b"\"");
+    }
+    ecrivain.pousser(b"],\"identites\":\"");
+    for (rang, (_, identite)) in adresses.iter().enumerate() {
+        if rang > 0 {
+            ecrivain.pousser(b" ");
         }
-        ecrivain.pousser(b"\"}");
+        ecrivain.pousser(identite.texte().as_str().as_bytes());
+    }
+    ecrivain.pousser(b"\"");
+}
+
+// ── L'`asl-directory` (décisions 73 à 87, 0.38.0) ───────────────────────────
+
+/// Le corps de `GET /v1/ou/{n-…}/asl-directory` : **celui du `421`, plus
+/// `service`** (décision 75).
+///
+/// ```jsonc
+/// // avec `localiser` :
+/// {"service":"s-…","annuaire":"n-titulaire",
+///  "adresses":["[2001:db8::51]:6630","192.0.2.52:6630"],
+///  "identites":"n-titulaire n-second"}
+/// // avec `voir` seul (ou `administrer`, décision 87) :
+/// {"service":"s-…","annuaire":"n-titulaire"}
+/// ```
+///
+/// - **`service` est une chaîne**, et vient en tête : le lecteur de renvoi
+///   d'aujourd'hui (`asl-client::renvoi`) saute une clé inconnue dont la
+///   valeur est une chaîne, et lit donc ce corps comme un `421`.
+/// - **Seuls les membres vivants** y sont — leurs locateurs publiés, sinon
+///   leur adresse déclarée (décisions 75 et 81) ; au même rang de
+///   `identites`, le `n-…` qu'on doit trouver au bout.
+/// - **La forme réduite omet `adresses` et `identites`**, elle ne les vide
+///   pas (décision 80) : `[]` dirait « personne ne répond », contre le `200`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnnuaireResolu<'a> {
+    /// Le `s-…` dérivé sous le titulaire (`asl_registre::asl_directory_derive`).
+    pub service: Identifiant,
+    /// L'annuaire : son titulaire.
+    pub annuaire: Identifiant,
+    /// Chaque adresse et l'identité de son membre — `None` pour la forme
+    /// réduite.
+    pub adresses: Option<&'a [(&'a str, Identifiant)]>,
+}
+
+impl AnnuaireResolu<'_> {
+    /// Encode la réponse en JSON.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::TamponTropPetit`] si `sortie` ne suffit pas.
+    pub fn encoder(&self, sortie: &mut [u8]) -> Result<usize, Erreur> {
+        let mut ecrivain = Ecrivain::nouveau(sortie);
+        ecrivain.pousser(b"{\"service\":\"");
+        ecrivain.pousser(self.service.texte().as_str().as_bytes());
+        ecrivain.pousser(b"\",");
+        ecrire_le_renvoi(&mut ecrivain, self.annuaire, self.adresses);
+        ecrivain.pousser(b"}");
         ecrivain.achever()
     }
 }
@@ -646,6 +722,38 @@ impl EtatDePaire {
     #[must_use]
     pub const fn alerte(self) -> bool {
         matches!(self, Self::SansPeer | Self::PeerInconnu)
+    }
+}
+
+/// La voie de fédération d'un membre vers la racine qui répond, telle que
+/// `GET /v1/annuaires` et `GET /v1/inscriptions` la disent (0.38.0,
+/// décision 86).
+///
+/// | Mot | Ce que la racine a constaté |
+/// |---|---|
+/// | `ouverte` | Le membre a prouvé sa clé et parlé depuis moins de l'expiration d'un rapport (trente secondes). C'est ce qui rend l'`asl-directory` vivant. |
+/// | `tombee` | Elle a tenu depuis que la racine tourne, et s'est tue au-delà, ou s'est fermée. |
+///
+/// **Absente** (`None` dans [`InscriptionRendue`]) tant que le membre n'a
+/// pas parlé à cette racine depuis son démarrage : l'état vivant ne s'écrit
+/// pas, et une racine qui redémarre n'affirme pas ce qu'elle n'a pas vu (C6).
+/// **Des mots ASCII, et non un booléen**, pour la raison d'[`EtatDePaire`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EtatDeVoie {
+    /// La voie tient.
+    Ouverte,
+    /// Elle a tenu, et s'est tue ou fermée.
+    Tombee,
+}
+
+impl EtatDeVoie {
+    /// Le mot, tel qu'il sort dans `GET /v1/annuaires`.
+    #[must_use]
+    pub const fn mot(self) -> &'static str {
+        match self {
+            Self::Ouverte => "ouverte",
+            Self::Tombee => "tombee",
+        }
     }
 }
 
