@@ -66,8 +66,8 @@ use asl_id::{Genre, Identifiant};
 
 use crate::{
     ADRESSES_MAX, Annonce, Bail, Candidat, Erreur, Horodatage, Joignabilite, NomService, Origine,
-    POINTS_MAX, PointEcoute, Port, Poussee, Protocole, RaisonNonSonde, Reponse, Verdict,
-    VerdictNat, VuDepuis,
+    POINTS_MAX, Passerelle, PointEcoute, Port, Poussee, Protocole, RaisonNonSonde, Reponse,
+    Verdict, VerdictNat, ViaPasserelle, VuDepuis,
 };
 
 /// La taille maximale d'un message d'annonce, en octets.
@@ -495,7 +495,13 @@ impl fmt::Write for Ecrivain<'_> {
 // ── Le message d'annonce ────────────────────────────────────────────────────
 
 /// Les champs attendus, dans l'ordre où l'encodeur les écrit.
-const CHAMPS: [&str; 4] = ["machine", "service", "points", "adresses_locales"];
+const CHAMPS: [&str; 5] = [
+    "machine",
+    "service",
+    "points",
+    "adresses_locales",
+    "passerelle",
+];
 
 impl<'a> Annonce<'a> {
     /// Décode une annonce.
@@ -528,6 +534,7 @@ impl<'a> Annonce<'a> {
         let mut service: Option<NomService<'a>> = None;
         let mut nombre_points = 0_usize;
         let mut nombre_adresses = 0_usize;
+        let mut passerelle: Option<(Passerelle, usize)> = None;
 
         lecteur.sauter_blancs();
         if lecteur.regarder() != Some(b'}') {
@@ -565,7 +572,8 @@ impl<'a> Annonce<'a> {
                     }
                     1 => service = Some(NomService::analyser(lecteur.chaine()?)?),
                     2 => nombre_points = decoder_points(&mut lecteur, &mut tampons.points)?,
-                    _ => nombre_adresses = decoder_adresses(&mut lecteur, &mut tampons.adresses)?,
+                    3 => nombre_adresses = decoder_adresses(&mut lecteur, &mut tampons.adresses)?,
+                    _ => passerelle = Some((decoder_passerelle(&mut lecteur)?, position_cle)),
                 }
 
                 // L'ACCOLADE SE CONSOMME ICI, là où on la voit. Un
@@ -605,7 +613,15 @@ impl<'a> Annonce<'a> {
         let points = tampons.points.get(..nombre_points).unwrap_or(&[]);
         let adresses = tampons.adresses.get(..nombre_adresses).unwrap_or(&[]);
 
-        Self::nouvelle(machine, service, points, adresses)
+        let annonce = Self::nouvelle(machine, service, points, adresses)?;
+        match passerelle {
+            // **SUR L'ÉCHO SEULEMENT** (décision 97) : sur toute autre
+            // annonce, le champ est hors de propos.
+            Some((passerelle, position)) => annonce
+                .avec_passerelle(passerelle)
+                .map_err(|_| Erreur::ChampHorsPropos { position }),
+            None => Ok(annonce),
+        }
     }
 
     /// Encode une annonce dans la tranche fournie, et rend le nombre d'octets
@@ -648,10 +664,70 @@ impl<'a> Annonce<'a> {
             }
             let _ = write!(ecrivain, "\"{adresse}\"");
         }
-        ecrivain.pousser(b"]}");
+        ecrivain.pousser(b"]");
+        if let Some(passerelle) = self.passerelle {
+            let _ = write!(
+                ecrivain,
+                ",\"passerelle\":{{\"port\":{},\"via\":\"{}\"}}",
+                passerelle.port.valeur(),
+                passerelle.via.texte()
+            );
+        }
+        ecrivain.pousser(b"}");
 
         ecrivain.achever()
     }
+}
+
+/// Décode `{"port":…,"via":"…"}` — les deux champs, dans n'importe quel
+/// ordre, ni doublon ni inconnu.
+fn decoder_passerelle(lecteur: &mut Lecteur<'_>) -> Result<Passerelle, Erreur> {
+    lecteur.attendre(b'{', "un objet")?;
+    let mut port: Option<Port> = None;
+    let mut via: Option<ViaPasserelle> = None;
+    loop {
+        let position_cle = lecteur.position;
+        let cle = lecteur.chaine()?;
+        lecteur.attendre(b':', "deux-points")?;
+        match cle {
+            "port" if port.is_none() => {
+                let position = lecteur.position;
+                let brut = lecteur.entier()?;
+                let borne =
+                    u16::try_from(brut).map_err(|_| Erreur::NombreHorsBornes { position })?;
+                port = Some(Port::depuis_u16(borne)?);
+            }
+            "via" if via.is_none() => via = Some(ViaPasserelle::analyser(lecteur.chaine()?)?),
+            "port" | "via" => {
+                return Err(Erreur::ChampEnDouble {
+                    position: position_cle,
+                });
+            }
+            _ => {
+                return Err(Erreur::ChampInconnu {
+                    position: position_cle,
+                });
+            }
+        }
+        lecteur.sauter_blancs();
+        match lecteur.regarder() {
+            Some(b',') => lecteur.avancer(),
+            Some(b'}') => {
+                lecteur.avancer();
+                break;
+            }
+            _ => {
+                return Err(Erreur::JsonAttendu {
+                    position: lecteur.position,
+                    attendu: "une virgule ou la fin de l'objet",
+                });
+            }
+        }
+    }
+    Ok(Passerelle {
+        port: port.ok_or(Erreur::ChampManquant { nom: "port" })?,
+        via: via.ok_or(Erreur::ChampManquant { nom: "via" })?,
+    })
 }
 
 /// Décode le tableau des points d'écoute.

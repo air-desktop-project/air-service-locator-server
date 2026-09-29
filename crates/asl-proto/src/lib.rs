@@ -402,6 +402,10 @@ pub enum Erreur {
         /// Où commence sa clé.
         position: usize,
     },
+    /// Un mot de `via` inconnu, dans la `passerelle` d'une annonce.
+    ViaInconnu,
+    /// Une `passerelle` sur une annonce qui n'est pas `asl-echo`.
+    PasserelleHorsEcho,
     /// Un couple adresse/port ne se lit pas.
     CandidatInvalide {
         /// Où.
@@ -575,6 +579,10 @@ impl fmt::Display for Erreur {
             }
             Self::VerdictImpossible => {
                 f.write_str("un verdict de mesure sur un point qui ne se sonde pas")
+            }
+            Self::ViaInconnu => f.write_str("une passerelle par un moyen inconnu"),
+            Self::PasserelleHorsEcho => {
+                f.write_str("une passerelle sur une annonce qui n'est pas asl-echo")
             }
             Self::ChampHorsPropos { position } => {
                 write!(
@@ -1036,6 +1044,56 @@ pub struct Annonce<'a> {
     /// l'Internet** (`docs/protocole.md` §1.1) : c'est ce qui permet à l'annuaire
     /// de trancher qu'il est derrière un NAT, en comparant avec ce qu'il observe.
     pub adresses_locales: &'a [IpAddr],
+    /// **Ce que la box a accordé à l'écho** — le port seul, et par quoi
+    /// (décision 97 ; E21). Propre à l'annonce `asl-echo` : refusé sur toute
+    /// autre. L'adresse n'y est jamais : l'annuaire emploie celle qu'il a
+    /// observée.
+    pub passerelle: Option<Passerelle>,
+}
+
+/// Par quoi la box a accordé un port à l'écho (décisions 94 et 96).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ViaPasserelle {
+    /// Une redirection ou un trou UPnP-IGD.
+    Upnp,
+    /// Une demande PCP (RFC 6887).
+    Pcp,
+    /// Une demande NAT-PMP (RFC 6886).
+    Natpmp,
+}
+
+impl ViaPasserelle {
+    /// Son écriture sur le fil.
+    #[must_use]
+    pub const fn texte(self) -> &'static str {
+        match self {
+            Self::Upnp => "upnp",
+            Self::Pcp => "pcp",
+            Self::Natpmp => "natpmp",
+        }
+    }
+
+    /// Lit un mot.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::ViaInconnu`].
+    pub fn analyser(texte: &str) -> Result<Self, Erreur> {
+        [Self::Upnp, Self::Pcp, Self::Natpmp]
+            .into_iter()
+            .find(|via| via.texte() == texte)
+            .ok_or(Erreur::ViaInconnu)
+    }
+}
+
+/// Le port que la passerelle a accordé à l'écho, et par quoi :
+/// `"passerelle":{"port":51377,"via":"upnp"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Passerelle {
+    /// Le port externe accordé.
+    pub port: Port,
+    /// Par quoi.
+    pub via: ViaPasserelle,
 }
 
 impl<'a> Annonce<'a> {
@@ -1106,6 +1164,23 @@ impl<'a> Annonce<'a> {
             service,
             points,
             adresses_locales,
+            passerelle: None,
+        })
+    }
+
+    /// La même annonce, avec ce que la passerelle a accordé.
+    ///
+    /// # Erreurs
+    ///
+    /// [`Erreur::PasserelleHorsEcho`] si le service n'est pas
+    /// [`NOM_ASL_ECHO`] : aucun autre daemon n'a de port accordé à dire.
+    pub fn avec_passerelle(self, passerelle: Passerelle) -> Result<Self, Erreur> {
+        if self.service.as_str() != NOM_ASL_ECHO {
+            return Err(Erreur::PasserelleHorsEcho);
+        }
+        Ok(Self {
+            passerelle: Some(passerelle),
+            ..self
         })
     }
 

@@ -3071,6 +3071,7 @@ mod domaines {
                     a: Some(1_789_217_751_000),
                     par: Some(n),
                     depuis: Some(asl_api::corps::DepuisDEcho::Interieur),
+                    via: Some(asl_api::corps::ViaDEcho::Direct),
                 }),
             },
             MachineDeDomaine {
@@ -3116,7 +3117,7 @@ mod domaines {
         assert!(
             texte.ends_with(&format!(
                 ",\"machines\":[{{\"machine\":\"{m}\",\"proprietaire\":\"{u}\",\"nom\":\"grenier\",\"alias\":\"Le grenier\",\
-                 \"echo\":\"verifie\",\"echo_a\":1789217751000,\"echo_par\":\"{n}\",\"echo_depuis\":\"interieur\"}},\
+                 \"echo\":\"verifie\",\"echo_a\":1789217751000,\"echo_par\":\"{n}\",\"echo_depuis\":\"interieur\",\"echo_via\":\"direct\"}},\
                  {{\"machine\":\"{m}\",\"proprietaire\":\"{u}\"}}]}}",
                 m = m.texte().as_str(),
                 u = u.texte().as_str(),
@@ -4061,6 +4062,7 @@ fn l_etat_d_echo_se_rend_en_chaines_et_en_entiers_et_se_relit() {
             a: Some(1_789_217_751_000),
             par: Some(n),
             depuis: Some(DepuisDEcho::Exterieur),
+            via: None,
         }),
         ..sans
     };
@@ -4130,4 +4132,55 @@ fn l_etat_d_echo_refuse_un_mot_inconnu_ou_des_champs_sans_echo() {
         MachineRendue::decoder(par_seul.as_bytes()),
         Err(Erreur::ChampManquant { nom: "echo" })
     );
+}
+
+#[test]
+fn echo_via_dit_par_ou_la_preuve_est_arrivee() {
+    use asl_api::corps::{DepuisDEcho, EtatDEcho, MotDEcho, ViaDEcho};
+    for (via, texte) in [
+        (ViaDEcho::Upnp, "upnp"),
+        (ViaDEcho::Pcp, "pcp"),
+        (ViaDEcho::Natpmp, "natpmp"),
+        (ViaDEcho::Nat, "nat"),
+        (ViaDEcho::Direct, "direct"),
+    ] {
+        assert_eq!(via.mot(), texte);
+        assert_eq!(ViaDEcho::depuis_mot(texte), Some(via));
+        let n = Identifiant::depuis_entropie(Genre::Annuaire, [0x4E; 16]);
+        let machine = MachineRendue {
+            echo: Some(EtatDEcho {
+                mot: MotDEcho::Verifie,
+                a: Some(1),
+                par: Some(n),
+                depuis: Some(DepuisDEcho::Exterieur),
+                via: Some(via),
+            }),
+            ..une_machine_rendue("grenier", Capacites::default(), true)
+        };
+        let octets = encoder_machine(&machine);
+        let texte_rendu = core::str::from_utf8(&octets).unwrap();
+        assert!(
+            texte_rendu.ends_with(&format!(r#","echo_via":"{texte}"}}"#)),
+            "{texte_rendu}"
+        );
+        assert_eq!(MachineRendue::decoder(&octets), Ok(machine));
+    }
+    assert_eq!(ViaDEcho::depuis_mot("box"), None);
+    let m = Identifiant::depuis_entropie(Genre::Machine, [0x44; 16]);
+    let debut = format!(
+        r#"{{"machine":"{}","nom":"grenier","capacites":[],"cle":"enrolee""#,
+        m.texte().as_str()
+    );
+    for suite in [
+        r#","echo":"verifie","echo_via":"box"}"#,
+        r#","echo":"verifie","echo_via":7}"#,
+        r#","echo":"verifie","echo_via":"nat","echo_via":"nat"}"#,
+        r#","echo_via":"nat"}"#,
+    ] {
+        let octets = format!("{debut}{suite}");
+        assert!(
+            MachineRendue::decoder(octets.as_bytes()).is_err(),
+            "{octets}"
+        );
+    }
 }

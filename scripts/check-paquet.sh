@@ -226,6 +226,10 @@ grep -q 'tcp dport 22 accept' paquet/nftables-asl.conf \
     || rate "la table n'ouvre pas le port du ssh"
 grep -q 'udp dport 6630 accept' paquet/nftables-asl.conf \
     || rate "la table n'ouvre pas le port de l'annuaire"
+# La plage de l'écho (décision 105) : sans elle, la sonde de l'annuaire
+# butte sur le pare-feu de la racine même.
+grep -q 'udp dport 6631-6639 accept' paquet/nftables-asl.conf \
+    || rate "la table n'ouvre pas la plage de l'écho"
 # **ICMPv6 EST OBLIGATOIRE** : le bloquer casse la découverte de voisins et la
 # découverte de MTU, c'est-à-dire IPv6.
 grep -q 'nd-neighbor-solicit' paquet/nftables-asl.conf \

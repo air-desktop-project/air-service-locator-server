@@ -76,6 +76,8 @@ pub struct Verdict {
     /// l'état par machine dit (`protocole.md` §3 quater) ; `aboutie` n'est
     /// posé que sur [`ResultatEcho::Verifie`]. `None` pour un trois-temps.
     pub echo: Option<ResultatEcho>,
+    /// Par où la preuve est arrivée, quand elle l'est (décision 97).
+    pub via: Option<asl_api::corps::ViaDEcho>,
     /// **Une sonde d'une racine, du dehors, vers l'écho d'une machine d'un
     /// domaine hébergé** (décision 92) : la machine. Son verdict ne touche
     /// pas au vivier — le bail est chez l'annuaire local.
@@ -103,6 +105,8 @@ pub struct ConstatDEcho {
     pub resultat: ResultatEcho,
     /// Quand, en millisecondes d'époque.
     pub a: u64,
+    /// Par où la preuve est arrivée — `verifie` seulement.
+    pub via: Option<asl_api::corps::ViaDEcho>,
 }
 
 /// Ce qu'une racine a sondé du dehors, vers l'écho d'une machine hébergée.

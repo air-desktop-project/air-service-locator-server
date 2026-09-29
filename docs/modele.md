@@ -672,7 +672,8 @@ chaque membre —, jamais dans les services d'une machine (décisions 84 et 86).
 
 **Un service que chaque machine enrôlée peut porter : l'`asl-echo`**
 (décidé le 2026-09-29, Thierry ; décisions 89 à 94, `protocole.md` §3
-quater). `asl echo` l'annonce sur **un port tiré au hasard**,
+quater). `asl echo` l'annonce sur **un port tiré au hasard dans la plage
+réservée UDP 6631–6639** (décision 105),
 en UDP, et tient son bail comme `asl announce` ; il ne répond qu'aux sondes
 autorisées — celle de l'annuaire qui tient son bail, et celle d'`asl ping`
 munie d'un jeton —, **par une signature de la clé de la machine**. C'est
@@ -1566,7 +1567,8 @@ quatre-vingt-dix secondes à perpétuité.
 #### L'écho : une sonde qui prouve la clé (décision 89)
 
 **Décidé le 2026-09-29 (Thierry)** : un service **`asl-echo`** sur chaque
-machine enrôlée, sur un port aléatoire publié par son annonce, et **deux
+machine enrôlée, sur un port aléatoire — dans la plage UDP 6631–6639,
+décision 105 — publié par son annonce, et **deux
 sondes autorisées** — celle de l'annuaire, et `asl ping` lancé par un compte
 qui en a le droit. **Le but** : prouver qu'une machine est joignable **et que
 c'est bien elle**, depuis l'annuaire ou depuis n'importe où.

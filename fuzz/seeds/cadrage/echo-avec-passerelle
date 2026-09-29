@@ -1,0 +1,1 @@
+{"machine":"m-00000000000000000000000000","service":"asl-echo","points":[{"protocole":"udp","port":6631}],"adresses_locales":["2001:db8::20"],"passerelle":{"port":51377,"via":"upnp"}}

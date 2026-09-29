@@ -1339,6 +1339,49 @@ impl DepuisDEcho {
     }
 }
 
+/// Par où la preuve de l'écho est arrivée (décision 97 ; E21) — `echo_via`,
+/// présent avec `"echo":"verifie"` seulement.
+///
+/// **Une chaîne, et un mot inconnu se dit tel quel** chez les lecteurs
+/// déployés : `pcp` et `natpmp` s'ajouteront quand l'écho les parlera
+/// (décision 96) — ce lecteur-ci les connaît déjà.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViaDEcho {
+    /// Par la redirection ou le trou que la box a accordés, en UPnP.
+    Upnp,
+    /// Par ce que la box a accordé en PCP.
+    Pcp,
+    /// Par ce que la box a accordé en NAT-PMP.
+    Natpmp,
+    /// Par le mapping que le bail tient ouvert, adresse ou port traduits.
+    Nat,
+    /// L'adresse observée est une adresse de la machine : ni traduction, ni
+    /// passerelle.
+    Direct,
+}
+
+impl ViaDEcho {
+    /// Le mot, tel qu'il sort.
+    #[must_use]
+    pub const fn mot(self) -> &'static str {
+        match self {
+            Self::Upnp => "upnp",
+            Self::Pcp => "pcp",
+            Self::Natpmp => "natpmp",
+            Self::Nat => "nat",
+            Self::Direct => "direct",
+        }
+    }
+
+    /// Lit un mot.
+    #[must_use]
+    pub fn depuis_mot(mot: &str) -> Option<Self> {
+        [Self::Upnp, Self::Pcp, Self::Natpmp, Self::Nat, Self::Direct]
+            .into_iter()
+            .find(|connu| connu.mot() == mot)
+    }
+}
+
 /// L'état d'écho d'une machine, tel que `GET /v1/machines` et
 /// `GET /v1/domaines/{d}` le rendent :
 ///
@@ -1359,6 +1402,8 @@ pub struct EtatDEcho {
     pub par: Option<Identifiant>,
     /// D'où.
     pub depuis: Option<DepuisDEcho>,
+    /// Par où la preuve est arrivée — avec `verifie` seulement (0.44.0).
+    pub via: Option<ViaDEcho>,
 }
 
 impl EtatDEcho {
@@ -1368,6 +1413,7 @@ impl EtatDEcho {
         a: None,
         par: None,
         depuis: None,
+        via: None,
     };
 
     /// Écrit ses champs, chacun précédé d'une virgule.
@@ -1390,6 +1436,11 @@ impl EtatDEcho {
             ecrivain.pousser(depuis.mot().as_bytes());
             ecrivain.pousser(b"\"");
         }
+        if let Some(via) = self.via {
+            ecrivain.pousser(b",\"echo_via\":\"");
+            ecrivain.pousser(via.mot().as_bytes());
+            ecrivain.pousser(b"\"");
+        }
     }
 }
 
@@ -1400,6 +1451,7 @@ pub(crate) struct EchoLu {
     a: Option<u64>,
     par: Option<Identifiant>,
     depuis: Option<DepuisDEcho>,
+    via: Option<ViaDEcho>,
 }
 
 impl EchoLu {
@@ -1434,6 +1486,14 @@ impl EchoLu {
                     })?;
                 poser(&mut self.depuis, depuis, position)?;
             }
+            "echo_via" => {
+                let ou = lecteur.position();
+                let via = ViaDEcho::depuis_mot(lecteur.chaine()?).ok_or(Erreur::JsonAttendu {
+                    position: ou,
+                    attendu: "upnp, pcp, natpmp, nat ou direct",
+                })?;
+                poser(&mut self.via, via, position)?;
+            }
             _ => return Ok(false),
         }
         Ok(true)
@@ -1448,8 +1508,15 @@ impl EchoLu {
                 a: self.a,
                 par: self.par,
                 depuis: self.depuis,
+                via: self.via,
             })),
-            None if self.a.is_none() && self.par.is_none() && self.depuis.is_none() => Ok(None),
+            None if self.a.is_none()
+                && self.par.is_none()
+                && self.depuis.is_none()
+                && self.via.is_none() =>
+            {
+                Ok(None)
+            }
             None => Err(Erreur::ChampManquant { nom: "echo" }),
         }
     }

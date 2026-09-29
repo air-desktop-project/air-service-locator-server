@@ -258,3 +258,99 @@ fn une_racine_sonde_du_dehors_une_fois_par_changement_et_par_quart_d_heure() {
         instant(CADENCE_D_ECHO_MS)
     ));
 }
+
+// ── La passerelle (décision 97, 0.44.0) ─────────────────────────────────────
+
+fn avec_passerelle<'a>(
+    points: &'a [PointEcoute],
+    adresses: &'a [IpAddr],
+    port_accorde: u16,
+) -> Annonce<'a> {
+    annonce("asl-echo", points, adresses)
+        .avec_passerelle(asl_proto::Passerelle {
+            port: port(port_accorde),
+            via: asl_proto::ViaPasserelle::Upnp,
+        })
+        .expect("l'écho porte une passerelle")
+}
+
+fn candidats_de(session: &Session) -> Vec<Candidat> {
+    let mut candidats = [Candidat {
+        protocole: Protocole::Udp,
+        adresse: publique(),
+        port: port(1),
+        origine: Origine::Annonce,
+    }; asl_annuaire::CANDIDATS_MAX];
+    let combien = session.candidats(udp(), &mut candidats);
+    candidats[..combien].to_vec()
+}
+
+#[test]
+fn la_passerelle_passe_en_tete_a_l_adresse_observee() {
+    let points = [udp()];
+    let locales = [
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x20)),
+    ];
+    // Un port accordé plus petit que l'observé : l'ordre ordinaire le
+    // mettrait ailleurs, la passerelle le remet en tête.
+    for accorde in [1_024, 60_000] {
+        let (session, _) = Session::ouvrir(
+            service(),
+            bail(),
+            &avec_passerelle(&points, &locales, accorde),
+            vu(),
+            instant(0),
+        )
+        .expect("ouverture");
+        assert_eq!(session.passerelle().map(|p| p.port), Some(port(accorde)));
+        let candidats = candidats_de(&session);
+        assert_eq!(candidats.len(), 2 + locales.len());
+        assert_eq!(
+            (
+                candidats[0].adresse,
+                candidats[0].port,
+                candidats[0].origine
+            ),
+            (publique(), port(accorde), Origine::Reflexif),
+            "la passerelle d'abord, à l'adresse OBSERVÉE"
+        );
+        assert!(
+            candidats[1..]
+                .iter()
+                .any(|c| c.origine == Origine::Reflexif && c.port == port(53211)),
+            "puis le bail"
+        );
+    }
+    // Un port accordé égal à l'observé ne fait pas deux candidats.
+    let (session, _) = Session::ouvrir(
+        service(),
+        bail(),
+        &avec_passerelle(&points, &[], 53211),
+        vu(),
+        instant(0),
+    )
+    .expect("ouverture");
+    assert_eq!(candidats_de(&session).len(), 1);
+}
+
+#[test]
+fn une_passerelle_nouvelle_fait_resonder_l_echo() {
+    let points = [udp()];
+    let (mut session, _) = ouvrir("asl-echo");
+    let a = Horodatage::depuis_millisecondes(5);
+    session
+        .verdict_de_sonde(udp(), None, a, instant(1))
+        .expect("un verdict");
+    let locale = [IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20))];
+    // Même adresse, même point, mais une passerelle : on resonde.
+    let ordres = session
+        .reannoncer(&avec_passerelle(&points, &locale, 51_377), vu(), instant(2))
+        .expect("réannonce");
+    assert!(!ordres.est_vide(), "la passerelle se mesure");
+    // La même passerelle une seconde fois : rien de neuf.
+    let ordres = session
+        .reannoncer(&avec_passerelle(&points, &locale, 51_377), vu(), instant(3))
+        .expect("réannonce");
+    assert!(ordres.est_vide());
+}

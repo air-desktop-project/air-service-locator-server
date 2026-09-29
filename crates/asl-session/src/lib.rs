@@ -10127,6 +10127,7 @@ mod voie_de_l_annuaire_local {
             machine: Identifiant::depuis_entropie(Genre::Machine, [machine; 16]),
             nom: asl_registre::NomRange::nouveau("depot").expect("un nom"),
             reponse,
+            passerelle: None,
         }
         .ecrire(&mut sortie)
         .expect("une entrée");

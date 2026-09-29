@@ -85,6 +85,8 @@ struct Tenue {
     service: Identifiant,
     /// Sa réponse d'annonce, s'il le dit vivant.
     reponse: Option<Vec<u8>>,
+    /// Pour un écho, le port que la box lui a accordé (décision 97).
+    passerelle: Option<asl_registre::PasserelleRapportee>,
     /// Quand ce rapport est arrivé, en microsecondes.
     recu_a: u64,
 }
@@ -139,6 +141,9 @@ pub struct LueFederee {
     /// Le membre dont le rapport a été retenu : c'est LUI qui a sondé, et
     /// c'est ce que `sonde_par` dit à l'écran (décision 60).
     pub membre: Identifiant,
+    /// Pour un écho, le port que la box lui a accordé, tel que ce membre le
+    /// rapporte (décision 97).
+    pub passerelle: Option<asl_registre::PasserelleRapportee>,
 }
 
 /// La clé d'un service : sa machine, puis son nom.
@@ -178,6 +183,7 @@ fn retenir(
         service: tenue.service,
         reponse: tenue.reponse.clone(),
         membre: *membre,
+        passerelle: tenue.passerelle,
     })
 }
 
@@ -199,6 +205,7 @@ impl EtatFedere {
                 Tenue {
                     service: entree.service,
                     reponse: entree.reponse.map(<[u8]>::to_vec),
+                    passerelle: entree.passerelle,
                     recu_a: maintenant,
                 },
             );
@@ -406,6 +413,8 @@ pub struct ServicePublie {
     pub nom: NomRange,
     /// Sa réponse d'annonce, s'il est vivant.
     pub reponse: Option<Vec<u8>>,
+    /// Pour un écho, le port que la box lui a accordé (décision 97).
+    pub passerelle: Option<asl_registre::PasserelleRapportee>,
 }
 
 /// Ce que la boucle qui sert publie, et que les fédérateurs poussent.
@@ -477,6 +486,7 @@ pub fn corps_d_etat(services: &[ServicePublie]) -> Vec<Vec<u8>> {
             machine: publie.machine,
             nom: publie.nom,
             reponse: publie.reponse.as_deref(),
+            passerelle: publie.passerelle,
         };
         // Une réponse au-delà de la borne ne se rapporte pas : elle ne serait
         // pas plus longue que l'annonce qu'elle reflète, et ne peut donc venir
@@ -1198,6 +1208,7 @@ mod essais {
             machine,
             nom: nom("depot"),
             reponse: Some(b"{\"a\":1}"),
+            passerelle: None,
         };
         let partie = EntreeDEtat {
             service: id(Genre::Service, 2),
@@ -1214,6 +1225,7 @@ mod essais {
                 service: vivante.service,
                 reponse: Some(b"{\"a\":1}".to_vec()),
                 membre: a,
+                passerelle: None,
             })
         );
         // Le rapport de A a vieilli : seul B parle, et il le dit parti.
@@ -1224,6 +1236,7 @@ mod essais {
                 service: partie.service,
                 reponse: None,
                 membre: b,
+                passerelle: None,
             })
         );
         // Plus personne : rien.
@@ -1244,6 +1257,7 @@ mod essais {
             machine,
             nom: nom("depot"),
             reponse: Some(b"1"),
+            passerelle: None,
         };
         let archive = EntreeDEtat {
             service: id(Genre::Service, 2),
@@ -1270,6 +1284,7 @@ mod essais {
                         service: archive.service,
                         reponse: None,
                         membre,
+                        passerelle: None,
                     }
                 ),
                 (
@@ -1278,6 +1293,7 @@ mod essais {
                         service: depot.service,
                         reponse: Some(b"1".to_vec()),
                         membre,
+                        passerelle: None,
                     }
                 ),
             ]
@@ -1341,6 +1357,7 @@ mod essais {
             machine,
             nom: nom("depot"),
             reponse: Some(b"1"),
+            passerelle: None,
         };
         let seconde = EntreeDEtat {
             reponse: Some(b"2"),
@@ -1360,6 +1377,7 @@ mod essais {
             machine: id(Genre::Machine, 1),
             nom: nom("depot"),
             reponse: None,
+            passerelle: None,
         };
         assert_eq!(publies.version(), 0);
         publies.publier(vec![service.clone()]);
@@ -1376,6 +1394,7 @@ mod essais {
                 machine: id(Genre::Machine, 1),
                 nom: nom("depot"),
                 reponse: Some(reponse.clone()),
+                passerelle: None,
             })
             .collect();
         let corps = corps_d_etat(&services);

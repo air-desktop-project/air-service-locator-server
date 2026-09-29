@@ -104,13 +104,34 @@ pub const ENTREE_D_ETAT_OCTETS_MIN: usize = IDENTIFIANT_OCTETS + IDENTIFIANT_OCT
 
 /// Ce qu'une entrée occupe au plus.
 pub const ENTREE_D_ETAT_OCTETS_MAX: usize =
-    ENTREE_D_ETAT_OCTETS_MIN + NOM_OCTETS_MAX + 2 + REPONSE_FEDEREE_OCTETS_MAX;
+    ENTREE_D_ETAT_OCTETS_MIN + NOM_OCTETS_MAX + 2 + REPONSE_FEDEREE_OCTETS_MAX + PASSERELLE_OCTETS;
+
+/// Ce que la passerelle d'un écho occupe : le port sur deux octets, `via` sur
+/// un (0.44.0).
+const PASSERELLE_OCTETS: usize = 3;
 
 /// Le drapeau d'un service qu'aucun daemon ne tient en ce moment.
 const PARTI: u8 = 0;
 
 /// Le drapeau d'un service vivant — sa réponse suit.
 const VIVANT: u8 = 1;
+
+/// Le drapeau d'un **écho vivant dont la box a accordé un port** (0.44.0,
+/// décision 97) — sa réponse suit, puis la passerelle. **Une racine d'avant
+/// la 0.44.0 refuse ce drapeau**, et le rapport entier avec lui : les racines
+/// se déploient avant les annuaires locaux.
+const VIVANT_AVEC_PASSERELLE: u8 = 2;
+
+/// Le port qu'une box a accordé à un écho, tel qu'un annuaire local le
+/// rapporte (décision 97) : le port, et par quoi — `1` UPnP, `2` PCP,
+/// `3` NAT-PMP. Ce module ne tire pas `asl-proto` ; l'étage 3 traduit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PasserelleRapportee {
+    /// Le port accordé, jamais nul.
+    pub port: u16,
+    /// Par quoi, de `1` à `3`.
+    pub via: u8,
+}
 
 /// L'état d'un service, tel que l'annuaire local le rapporte à une racine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +144,9 @@ pub struct EntreeDEtat<'a> {
     pub nom: NomRange,
     /// Sa réponse d'annonce, s'il est vivant ; rien s'il est parti.
     pub reponse: Option<&'a [u8]>,
+    /// **Pour un écho vivant**, le port que la box lui a accordé (0.44.0) —
+    /// ignoré pour un service parti, qui n'a rien à sonder.
+    pub passerelle: Option<PasserelleRapportee>,
 }
 
 impl<'a> EntreeDEtat<'a> {
@@ -131,10 +155,16 @@ impl<'a> EntreeDEtat<'a> {
     pub fn octets(&self) -> usize {
         ENTREE_D_ETAT_OCTETS_MIN
             .saturating_add(self.nom.longueur())
-            .saturating_add(
-                self.reponse
-                    .map_or(0, |reponse| reponse.len().saturating_add(2)),
-            )
+            .saturating_add(self.reponse.map_or(0, |reponse| {
+                reponse
+                    .len()
+                    .saturating_add(2)
+                    .saturating_add(if self.passerelle.is_some() {
+                        PASSERELLE_OCTETS
+                    } else {
+                        0
+                    })
+            }))
     }
 
     /// L'écrit au début de `sortie`, et rend ce qu'elle occupe.
@@ -195,7 +225,14 @@ impl<'a> EntreeDEtat<'a> {
         match self.reponse {
             None => poser_un(sortie.get_mut(tranche(1)).unwrap_or_default(), PARTI),
             Some(reponse) => {
-                poser_un(sortie.get_mut(tranche(1)).unwrap_or_default(), VIVANT);
+                poser_un(
+                    sortie.get_mut(tranche(1)).unwrap_or_default(),
+                    if self.passerelle.is_some() {
+                        VIVANT_AVEC_PASSERELLE
+                    } else {
+                        VIVANT
+                    },
+                );
                 // Bornée ci-dessus par REPONSE_FEDEREE_OCTETS_MAX : elle tient
                 // sur deux octets.
                 #[expect(
@@ -208,6 +245,16 @@ impl<'a> EntreeDEtat<'a> {
                     sortie.get_mut(tranche(reponse.len())).unwrap_or_default(),
                     reponse,
                 );
+                if let Some(passerelle) = self.passerelle {
+                    poser(
+                        sortie.get_mut(tranche(2)).unwrap_or_default(),
+                        &passerelle.port.to_be_bytes(),
+                    );
+                    poser_un(
+                        sortie.get_mut(tranche(1)).unwrap_or_default(),
+                        passerelle.via,
+                    );
+                }
             }
         }
         Ok(total)
@@ -262,10 +309,11 @@ impl<'a> EntreeDEtat<'a> {
                     machine,
                     nom,
                     reponse: None,
+                    passerelle: None,
                 },
                 fin_du_nom.saturating_add(1),
             )),
-            VIVANT => {
+            drapeau @ (VIVANT | VIVANT_AVEC_PASSERELLE) => {
                 let debut_longueur = fin_du_nom.saturating_add(1);
                 let debut_reponse = debut_longueur.saturating_add(2);
                 exiger(debut_reponse)?;
@@ -283,14 +331,41 @@ impl<'a> EntreeDEtat<'a> {
                         maximum: REPONSE_FEDEREE_OCTETS_MAX,
                     });
                 }
-                let fin = debut_reponse.saturating_add(longueur);
+                let fin_reponse = debut_reponse.saturating_add(longueur);
+                exiger(fin_reponse)?;
+                let reponse = Some(octets.get(debut_reponse..fin_reponse).unwrap_or_default());
+                if drapeau == VIVANT {
+                    return Ok((
+                        Self {
+                            service,
+                            machine,
+                            nom,
+                            reponse,
+                            passerelle: None,
+                        },
+                        fin_reponse,
+                    ));
+                }
+                let fin = fin_reponse.saturating_add(PASSERELLE_OCTETS);
                 exiger(fin)?;
+                let mut trois = [0_u8; PASSERELLE_OCTETS];
+                poser(&mut trois, octets.get(fin_reponse..fin).unwrap_or_default());
+                let [haut, bas, via] = trois;
+                let port = u16::from_be_bytes([haut, bas]);
+                // Un port nul, un moyen inconnu : ce n'est pas une passerelle.
+                if port == 0 {
+                    return Err(Faute::Etiquette { lue: 0 });
+                }
+                if !(1..=3).contains(&via) {
+                    return Err(Faute::Etiquette { lue: via });
+                }
                 Ok((
                     Self {
                         service,
                         machine,
                         nom,
-                        reponse: Some(octets.get(debut_reponse..fin).unwrap_or_default()),
+                        reponse,
+                        passerelle: Some(PasserelleRapportee { port, via }),
                     },
                     fin,
                 ))
@@ -375,7 +450,57 @@ mod tests {
             machine: id(Genre::Machine, 5),
             nom: NomRange::nouveau("depot").expect("il tient"),
             reponse,
+            passerelle: None,
         }
+    }
+
+    #[test]
+    fn un_echo_rapporte_sa_passerelle_et_elle_se_relit() {
+        let reponse = br#"{"service":"s-x"}"#;
+        let voulue = EntreeDEtat {
+            passerelle: Some(PasserelleRapportee {
+                port: 51_377,
+                via: 1,
+            }),
+            ..entree(Some(reponse.as_slice()))
+        };
+        let mut sortie = [0_u8; 256];
+        let n = voulue.ecrire(&mut sortie).expect("elle s'écrit");
+        assert_eq!(n, voulue.octets());
+        assert_eq!(n, entree(Some(reponse.as_slice())).octets() + 3);
+        assert_eq!(EntreeDEtat::lire(&sortie[..n]), Ok((voulue, n)));
+        // Tronquée dans la passerelle.
+        assert_eq!(
+            EntreeDEtat::lire(&sortie[..n - 1]),
+            Err(Faute::Tronquee {
+                attendus: n,
+                obtenus: n - 1
+            })
+        );
+        // Un port nul, un moyen inconnu.
+        let mut nul = sortie;
+        nul[n - 3] = 0;
+        nul[n - 2] = 0;
+        assert_eq!(
+            EntreeDEtat::lire(&nul[..n]),
+            Err(Faute::Etiquette { lue: 0 })
+        );
+        let mut inconnu = sortie;
+        inconnu[n - 1] = 9;
+        assert_eq!(
+            EntreeDEtat::lire(&inconnu[..n]),
+            Err(Faute::Etiquette { lue: 9 })
+        );
+        // Sur un service parti, elle ne s'écrit pas : rien à sonder.
+        let partie = EntreeDEtat {
+            passerelle: voulue.passerelle,
+            ..entree(None)
+        };
+        let n = partie.ecrire(&mut sortie).expect("elle s'écrit");
+        assert_eq!(
+            EntreeDEtat::lire(&sortie[..n]).map(|(lue, _)| lue.passerelle),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -432,6 +557,7 @@ mod tests {
         let pleine = [b'x'; REPONSE_FEDEREE_OCTETS_MAX];
         let longue = EntreeDEtat {
             nom: NomRange::nouveau(&"n".repeat(NOM_OCTETS_MAX)).expect("il tient"),
+            passerelle: Some(PasserelleRapportee { port: 1, via: 3 }),
             ..entree(Some(pleine.as_slice()))
         };
         assert_eq!(longue.octets(), ENTREE_D_ETAT_OCTETS_MAX);

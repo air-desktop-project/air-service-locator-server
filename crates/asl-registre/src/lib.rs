@@ -61,7 +61,7 @@ pub use domaine::{
 pub use droit::{DROIT_OCTETS, Droit, Droits};
 pub use federation::{
     ENTREE_D_ETAT_OCTETS_MAX, ENTREE_D_ETAT_OCTETS_MIN, EntreeDEtat, MACHINE_FEDEREE_OCTETS,
-    MachineFederee, REPONSE_FEDEREE_OCTETS_MAX,
+    MachineFederee, PasserelleRapportee, REPONSE_FEDEREE_OCTETS_MAX,
 };
 pub use groupe::{
     ADHESION_OCTETS, Adhesion, ETIQUETTE_DOMAINE_RACINE, GROUPE_OCTETS, Groupe,
