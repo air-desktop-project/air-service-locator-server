@@ -1551,8 +1551,9 @@ NAT partagé — ne produit pas cette signature ; un point UDP qui écoute, si.
 **La forme est tranchée** (décisions 90 à 93, les réponses de Thierry aux
 questions E1 à E14) et se lit dans `protocole.md` §3 quater — les
 datagrammes, le jeton, qui sonde et d'où, l'installation ; **l'écho parle
-UPnP** à la box pour ouvrir son seul port (décision 94 ; la forme proposée,
-questions E15 et suivantes). Ce qu'elle garde de cette section :
+UPnP** à la box pour ouvrir son seul port (décision 94), puis PCP et NAT-PMP
+en repli — la forme tranchée elle aussi (décisions 95 à 97, questions E15 à
+E23). Ce qu'elle garde de cette section :
 
 - **toujours le seul candidat réflexif** pour la sonde de l'annuaire, jamais
   une adresse annoncée ;

@@ -2367,8 +2367,14 @@ transport, la socket, la signature, le nom (E1, E2, E3, E13) ; 91 : qui
 l'écho croit, le jeton, les droits (E4, E5, E6, E7) ; 92 : les sondes des
 annuaires (E8, E9) ; 93 : l'installation, `asl ping`, l'activation (E10,
 E11, E12, E14). **Décision 94** : l'écho parle UPnP derrière une passerelle
-résidentielle. Ce qui reste ouvert est aux questions E15 et suivantes, en fin
-de section.
+résidentielle ; sa forme a été proposée par les questions E15 à E23, et
+Thierry en a retenu chaque recommandation de même (« d'accord pour tout »,
+2026-09-29) — **décisions 95 à 98** : 95 : la passerelle active par défaut,
+sa durée, quand on cherche la box (E15, E18, E23) ; 96 : notre client UPnP,
+puis PCP et NAT-PMP (E16, E17) ; 97 : ce que l'annuaire en apprend — double
+NAT, trou IPv6, `passerelle` et `echo_via` (E19, E20, E21) ; 98 : le Mac et
+l'attestation (E22). **Aucune question ne reste ouverte dans cette
+section.**
 
 ### Ce que l'écho est, et ce qu'il n'est pas
 
@@ -2481,8 +2487,9 @@ première. Tenir deux baux pour avoir les deux est écarté en v1.
 chances de son côté, `asl echo` doit aussi parler UPnP quand il est derrière
 une passerelle résidentielle ; normalement toutes les box le proposent. »**
 C'est la première route de `modele.md` §6.3 — « le daemon demande lui-même
-une redirection à sa box » —, prise **pour l'écho seul**. Ce qui suit est la
-forme **proposée** ; les points ouverts sont les questions E15 à E23.
+une redirection à sa box » —, prise **pour l'écho seul**. La forme qui suit
+a été proposée par les questions E15 à E23, puis **tranchée** (2026-09-29,
+Thierry ; décisions 95, 96 et 97).
 
 **Ce que la passerelle ajoute à la socket partagée (décision 90).** Le bail
 tient déjà un mapping NAT ouvert, mais il ne laisse entrer que ce que le NAT
@@ -2517,7 +2524,7 @@ tout le monde** sur ce port-là — c'est ce qui rend l'écho joignable d'un
   second NAT** au-dessus (celui de l'opérateur, ou une box derrière une box),
   la redirection ne sert à rien depuis l'Internet, et `asl echo` le dit
   (« double NAT : la box n'est pas la dernière — la redirection ne suffira
-  pas ») sans rien annoncer de plus (question E19).
+  pas ») sans rien annoncer de plus (**décidé**, décision 97 ; E19).
 
 #### IPv6 : un trou dans le pare-feu, si la box le propose — et c'est rare
 
@@ -2536,7 +2543,8 @@ ce service ; quand elles l'annoncent, `GetFirewallStatus` rend souvent
 `InboundPinholeAllowed = 0`, et l'on n'a alors le droit de rien. Rien n'en a
 été mesuré ici : le banc `bancs/nat` devra relever, box par box, ce qu'elles
 proposent. **Ne pas l'obtenir n'est pas une panne** : `asl echo` tente, et se
-tait si le service est absent (il le dit en mode bavard) — question E20.
+tait si le service est absent (il le dit en mode bavard) — **décidé**,
+décision 97 ; E20.
 
 #### La durée : un bail court, renouvelé, retiré au propre
 
@@ -2545,7 +2553,8 @@ tait si le service est absent (il le dit en mode bavard) — question E20.
   (`NewLeaseDuration = 0`).
 - **Une box qui n'accepte que le permanent** (`725
   OnlyPermanentLeasesSupported`, fréquent en IGD v1) : on le demande
-  permanent, et c'est alors à nous de le retirer (question E18).
+  permanent, et c'est alors à nous de le retirer (**décidé**, décision 95 ;
+  E18).
 - **À l'arrêt** — Ctrl-C, `SIGTERM` de systemd ou de launchd — :
   `DeletePortMapping` et `DeletePinhole`, **avant** de fermer le bail.
 - **Après un arrêt brutal** : `asl echo` retient dans son répertoire d'état
@@ -2557,12 +2566,12 @@ tait si le service est absent (il le dit en mode bavard) — question E20.
   **l'écho continue sans**, avec la socket du bail seule, et le dit une fois
   (« pas de passerelle UPnP : joignable depuis l'annuaire, peut-être pas
   d'ailleurs »). Il recherche la passerelle au démarrage, toutes les trente
-  minutes, et quand son adresse change (question E23).
+  minutes, et quand son adresse change (**décidé**, décision 95 ; E23).
 
 #### Comment l'annuaire l'apprend, la sonde, et le dit
 
-**L'annonce de l'écho porte ce que la box a accordé** — proposé (question
-E21) : un champ de plus, propre à l'annonce `asl-echo`,
+**L'annonce de l'écho porte ce que la box a accordé** — **décidé**
+(décision 97 ; E21) : un champ de plus, propre à l'annonce `asl-echo`,
 
 ```jsonc
 "passerelle": {"port": 51377, "via": "upnp"}
@@ -2592,8 +2601,8 @@ membre de l'annuaire local rapporte le candidat de la passerelle avec les
 autres, et la racine le sonde du dehors sous les mêmes bornes — une adresse
 globale, qui est celle que le membre a vue.
 
-**Ce que l'état d'écho dit en plus** — proposé (question E21) : **par où la
-preuve est arrivée**, une chaîne de plus sur la machine :
+**Ce que l'état d'écho dit en plus** — **décidé** (décision 97 ; E21) :
+**par où la preuve est arrivée**, une chaîne de plus sur la machine :
 
 ```jsonc
 "echo_via": "upnp"    // par la redirection ou le trou que la box a accordés
@@ -2608,7 +2617,8 @@ par clés et ignorent le reste, quelle qu'en soit la valeur
 `air-service-locator-ios`, `Sources/Coeur/Reseau/Reel/AnnuaireReel.swift:581-588`),
 et celui d'`asl domain` saute un champ inconnu quelle que soit sa valeur
 (`air-service-locator-client`, `crates/asl-client-tokio/src/domaines.rs:34`).
-Si NAT-PMP ou PCP venaient (E16), `natpmp` et `pcp` s'ajouteraient.
+PCP et NAT-PMP viendront (décision 96 ; E16) : `pcp` et `natpmp`
+s'ajouteront alors à la liste, sans rien casser.
 
 #### La sécurité : un seul port, le sien
 
@@ -2627,8 +2637,9 @@ Si NAT-PMP ou PCP venaient (E16), `natpmp` et `pcp` s'ajouteraient.
 - **L'écho n'active pas UPnP sur la box** ; si elle l'a désactivé, il s'en
   passe.
 - **`--no-upnp`** désactive tout cela (et `ASL_ECHO_UPNP=0` dans
-  l'environnement, pour une unité). **Proposé : activé par défaut**, puisque
-  Thierry veut toutes les chances — à confirmer (question E15).
+  l'environnement, pour une unité). **Activé par défaut** (décision 95 ;
+  E15) : Thierry veut toutes les chances ; l'écho, lui, reste inactif tant
+  qu'on ne l'a pas activé (décision 93).
 
 #### Le code : sans une ligne de C (C4)
 
@@ -2660,7 +2671,20 @@ réduit à ce que la description et les réponses SOAP portent, les six actions
 (`AddAnyPortMapping`, `AddPortMapping`, `DeletePortMapping`,
 `GetExternalIPAddress`, `GetFirewallStatus`, `AddPinhole`/`UpdatePinhole`/`DeletePinhole`)
 — quelques centaines de lignes, couvertes (C2) et fuzzées (C3), aucune
-dépendance. Question E17.
+dépendance. **Décidé (décision 96 ; E17) : c'est celle-là** — notre client,
+dans le dépôt client, `igd-next` lu comme référence et jamais ajouté au
+graphe.
+
+**Puis PCP, et NAT-PMP en repli** (décision 96 ; E16), dans une PR à part
+qui suit celle d'UPnP : quand aucune passerelle UPnP ne répond, `asl echo`
+parle PCP (RFC 6887) à la passerelle par défaut, port 5351 — une demande
+`MAP` du seul port UDP de l'écho, et en IPv6 le trou dans le pare-feu que PCP
+sait aussi ouvrir —, et NAT-PMP (RFC 6886) quand la box ne connaît que lui
+(la réponse de version non prise en charge que PCP prévoit). Un codec
+binaire d'étage 1, lui aussi couvert et fuzzé ; la passerelle par défaut se
+lit dans la table de routage, différemment sous Linux et sous macOS. Les
+mêmes règles tiennent : un seul port, le bail d'une heure, le retrait à
+l'arrêt, `--no-upnp` qui coupe tout, et `via` qui dit `pcp` ou `natpmp`.
 
 **Dans un cas comme dans l'autre, UPnP reste hors d'`asl-client`** : c'est
 l'utilitaire `asl` qui le parle, pas la bibliothèque chargée dans les
@@ -2937,7 +2961,7 @@ ces deux sortes (décision 86) :
  "echo_a":1789217751000,      // l'instant de la mesure — absent sur "en_cours"
  "echo_par":"n-…",            // l'annuaire qui a sondé
  "echo_depuis":"exterieur",   // "exterieur" | "interieur" (la règle de `sonde_locale`)
- "echo_via":"upnp"}           // "upnp" | "nat" | "direct" — décision 94, question E21 ; avec "verifie" seulement
+ "echo_via":"upnp"}           // "upnp" | "nat" | "direct" — décisions 94 et 97 ; avec "verifie" seulement
 ```
 
 - **Absent** : aucun `asl-echo` n'est annoncé — « pas d'écho », qui n'est ni
@@ -3190,7 +3214,13 @@ invite pour l'accès d'une application au conteneur de groupe d'une autre
 déclarerait `DCAppAttestService` disponible sur macOS, `isSupported`
 dépendant du matériel : **à vérifier** — cela ne peut pas se citer sans la
 consulter. Si c'était vrai sur certains Mac, cela changerait ce que le Mac
-peut prouver, et la question E22 en dépend.
+peut prouver. **Ce que le Mac fait si les racines refusent un jour
+`aucune`** est tranché (2026-09-29, Thierry ; décision 98 ; E22) : **il ne
+crée jamais de compte, il rejoint** un compte ouvert sur un téléphone
+attesté (`POST /v1/appareils`, signé par un appareil déjà enrôlé) ;
+« aucune » ne serait admis pour les Mac que si un utilisateur sans téléphone
+devait pouvoir commencer par le Mac ; et la question se rouvre si
+`DCAppAttestService` s'avère disponible sur des Mac.
 
 **Les applications** :
 
@@ -3200,71 +3230,100 @@ peut prouver, et la question E22 en dépend.
   « **une autre machine répond à cette adresse** » / « pas d'écho ».
 - **iOS, Android** : le même état sur la fiche de chaque machine, lu dans
   `GET /v1/machines` (les miennes) et `GET /v1/domaines/{d}` (celles que je
-  vois, si E7 le retient) — les quatre champs ci-dessus. **Le décodeur accepte
+  vois, décision 91) — les champs ci-dessus. **Le décodeur accepte
   les champs absents** (racine d'avant, pas d'écho) **et un mot inconnu**, dit
   tel quel plutôt que de refuser la liste. Une application ne sonde pas : un
   téléphone n'est pas une machine, et n'a pas de jeton.
 
 ### Travail à faire
 
-**Serveur** (`air-service-locator-server`), trois PR :
+Tout est tranché (décisions 89 à 98) ; ce qui suit est le découpage en PR,
+**dans l'ordre où elles se mergent**. Chacune change la version ; le cran est
+indiqué pour le serveur.
+
+**Serveur** (`air-service-locator-server`), quatre PR :
 
 1. **Le codec `asl-echo`** (mineur) : la crate d'étage 1 — les trois
    datagrammes et le jeton, écrits et lus, longueurs fixes, bourrage vérifié ;
    les quatre séparations de domaine dans `asl-cle` ; des vecteurs figés ;
-   100 % de couverture (C2), une cible de fuzz par décodeur (C3).
-2. **Le jeton** (mineur) : `POST /v1/echo/jetons` sur la voie machine,
-   la décision de `GET /v1/ou/{m}/asl-echo` dans `asl-auth`, un essai C9 et un
-   essai C10 ; la signature par la clé d'identité de la racine ; le débit et
-   la ligne de journal ; `421` chez un annuaire local.
-3. **La sonde par l'écho et l'état** (mineur) : le nom `asl-echo` réservé à sa
-   forme ; son candidat réflexif au port observé (`asl-annuaire`,
-   `Session::candidats`) ; le point UDP qui se sonde (`se_sonde`, les
-   `Ordres`) ; une socket UDP de sonde et ses trois envois dans
-   `asl-loop-tokio::sonde` ; `echo`, `echo_a`, `echo_par`, `echo_depuis` dans
-   `GET /v1/machines` et `GET /v1/domaines/{d}` ; la même sonde chez un annuaire
-   local, et son verdict dans l'état fédéré ; la sonde des racines vers les
-   échos fédérés (décision 92) ; la cadence de E9. **Et la passerelle**
-   (décision 94, si E21 a) : le champ `passerelle` de l'annonce `asl-echo`
-   dans `asl-proto` (décodé, fuzzé), son candidat en tête — adresse observée,
-   port accordé —, rapporté par un membre d'annuaire local, et `echo_via`.
+   100 % de couverture (C2), une cible de fuzz par décodeur (C3). Le client
+   la lit : elle précède tout ce que le client fait de l'écho.
+2. **Le jeton** (mineur ; décision 91) : `POST /v1/echo/jetons` sur la voie
+   machine, la décision de `GET /v1/ou/{m}/asl-echo` dans `asl-auth`, un essai
+   C9 et un essai C10 ; la signature par la clé d'identité de la racine ; le
+   débit et la ligne de journal ; `421` chez un annuaire local.
+3. **La sonde par l'écho et l'état** (mineur ; décisions 90 et 92) : le nom
+   `asl-echo` réservé à sa forme ; son candidat réflexif au port observé
+   (`asl-annuaire`, `Session::candidats`) ; le point UDP qui se sonde
+   (`se_sonde`, les `Ordres`) ; une socket UDP de sonde et ses trois envois
+   dans `asl-loop-tokio::sonde` ; `echo`, `echo_a`, `echo_par`, `echo_depuis`
+   dans `GET /v1/machines` et `GET /v1/domaines/{d}` ; la même sonde chez un
+   annuaire local, et son verdict dans l'état fédéré ; la sonde des racines
+   vers les échos fédérés ; la cadence de quinze minutes.
+4. **Le champ `passerelle`** (mineur ; décisions 94 et 97) : le champ
+   `{"port", "via"}` de l'annonce `asl-echo` dans `asl-proto` (décodé, fuzzé,
+   refusé sur toute autre annonce) ; son candidat en tête — adresse observée,
+   port accordé — ; rapporté par un membre d'annuaire local et sondé par les
+   racines sous les bornes de la décision 92 ; `echo_via` (`upnp` | `nat` |
+   `direct`) sur la machine. La version qui le porte est celle qu'`asl echo`
+   lira dans `GET /v1/version` avant d'envoyer le champ.
 
-**Client** (`air-service-locator-client`), quatre PR :
+**Client** (`air-service-locator-client`), six PR, après les PR 1 et 2 du
+serveur :
 
-1. **La socket partagée** (si E2 a) : `asl-client-tokio` sait tenir une
-   connexion sur une socket non connectée qu'on lui donne, et rend à l'appelant
-   les datagrammes qui ne sont pas du QUIC (`lib.rs:255-262`).
-2. **`asl echo`** : tirer le port, annoncer `asl-echo`, tenir le bail comme
-   `asl announce` (`crates/asl-cli/src/commandes.rs:436-527`), répondre aux sondes, borner le
-   débit, refuser root, dire le verdict poussé ; `--install` / `--uninstall`
-   sur Mac.
-3. **`asl ping`** : résoudre, demander le jeton, sonder, vérifier, dire d'où ;
-   les codes de sortie ; l'ABI (`asl-client-ffi`) si une liaison en veut.
-4. **Le paquet** : l'unité `asl-echo.service` posée par `scripts/paquet.sh`,
-   désactivée, et `check-paquet.sh` qui le vérifie ; la page de manuel.
-5. **UPnP** (décision 94) : le client IGD — le nôtre, codec d'étage 1 fuzzé,
-   ou `igd-next` (E17) — dans `asl-cli` seulement, jamais dans `asl-client`
-   (C4) ; SSDP sur le lien local (IPv4 et IPv6), `LOCATION` littérale
-   seulement (C20) ; `AddAnyPortMapping`/`AddPortMapping` du seul port de
-   l'écho, `GetExternalIPAddress` comparée à `vu_depuis` (double NAT, E19) ;
-   `AddPinhole` si la box le permet (E20) ; le bail d'une heure renouvelé,
-   le retrait à l'arrêt et au démarrage suivant (E18) ; la recherche
-   périodique (E23) ; `--no-upnp` et `ASL_ECHO_UPNP=0` (E15) ; la réannonce
-   avec `passerelle` vers un annuaire qui le connaît (E21).
-6. **NAT-PMP et PCP**, si E16 le retient : une PR à part, après UPnP.
-7. **L'identité sur macOS** (décision 93, révisée) : `etat.rs` cherche
+1. **`asl echo`, sur la socket du bail** (décisions 89, 90, 93) :
+   `asl-client-tokio` sait tenir une connexion sur une socket non connectée
+   qu'on lui donne, et rend à l'appelant les datagrammes qui ne sont pas du
+   QUIC (`lib.rs:255-262`) ; puis tirer le port, annoncer `asl-echo`, tenir le
+   bail comme `asl announce` (`crates/asl-cli/src/commandes.rs:436-527`),
+   répondre aux sondes, borner le débit, refuser root, dire le verdict poussé ;
+   `--install` / `--uninstall` sur Mac (le LaunchAgent).
+2. **`asl ping`** (décisions 91 et 93) : résoudre un `m-…`, un nom ou un
+   alias, demander le jeton, sonder, vérifier, dire d'où ; les codes de
+   sortie ; l'ABI (`asl-client-ffi`) si une liaison en veut.
+3. **UPnP** (décisions 94 à 97) : **notre** client IGD, codec d'étage 1
+   couvert et fuzzé, `igd-next` lu comme référence (E17), dans `asl-cli`
+   seulement, jamais dans `asl-client` (C4) ; SSDP sur le lien local (IPv4 et
+   IPv6), `LOCATION` littérale seulement (C20) ; `AddAnyPortMapping` /
+   `AddPortMapping` du seul port de l'écho ; `GetExternalIPAddress` comparée à
+   `vu_depuis` — un double NAT se dit et ne s'annonce pas (E19) ; `AddPinhole`
+   si la box le propose, silence sinon hors du mode bavard (E20) ; le bail
+   d'une heure renouvelé toutes les trente minutes, permanent seulement si la
+   box l'exige, retiré à l'arrêt et, après un arrêt brutal, au démarrage
+   suivant (E18) ; la recherche de la box au démarrage, toutes les trente
+   minutes et à chaque changement d'adresse (E23) ; actif par défaut,
+   `--no-upnp` et `ASL_ECHO_UPNP=0` (E15) ; la réannonce avec `passerelle`
+   vers un annuaire dont la version l'accepte (E21 ; PR 4 du serveur).
+4. **PCP, puis NAT-PMP en repli** (décision 96 ; E16) : le codec binaire
+   d'étage 1, fuzzé ; la passerelle par défaut lue sous Linux et sous macOS ;
+   les mêmes règles que pour UPnP, `via` = `pcp` ou `natpmp`.
+5. **L'unité systemd utilisateur** (décision 93) : `asl-echo.service` posée
+   désactivée par `scripts/paquet.sh`, sans script de mainteneur, et
+   `check-paquet.sh` qui le vérifie ; la page de manuel (`asl echo`,
+   `asl ping`, `--no-upnp`, `loginctl enable-linger`).
+6. **L'identité sur macOS** (décision 93, révisée) : `etat.rs` cherche
    `--state`/`ASL_STATE` sans repli, puis le conteneur de groupe
    `SB7H9B6TY8.org.airdesktop.servicelocator`, puis l'ancien conteneur de
    l'application (avec un avertissement), puis `~/.config/asl` ; il dit quand
    deux identités différentes coexistent ; le chemin se calcule depuis le
-   répertoire de l'utilisateur, pas depuis `HOME` (bac à sable).
+   répertoire de l'utilisateur, pas depuis `HOME` (bac à sable). Elle précède
+   la migration de l'application Mac.
 
-**Applications** : Mac — les droits de bac à sable et de groupe sur
-l'application et l'agent, la migration de l'identité vers le conteneur de
-groupe (copier, relire, comparer, puis retirer ; les échecs partiels),
-l'agent `SMAppService` activé depuis « ce Mac », et ce qu'on dit à l'App
-Review (décision 93, révisée) ; Mac, iOS, Android — afficher l'état d'écho sur la
-fiche d'une machine, décodeur tolérant.
+**Applications**, après la PR 3 du serveur (et la PR 4 pour `echo_via`) :
+
+1. **Mac, iOS, Android — l'état d'écho** sur la fiche d'une machine :
+   `echo`, `echo_a`, `echo_par`, `echo_depuis`, `echo_via` ; décodeur
+   tolérant (champs absents, mot inconnu dit tel quel) ; sur « ce Mac »,
+   proposer d'activer l'écho.
+2. **Mac — le groupe d'application, la migration, l'agent** (décision 93,
+   révisée), après la PR 6 du client : les droits de bac à sable et de groupe
+   sur l'application et l'agent ; la migration de l'identité vers le conteneur
+   de groupe (copier, relire, comparer, puis retirer ; les échecs partiels) ;
+   l'agent `SMAppService` activé depuis « ce Mac » ; ce qu'on dit à l'App
+   Review.
+3. **Mac, plus tard — rejoindre plutôt que créer** (décision 98) : le jour où
+   une racine refuse `aucune`, l'application Mac n'offre plus que de rejoindre
+   un compte ouvert sur un téléphone attesté. Rien à coder avant.
 
 ### Les questions E1 à E14 — tranchées
 
@@ -3398,7 +3457,11 @@ domaine hébergé par un annuaire local ?**
   un script pour l'activer.
 - **Décidé (2026-09-29, Thierry ; décision 93) : (a).**
 
-### Questions pour Thierry — E15 et suivantes
+### Les questions E15 à E23 — tranchées
+
+**Thierry a répondu le 2026-09-29 : « d'accord pour tout ».** Comme pour E1
+à E14, chaque recommandation est devenue une décision (95 à 98), et les
+options écartées restent écrites.
 
 **E15. UPnP est-il actif par défaut ?**
 - (a) **Oui** : `asl echo` demande une redirection à la box sans qu'on le lui
@@ -3408,7 +3471,7 @@ domaine hébergé par un annuaire local ?**
 - (b) Non : il faut `--upnp`. Rien ne change sur la box sans un geste, mais
   la plupart des gens ne le feront pas, et l'écho restera injoignable du
   dehors derrière une box IPv4.
-- **Recommandation : (a).**
+- **Décidé (2026-09-29, Thierry ; décision 95) : (a).**
 
 **E16. Faut-il aussi parler NAT-PMP ou PCP, quand UPnP ne répond pas ?**
 - (a) Non, UPnP seul en v1 : un protocole de moins.
@@ -3418,9 +3481,9 @@ domaine hébergé par un annuaire local ?**
   partagent le port 5351, et PCP prévoit ce repli. Un codec binaire de plus,
   petit ; il faut trouver l'adresse de la passerelle (la route par défaut),
   différemment sous Linux et sous macOS.
-- **Recommandation : (c)**, après UPnP, dans une PR à part : c'est ce qui
-  donne le plus de chances, et le format est bien plus simple que celui
-  d'UPnP.
+- **Décidé (2026-09-29, Thierry ; décision 96) : (c)**, après UPnP, dans
+  une PR à part : c'est ce qui donne le plus de chances, et le format est
+  bien plus simple que celui d'UPnP.
 
 **E17. Utiliser `igd-next`, ou écrire notre propre client UPnP ?**
 - (a) `igd-next` : MIT, Rust pur, IGD v1 et v2 déjà écrits. Mais une trentaine
@@ -3428,7 +3491,8 @@ domaine hébergé par un annuaire local ?**
   ce qu'envoie un appareil du réseau sans être fuzzés par nous (C3).
 - (b) **Le nôtre**, dans le dépôt client, réservé à `asl` : quelques centaines
   de lignes, aucune dépendance, fuzzé, et le trou IPv6 compris.
-- **Recommandation : (b)**, en lisant `igd-next` comme référence.
+- **Décidé (2026-09-29, Thierry ; décision 96) : (b)**, en lisant
+  `igd-next` comme référence.
 
 **E18. Combien de temps dure la redirection ?**
 - (a) **Une heure, renouvelée toutes les trente minutes** ; permanente
@@ -3438,7 +3502,7 @@ domaine hébergé par un annuaire local ?**
   sur la box pour toujours si la machine disparaît.
 - (c) Jamais permanente : on se passe d'UPnP sur les box qui l'exigent (les
   vieilles, souvent).
-- **Recommandation : (a).**
+- **Décidé (2026-09-29, Thierry ; décision 95) : (a).**
 
 **E19. Et s'il y a deux NAT (la box derrière celle de l'opérateur, ou derrière
 une autre box) ?**
@@ -3448,14 +3512,14 @@ une autre box) ?**
 - (b) On essaie aussi d'ouvrir la box du dessus : UPnP ne le permet pas (on ne
   la voit pas depuis le réseau local), et PCP seulement si l'opérateur le
   sert.
-- **Recommandation : (a).**
+- **Décidé (2026-09-29, Thierry ; décision 97) : (a).**
 
 **E20. Le trou IPv6 dans le pare-feu de la box (`AddPinhole`) ?**
 - (a) **On le tente si la box le propose** et l'autorise ; sinon on se tait (le
   dire seulement en mode bavard). C'est rare, mais ça ne coûte presque rien.
 - (b) Pas en v1 : moins de code, mais une machine en IPv6 derrière un pare-feu
   de box reste injoignable du dehors, même quand la box aurait accepté.
-- **Recommandation : (a).**
+- **Décidé (2026-09-29, Thierry ; décision 97) : (a).**
 
 **E21. Comment l'annuaire apprend-il la redirection, et comment le dit-il ?**
 - (a) **Un champ `passerelle` dans l'annonce de l'écho (le port seul, et
@@ -3467,7 +3531,7 @@ une autre box) ?**
   pas par où la preuve est passée.
 - (c) Un champ avec l'adresse externe aussi : écarté — l'annuaire sonderait
   une adresse que le client choisit, c'est-à-dire n'importe laquelle.
-- **Recommandation : (a).**
+- **Décidé (2026-09-29, Thierry ; décision 97) : (a).**
 
 **E22. Si les racines finissent par refuser les comptes en attestation
 « aucune », que fait le Mac ?** Aujourd'hui le Mac ouvre son compte en
@@ -3482,9 +3546,9 @@ empêcherait.
   téléphone attesté (`POST /v1/appareils`, signé par un appareil déjà
   enrôlé). Il reste utilisable, mais on ne peut plus commencer par le Mac.
 - (c) Refuser le Mac tant qu'il ne s'atteste pas : plus de Mac du tout.
-- **Recommandation : (b)**, et (a) seulement si un utilisateur sans téléphone
-  doit pouvoir commencer ; revoir si `DCAppAttestService` s'avère disponible
-  sur des Mac.
+- **Décidé (2026-09-29, Thierry ; décision 98) : (b)**, et (a) seulement
+  si un utilisateur sans téléphone doit pouvoir commencer ; revoir si
+  `DCAppAttestService` s'avère disponible sur des Mac.
 
 **E23. Quand l'écho cherche-t-il la box ?**
 - (a) **Au démarrage, toutes les trente minutes, et quand l'adresse de la
@@ -3492,7 +3556,7 @@ empêcherait.
   redémarrée, ou un portable qui change de Wi-Fi, retrouve sa redirection.
 - (b) Au démarrage seulement : plus simple, mais une box redémarrée qui a perdu
   la redirection n'en redonne pas avant le redémarrage de l'écho.
-- **Recommandation : (a).**
+- **Décidé (2026-09-29, Thierry ; décision 95) : (a).**
 
 ## 4. Ce qui est nommé et repoussé
 
@@ -3517,7 +3581,7 @@ jeton à usage unique dans le datagramme pour qu'on ne puisse pas faire attribue
 n'importe quel mapping à n'importe qui, et une borne sur ce qu'un daemon peut
 faire émettre. Mais c'est désormais une extension, et non un second protocole.
 
-**L'écho en réalise un cas, pour lui seul** (proposé ; décision 89, §3 quater,
+**L'écho en réalise un cas, pour lui seul** (décidé ; décision 90, §3 quater,
 question E2) : `asl echo` tient son bail **sur la socket où il écoute**, et son
 candidat réflexif porte alors le port observé. Le cas général — le daemon d'un
 autre, avec sa propre socket — reste repoussé.
