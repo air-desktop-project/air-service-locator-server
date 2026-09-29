@@ -63,6 +63,15 @@ IPv6 publique n'est derrière aucun NAT, et tient l'exigence de joignabilité sa
 rien faire. IPv4 est le chemin où les problèmes commencent, et le nommer
 « repli » plutôt que « alternative » garde cette asymétrie visible dans le code.
 
+**Une exception, et une seule : l'écho** (décision 106, §3 quater, « Quand la
+box ne perce pas son pare-feu IPv6 »). `asl echo` tient son bail **en IPv4
+alors que l'IPv6 marche**, quand la box ne lui ouvre pas de trou IPv6 mais lui
+accorde une redirection IPv4 vers une adresse externe publique : l'annuaire
+ne sonde que l'adresse qu'il a vue, et ce n'est qu'en IPv4 qu'il verra une
+adresse où la box laisse entrer. Ce n'est pas un repli sur échec — le bail
+IPv6 tenait —, c'est le choix de la seule famille où l'écho est joignable du
+dehors. Toute autre connexion, `asl announce` compris, garde la règle.
+
 ### Qui l'on croit : une identité, pas un nom
 
 **Décidé le 2026-09-27 (Thierry) — C20, `annuaires.md` §2 quater, décisions 53
@@ -2433,8 +2442,10 @@ Thierry en a retenu chaque recommandation de même (« d'accord pour tout »,
 sa durée, quand on cherche la box (E15, E18, E23) ; 96 : notre client UPnP,
 puis PCP et NAT-PMP (E16, E17) ; 97 : ce que l'annuaire en apprend — double
 NAT, trou IPv6, `passerelle` et `echo_via` (E19, E20, E21) ; 98 : le Mac et
-l'attestation (E22). **Aucune question ne reste ouverte dans cette
-section.**
+l'attestation (E22). **Décision 106** (2026-09-29, Thierry, « option
+(b) ») : quand la box refuse le trou IPv6 mais redirige en IPv4, l'écho tient
+son bail en IPv4 (« Quand la box ne perce pas son pare-feu IPv6 », plus bas).
+**Aucune question ne reste ouverte dans cette section.**
 
 ### Ce que l'écho est, et ce qu'il n'est pas
 
@@ -2561,7 +2572,11 @@ au plus `ADRESSES_MAX`, et non plus la seule qui a servi à joindre l'annuaire
 sondeur du même réseau essaie les annoncées, un sondeur du dehors la
 réflexive. **Le candidat réflexif est d'une seule famille**, celle du bail :
 une machine joignable en IPv6 et en IPv4 ne le verra dit que dans la
-première. Tenir deux baux pour avoir les deux est écarté en v1.
+première. Tenir deux baux pour avoir les deux est écarté en v1. **Sauf
+quand la box ne laisse entrer qu'en IPv4** : le bail passe alors en IPv4,
+sur la même socket (décision 106, « Quand la box ne perce pas son pare-feu
+IPv6 », plus bas) — c'est pourquoi la double pile est posée
+explicitement, et non laissée au réglage du système.
 
 ### La passerelle : UPnP, pour mettre toutes les chances de son côté
 
@@ -2626,7 +2641,107 @@ ce service ; quand elles l'annoncent, `GetFirewallStatus` rend souvent
 été mesuré ici : le banc `bancs/nat` devra relever, box par box, ce qu'elles
 proposent. **Ne pas l'obtenir n'est pas une panne** : `asl echo` tente, et se
 tait si le service est absent (il le dit en mode bavard) — **décidé**,
-décision 97 ; E20.
+décision 97 ; E20. **Mais ce n'est plus un cul-de-sac** quand la même box
+redirige en IPv4 : voir la sous-section suivante (décision 106).
+
+#### Quand la box ne perce pas son pare-feu IPv6 : le bail passe en IPv4
+
+**Décidé (2026-09-29, Thierry ; décision 106, « option (b) »).** Constaté
+derrière une Livebox, sur trois machines (speedy, helium, oxygen) : la box
+refuse le trou (`AddPinhole` → `606 Action not authorized`), accorde la
+redirection (`udp 66xx → box 193.250.159.198:66xx`), et le bail, parti en
+IPv6, ne peut pas l'annoncer — l'annuaire ne sonde que l'adresse qu'il a vue
+(ci-dessous), et il a vu l'IPv6, que le pare-feu de la box ferme. L'écho
+n'est alors joignable que de l'intérieur, **alors que la box a précisément
+ouvert de quoi le joindre du dehors**. La décision : **l'écho tient son bail
+en IPv4**, pour que l'annuaire voie l'adresse externe de la box et sonde la
+redirection.
+
+**Les conditions — toutes les trois**, lues à un tour de la passerelle :
+
+1. **aucun trou IPv6 obtenu** : `AddPinhole` refusé (`606`, toute autre
+   faute), `InboundPinholeAllowed = 0`, ou pas de service
+   `WANIPv6FirewallControl` du tout. **Un pare-feu IPv6 inactif**
+   (`FirewallEnabled = 0`) **n'en est pas une** : la box laisse alors tout
+   entrer en IPv6, et le bail y reste ;
+2. **une redirection IPv4 accordée** pour le port de l'écho (IGD v1 ou v2,
+   bail d'une heure ou permanente) ;
+3. **une adresse externe publique** : `GetExternalIPAddress` rend une
+   adresse, et elle n'est ni privée (RFC 1918), ni partagée
+   (`100.64.0.0/10`, RFC 6598), ni de lien local, de bouclage ou nulle. Une
+   adresse externe non publique, c'est un double NAT **déjà visible** — la
+   box n'est pas la dernière —, et le bail reste en IPv6 sans rien tenter.
+
+Il faut encore, côté machine, **que la socket de l'écho sache l'IPv4** — une
+double pile, ou une socket IPv4 seule, auquel cas le bail y était déjà — et
+**qu'un annuaire ait une adresse IPv4** dans la liste. À défaut, l'écho le
+dit et reste en IPv6.
+
+**La bascule.** L'écho ferme le bail IPv6 — la connexion, donc l'annonce —,
+puis rouvre **sur la même socket**, vers les seules adresses IPv4 des
+annuaires (racines, ou l'annuaire local d'un renvoi), et réannonce : sans
+`passerelle` d'abord, pour apprendre `vu_depuis`, puis avec, comme partout
+(« Comment l'annuaire l'apprend »). **La même socket** : le port local ne
+change pas, la redirection que la box tient vise toujours le bon port, et le
+mapping NAT que le keepalive tient est celui de cette socket (décision 90).
+Fermer avant de rouvrir : il n'y a jamais deux baux de l'écho à la fois. Un
+annuaire qui ne répond pas en IPv4 dans la patience d'`asl announce` fait
+revenir en IPv6, et la bascule n'est pas retentée avant le tour suivant de la
+passerelle (trente minutes).
+
+**La vérification, après la bascule.** Le premier `vu_depuis` du bail IPv4
+est comparé à l'adresse externe que la box a dite :
+
+- **égales** : la box est bien le dernier NAT. L'annonce part avec
+  `"passerelle": {"port": <port externe redirigé>, "via": "upnp"}` — le port
+  que la box a accordé, qui n'est pas forcément celui de l'écho —,
+  l'annuaire sonde `vu_depuis:<port externe>` en tête, et l'état dit
+  `echo_via: upnp` quand la preuve arrive par là ;
+- **différentes** : un double NAT que l'adresse externe ne montrait pas (la
+  box a une adresse publique, mais on sort par ailleurs — un second
+  routeur, un VPN, une route par défaut qui ne passe pas par elle).
+  L'écho le dit (« double NAT : la box dit A, l'annuaire nous voit depuis
+  B — le bail revient en IPv6 »), **revient en IPv6**, et ne rebascule pas
+  tant que la box dit la même adresse externe.
+
+**L'hystérésis : on ne rebascule pas à chaque tour.** La passerelle
+recommence toutes les trente minutes (« La durée ») ; ce qui a décidé la
+bascule n'est pas réexaminé à chaque fois. **Le bail reste en IPv4 tant que
+la redirection tient** et que `vu_depuis` reste l'adresse externe de la box.
+Il **revient en IPv6** dans trois cas seulement :
+
+- **un trou IPv6 devient possible** — la passerelle continue de le demander
+  en IPv4, et l'obtient (une box reconfigurée, une mise à jour) : le bail
+  revient là où l'écho est joignable sans traduction, et annonce le trou ;
+- **la redirection est perdue** — refusée au renouvellement, la box ne
+  répond plus, ou plus de box : en IPv4, sans elle, l'écho n'a que le
+  mapping du bail, et l'IPv6 vaut au moins autant ;
+- **le double NAT se révèle** (ci-dessus) : `vu_depuis` et l'adresse
+  externe de la box divergent.
+
+Un bail IPv4 perdu pour une autre raison — l'annuaire redémarre, le réseau
+tombe — se rouvre **en IPv4** : la bascule tient d'un bail à l'autre, et
+seuls les trois cas ci-dessus la défont. Un arrêt de l'écho l'oublie : au
+démarrage suivant, le bail part en IPv6, et le premier tour de la passerelle
+décide de nouveau.
+
+**Ce que dit le journal** — une ligne à chaque changement, pas à chaque
+tour : « le bail passe en IPv4 : la box ne perce pas son pare-feu IPv6, mais
+redirige udp N » à la bascule ; « le bail revient en IPv6 : » suivi de la
+raison (trou obtenu, redirection perdue, double NAT, annuaire muet en IPv4)
+au retour.
+
+**Côté serveur, rien ne change.** Un bail IPv4 d'`asl-echo` est un bail
+comme un autre : son candidat réflexif est `vu_depuis` — ici l'adresse
+externe de la box — au port observé, la passerelle place en tête
+`vu_depuis` au port accordé (`asl-annuaire`, `Session::candidats`), et
+`echo_via` dit `upnp` quand c'est la passerelle qui a prouvé — y compris
+quand la box a redirigé le même port externe que celui du mapping, et que les
+deux candidats n'en font qu'un (`asl-loop-tokio`, `SondeDEcho::du_bail`). La
+bascule elle-même est une fermeture de bail suivie d'une annonce : le service
+passe `parti` le temps de la reconnexion, puis `annonce`. Le décodeur
+d'annonce, la sonde, le rapport d'un membre d'annuaire local aux racines
+n'ont rien à apprendre. **C'est une décision du client seul.**
 
 #### La durée : un bail court, renouvelé, retiré au propre
 
@@ -2668,7 +2783,9 @@ l'adresse observée et le port annoncé. Une adresse externe choisie par le
 client ferait de l'annuaire un balayeur ; il n'y en a donc pas, et c'est
 aussi pourquoi `asl echo` ne l'annonce que si `GetExternalIPAddress` est
 égale à `vu_depuis` (le double NAT ci-dessus). Pour un trou IPv6, le port est
-celui de l'écho, `"via":"upnp"`, et rien ne change au candidat.
+celui de l'écho, `"via":"upnp"`, et rien ne change au candidat. Sans trou IPv6 mais
+avec une redirection, le bail passe en IPv4 pour que ce `vu_depuis`-là soit
+l'adresse externe de la box (décision 106, plus haut).
 
 **Le champ demande un annuaire qui le connaît** : le décodeur d'annonce
 refuse un champ inconnu (`asl-proto`, `crates/asl-proto/src/cadrage.rs:38`,
@@ -3478,6 +3595,12 @@ serveur :
    deux identités différentes coexistent ; le chemin se calcule depuis le
    répertoire de l'utilisateur, pas depuis `HOME` (bac à sable). Elle précède
    la migration de l'application Mac.
+7. **Le bail en IPv4 quand la box ne perce pas son pare-feu IPv6**
+   (décision 106) : la passerelle conclut, à chaque tour, dans quelle famille
+   le bail doit se tenir ; l'écho ferme le bail IPv6 et rouvre en IPv4 sur la
+   même socket — double pile posée explicitement —, vérifie `vu_depuis`
+   contre l'adresse externe de la box, et ne revient en IPv6 que sur un trou
+   obtenu, une redirection perdue ou un double NAT révélé. Rien côté serveur.
 
 **Applications**, après la PR 3 du serveur (et la PR 4 pour `echo_via`) :
 
