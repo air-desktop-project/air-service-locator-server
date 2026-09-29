@@ -642,8 +642,10 @@ membre vivant, et seulement à un cercle étroit — son propriétaire, les
 administrateurs des racines, qui tient un droit sur un domaine qu'il héberge
 (décision 79 ; `annuaires.md` §2 quinquies, « Le cercle ») —, les adresses à
 `localiser` seul (décision 80) : **pas au public**, et pas par un droit qu'on
-écrirait. Les applications le montrent sur la tuile de l'annuaire, pas dans
-les services d'une machine (décision 84).
+écrirait. **C'est le moyen des machines**, servi sur la voie machine seulement
+(décision 86) : les applications ne le lisent pas. Elles montrent l'état de
+l'annuaire sur sa tuile, lu dans `GET /v1/annuaires` — le champ `voie` de
+chaque membre —, jamais dans les services d'une machine (décisions 84 et 86).
 
 ### 2.5 Autorisation
 
@@ -1171,7 +1173,10 @@ sur un élément**.
 sur lui ; le résolvent son propriétaire, les administrateurs des racines, et
 tout compte qui tient un droit sur un domaine que cet annuaire héberge — la
 règle du tableau y vaut : **`localiser` donne les adresses, `voir` seul
-seulement l'existence et l'état**. `rattacher` seul n'y donne rien — une machine
+seulement l'existence et l'état** — et **`administrer` n'emporte pas
+`localiser`** (décision 87) : l'administrateur d'un domaine hébergé qui veut
+les adresses s'accorde `localiser` sur ce domaine, un droit écrit, daté, qui
+se retire comme les autres. `rattacher` seul n'y donne rien — une machine
 rattachée apprend pourtant où est l'annuaire, par le `421`, qui ne change
 pas : c'est la machine qu'il guide, pas son compte.
 

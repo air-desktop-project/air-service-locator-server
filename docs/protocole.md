@@ -818,12 +818,12 @@ l'empêcherait de comprendre.
 | `DELETE /v1/machines/{m}/alias` | Le retire. |
 | `DELETE /v1/domaines/{d}` | Supprime un domaine : ses machines détachées, son alias, ses groupes et les droits qui le visent retirés. **`409` si c'est mon dernier.** Propriétaire seulement ; le domaine racine ne se supprime pas. |
 | `POST /v1/annuaires` | **Déclare MON annuaire local** : `{"adresse":"hôte:port"}` — ASCII imprimable, sans `"` ni `\`, un port de 1 à 65 535 ; `201` `{"code":"XXXXX-XXXXX","expire_a":<ms>}`, un code d'inscription — dix symboles, à usage unique, comme un code d'enrôlement, **valable vingt-quatre heures** (0.27.0). L'annuaire le présente aux racines avec sa clé d'identité (`POST /v1/annuaires/inscription`) ; l'inscription est alors **en attente**. |
-| `GET /v1/annuaires` | Mes annuaires locaux et l'état de leur inscription : `attendue` (un code déclaré, pas encore présenté ni expiré — `adresse`, `expire_a`), `en attente`, `acceptée`, `refusée`, `retirée` (`membre`, `annuaire` — son titulaire —, `adresse`, et `locateurs` s'il en a publié : décision 57, 0.30.0). **Et `paire`** (0.36.0, décision 70) : `seul`, `reglee`, `sans-peer` ou `peer-inconnu`, ce que ce membre conclut de sa paire — absent tant qu'il ne l'a pas dit à cette racine. |
+| `GET /v1/annuaires` | Mes annuaires locaux et l'état de leur inscription : `attendue` (un code déclaré, pas encore présenté ni expiré — `adresse`, `expire_a`), `en attente`, `acceptée`, `refusée`, `retirée` (`membre`, `annuaire` — son titulaire —, `adresse`, et `locateurs` s'il en a publié : décision 57, 0.30.0). **Et `paire`** (0.36.0, décision 70) : `seul`, `reglee`, `sans-peer` ou `peer-inconnu`, ce que ce membre conclut de sa paire — absent tant qu'il ne l'a pas dit à cette racine. **Et `voie`** (décidé le 2026-09-29, décision 86 — à coder) : `ouverte` si la voie de fédération de ce membre vers **cette** racine tient (trente secondes au plus, la règle des services), `tombee` si elle a tenu depuis que la racine tourne et s'est tue — une chaîne, comme `paire` ; absent tant que ce membre ne lui a pas parlé depuis son démarrage. C'est ce que la tuile de l'annuaire affiche : les applications ne lisent pas `asl-directory`. |
 | `DELETE /v1/annuaires/{n}` | Retire l'inscription de mon annuaire local — son second avec lui ; ses domaines reviennent aux racines. **Un administrateur des racines le peut aussi** : c'est révoquer une inscription acceptée (0.27.0). |
 | `POST /v1/annuaires/{n}/membres` | **Déclare le second membre** de mon annuaire local accepté — sa paire de secours (2026-09-27, décision 49) : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription, que la seconde machine présente avec **sa** clé. `409` si l'annuaire a déjà deux membres ; `404` s'il n'est pas à moi ou pas accepté. |
 | `DELETE /v1/annuaires/{n}/membres/{n2}` | Retire le second membre. Nommer ici le titulaire, c'est retirer l'annuaire entier, comme `DELETE /v1/annuaires/{n}`. `404` pour un membre d'un autre annuaire. |
 | `PUT /v1/domaines/{d}/hebergeur` | **Confie** mon domaine à mon annuaire local accepté : `{"annuaire":"n-…"}` ; `DELETE` le rend aux racines. Propriétaire seulement, et **vers un annuaire de son propre compte** : `404` pour l'annuaire d'un autre, même si j'administre le domaine (décision 48). |
-| `GET /v1/inscriptions` | **Les inscriptions en attente**, pour un administrateur des racines (`modele.md` §2.12) : `membre`, `annuaire`, `proprietaire`, `etat`, `adresse`. Aux autres, `404`. |
+| `GET /v1/inscriptions` | **Les inscriptions en attente**, pour un administrateur des racines (`modele.md` §2.12) : `membre`, `annuaire`, `proprietaire`, `etat`, `adresse` — et `paire` et `voie`, comme `GET /v1/annuaires` (décisions 70 et 86). Aux autres, `404`. |
 | `POST /v1/inscriptions/{n}/decision` | **Accepte ou refuse** : `{"accepte":true}`. Un administrateur suffit ; **le refus l'emporte**, même arrivé après une acceptation, même d'une autre racine (`replication.md` décision 51). Accepter une inscription retirée ou refusée, `409` ; redemander, c'est une inscription neuve. |
 | `POST /v1/annuaires/inscription` | **L'annuaire local présente son code** (0.27.0), **sans session** : corps binaire `code (10) ‖ clé d'identité (32) ‖ preuve de possession (64)`, la forme d'un enrôlement, la preuve signant le défi de la connexion (`POST /v1/defi` d'abord). `200` et l'inscription (`membre` — `asl_cle::identifiant_de_racine` de la clé —, `annuaire`, `etat`, `adresse`) ; la même clé qui représente le même code, `200` encore ; une autre clé, ou une clé déjà membre d'un annuaire, `409` ; un code inconnu, `404` ; expiré, `403` ; une preuve fausse ou sans défi, `401` ; trop d'échecs d'une adresse, `429` — le frein des invitations. |
 | `POST /v1/annuaires/etat` | **L'annuaire local relit son état** (0.27.0), sans session : `clé (32) ‖ preuve (64)` ; `200` et l'inscription, `404` pour une clé membre de rien. |
@@ -1983,8 +1983,8 @@ pas, et n'a pas à savoir, que le service vit derrière un annuaire local.
 ### Résoudre un annuaire local : `asl-directory`
 
 **Décidé le 2026-09-28 (Thierry ; décisions 73 à 85, `annuaires.md` §2
-quinquies).** Un annuaire local accepté se résout comme un service, **sous le
-`n-…` de son titulaire** :
+quinquies), précisé le 2026-09-29 (décisions 86 et 87).** Un annuaire local
+accepté se résout comme un service, **sous le `n-…` de son titulaire** :
 
 ```
 GET /v1/ou/{n-…}/asl-directory
@@ -2003,15 +2003,19 @@ les clients ; le chemin par `n-…` est nouveau, et le lecteur de renvoi
 d'aujourd'hui lit ce corps, dont il saute `service`. **`voir` sans `localiser`**
 reçoit le même `200` sans `adresses` ni `identites` — absents, pas vides : on
 omet ce qui n'est pas accordé, comme une liste (§2.2), et C9 garde ses deux
-seules réponses (décision 80). **Personne ne l'annonce** : les racines le
+seules réponses (décision 80). **`administrer` n'emporte pas `localiser`**
+(décision 87) : un administrateur d'un domaine hébergé reçoit ce corps réduit,
+et s'accorde `localiser` s'il veut les adresses. **Personne ne l'annonce** : les racines le
 synthétisent, et une annonce du nom `asl-directory` est refusée (`403`).
 **Vivant** veut dire qu'une voie tient, pas que la maison est joignable du
 dehors — aucune sonde en v1 (décision 83). **Le cercle est étroit** (décision
 79) : le propriétaire, les administrateurs des racines, qui tient un droit sur
 un domaine hébergé ; **le `421`, lui, reste servi à toute machine rattachée**,
-quel que soit son compte. **Servi sur la voie machine et sur la voie
-appareil** — la tuile de l'annuaire le lit (décision 84) ; `GET /v1/ou?service=`
-ne rend aucun annuaire. **Les racines n'en ont pas** : `GET /v1/racines`
+quel que soit son compte. **Servi sur la voie machine seulement** (décision
+86) : c'est le moyen des machines — daemons, `asl`. **Les applications ne le
+lisent pas** : la tuile de l'annuaire tient son état du champ `voie` de
+`GET /v1/annuaires` (§2.2), et la voie appareil n'a pas ce chemin.
+`GET /v1/ou?service=` ne rend aucun annuaire. **Les racines n'en ont pas** : `GET /v1/racines`
 (§2.2).
 
 ## 3 bis. La voie entre racines — servie, pas encore tirée
