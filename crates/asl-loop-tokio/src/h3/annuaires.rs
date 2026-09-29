@@ -24,8 +24,9 @@ use asl_store::{
 use super::{Service, alloc_reponse, maintenant};
 
 /// Un membre, encodé — `proprietaire` pour les administrateurs, les
-/// locateurs qu'il a publiés (décision 57), et ce qu'il a conclu de sa paire
-/// s'il l'a dit à cette racine (décision 70).
+/// locateurs qu'il a publiés (décision 57), ce qu'il a conclu de sa paire
+/// s'il l'a dit à cette racine (décision 70), et sa voie pour
+/// `GET /v1/annuaires` seulement (décision 86).
 fn encoder_un_membre(
     lu: &MembreLu,
     avec_proprietaire: bool,
@@ -260,12 +261,10 @@ impl Service<'_> {
             membres
                 .iter()
                 .filter_map(|lu| {
-                    encoder_un_membre(
-                        lu,
-                        true,
-                        self.etat_federe.paire_de(lu.membre),
-                        self.voie_de(lu.membre),
-                    )
+                    // **PAS DE `voie` ICI** (décision 86, précisée le
+                    // 2026-09-29) : cette vue ne rend que ce qui attend, et
+                    // `voie` n'est dite que d'un membre accepté.
+                    encoder_un_membre(lu, true, self.etat_federe.paire_de(lu.membre), None)
                 })
                 .collect(),
         )

@@ -784,10 +784,10 @@ logique :
 | | La règle | Décision |
 |---|---|---|
 | **Son identité** | L'**annuaire logique**, nommé par le `n-…` de son titulaire (§2 ter) — celui que `heberge_par`, `GET /v1/annuaires` et le `421` portent déjà. Pour la paire speedy/helium : `n-7MSV5RPCXBZH25PQM4ZPE5X87P`. **Pas une machine** : l'hôte n'est pas forcément enrôlé, et il peut changer — la clé d'identité, elle, se transporte (§2 ter, « Remplacer une machine »). | 73 |
-| **Son nom** | `asl-directory`, **réservé** : aucun daemon ne peut l'annoncer, ni aux racines ni à un annuaire local. L'annonce est **refusée explicitement** — `403`, le refus d'une annonce (une annonce ne lit rien, C10 ne s'y applique pas : `asl-session`), et une ligne au journal (`annonce refusée : m-… annonce « asl-directory », un nom réservé …`) —, jamais prise pour une autre. **Le refus passe avant le `421`** (0.38.0) : une machine d'un domaine confié qui l'annonce aux racines reçoit ce `403`, pas un renvoi vers un annuaire qui la refuserait de même. | 73 |
+| **Son nom** | `asl-directory`, **réservé** : aucun daemon ne peut l'annoncer, ni aux racines ni à un annuaire local. L'annonce est **refusée explicitement** — `403`, le refus d'une annonce (une annonce ne lit rien, C10 ne s'y applique pas : `asl-session`), et une ligne au journal (`annonce refusée : m-… annonce « asl-directory », un nom réservé …`) —, jamais prise pour une autre. **Le refus passe avant le `421`** (0.38.0) : une machine d'un domaine confié qui l'annonce aux racines reçoit ce `403`, pas un renvoi vers un annuaire qui la refuserait de même. **Précisé (2026-09-29, Thierry)** : le `403` passe avant le `421` ; un membre encore en 0.37.0 accepterait l'annonce et la rapporterait comme un service ordinaire — **il faut déployer la 0.38.0 partout**, racines et membres. | 73 |
 | **Son `s-…`** | **Dérivé comme A1** (décision 66), le `n-…` à la place du `m-…`, sous une **chaîne de séparation distincte** : `SHA-256("asl/annuaire/1" ‖ n-… (16 octets) ‖ "asl-directory")`, tronqué à 128 bits. La chaîne distincte garantit qu'il ne rencontre jamais le `s-…` d'un service de machine, même si seize octets d'un `n-…` et d'un `m-…` coïncidaient. **Forme arrêtée en 0.38.0** (`asl_registre::asl_directory_derive`) : les quatorze octets ASCII de `asl/annuaire/1`, les **seize octets** du `n-…` du titulaire (jamais son texte), les treize octets de `asl-directory`, sans longueur ni séparateur ; les seize premiers octets du condensat. Vecteur figé : `n-7MSV5RPCXBZH25PQM4ZPE5X87P` → `s-294B4BA9XHXFZ5DQ8Q7T35M7PY`. | 73 |
 | **Qui le déclare** | **Les racines, de ce qu'elles savent déjà** : il existe dès que l'inscription est **acceptée**, et disparaît avec elle (`DELETE /v1/annuaires/{n}`). Rien ne se range pour lui : l'inscription est déjà répliquée (§3), et le service s'en déduit — sur les deux racines, le même `s-…`. **Aucun ajout de protocole côté membre** : ni verbe, ni champ sur sa voie. | 74 |
-| **Vivant** | Tant qu'**au moins un membre a sa voie de fédération ouverte vers cette racine** — la règle des services fédérés, décision 52 : la voie qui se tait fait tomber ce qu'elle disait au bout de l'expiration d'un rapport, **trente secondes au plus**. **Ce qui compte comme parole** (0.38.0) : chacun des quatre verbes de la voie d'un membre accepté — `GET /v1/federation/machines`, `POST /v1/federation/etat`, `PUT /v1/federation/locateurs`, `PUT /v1/federation/paire` —, dont le fédérateur dit au moins deux par tour de dix secondes ; **la fermeture de la connexion sur laquelle il a parlé en dernier** la fait tomber aussitôt (celle d'une connexion d'avant une reprise, non). Comme tout état vivant, il ne se réplique pas entre racines (§3) : chacune juge avec les voies qu'elle tient, et les deux peuvent différer le temps qu'une voie s'ouvre ou tombe. **Aucun membre vivant : `404`**, la réponse de l'inexistant et de l'hors-cercle (C9). | 74, 82 |
+| **Vivant** | Tant qu'**au moins un membre a sa voie de fédération ouverte vers cette racine** — la règle des services fédérés, décision 52 : la voie qui se tait fait tomber ce qu'elle disait au bout de l'expiration d'un rapport, **trente secondes au plus**. **Ce qui compte comme parole** (0.38.0) : chacun des quatre verbes de la voie d'un membre accepté — `GET /v1/federation/machines`, `POST /v1/federation/etat`, `PUT /v1/federation/locateurs`, `PUT /v1/federation/paire` —, dont le fédérateur dit au moins deux par tour de dix secondes ; **la fermeture de la connexion sur laquelle il a parlé en dernier** la fait tomber aussitôt (celle d'une connexion d'avant une reprise, non). **Précisé (2026-09-29, Thierry)** : un membre est vivant dès qu'il use de **n'importe quel** verbe de sa voie — machines, état, localisateurs, paire —, pas de la seule preuve de clé, et il tombe à la fermeture de sa dernière connexion ; **la route appelée avec le `n-…` du second membre rend `404`** : l'annuaire se nomme par son titulaire. Comme tout état vivant, il ne se réplique pas entre racines (§3) : chacune juge avec les voies qu'elle tient, et les deux peuvent différer le temps qu'une voie s'ouvre ou tombe. **Aucun membre vivant : `404`**, la réponse de l'inexistant et de l'hors-cercle (C9). | 74, 82 |
 | **Ses adresses** | Pour **chaque membre vivant**, les **locateurs qu'il a publiés** (`--locator`, décision 57 ; `--locator auto`, décision 64) — donc le **vrai port**, celui où il écoute —, **sinon son adresse déclarée**, comme le `421` : la même source, la même règle. Un membre dont la voie est tombée n'y est pas. | 74, 75, 81 |
 | **Dans une paire** | **UN SEUL** `asl-directory` par annuaire logique — sous le `n-…` du titulaire —, vivant si l'un des membres l'est (décision 52), qui rend **l'adresse de chaque membre vivant avec SON `n-…`** : le client doit épingler la bonne clé, parce que chaque membre présente **la sienne** (décision 59, la forme du `421`). | 75 |
 | **Les racines** | **Pas d'`asl-directory` pour elles** : `GET /v1/racines` joue ce rôle (ci-dessous). | 76, 85 |
@@ -845,6 +845,12 @@ GET /v1/ou/n-7MSV5RPCXBZH25PQM4ZPE5X87P/asl-directory
   jamais écrit, et une racine qui vient de redémarrer ne distingue pas
   « parti » de « pas encore revenu ». C'est aussi la réponse de l'inexistant et
   de l'hors-cercle : **un seul `404`, après le même délai** (C9).
+  **Précisé (2026-09-29, Thierry)** : **pas d'égaliseur de temps**.
+  Hors cercle et parti font le même travail et rendent la même réponse à
+  l'octet ; un `n-…` inexistant s'arrête plus tôt (aucun domaine à lire),
+  comme `GET /v1/ou/{m}/…` pour une machine inexistante aujourd'hui.
+  L'égalisation se traitera globalement, pour toutes les résolutions, si l'on
+  veut durcir un jour.
 - **`voir` sans `localiser` : `200`, sans `adresses` ni `identites`**
   (décision 80). **Pourquoi cette forme** :
   - **C9 n'y perd rien.** Les deux seules réponses restent `200` et `404`,
@@ -899,6 +905,10 @@ qui le disait « le cercle du `421` » :
    rien**, et un droit sur **une seule machine ou un seul service** du domaine
    non plus : le cercle ne compte que les droits sur un domaine hébergé.
 
+**Précisé (2026-09-29, Thierry ; lecture stricte de la décision 79)** : **une
+autorisation de portée « tout le compte » sur le propriétaire de l'annuaire
+n'ouvre pas le cercle** — ce n'est pas un droit sur un domaine hébergé.
+
 **`localiser` seul donne l'adresse, comme partout ailleurs** (décision 80). Le
 cercle est **calculé à la lecture** : aucun droit ne s'écrit sur
 l'`asl-directory`, et aucun ne se retire à part ; il suit les domaines hébergés
@@ -936,11 +946,13 @@ l'`asl-directory` répond à un compte, selon ses droits.
 ### L'état de l'annuaire dans les applications — `GET /v1/annuaires`, pas `asl-directory`
 
 **Décidé (2026-09-29, Thierry ; décision 86)** : **les applications ne lisent
-pas `asl-directory`**. `GET /v1/annuaires` — la vue du propriétaire (et
-`GET /v1/inscriptions`, celle des administrateurs des racines) — porte déjà,
-membre par membre, `membre`, `annuaire`, `adresse`, `locateurs` et, depuis la
-0.36.0, `paire` (décision 70). **Elle gagne, par membre, `voie`** : ce que la
-racine qui répond sait de la voie de fédération de ce membre vers elle.
+pas `asl-directory`**. `GET /v1/annuaires` — la vue du propriétaire — porte
+déjà, membre par membre, `membre`, `annuaire`, `adresse`, `locateurs` et,
+depuis la 0.36.0, `paire` (décision 70). **Elle gagne, par membre, `voie`** :
+ce que la racine qui répond sait de la voie de fédération de ce membre vers
+elle. **Pas `GET /v1/inscriptions`** (précisé le 2026-09-29, Thierry) : la vue
+des administrateurs des racines ne rend que les inscriptions en attente, et
+`voie` n'est dite que d'un membre accepté — elle n'y paraîtrait jamais.
 
 ```jsonc
 {"membre":"n-7MSV…","annuaire":"n-7MSV…","etat":"acceptée",
@@ -1052,9 +1064,8 @@ client (ci-dessous) — et, côté serveur, un annuaire local nomme ses racines 
 ### Travail à faire
 
 **Serveur** (`air-service-locator-server`) — **fait en 0.38.0**, tel que
-décrit ci-dessous ; `GET /v1/inscriptions` ne rendant que les inscriptions
-**en attente**, `voie` n'y paraît jamais (une inscription non acceptée n'en
-porte pas) — le champ y est câblé, et s'y écrira si la vue s'élargit :
+décrit ci-dessous ; `voie` retiré de `GET /v1/inscriptions` en 0.38.1, qui ne
+rend que les inscriptions en attente :
 
 - **La synthèse aux racines** : pour chaque inscription acceptée, un service
   `asl-directory` sous le `n-…` titulaire, son `s-…` dérivé (`"asl/annuaire/1"`),
@@ -1072,7 +1083,7 @@ porte pas) — le champ y est câblé, et s'y écrira si la vue s'élargit :
   qui n'est pas une machine, deux niveaux de réponse, éprouvés à 100 % (C2) —
   **`administrer` sans `localiser` reçoit la réponse réduite** (décision 87),
   un cas d'essai à part. **Le `421` ne change pas.**
-- **Le champ `voie` dans `GET /v1/annuaires` et `GET /v1/inscriptions`**
+- **Le champ `voie` dans `GET /v1/annuaires`**, et lui seul
   (décision 86) : par membre accepté, `"ouverte"` ou `"tombee"` d'après les
   voies que cette racine tient (la même source qui fait vivre
   l'`asl-directory`), absent tant que le membre ne lui a pas parlé depuis
@@ -1826,9 +1837,11 @@ Rassemblé, plutôt que dispersé.
     répond, absent tant que ce membre ne lui a pas parlé depuis qu'elle tourne
     —, et la tuile « Mon annuaire local » en tire vivant, parti ou pas de
     nouvelles (§2 quinquies, « L'état de l'annuaire dans les applications »).
-    **Conséquence assumée** : qui tient un droit sur un domaine hébergé sans
-    être propriétaire de l'annuaire n'a pas de tuile, et ne voit pas cet état
-    dans l'application (question 28).
+    **Précisé (2026-09-29, Thierry)** : pas dans `GET /v1/inscriptions`, qui
+    ne rend que les inscriptions en attente. **Conséquence assumée** : qui
+    tient un droit sur un domaine hébergé sans être propriétaire de l'annuaire
+    n'a pas de tuile, et ne voit pas cet état dans l'application (question
+    28).
 27. ~~**`administrer` emporte-t-il `localiser` sur l'`asl-directory` ?**~~
     **Décidé (2026-09-29, Thierry ; décision 87)** : **non, la règle est
     stricte** — la décision 44 ne change pas. Un administrateur d'un domaine
