@@ -325,35 +325,63 @@ impl Cible {
 
 // ── Les décisions ───────────────────────────────────────────────────────────
 
-/// Un compte peut-il voir les services de cette machine ? Celui d'un appareil,
-/// ou — depuis la 0.39.0 — celui d'une machine qui porte `lecture` : la règle
-/// est la même sur les deux voies.
+/// Ce que le demandeur peut sur le domaine où la machine visée est rangée —
+/// **lu depuis le demandeur** (C10), la réunion que l'entrepôt calcule
+/// (`modele.md` §2.13). Rien de vrai pour une machine hors de tout domaine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct VueDuDomaine {
+    /// `voir`, ou ce qui l'emporte (`localiser`, `administrer`).
+    pub voir: bool,
+    /// `localiser` — et rien d'autre ne l'emporte (décision 87).
+    pub localiser: bool,
+}
+
+/// Ce que `GET /v1/machines/{m}/services` rend à ce demandeur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecisionDeServices {
+    /// Rien : `[]`, la même réponse que pour une machine sans service (C9).
+    Refuser,
+    /// Les noms et l'état, **sans adresse** : un service vivant porte un
+    /// objet d'annonce vide (décision 104).
+    SansAdresses,
+    /// Tout, adresses comprises.
+    Entiere,
+}
+
+/// Un compte peut-il voir les services de cette machine, et avec quoi ? Celui
+/// d'un appareil, ou — depuis la 0.39.0 — celui d'une machine qui porte
+/// `lecture` : la règle est la même sur les deux voies.
 ///
-/// # UNE RÈGLE, ET NON UNE COMPARAISON ÉGARÉE DANS LA BOUCLE
+/// # LES TROIS RÈGLES (0.40.0, décision 104)
 ///
-/// Elle tient en une égalité, et c'est justement pourquoi elle doit être ici :
-/// une règle écrite au milieu d'un rassemblement est une règle que personne ne
-/// relit, et qu'aucun essai ne prend pour cible.
+/// 1. **Le propriétaire de la machine** : tout.
+/// 2. **`localiser` sur le domaine où elle est rangée** : tout — c'est ce que
+///    `GET /v1/ou` lui rend déjà, machine par machine (décision 103).
+/// 3. **`voir` sur ce domaine** — ou ce qui l'emporte : les noms et l'état,
+///    sans adresse.
+/// 4. **Sinon, rien.**
 ///
-/// # ELLE NE REGARDE AUCUNE AUTORISATION, ET C'EST DÉLIBÉRÉ
+/// **Ranger sa machine dans le domaine d'un autre, c'est accepter les droits
+/// de ce domaine sur elle** : le rangement est un geste de son propriétaire
+/// seul (`PUT /v1/machines/{m}/domaine`).
 ///
-/// `GET /v1/machines/{m}/services` appartient à l'administration d'un compte
-/// (`protocole.md` §2.2) : c'est l'écran qui montre MES machines. Le chemin
-/// inter-comptes est `GET /v1/ou`, qui passe par [`decider_resolution`] et ses
-/// autorisations.
+/// # UN DROIT SUR LE DOMAINE, ET SUR LUI SEUL
 ///
-/// Les confondre donnerait à une autorisation de LECTURE le droit de lire les
-/// services d'une machine par la porte de l'administration. **Ce qu'une
-/// autorisation donne à voir a son propre verbe et sa propre décision** :
-/// `GET /v1/utilisateurs/{u}/machines` et [`decider_machine_visible`].
-// `const fn` serait plus joli, et `PartialEq` ne l'est pas encore : la
-// comparaison de deux identifiants passe par un `==` ordinaire.
+/// Un droit sur la machine ou sur le compte ouvre `GET /v1/ou` et
+/// `GET /v1/utilisateurs/{u}/machines` (décision 40) ; il n'ouvre pas cette
+/// porte-ci, qui reste celle de l'écran d'un domaine.
 #[must_use]
-pub fn decider_services_de_machine(demandeur: Identifiant, proprietaire: Identifiant) -> Decision {
-    if demandeur == proprietaire {
-        Decision::Servir
+pub fn decider_services_de_machine(
+    demandeur: Identifiant,
+    proprietaire: Identifiant,
+    domaine: VueDuDomaine,
+) -> DecisionDeServices {
+    if demandeur == proprietaire || domaine.localiser {
+        DecisionDeServices::Entiere
+    } else if domaine.voir {
+        DecisionDeServices::SansAdresses
     } else {
-        Decision::Refuser
+        DecisionDeServices::Refuser
     }
 }
 

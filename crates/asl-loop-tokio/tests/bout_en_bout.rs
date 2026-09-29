@@ -7443,19 +7443,24 @@ async fn la_federation_de_bout_en_bout() {
         "la porte de l'administration n'ouvre que ses propres machines"
     );
 
-    // **RIEN DE L'ÉTAT FÉDÉRÉ N'EST ÉCRIT DANS L'ENTREPÔT DES RACINES** (C13).
-    assert!(
+    // **LE NOM SEUL EST ÉCRIT DANS L'ENTREPÔT DES RACINES** (C13 amendée,
+    // décision 100) : une ligne de service — machine, nom, `s-…` dérivé —,
+    // jamais l'état vivant ni l'adresse, qui n'ont pas de colonne.
+    let derive = asl_registre::service_derive(machine_d, b"depot");
+    assert_eq!(
         entrepot_racine
             .service_par_nom(machine_d, "depot")
-            .expect("une lecture")
-            .is_none(),
-        "le service vit chez l'annuaire local, et nulle part sur le disque des racines"
+            .expect("une lecture"),
+        Some(derive),
+        "le nom du service fédéré est rangé, sous son identifiant dérivé"
     );
-    assert!(
-        entrepot_racine
-            .services_de_machine(machine_d)
-            .expect("les services")
-            .is_empty()
+    let rangees = entrepot_racine
+        .services_de_machine(machine_d)
+        .expect("les services");
+    assert_eq!(rangees.len(), 1);
+    assert_eq!(
+        rangees.first().map(|(_, rangee)| rangee.nom.octets()),
+        Some(&b"depot"[..])
     );
 
     // ── LA CLÉ DE L'ANNUAIRE LOCAL N'OUVRE PAS LA VOIE ENTRE RACINES, ET IL ─
@@ -7708,7 +7713,8 @@ async fn la_federation_de_bout_en_bout() {
         "fédération : l'annuaire local s'est tu, le service est tombé en {:?}",
         tait.elapsed()
     );
-    // Et l'écran ne le montre plus : plus personne ne le confirme (C6).
+    // Et l'écran le montre parti, sans motif : plus personne ne le confirme
+    // (C6), mais sa ligne se garde pour toujours (décision 102).
     let (statut, services) = lire_json(
         &mut alice,
         48,
@@ -7717,8 +7723,12 @@ async fn la_federation_de_bout_en_bout() {
     .await;
     assert_eq!(statut, b"200");
     assert_eq!(
-        services, "[]",
-        "un service que plus personne ne rapporte n'existe plus"
+        services,
+        format!(
+            r#"[{{"service":"{}","nom":"depot","etat":"parti","volontaire":null}}]"#,
+            derive.texte().as_str()
+        ),
+        "un service que plus personne ne rapporte est parti, et reste"
     );
 
     helium_local.arreter().await;
@@ -8172,6 +8182,8 @@ struct SceneDAnnuaire {
     bob: ams_quic_client::Client,
     flux_bob: u64,
     compte_b: Identifiant,
+    /// Le compte d'alice.
+    compte_a: Identifiant,
     domaine_a: Identifiant,
     n_speedy: Identifiant,
     /// L'entrepôt de la racine, pour voir ce qui est rangé sur son disque.
@@ -8266,6 +8278,7 @@ async fn monter_une_scene_d_annuaire(nom: &str) -> SceneDAnnuaire {
         bob,
         flux_bob: 12,
         compte_b,
+        compte_a,
         domaine_a,
         n_speedy,
         entrepot: entrepot_racine,
@@ -9232,5 +9245,398 @@ async fn un_service_ne_aux_racines_puis_confie_suit_l_annuaire_local() {
     drop(chez_speedy);
     speedy_local.arreter().await;
     scene.alice = alice;
+    scene.arreter().await;
+}
+
+/// Attend que la racine ait rangé le nom de ce service fédéré (décision 100).
+async fn attendre_la_ligne(entrepot: &Entrepot, machine: Identifiant, nom: &str) -> Identifiant {
+    for _ in 0..100_u32 {
+        if let Some(service) = entrepot.service_par_nom(machine, nom).expect("lisible") {
+            return service;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("la racine n'a pas rangé {nom} de {machine}");
+}
+
+#[tokio::test]
+async fn un_droit_un_service_se_pose_sur_un_service_federe() {
+    // ── CE QUE CET ESSAI PROUVE (0.40.0) ────────────────────────────────────
+    //
+    // 1. **Au premier rapport, la racine range le NOM** du service fédéré —
+    //    une ligne ordinaire sous le `s-…` dérivé, jamais l'adresse
+    //    (décision 100) — et le journal le dit.
+    // 2. **Un droit « Un service » se pose dessus** par `POST /v1/droits`, et
+    //    `GET /v1/ou` le rend à qui l'a reçu — l'adresse, celle que
+    //    l'annuaire local rapporte ; `404` à qui ne l'a pas, comme avant.
+    // 3. **La ligne se réplique** : le journal de la racine porte
+    //    l'opération `service`, et une autre racine qui l'applique la range.
+    // 4. **Elle se garde** quand l'annuaire local se tait (décision 102).
+    let mut scene = monter_une_scene_d_annuaire("service-federe-droit").await;
+    let domaine_a = scene.domaine_a;
+
+    // Le grenier d'alice, dans le domaine confié à speedy.
+    let cle_d = asl_cle::CleSecrete::depuis_entropie([0xD1; 32]);
+    let flux = suivant(&mut scene.flux_alice);
+    let machine_d = machine_du_compte(
+        &mut scene.alice,
+        flux,
+        &scene.racine,
+        scene.adresse,
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        &cle_d,
+    )
+    .await;
+    let flux = suivant(&mut scene.flux_alice);
+    assert_eq!(
+        poser_json(
+            &mut scene.alice,
+            flux,
+            format!("/v1/machines/{}/domaine", machine_d.texte()).as_bytes(),
+            format!("{{\"domaine\":\"{}\"}}", domaine_a.texte()).as_bytes(),
+        )
+        .await,
+        b"204"
+    );
+    // Carole, qui recevra le droit ; dan, qui ne recevra rien.
+    let (mut carole, mut flux_carole, compte_c) = un_compte(&scene, 0xC1).await;
+    let (_, mut carole_lit, mut flux_cl, _) = une_machine_prouvee(
+        &scene,
+        &mut carole,
+        &mut flux_carole,
+        br#"{"nom":"portable","capacites":["lecture"]}"#,
+        0xC2,
+    )
+    .await;
+    let (mut dan, mut flux_dan, _) = un_compte(&scene, 0xD4).await;
+    let (_, mut dan_lit, mut flux_dl, _) = une_machine_prouvee(
+        &scene,
+        &mut dan,
+        &mut flux_dan,
+        br#"{"nom":"curieux","capacites":["lecture"]}"#,
+        0xD5,
+    )
+    .await;
+
+    // ── AVANT TOUT RAPPORT, AUCUN DROIT NE SE POSE (décision 101) ───────────
+    let derive = asl_registre::service_derive(machine_d, b"depot");
+    let demande = format!(
+        r#"{{"groupe":"{}","element":"{}","droits":["localiser"],"etiquette":"essai"}}"#,
+        t(asl_registre::groupe_personnel(compte_c)),
+        t(derive)
+    );
+    let flux = suivant(&mut scene.flux_alice);
+    let (statut, _) = poster(
+        &mut scene.alice,
+        flux,
+        b"/v1/droits",
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_ne!(statut, b"201", "pas de droit sur un service jamais annoncé");
+
+    // ── SPEEDY FÉDÈRE, LE DAEMON S'ANNONCE CHEZ LUI ─────────────────────────
+    let speedy_local = scene.lever_speedy("service-federe-droit-speedy").await;
+    speedy_local.attendre_la_machine(machine_d).await;
+    let mut chez_speedy = connecter(&speedy_local.racine, speedy_local.adresse).await;
+    let (statut, corps) = annoncer_depot(&mut chez_speedy, machine_d, &cle_d).await;
+    assert_eq!(statut, b"200", "{corps}");
+    let range = attendre_la_ligne(&scene.entrepot, machine_d, "depot").await;
+    assert_eq!(range, derive, "le nom est rangé sous le dérivé");
+    assert!(
+        JOURNAL.lock().expect("le journal").iter().any(
+            |ligne| ligne.contains("nom rangé sous") && ligne.contains(derive.texte().as_str())
+        ),
+        "la racine dit qu'elle a rangé le nom"
+    );
+
+    // Sans droit, rien — ni pour carole, ni pour dan.
+    let cible = format!("/v1/ou/{}/depot", machine_d.texte());
+    let (statut, refus) = lire_json(&mut carole_lit, suivant(&mut flux_cl), cible.as_bytes()).await;
+    assert_eq!(statut, b"404", "{refus}");
+
+    // ── LE DROIT « UN SERVICE », POSÉ SUR LE SERVICE FÉDÉRÉ ─────────────────
+    let droit = accorder(
+        &mut scene.alice,
+        &mut scene.flux_alice,
+        compte_c,
+        derive,
+        r#"["localiser"]"#,
+    )
+    .await;
+    let (_, trouve) = chercher_jusqu_a(
+        &mut carole_lit,
+        &mut flux_cl,
+        machine_d,
+        b"200",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("le droit « Un service » ouvre le service fédéré");
+    assert!(trouve.contains("49152"), "{trouve}");
+    let (statut, corps) = lire_json(&mut dan_lit, suivant(&mut flux_dl), cible.as_bytes()).await;
+    assert_eq!(
+        (statut.as_slice(), corps.as_str()),
+        (&b"404"[..], refus.as_str()),
+        "hors droit, le même 404 qu'avant (C9, C10)"
+    );
+    let flux = suivant(&mut scene.flux_alice);
+    let (statut, droits) = lire_json(&mut scene.alice, flux, b"/v1/droits").await;
+    assert_eq!(statut, b"200", "{droits}");
+    assert!(
+        droits.contains(t(droit).as_str()) && droits.contains(t(derive).as_str()),
+        "GET /v1/droits le montre : {droits}"
+    );
+
+    // ── LA LIGNE SE RÉPLIQUE ────────────────────────────────────────────────
+    let cadres = match scene.entrepot.operations_apres(0).expect("le journal") {
+        asl_store::Rattrapage::Operations(cadres) => cadres,
+        asl_store::Rattrapage::HorsJournal { .. } => panic!("rien d'expiré"),
+    };
+    let chemin = std::env::temp_dir().join(format!(
+        "asl-bout-en-bout-{}-autre-racine.redb",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&chemin);
+    let autre = Entrepot::ouvrir(
+        &chemin,
+        Identifiant::depuis_entropie(Genre::Annuaire, [0xAB; 16]),
+    )
+    .expect("un entrepôt neuf");
+    let emetteur = Identifiant::depuis_entropie(Genre::Annuaire, [0xAC; 16]);
+    for brut in &cadres {
+        let (cadre, _) = asl_registre::Cadre::lire(brut).expect("un cadre");
+        let _ = autre.appliquer(emetteur, &cadre, false).expect("appliqué");
+    }
+    assert_eq!(
+        autre.service_par_nom(machine_d, "depot").expect("lisible"),
+        Some(derive),
+        "l'autre racine range la même ligne"
+    );
+    let _ = std::fs::remove_file(&chemin);
+
+    // ── SPEEDY SE TAIT : LA LIGNE ET LE DROIT RESTENT (décision 102) ────────
+    drop(chez_speedy);
+    speedy_local.arreter().await;
+    chercher_jusqu_a(
+        &mut carole_lit,
+        &mut flux_cl,
+        machine_d,
+        b"404",
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    .expect("plus personne ne le confirme : introuvable");
+    assert_eq!(
+        scene
+            .entrepot
+            .service_par_nom(machine_d, "depot")
+            .expect("lisible"),
+        Some(derive),
+        "la ligne se garde pour toujours"
+    );
+    let flux = suivant(&mut scene.flux_alice);
+    let (_, droits) = lire_json(&mut scene.alice, flux, b"/v1/droits").await;
+    assert!(droits.contains(t(droit).as_str()), "{droits}");
+
+    scene.arreter().await;
+}
+
+#[tokio::test]
+async fn les_droits_d_un_domaine_valent_sur_les_machines_des_autres_qui_y_sont_rangees() {
+    // ── CE QUE CET ESSAI PROUVE (0.40.0) ────────────────────────────────────
+    //
+    // Bob possède un domaine ; alice y range SA machine (bob lui a donné
+    // `rattacher`) — geste de son propriétaire, et d'elle seule.
+    //
+    // 1. **Décision 103** : qui tient `localiser` sur le domaine — ici son
+    //    propriétaire, sans droit écrit — localise la machine d'alice, par
+    //    `GET /v1/ou` et par la recherche `GET /v1/ou?service=…`.
+    // 2. **Décision 104** : qui tient `voir` sur le domaine lit ses services
+    //    par `GET /v1/machines/{m}/services`, **sans adresse** ; qui tient
+    //    `localiser`, avec.
+    // 3. Hors droit, les mêmes réponses qu'avant : `[]` et `404` (C9, C10).
+    let mut scene = monter_une_scene_d_annuaire("droits-de-domaine").await;
+    let chez_bob = asl_registre::premier_domaine(scene.compte_b);
+
+    // Le grenier d'alice.
+    let cle_g = asl_cle::CleSecrete::depuis_entropie([0xE1; 32]);
+    let flux = suivant(&mut scene.flux_alice);
+    let grenier = machine_du_compte(
+        &mut scene.alice,
+        flux,
+        &scene.racine,
+        scene.adresse,
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        &cle_g,
+    )
+    .await;
+    let cible_domaine = format!("/v1/machines/{}/domaine", grenier.texte());
+    let dans_chez_bob = format!("{{\"domaine\":\"{}\"}}", chez_bob.texte());
+    // Sans `rattacher`, alice ne range pas chez bob : `403`.
+    let flux = suivant(&mut scene.flux_alice);
+    assert_eq!(
+        poser_json(
+            &mut scene.alice,
+            flux,
+            cible_domaine.as_bytes(),
+            dans_chez_bob.as_bytes()
+        )
+        .await,
+        b"403"
+    );
+    let compte_alice = scene.compte_a;
+    let mut bob = std::mem::replace(
+        &mut scene.bob,
+        connecter(&scene.racine, scene.adresse).await,
+    );
+    let mut flux_bob = scene.flux_bob;
+    let _ = accorder(
+        &mut bob,
+        &mut flux_bob,
+        compte_alice,
+        chez_bob,
+        r#"["rattacher"]"#,
+    )
+    .await;
+    let flux = suivant(&mut scene.flux_alice);
+    assert_eq!(
+        poser_json(
+            &mut scene.alice,
+            flux,
+            cible_domaine.as_bytes(),
+            dans_chez_bob.as_bytes()
+        )
+        .await,
+        b"204",
+        "ranger chez bob : un geste d'alice, avec `rattacher`"
+    );
+    let mut daemon = connecter(&scene.racine, scene.adresse).await;
+    let (statut, corps) = annoncer_depot(&mut daemon, grenier, &cle_g).await;
+    assert_eq!(statut, b"200", "{corps}");
+
+    // Les lecteurs : bob, carole (`voir`), dan (rien).
+    let (_, mut bob_lit, mut flux_bl, _) = une_machine_prouvee(
+        &scene,
+        &mut bob,
+        &mut flux_bob,
+        br#"{"nom":"console","capacites":["lecture"]}"#,
+        0xB2,
+    )
+    .await;
+    let (mut carole, mut flux_carole, compte_c) = un_compte(&scene, 0xC1).await;
+    let (_, mut carole_lit, mut flux_cl, _) = une_machine_prouvee(
+        &scene,
+        &mut carole,
+        &mut flux_carole,
+        br#"{"nom":"portable","capacites":["lecture"]}"#,
+        0xC2,
+    )
+    .await;
+    let (mut dan, mut flux_dan, _) = un_compte(&scene, 0xD4).await;
+    let (_, mut dan_lit, mut flux_dl, _) = une_machine_prouvee(
+        &scene,
+        &mut dan,
+        &mut flux_dan,
+        br#"{"nom":"curieux","capacites":["lecture"]}"#,
+        0xD5,
+    )
+    .await;
+    let cible_ou = format!("/v1/ou/{}/depot", grenier.texte());
+    let cible_services = format!("/v1/machines/{}/services", grenier.texte());
+    let (statut, refus) = lire_json(&mut dan_lit, suivant(&mut flux_dl), cible_ou.as_bytes()).await;
+    assert_eq!(statut, b"404");
+
+    // ── 1. LE PROPRIÉTAIRE DU DOMAINE LOCALISE LA MACHINE D'ALICE ───────────
+    let (_, trouve) = chercher_jusqu_a(
+        &mut bob_lit,
+        &mut flux_bl,
+        grenier,
+        b"200",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("localiser sur le domaine atteint la machine d'un autre qui y est rangée");
+    assert!(trouve.contains("49152"), "{trouve}");
+    let (statut, liste) =
+        lire_json(&mut bob_lit, suivant(&mut flux_bl), b"/v1/ou?service=depot").await;
+    assert_eq!(statut, b"200", "{liste}");
+    assert!(
+        liste.contains(
+            asl_registre::service_derive(grenier, b"depot")
+                .texte()
+                .as_str()
+        ),
+        "la recherche par nom la trouve aussi : {liste}"
+    );
+    // Et ses services, adresses comprises.
+    let (statut, services) =
+        lire_json(&mut bob, suivant(&mut flux_bob), cible_services.as_bytes()).await;
+    assert_eq!(statut, b"200", "{services}");
+    assert!(
+        services.contains("\"etat\":\"annonce\"") && services.contains("vu_depuis"),
+        "localiser : l'objet d'annonce entier : {services}"
+    );
+
+    // ── 2. `voir` : LES NOMS ET L'ÉTAT, SANS ADRESSE ────────────────────────
+    let _ = accorder(&mut bob, &mut flux_bob, compte_c, chez_bob, r#"["voir"]"#).await;
+    let (statut, vus) = lire_json(
+        &mut carole,
+        suivant(&mut flux_carole),
+        cible_services.as_bytes(),
+    )
+    .await;
+    assert_eq!(statut, b"200", "{vus}");
+    assert_eq!(
+        vus,
+        format!(
+            r#"[{{"service":"{}","nom":"depot","etat":"annonce","annonce":{{}}}}]"#,
+            asl_registre::service_derive(grenier, b"depot")
+                .texte()
+                .as_str()
+        ),
+        "voir : vivant, sans adresse"
+    );
+    // Par la voie machine, la même chose.
+    let (statut, vus_machine) = lire_json(
+        &mut carole_lit,
+        suivant(&mut flux_cl),
+        cible_services.as_bytes(),
+    )
+    .await;
+    assert_eq!(
+        (statut.as_slice(), vus_machine.as_str()),
+        (&b"200"[..], vus.as_str())
+    );
+    let (statut, corps) =
+        lire_json(&mut carole_lit, suivant(&mut flux_cl), cible_ou.as_bytes()).await;
+    assert_eq!(
+        (statut.as_slice(), corps.as_str()),
+        (&b"404"[..], refus.as_str()),
+        "voir ne localise pas"
+    );
+
+    // ── 3. HORS DROIT, RIEN — LES RÉPONSES D'AVANT ──────────────────────────
+    let (statut, rien) =
+        lire_json(&mut dan, suivant(&mut flux_dan), cible_services.as_bytes()).await;
+    assert_eq!((statut.as_slice(), rien.as_str()), (&b"200"[..], "[]"));
+    let (statut, corps) = lire_json(&mut dan_lit, suivant(&mut flux_dl), cible_ou.as_bytes()).await;
+    assert_eq!(
+        (statut.as_slice(), corps.as_str()),
+        (&b"404"[..], refus.as_str())
+    );
+
+    // Sortie du domaine par alice : bob ne la localise plus.
+    let flux = suivant(&mut scene.flux_alice);
+    assert_eq!(
+        retirer(&mut scene.alice, flux, cible_domaine.as_bytes()).await,
+        b"204"
+    );
+    let (statut, _) = lire_json(&mut bob_lit, suivant(&mut flux_bl), cible_ou.as_bytes()).await;
+    assert_eq!(statut, b"404", "rangée ailleurs, elle n'est plus à bob");
+
+    drop(daemon);
+    scene.bob = bob;
     scene.arreter().await;
 }

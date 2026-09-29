@@ -3554,23 +3554,22 @@ fn les_administrateurs_du_domaine_racine_y_rangent_leurs_machines() {
     assert_eq!(dans_r, attendues);
 
     // ── Ce qu'un administrateur a sur la machine d'un autre, rangée dans R ──
-    // La logique d'un domaine ordinaire à plusieurs administrateurs : il la
-    // voit, il peut la partager (décision 40) ; `localiser` ne descend pas
-    // d'un domaine qu'on administre — il faut un droit écrit.
-    let voir = base
-        .acces(thierry, asl_store::Voulu::Voir)
-        .expect("lisible");
+    // Il la voit, il peut la partager (décision 40) ; et, depuis la 0.40.0
+    // (décision 103), il la LOCALISE : il tient `localiser` sur R, et qui
+    // tient `localiser` sur un domaine localise tout ce qui y est rangé.
+    let console_de_bob = vec![asl_store::Acces {
+        proprietaire: bob,
+        portee: Portee::UneMachine(console),
+    }];
     assert_eq!(
-        voir,
-        vec![asl_store::Acces {
-            proprietaire: bob,
-            portee: Portee::UneMachine(console),
-        }]
+        base.acces(thierry, asl_store::Voulu::Voir)
+            .expect("lisible"),
+        console_de_bob
     );
-    assert!(
+    assert_eq!(
         base.acces(thierry, asl_store::Voulu::Localiser)
-            .expect("lisible")
-            .is_empty()
+            .expect("lisible"),
+        console_de_bob
     );
     assert!(
         base.peut_accorder_sur_la_machine(thierry, console)
@@ -3734,6 +3733,97 @@ fn un_rattachement_au_domaine_racine_passe_d_une_racine_a_l_autre() {
     assert_eq!(
         amorcee.domaine_de_machine(nitrogen).expect("lisible"),
         Some(racine)
+    );
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn qui_tient_localiser_sur_un_domaine_localise_les_machines_des_autres_qui_y_sont_rangees() {
+    // **Décision 103 (0.40.0)** : le propriétaire d'un domaine tient les
+    // quatre droits sur lui ; il localise donc TOUTES les machines qui y sont
+    // rangées, celles d'un autre compte comprises — qui les y a rangées a
+    // accepté les droits du domaine sur elles. Un droit `localiser` écrit
+    // fait de même ; `voir` seul ne localise pas.
+    let (base, chemin) = entrepot("localiser-domaine");
+    let proprietaire = un(Genre::Utilisateur, 1);
+    let invite = un(Genre::Utilisateur, 2);
+    let ami = un(Genre::Utilisateur, 3);
+    for (rang, qui) in [proprietaire, invite, ami].into_iter().enumerate() {
+        creer(&base, qui, u64::try_from(rang).unwrap() + 1);
+    }
+    let maison = asl_registre::premier_domaine(proprietaire);
+    let console = un(Genre::Machine, 7);
+    appliquer(
+        &base,
+        est(pair(), 10),
+        Operation::Machine {
+            machine: console,
+            enregistrement: machine(est(pair(), 10), invite, "console"),
+        },
+    );
+    // L'invité reçoit `rattacher`, et range SA machine chez le propriétaire.
+    base.accorder_droit(
+        un(Genre::Autorisation, 1),
+        proprietaire,
+        asl_registre::groupe_personnel(invite),
+        maison,
+        asl_registre::Droits::RATTACHER,
+        nom("ranger"),
+    )
+    .expect("écrit");
+    assert!(base.peut_ranger(invite, maison).expect("lisible"));
+    base.rattacher_machine(console, Some(maison))
+        .expect("rangée");
+    let la_console = vec![asl_store::Acces {
+        proprietaire: invite,
+        portee: Portee::UneMachine(console),
+    }];
+    for voulu in [asl_store::Voulu::Voir, asl_store::Voulu::Localiser] {
+        assert_eq!(
+            base.acces(proprietaire, voulu).expect("lisible"),
+            la_console,
+            "le propriétaire du domaine, sans droit écrit"
+        );
+    }
+    // Un droit `voir` écrit : il voit, il ne localise pas ; `localiser`, si.
+    base.accorder_droit(
+        un(Genre::Autorisation, 2),
+        proprietaire,
+        asl_registre::groupe_personnel(ami),
+        maison,
+        asl_registre::Droits::VOIR,
+        nom("voir"),
+    )
+    .expect("écrit");
+    assert_eq!(
+        base.acces(ami, asl_store::Voulu::Voir).expect("lisible"),
+        la_console
+    );
+    assert!(
+        base.acces(ami, asl_store::Voulu::Localiser)
+            .expect("lisible")
+            .is_empty()
+    );
+    base.accorder_droit(
+        un(Genre::Autorisation, 3),
+        proprietaire,
+        asl_registre::groupe_personnel(ami),
+        maison,
+        asl_registre::Droits::LOCALISER,
+        nom("localiser"),
+    )
+    .expect("écrit");
+    assert_eq!(
+        base.acces(ami, asl_store::Voulu::Localiser)
+            .expect("lisible"),
+        la_console
+    );
+    // Sortie du domaine par son propriétaire, elle n'est plus à personne.
+    base.rattacher_machine(console, None).expect("sortie");
+    assert!(
+        base.acces(proprietaire, asl_store::Voulu::Localiser)
+            .expect("lisible")
+            .is_empty()
     );
     let _ = std::fs::remove_file(&chemin);
 }

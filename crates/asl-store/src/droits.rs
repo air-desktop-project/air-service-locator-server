@@ -772,9 +772,12 @@ impl Entrepot {
     /// - un droit sur un compte (une autorisation convertie) : tout ce que ce
     ///   compte possède, présent et à venir ;
     /// - sur une machine ou un service : lui, s'il vaut encore ;
-    /// - sur un domaine : chaque machine qui y vaut rangée ;
-    /// - et, pour VOIR seulement, chaque machine rangée dans un domaine qu'il
-    ///   administre — `administrer` emporte `voir`.
+    /// - sur un domaine : chaque machine qui y vaut rangée, **quel que soit
+    ///   son propriétaire** (décision 103) ;
+    /// - et chaque machine rangée dans un domaine qu'il possède ou administre,
+    ///   selon ce que cette propriété lui donne : les quatre au propriétaire
+    ///   (et aux administrateurs du domaine racine), `voir` seul à qui
+    ///   administre — `administrer` n'emporte pas `localiser` (décision 87).
     ///
     /// Ce qu'il possède lui-même n'y figure pas : `asl-auth` le sert sans
     /// arête.
@@ -824,14 +827,22 @@ impl Entrepot {
                 _ => {}
             }
         }
-        if voulu == Voulu::Voir {
-            let mut administres: Vec<Identifiant> = self
-                .domaines_de_compte(compte)?
-                .into_iter()
-                .map(|(domaine, _)| domaine)
-                .collect();
-            administres.extend(self.domaines_administres(compte)?);
-            for domaine in administres {
+        // **CE QUE LA PROPRIÉTÉ OU L'ADMINISTRATION D'UN DOMAINE DONNE**, sans
+        // droit écrit : `droits_sur_domaine` en fait la réunion — les quatre
+        // pour son propriétaire et, sur le domaine racine, pour ses
+        // administrateurs (décision 88) ; `administrer` emporte `voir`, pas
+        // `localiser` (décision 87). **Toutes les machines qui y sont
+        // rangées, celles des autres comptes comprises** (0.40.0, décision
+        // 103) : ranger sa machine dans le domaine d'un autre, c'est accepter
+        // les droits de ce domaine sur elle.
+        let mut tenus: Vec<Identifiant> = self
+            .domaines_de_compte(compte)?
+            .into_iter()
+            .map(|(domaine, _)| domaine)
+            .collect();
+        tenus.extend(self.domaines_administres(compte)?);
+        for domaine in tenus {
+            if voulu.permis_par(self.droits_sur_domaine(compte, domaine)?) {
                 for machine in self.machines_du_domaine(domaine)? {
                     par_machine(machine, &mut rendus)?;
                 }

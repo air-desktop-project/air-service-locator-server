@@ -2433,11 +2433,13 @@ impl Service<'_> {
     /// mobile qui regarde —, ou, depuis la 0.39.0, celui de la machine qui lit
     /// — le client en ligne de commande. On rassemble donc au nom de son
     /// COMPTE, et la décision est la même sur les deux voies.
+    ///
+    /// **DEUX FORMES, TOUJOURS COMPOSÉES** (0.40.0, décision 104) : l'entière,
+    /// pour le propriétaire et qui tient `localiser` sur le domaine de la
+    /// machine ; celle sans adresse, pour qui n'y tient que `voir`.
+    /// `asl_auth::decider_services_de_machine` choisit à l'étage 2 ; le
+    /// travail ici ne dépend pas de ce qu'elle choisira (C9).
     fn rassembler_les_services(&self, machine: Identifiant) -> Trouvaille {
-        // **L'APPAREIL, OU UNE MACHINE QUI PORTE `lecture`** (0.39.0) : le
-        // client en ligne de commande lit avec la clé de sa machine. La règle
-        // ne change pas — le propriétaire, et lui seul
-        // (`asl_auth::decider_services_de_machine`).
         let Some(demandeur) = self.compte_qui_lit() else {
             return Trouvaille::Rien;
         };
@@ -2450,6 +2452,20 @@ impl Service<'_> {
         let Ok(services) = self.entrepot.services_de_machine(machine) else {
             return Trouvaille::Rien;
         };
+        // **CE QUE LE DEMANDEUR PEUT SUR LE DOMAINE DE LA MACHINE** (C10 :
+        // depuis lui), la réunion que l'entrepôt calcule.
+        let domaine = self
+            .entrepot
+            .domaine_de_machine(machine)
+            .ok()
+            .flatten()
+            .and_then(|domaine| self.entrepot.droits_sur_domaine(demandeur, domaine).ok())
+            .map_or_else(asl_auth::VueDuDomaine::default, |droits| {
+                asl_auth::VueDuDomaine {
+                    voir: droits.permettent_de_voir(),
+                    localiser: droits.permettent_de_localiser(),
+                }
+            });
         let noms_d_ici: Vec<Vec<u8>> = services
             .iter()
             .map(|(_, enregistre)| enregistre.nom.octets().to_vec())
@@ -2460,7 +2476,7 @@ impl Service<'_> {
         // connexion est tombée doit apparaître, sans quoi il semblerait n'avoir
         // jamais existé.
         let confiee = self.confiee_a_un_annuaire_local(machine);
-        let annonces = services
+        let mut rendus: Vec<(Vec<u8>, Vec<u8>)> = services
             .into_iter()
             .filter_map(|(quel, enregistre)| {
                 // Le nom d'un service est une clé (alphabet restreint), donc
@@ -2481,81 +2497,75 @@ impl Service<'_> {
                 {
                     return self.rendre_un_service_federe(quel, nom, &lue);
                 }
-                let mut sortie = alloc_reponse();
-                let combien = match self.vivier.annonce(quel) {
+                match self.vivier.annonce(quel) {
                     // Dans le vivier, mais peut-être en instance de départ tant
                     // que le balayage ne l'a pas ôtée : on regarde son état.
                     Some(vivante) => match vivante.etat(instant()) {
-                        asl_annuaire::Etat::Parti { motif } => asl_api::corps::ServiceRendu {
-                            service: quel,
-                            nom,
-                            etat: asl_api::corps::ServiceEtat::Parti {
-                                volontaire: Some(matches!(
-                                    motif,
-                                    asl_annuaire::MotifDeDepart::Volontaire
-                                )),
-                            },
-                            sonde: None,
+                        asl_annuaire::Etat::Parti { motif } => {
+                            encoder_les_deux(asl_api::corps::ServiceRendu {
+                                service: quel,
+                                nom,
+                                etat: asl_api::corps::ServiceEtat::Parti {
+                                    volontaire: Some(matches!(
+                                        motif,
+                                        asl_annuaire::MotifDeDepart::Volontaire
+                                    )),
+                                },
+                                sonde: None,
+                            })
                         }
-                        .encoder(&mut sortie)
-                        .ok()?,
                         // Vivant : on réémet l'objet d'annonce déjà éprouvé, tel
                         // qu'un daemon le reçoit, plutôt que d'en réécrire un.
                         asl_annuaire::Etat::Annonce | asl_annuaire::Etat::Joignable { .. } => {
                             let mut objet = alloc_reponse();
                             let n = vivante.reponse().ok()?.encoder(&mut objet).ok()?;
                             objet.truncate(n);
-                            asl_api::corps::ServiceRendu {
+                            encoder_les_deux(asl_api::corps::ServiceRendu {
                                 service: quel,
                                 nom,
                                 etat: asl_api::corps::ServiceEtat::Annonce { annonce: &objet },
                                 sonde: None,
-                            }
-                            .encoder(&mut sortie)
-                            .ok()?
+                            })
                         }
                     },
                     // Déclaré, mais aucune session vivante : parti, motif perdu.
-                    None => asl_api::corps::ServiceRendu {
+                    None => encoder_les_deux(asl_api::corps::ServiceRendu {
                         service: quel,
                         nom,
                         etat: asl_api::corps::ServiceEtat::Parti { volontaire: None },
                         sonde: None,
-                    }
-                    .encoder(&mut sortie)
-                    .ok()?,
-                };
-                sortie.truncate(combien);
-                Some(sortie)
+                    }),
+                }
             })
-            .collect::<Vec<_>>();
+            .collect();
 
-        // **ET CE QU'EN RAPPORTENT LES ANNUAIRES LOCAUX** (décision 60). Une
-        // machine d'un domaine confié s'annonce chez l'annuaire local, et rien
-        // n'en est rangé ici : ses services n'existent pour la racine que dans
-        // l'état fédéré, en mémoire (C13). Un nom déjà rendu d'ici n'est pas
-        // rendu deux fois : sa ligne a déjà pris l'état fédéré si la machine
-        // est confiée (0.39.2), et sinon c'est la mémoire de CETTE racine.
-        let mut annonces = annonces;
-        annonces.extend(self.services_federes(machine, &noms_d_ici));
+        // **ET CE QU'EN RAPPORTENT LES ANNUAIRES LOCAUX** (décision 60), pour
+        // les noms dont cette racine n'a pas encore la ligne — depuis la
+        // 0.40.0, elle la range au premier rapport (décision 100). Un nom
+        // déjà rendu d'ici n'est pas rendu deux fois : sa ligne a déjà pris
+        // l'état fédéré si la machine est confiée (0.39.2).
+        rendus.extend(self.services_federes(machine, &noms_d_ici));
+        let (annonces, sans_adresses) = rendus.into_iter().unzip();
 
         Trouvaille::ServicesDeMachine {
             demandeur,
             proprietaire: visee.proprietaire,
+            domaine,
             annonces,
+            sans_adresses,
         }
     }
 
     /// Les services qu'un annuaire local rapporte de cette machine, encodés
-    /// comme l'écran les lit, et dont le nom n'est pas parmi `deja` — les
-    /// noms que cette racine tient elle-même.
+    /// comme l'écran les lit — les deux formes —, et dont le nom n'est pas
+    /// parmi `deja` : les noms que cette racine tient elle-même.
     ///
     /// **Vivant si un membre le dit, parti s'ils le disent tous, rien pour ce
     /// que plus personne ne confirme** — la règle de [`crate::federation`].
     /// Un service fédéré parti se rend `parti`, sans motif (`volontaire:
     /// null`) : l'annuaire local ne le rapporte pas, et un écran doit voir
     /// qu'il a existé, comme pour un service tenu ici.
-    fn services_federes(&self, machine: Identifiant, deja: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    fn services_federes(&self, machine: Identifiant, deja: &[Vec<u8>]) -> Vec<(Vec<u8>, Vec<u8>)> {
         self.etat_federe
             .services_de(machine, maintenant(), self.expiration_federee_us)
             .into_iter()
@@ -2568,15 +2578,15 @@ impl Service<'_> {
     }
 
     /// Un service tel qu'un annuaire local le rapporte, encodé comme l'écran
-    /// le lit, sous cet identifiant — le sien, ou celui de la ligne que
-    /// cette racine tient (0.39.2 : la ligne donne l'identité, le rapport
-    /// l'état).
+    /// le lit — les deux formes —, sous cet identifiant : le sien, ou celui
+    /// de la ligne que cette racine tient (0.39.2 : la ligne donne
+    /// l'identité, le rapport l'état).
     fn rendre_un_service_federe(
         &self,
         service: Identifiant,
         nom: &str,
         lue: &crate::federation::LueFederee,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
         let sonde = asl_api::corps::SondeFederee {
             par: lue.membre,
             locale: lue
@@ -2584,8 +2594,7 @@ impl Service<'_> {
                 .as_deref()
                 .is_some_and(|reponse| self.sonde_de_l_interieur(lue.membre, reponse)),
         };
-        let mut sortie = alloc_reponse();
-        let combien = asl_api::corps::ServiceRendu {
+        encoder_les_deux(asl_api::corps::ServiceRendu {
             service,
             nom,
             etat: match lue.reponse.as_deref() {
@@ -2593,11 +2602,7 @@ impl Service<'_> {
                 None => asl_api::corps::ServiceEtat::Parti { volontaire: None },
             },
             sonde: Some(sonde),
-        }
-        .encoder(&mut sortie)
-        .ok()?;
-        sortie.truncate(combien);
-        Some(sortie)
+        })
     }
 
     /// Cette machine est-elle rangée dans un domaine confié à un annuaire
@@ -3003,6 +3008,29 @@ impl Service<'_> {
             annonce,
         })
     }
+}
+
+/// Un service encodé sous ses deux formes (décision 104) : l'entière, et
+/// celle **sans adresse**, où l'objet d'annonce d'un vivant est vide — `{}`.
+/// Les décodeurs déployés (`asl` 0.22, les applications) lisent un objet
+/// d'annonce vide comme un service vivant sans point ni diagnostic.
+fn encoder_les_deux(rendu: asl_api::corps::ServiceRendu<'_>) -> Option<(Vec<u8>, Vec<u8>)> {
+    let mut entiere = alloc_reponse();
+    let n = rendu.encoder(&mut entiere).ok()?;
+    entiere.truncate(n);
+    let reduit = asl_api::corps::ServiceRendu {
+        etat: match rendu.etat {
+            asl_api::corps::ServiceEtat::Annonce { .. } => {
+                asl_api::corps::ServiceEtat::Annonce { annonce: b"{}" }
+            }
+            parti @ asl_api::corps::ServiceEtat::Parti { .. } => parti,
+        },
+        ..rendu
+    };
+    let mut sans_adresse = alloc_reponse();
+    let n = reduit.encoder(&mut sans_adresse).ok()?;
+    sans_adresse.truncate(n);
+    Some((entiere, sans_adresse))
 }
 
 /// L'instant courant, comme `asl-annuaire` le compte.

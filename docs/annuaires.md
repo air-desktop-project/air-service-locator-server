@@ -516,7 +516,7 @@ celui des deux identifiants qui perd **disparaît** pour qui l'avait vu — ici
 | **À l'annonce, chez qui la reçoit** — racine ou membre d'un annuaire local, le même chemin | `crates/asl-loop-tokio/src/h3.rs` l. 2284–2308 : on cherche `(machine, nom)` dans l'entrepôt (`service_par_nom`) ; s'il n'y est pas, **seize octets d'aléa** (`tirer_un_identifiant`, `getrandom(2)` via `crates/asl-server/src/entropie.rs`) deviennent un `s-…`, déclaré par `declarer_service`. La première annonce d'un nom crée le service (`modele.md` §2.4). |
 | **Persistance** | `crates/asl-store/src/lib.rs` l. 2713–2767 : table `services` (identifiant → machine, nom, estampille) et index `services-par-nom` (`machine ‖ nom` → identifiant), dans redb, journalisé. **Un service ne se retire jamais** (`replication.md` §3.2) : l'identifiant survit aux redémarrages du daemon et du membre, et une ré-annonce du même nom au MÊME membre retrouve le même `s-…`. |
 | **Entre les deux membres** | Ils se répliquent l'opération `service` comme deux racines (§2 ter, `replication.md` §3.2) : `appliquer_service`, `lib.rs` l. 4730–4791. Si `(machine, nom)` est déjà tenu sous un autre `s-…`, **celui dont l'estampille de Lamport est la plus petite reste**, l'autre s'efface — l'estampille est `(compteur, annuaire)`, comparée compteur d'abord, puis identifiant de l'annuaire (`Estampille`, `crates/asl-registre/src/lib.rs` l. 482–488, `Ord` dérivé). La règle converge — **si l'opération passe**. |
-| **Aux racines** | Rien n'est rangé dans l'entrepôt (C13 amendée). `EtatFedere` (`crates/asl-loop-tokio/src/federation.rs` l. 69–171) tient, en mémoire, `machine ‖ nom` → membre → `(s-…, réponse, heure)`, **chacun avec le `s-…` que CE membre a rapporté** ; le commentaire l. 85–87 admet déjà que « leurs identifiants de service peuvent différer ». `retenir` (l. 125–148) rend le `s-…` du **rapport vivant le plus récent**, sinon celui du rapport le plus récent. |
+| **Aux racines** | Rien n'était rangé dans l'entrepôt (C13 amendée) ; **depuis la 0.40.0, le nom seul** (décision 100), sous le `s-…` dérivé. `EtatFedere` (`crates/asl-loop-tokio/src/federation.rs` l. 69–171) tient, en mémoire, `machine ‖ nom` → membre → `(s-…, réponse, heure)`, **chacun avec le `s-…` que CE membre a rapporté** ; le commentaire l. 85–87 admet déjà que « leurs identifiants de service peuvent différer ». `retenir` (l. 125–148) rend le `s-…` du **rapport vivant le plus récent**, sinon celui du rapport le plus récent. |
 | **Ce que `GET /v1/ou` rend** | `rassembler`, `h3.rs` l. 2861–2890 : le service tenu par la racine elle-même, sinon celui que `EtatFedere::lire` retient. Le `s-…` rendu est donc **celui du membre qui tient le daemon** ; quand le daemon est parti des deux, les deux membres le rapportent `parti` toutes les dix secondes, chacun sous son `s-…`, et celui que la racine rend **alterne au gré du dernier rapport reçu**. `GET /v1/machines/{m}/services` suit la même règle (`services_federes`, `h3.rs` l. 2495). |
 
 **Pourquoi `s-0DV…` a gagné, alors que `s-6AQ…` était plus ancien.** « Le plus
@@ -1466,6 +1466,19 @@ viennent de l'état fédéré ; la ligne rangée ne donne que l'identité** — 
 introuvable, pour `GET /v1/ou`), comme s'il n'avait pas de ligne. Pour une
 machine qui n'est dans aucun domaine confié, rien ne change.
 
+**Le nom se range, jamais l'adresse** (décidé le 2026-09-29, Thierry ;
+décisions 100 à 102, 0.40.0). Au premier rapport d'un membre sur un service,
+chaque racine en déclare la ligne — machine, nom, `s-…` dérivé
+(`service_derive`, décision 66), le même sous les deux racines et chez les
+membres —, comme pour un service qu'on lui annonce ; l'opération `service`
+se réplique entre racines comme toute autre (`replication.md` §3.2), et les
+deux déclarations d'un même `(machine, nom)` convergent, puisqu'elles portent
+le même `s-…`. **C'est ce qui rend possible un droit « Un service »** sur un
+service fédéré. La ligne se garde pour toujours, avec ses droits ; l'état
+vivant et l'adresse restent en mémoire (C13), et c'est le rapport qui les
+donne (décision 99). Un membre d'avant la 0.37.0, qui rapporterait un `s-…`
+non dérivé, ne change rien à la ligne : elle est rangée sous le dérivé.
+
 **Comment ça circule** (décidé le 2026-09-26, Thierry, `protocole.md` §3 ter) : la
 connexion de l'annuaire local vers **chaque** racine, authentifiée par sa clé
 d'identité comme entre racines ; dans un sens, les machines de ses domaines et
@@ -1692,6 +1705,21 @@ Rassemblé, plutôt que dispersé.
     service né aux racines dont le domaine est ensuite confié était rendu
     `parti` alors que l'annuaire local le disait vivant. **Fait (0.39.2)** :
     §5.4, « Une ligne rangée aux racines ne l'emporte pas ».
+    **Décidé (2026-09-29, Thierry ; décisions 100 à 102)** — le mécanisme :
+    (1) **(a), les racines rangent le NOM** de tout service fédéré, jamais son
+    adresse, dès le premier rapport d'un membre : une ligne de service
+    ordinaire (machine, nom, `s-…` dérivé), écrite par `declarer_service`
+    depuis la réception du rapport (`POST /v1/federation/etat`), répliquée
+    comme toute opération `service`. Les droits « Un service » marchent alors
+    sans autre changement : `POST /v1/droits`, `POST /v1/autorisations`,
+    `vaut`, la cascade, `GET /v1/droits`. (2) **Pas de droit sur un service
+    jamais annoncé** : sans ligne, `POST /v1/droits` le refuse comme un
+    élément inconnu. (3) **Le défaut de priorité est corrigé d'abord** —
+    décision 99, 0.39.2. (4) **Une ligne de service fédéré se garde pour
+    toujours, avec ses droits**, comme celle d'un service des racines : aucun
+    retrait quand l'annuaire local se tait ; le service se rend alors
+    `parti`, et introuvable à `GET /v1/ou`. **Fait (0.40.0)** : §5.4, « Le
+    nom se range, jamais l'adresse ».
 19. **L'opération perdue sans bruit.** Entre deux membres, une opération
     `service` dont la machine n'est pas encore connue est ignorée ET le curseur
     avance (`appliquer_service`) : elle ne revient jamais. Ce n'est pas ce qui a

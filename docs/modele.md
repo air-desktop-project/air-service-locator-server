@@ -1202,6 +1202,34 @@ sur un élément**.
 | `voir` | Lister les machines et les services — identifiants, noms, état —, **pas leurs adresses**. | Domaine, machine, service. |
 | `localiser` | Obtenir l'adresse et le port d'un service : `GET /v1/ou` (`protocole.md` §3). **Emporte `voir`** sur ce qu'il couvre. | Domaine, machine, service. |
 
+**Sur un domaine, un droit vaut pour TOUTES les machines qui y sont rangées,
+celles des autres comptes comprises** (décidé le 2026-09-29, Thierry ;
+décisions 103 et 104, 0.40.0), qu'il soit écrit ou tenu par la propriété —
+**pour tout domaine, le domaine racine compris** :
+
+- **`localiser`** sur le domaine localise chacune : `GET /v1/ou/{m}/{s}` et
+  `GET /v1/ou?service=…` rendent leurs services, adresses comprises, et
+  `GET /v1/machines/{m}/services` les rend entiers (`asl-auth` :
+  `decider_resolution` sur l'accès que l'entrepôt calcule par machine,
+  `decider_services_de_machine`).
+- **`voir`** sur le domaine liste leurs services — identifiants, noms, état —
+  **sans adresse** : `GET /v1/machines/{m}/services`, un vivant y portant un
+  objet d'annonce vide (`protocole.md` §3).
+- **`administrer`** emporte `voir`, pas `localiser` (décision 87).
+- **Ranger sa machine dans le domaine d'un autre, c'est accepter les droits de
+  ce domaine sur elle.** Le rangement est un geste de son propriétaire seul
+  (`PUT /v1/machines/{m}/domaine`, qui exige qu'il possède la machine et tienne
+  `rattacher` sur le domaine) ; il le défait quand il veut. L'application doit
+  le dire au moment de ranger : qui voit ce domaine verra les services de la
+  machine, et qui le localise les joindra.
+
+**Un droit sur UN service fédéré** (décision 100, 0.40.0) — un service d'une
+machine rangée dans un domaine confié à un annuaire local — se pose comme sur
+tout service : les racines rangent son nom au premier rapport d'un membre
+(`annuaires.md` §5.4), et le droit vise ce `s-…` dérivé. **Pas de droit sur un
+service jamais annoncé** (décision 101) : sa ligne n'existe pas, et
+`POST /v1/droits` le refuse comme un élément inconnu.
+
 **Un service échappe à ce tableau : l'`asl-directory` d'un annuaire local**
 (décisions 77, 79 et 80, `annuaires.md` §2 quinquies). Aucun droit ne s'écrit
 sur lui ; le résolvent son propriétaire, les administrateurs des racines, et
@@ -1271,7 +1299,7 @@ administrateur y a rangée :
 |---|---|
 | `voir` | **Oui** : il la voit — le détail du domaine la liste, avec son nom ; `GET /v1/utilisateurs/{u}/machines` la rend. Comme tout administrateur voit ce qui est rangé dans son domaine (`administrer` emporte `voir`). |
 | Accorder sur elle | **Oui** : ranger sa machine dans un domaine, c'est confier à ses administrateurs le droit de la partager (décision 40), et le domaine racine ne fait pas exception — l'application le dit au moment de ranger. |
-| `localiser` | **Non, pas de lui-même** — la forme codée en 0.39.0, **à confirmer par Thierry** : `localiser` sur un domaine, tenu par sa propriété ou son administration, ne se transforme pas en adresse d'une machine d'un AUTRE compte — c'est vrai de tout domaine, où seuls les droits ÉCRITS (§2.13, décision 44) ouvrent `GET /v1/ou`. Il l'obtient en s'accordant `localiser` sur la machine ou le service — un geste écrit, daté, qui se voit et se retire (décision 87) ; pas sur le domaine racine, sur lequel aucun droit ne s'écrit. |
+| `localiser` | **Oui, depuis la 0.40.0** (décidé le 2026-09-29, Thierry ; décision 103, qui tranche le point 5 de la décision 88) : il tient `localiser` sur le domaine racine, et qui tient `localiser` sur un domaine localise toutes les machines qui y sont rangées. ~~Non, pas de lui-même — la forme codée en 0.39.0.~~ |
 
 Ses propres machines, il les localise toujours : c'est la propriété, pas le
 domaine. Et ce qu'il a sur la machine d'un autre ne vaut que tant qu'elle est
