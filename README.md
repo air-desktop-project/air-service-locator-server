@@ -724,6 +724,47 @@ et se résout par `asl where` — dix secondes après le redémarrage au plus, l
 temps d'un tour du fédérateur. **Le retour arrière est un `dpkg -i` de la
 0.39.0.**
 
+### Déployer la 0.40.0 — droits sur les services fédérés, et droits de domaine
+
+**Ce qui change** (`docs/replication.md` décisions 100 à 104) :
+
+- **Les racines rangent le nom de chaque service fédéré** au premier rapport
+  d'un membre (machine, nom, `s-…` dérivé ; jamais l'adresse), et
+  répliquent la ligne comme toute opération `service`. Un droit « Un
+  service » se pose désormais sur un service d'un domaine confié à
+  speedy/helium. La ligne se garde pour toujours.
+- **`localiser` sur un domaine localise toutes les machines qui y sont
+  rangées**, celles des autres comptes comprises — R compris : nitrogen et
+  argon, et toute machine qu'un autre administrateur y range.
+- **`voir` sur un domaine ouvre `GET /v1/machines/{m}/services`** pour ses
+  machines, sans adresse (`"annonce":{}`) ; `localiser`, en entier.
+
+**Aucune migration, aucun format qui change** : les lignes nouvelles sont des
+opérations `service` que la 0.39.2 sait déjà appliquer (sa machine est
+connue des deux racines), et la 0.39.2 prend déjà l'état d'un service fédéré
+dans le rapport même quand elle en tient la ligne (décision 99) — c'est
+pourquoi elle est passée d'abord. **L'ordre : les deux racines à la suite**,
+nitrogen puis argon. Dans l'intervalle, la racine encore en 0.39.2 reçoit les
+lignes et les sert correctement, mais n'applique pas encore les nouvelles
+règles de domaine : une même question peut recevoir deux réponses selon la
+racine jointe, quelques minutes. Les annuaires locaux n'ont rien à faire.
+
+```sh
+# nitrogen, puis argon, à la suite
+sudo dpkg -i asl-server_0.40.0_amd64.deb
+sudo systemctl restart asl-server
+asl-server --version            # 0.40.0
+journalctl -u asl-server --since -2min | grep 'nom rangé sous'
+```
+
+**Ce qu'on voit au journal**, une fois par service fédéré et par racine :
+`fédération : n-… rapporte « depot » de m-… — nom rangé sous s-… (décision
+100)`. Les services déjà rangés (nés aux racines) n'en écrivent pas.
+
+**Le retour arrière est un `dpkg -i` de la 0.39.2** : les lignes rangées
+restent, et la 0.39.2 les lit comme des services nés aux racines — ce
+qu'elle sait faire depuis la décision 99.
+
 ### Frapper la clé d'exploitation, et émettre (depuis 0.15.0)
 
 Les deux gestes sont dans le même binaire, et **aucun ne tourne sur un banc** :

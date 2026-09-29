@@ -1754,10 +1754,13 @@ avoir tout vu. `500` est le mot juste — le demandeur n'a rien fait de mal, c'e
 l'annuaire qui a plus à dire que ce protocole ne sait exprimer, et la réponse est
 une **pagination à concevoir**, pas un réessai.
 
-**`GET /v1/machines/{m}/services` ne regarde aucune autorisation.** C'est l'écran
-qui montre MES machines ; les chemins inter-comptes sont `GET /v1/ou` pour les
-services et `GET /v1/utilisateurs/{u}/machines` pour les machines — chacun
-calculé depuis les arêtes du demandeur, jamais depuis ce qu'il désigne (C10).
+**`GET /v1/machines/{m}/services` ne regarde aucune autorisation de compte ni
+de machine.** C'est l'écran qui montre MES machines ; les chemins inter-comptes
+sont `GET /v1/ou` pour les services et `GET /v1/utilisateurs/{u}/machines` pour
+les machines — chacun calculé depuis les arêtes du demandeur, jamais depuis ce
+qu'il désigne (C10). **Depuis la 0.40.0, un droit sur le DOMAINE où `m` est
+rangée l'ouvre** : `voir` sans adresse, `localiser` en entier (décision 104,
+§3 « Les services d'une machine d'un AUTRE compte »).
 
 **Une machine d'un domaine confié : ses services viennent de l'état fédéré**
 (décision 60, 0.32.0). Elle s'annonce chez l'annuaire local, et rien n'en est
@@ -1890,7 +1893,7 @@ recopier des `m-…`.
 | `GET /v1/domaines?alias=…` | Déjà (0.24.0) — toute machine qui a prouvé sa clé | `[{"domaine","autorite"}]`, rien de plus. |
 | `GET /v1/domaines` | **0.39.0**, une machine qui porte `lecture` | Les domaines du propriétaire de la machine, et ceux où l'un de ses groupes tient un droit — la même liste que sur la voie appareil. Sans `lecture` : `[]`. |
 | `GET /v1/domaines/{d}` | **0.39.0**, une machine qui porte `lecture` | Le même objet que sur la voie appareil : `machines` pour qui a `voir` (ou `localiser`, ou `administrer`) sur le domaine, `groupes` pour qui l'administre ; `404` pour qui n'y tient rien, et pour une machine sans `lecture` (C10). |
-| `GET /v1/machines/{m}/services` | **0.39.0**, une machine qui porte `lecture` | **Le propriétaire de `m`, et lui seul** (`asl_auth::decider_services_de_machine`) ; `[]` sinon. |
+| `GET /v1/machines/{m}/services` | **0.39.0**, une machine qui porte `lecture` | Le propriétaire de `m` : tout ; **depuis la 0.40.0** (décision 104), qui tient `localiser` sur le domaine où `m` est rangée : tout ; qui n'y tient que `voir` (ou `administrer`) : les services **sans adresse** ; `[]` sinon (`asl_auth::decider_services_de_machine`). |
 | `GET /v1/ou/{m}/{s}`, `GET /v1/ou?service=…` | Déjà | `localiser` (§3 ci-dessus). |
 | `POST /v1/echo/jetons` | **Proposé** (décision 89, §3 quater) | `localiser` sur `asl-echo` de la machine visée — la décision de `GET /v1/ou/{m}/asl-echo` ; `404` sinon (C9). |
 
@@ -1900,15 +1903,42 @@ domaine, y ranger une machine, ses groupes, ses droits restent à un appareil
 pas. La capacité `lecture` se juge à l'étage 3, comme pour
 `GET /v1/utilisateurs/{u}/machines`.
 
-**Ce qui n'est PAS servi, et c'est à trancher** : les services d'une machine
-d'un AUTRE compte, que le demandeur voit par `voir` sur son domaine.
-`modele.md` §2.13 dit que `voir` permet de « lister les machines et les
-services — identifiants, noms, état » ; aucune route ne les rend aujourd'hui,
-sur aucune voie : `GET /v1/machines/{m}/services` est l'écran du propriétaire
-(il rend les candidats, donc les adresses), et `asl-auth` refuse délibérément
-d'y faire entrer un droit de lecture. Un client qui tient `localiser` sur le
-domaine atteint un service par son nom (`GET /v1/ou/{m}/{s}`,
-`GET /v1/ou?service=…`), pas par une liste.
+**Les services d'une machine d'un AUTRE compte, rangée dans un domaine où le
+demandeur tient un droit** — tranché (Thierry, 2026-09-29 ; décisions 103 et
+104, 0.40.0), **pour tout domaine, le domaine racine compris** :
+
+- **`voir`** sur le domaine (ou `administrer`, qui l'emporte) :
+  `GET /v1/machines/{m}/services` rend la liste — identifiants, noms, état —
+  **sans adresse**. Un service vivant y porte un objet d'annonce **vide** :
+
+  ```jsonc
+  [{"service":"s-…","nom":"depot","etat":"annonce","annonce":{}},
+   {"service":"s-…","nom":"nas","etat":"parti","volontaire":null}]
+  ```
+
+  `sonde_par` et `sonde_locale` y restent pour un service fédéré (un `n-…` et
+  un booléen, pas une adresse). Un parti est le même objet que pour le
+  propriétaire.
+- **`localiser`** sur le domaine : la liste entière, **objet d'annonce
+  compris** — bail, adresse observée, candidats —, celle du propriétaire ;
+  et `GET /v1/ou/{m}/{s}`, `GET /v1/ou?service=…` rendent ses services
+  (décision 103).
+- **Rien** : `[]`, comme pour une machine sans service (C9).
+
+**Pourquoi cette route, et pas `GET /v1/domaines/{d}`.** Le détail d'un
+domaine est UN objet, borné à 4 Kio (`MESSAGE_MAX`) : y mettre les services de
+chaque machine le ferait déborder dès quelques machines. La liste des services
+est une liste, bornée à soixante-quatre éléments de 4 Kio chacun. Et la forme
+passe les décodeurs déployés : `asl` 0.22 lit un objet d'annonce vide comme un
+service annoncé (il n'exige qu'un objet) ; les applications Android et iOS le
+lisent vivant, sans point ni diagnostic. Un mot d'état nouveau (« vivant »)
+aurait été lu « parti » par les deux applications.
+
+**Ranger sa machine dans le domaine d'un autre, c'est accepter les droits de
+ce domaine sur elle** : qui y tient `voir` voit ses services, qui y tient
+`localiser` les localise. Le rangement reste un geste de son propriétaire, et
+de lui seul (`PUT /v1/machines/{m}/domaine`, avec `rattacher` sur le domaine) ;
+il le défait quand il veut (`DELETE`).
 
 ```
 GET /v1/moi/appareils

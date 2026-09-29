@@ -464,9 +464,16 @@ et la contrainte le borne ainsi :
   d'`asl-registre` n'a pas de colonne pour elle, et c'est le contrôle de cette
   contrainte — `asl-registre` sait ÉCRIRE une entrée d'état pour le fil
   (`EntreeDEtat`, 0.28.0), mais l'entrepôt n'a aucune table où la ranger, et
-  l'essai de bout en bout vérifie qu'aucun service fédéré n'y apparaît. Elle
-  tombe quand plus aucun membre ne la confirme : trente secondes au plus après
-  son dernier rapport (décision 52).
+  l'essai de bout en bout vérifie que du service fédéré, **seul le nom** y
+  apparaît. Elle tombe quand plus aucun membre ne la confirme : trente
+  secondes au plus après son dernier rapport (décision 52).
+- **Le NOM, lui, se range** — amendé le 2026-09-29 (Thierry ; décision 100,
+  0.40.0) : les racines déclarent une ligne de service ordinaire (machine,
+  nom, `s-…` dérivé) au premier rapport, pour qu'un droit « Un service » se
+  pose dessus, et la gardent. C'est ce qu'elles rangent déjà de tout service
+  qu'on leur annonce : un nom choisi par le propriétaire de la machine, une
+  clé à l'alphabet restreint comme `depot`. Jamais l'état vivant, jamais
+  l'adresse.
 - **Pas répliquée entre racines** : chacune la reçoit de l'annuaire local
   (`replication.md` §1).
 - **Servie aux seuls comptes autorisés** (C10), et journalisée comme toute

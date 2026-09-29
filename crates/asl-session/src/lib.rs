@@ -1105,15 +1105,24 @@ pub enum Trouvaille {
     ///
     /// Le demandeur n'est pas une machine : c'est un APPAREIL, et
     /// `asl_auth::Machine` ne sait pas le représenter. La décision n'est donc pas
-    /// la même — [`asl_auth::decider_services_de_machine`], qui ne regarde
-    /// aucune autorisation.
+    /// la même — [`asl_auth::decider_services_de_machine`], qui regarde le
+    /// propriétaire, puis les droits du demandeur sur le domaine où la
+    /// machine est rangée (0.40.0, décision 104).
+    ///
+    /// **LES DEUX FORMES SONT COMPOSÉES, QUOI QU'ON DÉCIDE** (C9) : le même
+    /// travail pour qui reçoit tout, les noms seuls, ou rien.
     ServicesDeMachine {
         /// Le compte de l'appareil qui demande.
         demandeur: Identifiant,
         /// Le compte qui possède la machine visée.
         proprietaire: Identifiant,
-        /// Ce que chaque service annonce, déjà encodé.
+        /// Ce que le demandeur peut sur le domaine de la machine.
+        domaine: asl_auth::VueDuDomaine,
+        /// Ce que chaque service annonce, déjà encodé — adresses comprises.
         annonces: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+        /// Les mêmes services, **sans adresse** : un vivant porte un objet
+        /// d'annonce vide.
+        sans_adresses: alloc::vec::Vec<alloc::vec::Vec<u8>>,
     },
     /// Les autorisations d'un compte, dans les deux sens, **chacune déjà
     /// encodée**.
@@ -2549,13 +2558,20 @@ pub fn repondre<'o>(
             Trouvaille::ServicesDeMachine {
                 demandeur,
                 proprietaire,
+                domaine,
                 annonces,
-            } if asl_auth::decider_services_de_machine(*demandeur, *proprietaire)
-                == asl_auth::Decision::Servir =>
-            {
-                composer_une_liste(annonces, sortie)
-            }
-            // Refusé, ou rien trouvé : un tableau vide, pour la raison ci-dessus.
+                sans_adresses,
+            } => match asl_auth::decider_services_de_machine(*demandeur, *proprietaire, *domaine) {
+                asl_auth::DecisionDeServices::Entiere => composer_une_liste(annonces, sortie),
+                asl_auth::DecisionDeServices::SansAdresses => {
+                    composer_une_liste(sans_adresses, sortie)
+                }
+                // Refusé : un tableau vide, pour la raison ci-dessus.
+                asl_auth::DecisionDeServices::Refuser => {
+                    composer_une_liste(&alloc::vec::Vec::new(), sortie)
+                }
+            },
+            // Rien trouvé : un tableau vide, pour la raison ci-dessus.
             _ => composer_une_liste(&alloc::vec::Vec::new(), sortie),
         },
 
@@ -5406,7 +5422,9 @@ mod resolution {
             &Trouvaille::ServicesDeMachine {
                 demandeur: moi,
                 proprietaire: moi,
+                domaine: asl_auth::VueDuDomaine::default(),
                 annonces,
+                sans_adresses: Vec::new(),
             },
         );
         assert_eq!(statut, StatusCode::INTERNAL_SERVER_ERROR);
@@ -5429,6 +5447,7 @@ mod resolution {
         let moi = un(Genre::Utilisateur, 1);
         let autre = un(Genre::Utilisateur, 2);
         let annonces = vec![br#"{"service":"s-abc"}"#.to_vec()];
+        let sans_adresses = vec![br#"{"service":"s-abc","annonce":{}}"#.to_vec()];
 
         let (statut, corps) = rendu(
             &Besoin::ServicesDeMachine {
@@ -5437,7 +5456,9 @@ mod resolution {
             &Trouvaille::ServicesDeMachine {
                 demandeur: moi,
                 proprietaire: moi,
+                domaine: asl_auth::VueDuDomaine::default(),
                 annonces: annonces.clone(),
+                sans_adresses: sans_adresses.clone(),
             },
         );
         assert_eq!(statut, StatusCode::OK);
@@ -5450,7 +5471,9 @@ mod resolution {
             &Trouvaille::ServicesDeMachine {
                 demandeur: moi,
                 proprietaire: autre,
-                annonces,
+                domaine: asl_auth::VueDuDomaine::default(),
+                annonces: annonces.clone(),
+                sans_adresses: sans_adresses.clone(),
             },
         );
         assert_eq!(
@@ -5459,6 +5482,43 @@ mod resolution {
             "un refus ne se distingue pas d'un vide"
         );
         assert_eq!(corps, "[]", "et il ne dit pas si la machine existe");
+
+        // **DÉCISION 104** : `voir` sur le domaine de la machine rend les
+        // noms et l'état, sans adresse ; `localiser`, tout.
+        let (statut, corps) = rendu(
+            &Besoin::ServicesDeMachine {
+                machine: un(Genre::Machine, 2),
+            },
+            &Trouvaille::ServicesDeMachine {
+                demandeur: moi,
+                proprietaire: autre,
+                domaine: asl_auth::VueDuDomaine {
+                    voir: true,
+                    localiser: false,
+                },
+                annonces: annonces.clone(),
+                sans_adresses: sans_adresses.clone(),
+            },
+        );
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(corps, r#"[{"service":"s-abc","annonce":{}}]"#);
+        let (statut, corps) = rendu(
+            &Besoin::ServicesDeMachine {
+                machine: un(Genre::Machine, 2),
+            },
+            &Trouvaille::ServicesDeMachine {
+                demandeur: moi,
+                proprietaire: autre,
+                domaine: asl_auth::VueDuDomaine {
+                    voir: true,
+                    localiser: true,
+                },
+                annonces,
+                sans_adresses,
+            },
+        );
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(corps, r#"[{"service":"s-abc"}]"#);
     }
 
     #[test]

@@ -637,3 +637,37 @@ fn sans_lecture_personne_ne_resout_l_asl_directory_pas_meme_le_proprietaire() {
         DecisionDAnnuaire::Refuser
     );
 }
+
+// ── Les services d'une machine (décision 104) ───────────────────────────────
+
+#[test]
+fn les_services_d_une_machine_suivent_le_domaine_ou_elle_est_rangee() {
+    use asl_auth::{DecisionDeServices, VueDuDomaine, decider_services_de_machine};
+    let rien = VueDuDomaine::default();
+    let voir = VueDuDomaine {
+        voir: true,
+        localiser: false,
+    };
+    let localiser = VueDuDomaine {
+        voir: true,
+        localiser: true,
+    };
+    // Le propriétaire : tout, quel que soit le domaine.
+    assert_eq!(
+        decider_services_de_machine(alice(), alice(), rien),
+        DecisionDeServices::Entiere
+    );
+    // Un autre compte : ce que son droit sur le domaine donne.
+    assert_eq!(
+        decider_services_de_machine(bob(), alice(), localiser),
+        DecisionDeServices::Entiere
+    );
+    assert_eq!(
+        decider_services_de_machine(bob(), alice(), voir),
+        DecisionDeServices::SansAdresses
+    );
+    assert_eq!(
+        decider_services_de_machine(carole(), alice(), rien),
+        DecisionDeServices::Refuser
+    );
+}

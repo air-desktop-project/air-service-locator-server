@@ -121,6 +121,32 @@ impl Service<'_> {
         for entree in &lues {
             self.etat_federe.ranger(lu.membre, entree, maintenant);
         }
+        // **LE NOM SE RANGE, JAMAIS L'ADRESSE** (0.40.0, décision 100) : au
+        // premier rapport d'un service, les racines en déclarent la ligne —
+        // machine, nom, `s-…` dérivé —, comme pour un service qu'on leur
+        // annonce, et elle se réplique comme toute opération `service`. C'est
+        // ce qui fait marcher un droit « Un service » sur lui. **Elle se garde
+        // pour toujours** (décision 102), avec ses droits ; l'état vivant et
+        // les adresses restent en mémoire (C13), et c'est le rapport qui les
+        // donne (décision 99).
+        let nommees = lues
+            .iter()
+            .filter_map(|entree| Some((entree, core::str::from_utf8(entree.nom.octets()).ok()?)));
+        for (entree, nom) in nommees {
+            if matches!(self.entrepot.service_par_nom(entree.machine, nom), Ok(None))
+                && let Ok(service) = self.entrepot.declarer_service(
+                    asl_registre::Provenance::Ici,
+                    entree.machine,
+                    entree.nom,
+                )
+            {
+                (self.voie.journal)(&format!(
+                    "fédération : {} rapporte « {nom} » de {} — nom rangé sous {service} \
+                     (décision 100)",
+                    lu.membre, entree.machine
+                ));
+            }
+        }
         let vivantes = lues
             .iter()
             .filter(|entree| entree.reponse.is_some())
