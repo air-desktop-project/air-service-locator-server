@@ -254,6 +254,32 @@ impl EtatFedere {
         trouves
     }
 
+    /// Les services VIVANTS de ce nom, sur toutes les machines, avec leur
+    /// machine — pour les sondes du dehors d'une racine vers les échos des
+    /// domaines hébergés (décision 92).
+    #[must_use]
+    pub fn vivants_du_nom(
+        &self,
+        nom: &[u8],
+        maintenant: u64,
+        expiration: u64,
+    ) -> Vec<(Identifiant, LueFederee)> {
+        self.tenus
+            .iter()
+            .filter_map(|(clef, tenus)| {
+                let (&prefixe, reste) = clef.split_first()?;
+                let (octets, suite) = reste.split_first_chunk::<16>()?;
+                if suite != nom {
+                    return None;
+                }
+                let genre = asl_id::Genre::depuis_prefixe(prefixe)?;
+                let lue = retenir(tenus, maintenant, expiration)?;
+                lue.reponse.as_ref()?;
+                Some((Identifiant::depuis_entropie(genre, *octets), lue))
+            })
+            .collect()
+    }
+
     /// Oublie ce qu'aucun membre ne confirme plus : la mémoire ne grossit pas
     /// d'annuaires disparus.
     pub fn oublier_les_perimes(&mut self, maintenant: u64, expiration: u64) {

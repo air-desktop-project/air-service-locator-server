@@ -11,7 +11,8 @@
 //! # Les propriétés
 //!
 //! 1. **Rien ne panique.**
-//! 2. **C6 tient ici comme dans la réponse** : aucun point UDP dit mesuré,
+//! 2. **Comme dans la réponse** : un verdict mesuré porte sa date — sur TCP,
+//!    ou sur le point UDP de l'`asl-echo` depuis 0.43.0 (l'exception de C6) —,
 //!    aucun `joignable` sans date.
 //! 3. **AUCUN IDENTIFIANT DE SERVICE N'A PU ENTRER.** La connexion le détermine ;
 //!    un champ qui le répéterait pourrait la contredire.
@@ -22,7 +23,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use asl_proto::{MESSAGE_MAX, POINTS_MAX, Poussee, Protocole, TamponsReponse, Verdict};
+use asl_proto::{MESSAGE_MAX, POINTS_MAX, Poussee, TamponsReponse, Verdict};
 
 fuzz_target!(|donnees: &[u8]| {
     let mut tampons = TamponsReponse::nouveaux();
@@ -33,16 +34,14 @@ fuzz_target!(|donnees: &[u8]| {
     assert!(!poussee.joignabilite.is_empty());
     assert!(poussee.joignabilite.len() <= POINTS_MAX);
 
-    // PROPRIÉTÉ 2 : C6.
+    // PROPRIÉTÉ 2 : une mesure porte sa date.
     for entree in poussee.joignabilite {
         match entree.verdict {
             Verdict::Joignable { candidat, a } => {
-                assert_eq!(entree.point.protocole, Protocole::Tcp);
                 assert_eq!(entree.verdict.mesure_a(), Some(a));
                 assert_ne!(candidat.port.valeur(), 0);
             }
             Verdict::Injoignable { a } => {
-                assert_eq!(entree.point.protocole, Protocole::Tcp);
                 assert_eq!(entree.verdict.mesure_a(), Some(a));
             }
             Verdict::NonSonde { .. } | Verdict::EnCours => {

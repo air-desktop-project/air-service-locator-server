@@ -3014,9 +3014,28 @@ tout ce qu'il ne connaît pas (`asl-proto`, `Verdict::analyser` ;
 qui les met en français) : un verdict `joignable_prouve` ferait refuser la
 réponse entière par chaque `asl` et chaque application déployés. **Sur le point
 `asl-echo`, `joignable` veut dire « preuve de clé vérifiée »** — l'annuaire ne
-le pose pas autrement —, et un lecteur d'hier qui lit « joignable » dit vrai.
+le pose pas autrement.
 **C6 reçoit une exception, et une seule** : un point UDP devient `joignable`
 quand, et seulement quand, un écho a signé (`contraintes.md`, C6).
+
+**Ce que les lecteurs déployés en font — relevé en 0.43.0, et il faut le dire
+exactement.** Le mot n'est pas nouveau, mais **une mesure sur un point UDP
+l'est** : jusqu'à la 0.42.0, `asl_proto::Reponse::decoder` et
+`Poussee::decoder` refusaient tout `joignable` ou `injoignable` porté par un
+point UDP (`Erreur::VerdictImpossible`, C6 dans un type). Donc :
+
+- **`asl` ≤ 0.22.3 refuse l'objet d'annonce de CE service, et de lui seul** :
+  `asl where m-… asl-echo` échoue, et `asl domain` dit « la réponse ne se lit
+  pas » sur la ligne de l'écho ; les autres services de la même machine se
+  lisent comme avant. `asl-proto` accepte la mesure sur UDP **depuis 0.43.0**
+  — il ne connaît pas le nom du service, une poussée ne le porte pas —, et
+  un client qui l'épingle lit tout ;
+- **les applications Android et iOS la tolèrent** : elles lisent le verdict
+  par clé, sans contrainte de protocole
+  (`coeur-reseau/…/LectureDesServices.kt:63-72`,
+  `Sources/Coeur/Reseau/Reel/AnnuaireReel.swift:715-724`) ;
+- **les champs `echo*` de la machine sont tolérés** : des chaînes et des
+  entiers, que les applications lisent par clés et qu'`asl domain` saute.
 
 **L'état par machine — ce que les applications lisent.** Un champ de plus sur
 chaque machine, là où la machine est déjà rendue, **des chaînes et des
@@ -3331,6 +3350,36 @@ indiqué pour le serveur.
    dans `GET /v1/machines` et `GET /v1/domaines/{d}` ; la même sonde chez un
    annuaire local, et son verdict dans l'état fédéré ; la sonde des racines
    vers les échos fédérés ; la cadence de quinze minutes.
+   **Fait en 0.43.0.** Le nom réservé à sa forme : `asl-session` rend `400`
+   à une annonce `asl-echo` qui ne porte pas un seul point UDP
+   (`asl_proto::forme_d_echo`). `asl_annuaire::Session` sait qu'elle tient un
+   écho : son point UDP se sonde, son candidat réflexif porte le port observé,
+   et `a_resonder` rend ses points toutes les quinze minutes
+   (`CADENCE_D_ECHO_MS`). `asl-loop-tokio::sonde::prouver` sonde depuis une
+   socket UDP éphémère, trois envois d'une seconde, avec la sonde
+   `0x01` signée par la clé d'identité de l'annuaire qui tient le bail — une
+   racine, ou le membre de l'annuaire local — et vérifie la réponse sous la clé
+   que l'entrepôt tient pour la machine. `asl-proto` accepte une mesure sur un
+   point UDP (voir « Aucun mot nouveau », plus haut, pour ce que les lecteurs
+   déployés en font). Les racines sondent du dehors l'écho que rapporte un
+   membre, vers l'adresse et le port qu'il a vus, **si l'adresse est
+   globale** (`asl_annuaire::adresse_globale`), une fois par changement et au
+   plus tous les quarts d'heure (`sonder_du_dehors`). L'état par machine —
+   `echo`, `echo_a`, `echo_par`, `echo_depuis` — est dans `GET /v1/machines`
+   et dans les `machines` de `GET /v1/domaines/{d}`. **Trois précisions**,
+   que la forme impliquait sans les écrire :
+   - **`echo_depuis` d'un bail tenu par une racine** : `exterieur` si
+     l'adresse observée est globale, `interieur` sinon — bouclage, privée,
+     lien-local, ULA, partagée. Une racine n'a pas, comme un membre, de liste
+     d'adresses à elle à comparer ; pour un écho qu'un membre rapporte, c'est
+     la règle de `sonde_locale`, sur ses adresses ;
+   - **un membre ne rapporte pas `autre_cle`** : son rapport est l'objet
+     d'annonce, où une autre clé est `injoignable`. Les racines le disent
+     quand ELLES sondent du dehors, et leur constat l'emporte alors sur celui
+     du membre (`echo_par` à la racine, `exterieur`) ;
+   - **la resonde du quart d'heure pousse le verdict à `asl echo`** chaque
+     fois : `joignable` porte sa date, et une date nouvelle est un verdict
+     nouveau.
 4. **Le champ `passerelle`** (mineur ; décisions 94 et 97) : le champ
    `{"port", "via"}` de l'annonce `asl-echo` dans `asl-proto` (décodé, fuzzé,
    refusé sur toute autre annonce) ; son candidat en tête — adresse observée,

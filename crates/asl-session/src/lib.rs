@@ -102,6 +102,26 @@ const _: () = assert!(
     "le nom d'une machine ne se range pas : les deux bornes ont divergé"
 );
 
+/// **LE NOM DE L'ÉCHO EST LE MÊME DES DEUX CÔTÉS** : `asl-proto` le réserve
+/// à sa forme et `asl-annuaire` le sonde par lui, `asl-echo` le résout pour
+/// le jeton — deux crates qui ne se connaissent pas.
+const _: () = assert!(
+    {
+        let (a, b) = (
+            asl_proto::NOM_ASL_ECHO.as_bytes(),
+            asl_echo::NOM_SERVICE.as_bytes(),
+        );
+        let mut egaux = a.len() == b.len();
+        let mut rang = 0;
+        while egaux && rang < a.len() {
+            egaux = a[rang] == b[rang];
+            rang += 1;
+        }
+        egaux
+    },
+    "le nom de l'écho a divergé entre asl-proto et asl-echo"
+);
+
 /// **LE NOM RÉSERVÉ EST LE NOM DÉRIVÉ** (décision 73) : `asl-proto` le
 /// route et le refuse à l'annonce, `asl-registre` en dérive le `s-…`, et les
 /// deux crates ne se connaissent pas. Celle-ci tient leur égalité.
@@ -1750,7 +1770,22 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         Ressource::MachinesUtilisateur { compte } => Besoin::MachinesDe { compte },
         Ressource::Moi => Besoin::Moi,
         Ressource::AppareilsDuProprietaire => Besoin::AppareilsDuProprietaire,
-        Ressource::Annonce => Besoin::Annoncer,
+        // **LE NOM `asl-echo` EST RÉSERVÉ À SA FORME** (décision 90 ; E13) :
+        // un seul point, en UDP, sinon `400` — la requête est bien formée en
+        // JSON, mais elle dit de l'écho ce que l'écho n'est pas. Tout autre
+        // défaut du message reste à l'étage 3, qui le refuse comme avant.
+        Ressource::Annonce => {
+            let mut tampons = asl_proto::cadrage::Tampons::nouveaux();
+            match asl_proto::Annonce::decoder(corps, &mut tampons) {
+                Ok(annonce)
+                    if annonce.service.as_str() == asl_proto::NOM_ASL_ECHO
+                        && !asl_proto::forme_d_echo(annonce.points) =>
+                {
+                    Besoin::Deja(StatusCode::BAD_REQUEST)
+                }
+                _ => Besoin::Annoncer,
+            }
+        }
         Ressource::Ou { machine, service } => Besoin::Ou {
             machine,
             service: service.as_str(),
@@ -10612,6 +10647,43 @@ mod jeton_echo {
         for (statut, corps) in &refus {
             assert_eq!(*statut, StatusCode::NOT_FOUND);
             assert_eq!(corps, &refus[0].1, "C9 : octet pour octet");
+        }
+    }
+
+    #[test]
+    fn le_nom_asl_echo_est_reserve_a_sa_forme() {
+        // Décision 90 ; E13 : un seul point, en UDP, sinon `400`.
+        let session = session_authentifiee();
+        let m = un(Genre::Machine, 1).texte();
+        let annonce = |service: &str, points: &str| {
+            alloc::format!(
+                r#"{{"machine":"{}","service":"{service}","points":{points}}}"#,
+                m.as_str()
+            )
+        };
+        for points in [
+            r#"[{"protocole":"tcp","port":41877}]"#,
+            r#"[{"protocole":"udp","port":41877},{"protocole":"udp","port":41878}]"#,
+        ] {
+            let corps = annonce("asl-echo", points);
+            assert_eq!(
+                besoin(&session, &tete(b"POST", b"/v1/annonce"), corps.as_bytes()),
+                Besoin::Deja(StatusCode::BAD_REQUEST),
+                "{points}"
+            );
+        }
+        // Sa forme, et tout autre nom sous n'importe quelle forme, passent ;
+        // un message mal formé reste à l'étage 3.
+        for corps in [
+            annonce("asl-echo", r#"[{"protocole":"udp","port":41877}]"#),
+            annonce("depot", r#"[{"protocole":"tcp","port":41877}]"#),
+            alloc::string::String::from("pas du json"),
+        ] {
+            assert_eq!(
+                besoin(&session, &tete(b"POST", b"/v1/annonce"), corps.as_bytes()),
+                Besoin::Annoncer,
+                "{corps}"
+            );
         }
     }
 

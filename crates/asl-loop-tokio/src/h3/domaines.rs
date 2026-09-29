@@ -264,6 +264,9 @@ impl Service<'_> {
                     proprietaire: rangee.proprietaire,
                     nom: core::str::from_utf8(rangee.nom.octets()).ok(),
                     alias: alias.as_ref().map(asl_registre::AliasDeMachine::texte),
+                    // **L'ÉTAT D'ÉCHO, POUR QUI A `voir`** (décision 91 ; E7) :
+                    // sans adresse, comme le reste de cet objet.
+                    echo: self.etat_d_echo(*machine),
                 },
             )
             .collect();

@@ -481,3 +481,16 @@ fn chaque_erreur_se_dit_a_un_humain() {
         assert_ne!(message, format!("{erreur:?}"), "{erreur:?}");
     }
 }
+
+#[test]
+fn l_echo_porte_un_seul_point_en_udp() {
+    use asl_proto::{NOM_ASL_ECHO, PointEcoute, Port, Protocole, forme_d_echo};
+    assert_eq!(NOM_ASL_ECHO, "asl-echo");
+    let udp = PointEcoute::nouveau(Protocole::Udp, Port::depuis_u16(41877).unwrap());
+    let tcp = PointEcoute::nouveau(Protocole::Tcp, Port::depuis_u16(41877).unwrap());
+    let autre = PointEcoute::nouveau(Protocole::Udp, Port::depuis_u16(41878).unwrap());
+    assert!(forme_d_echo(&[udp]));
+    assert!(!forme_d_echo(&[tcp]));
+    assert!(!forme_d_echo(&[udp, autre]));
+    assert!(!forme_d_echo(&[]));
+}

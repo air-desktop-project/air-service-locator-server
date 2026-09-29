@@ -125,17 +125,14 @@ fn les_invariants_sont_ceux_de_la_reponse() {
         Err(Erreur::PointEnDouble)
     );
 
-    // C6 : un point UDP ne peut pas être dit mesuré, ici comme là-bas.
-    let impossible = [Joignabilite {
+    // Le point UDP de l'écho se mesure, ici comme là-bas (0.43.0).
+    let mesure = [Joignabilite {
         point: PointEcoute::nouveau(Protocole::Udp, port(1)),
         verdict: Verdict::Injoignable {
             a: Horodatage::depuis_millisecondes(1),
         },
     }];
-    assert_eq!(
-        Poussee::nouvelle(vu_depuis(), VerdictNat::Non, &impossible),
-        Err(Erreur::VerdictImpossible)
-    );
+    assert!(Poussee::nouvelle(vu_depuis(), VerdictNat::Non, &mesure).is_ok());
 }
 
 #[test]

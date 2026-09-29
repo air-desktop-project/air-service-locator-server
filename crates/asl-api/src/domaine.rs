@@ -324,6 +324,9 @@ pub struct MachineDeDomaine<'a> {
     /// Son alias, sous la même condition que le nom, et s'il en a un
     /// (0.26.0).
     pub alias: Option<&'a str>,
+    /// L'état de son écho, pour qui a `voir` sur le domaine (décision 91 ;
+    /// E7) — sans adresse ; absent sans `asl-echo` annoncé.
+    pub echo: Option<crate::corps::EtatDEcho>,
 }
 
 impl MachineDeDomaine<'_> {
@@ -344,6 +347,9 @@ impl MachineDeDomaine<'_> {
             ecrivain.pousser(b",\"alias\":\"");
             ecrivain.pousser(alias.as_bytes());
             ecrivain.pousser(b"\"");
+        }
+        if let Some(echo) = &self.echo {
+            echo.ecrire(ecrivain);
         }
         ecrivain.pousser(b"}");
     }
