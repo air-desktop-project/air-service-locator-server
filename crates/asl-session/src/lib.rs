@@ -894,6 +894,14 @@ pub enum Besoin<'a> {
     /// `GET /v1/racines` — l'identité et les locateurs des racines
     /// (décision 56). Sans exigence.
     Racines,
+    /// `POST /v1/echo/jetons` — un jeton pour sonder l'écho de cette machine
+    /// (décision 91). **L'étage 3 rassemble la résolution de
+    /// `GET /v1/ou/{m}/asl-echo` et signe le jeton ; c'est ici qu'`asl_auth`
+    /// décide s'il se rend** — voir [`JetonRassemble`].
+    JetonEcho {
+        /// La machine qu'on veut sonder.
+        machine: Identifiant,
+    },
     /// **Ce verbe relève des racines, et cet annuaire est LOCAL** (décision
     /// 62) : `421`, avec la liste des racines pour corps — celle que rend
     /// `GET /v1/racines`, identités et locateurs. Un annuaire local n'a
@@ -996,6 +1004,25 @@ pub struct ResolutionDAnnuaire {
     /// adresse déclarée (décisions 75 et 81) — et son `n-…`. Vide quand
     /// aucun membre n'est vivant : `404` (décision 82).
     pub vivants: alloc::vec::Vec<(alloc::string::String, Identifiant)>,
+}
+
+/// Ce que l'étage 3 rassemble pour `POST /v1/echo/jetons` (décision 91).
+///
+/// # LE JETON EST SIGNÉ AVANT LA DÉCISION, ET RENDU APRÈS
+///
+/// C'est la forme de [`Resolution::annonce`] : lu — ici, signé — quel que
+/// soit le demandeur, révélé seulement si `asl_auth::decider_resolution`
+/// sert. **L'étage 3 signe TOUJOURS un jeton, et un seul** — un vrai quand la
+/// résolution est complète, un leurre sinon — : « pas de machine », « pas
+/// d'écho annoncé » et « pas le droit » rendent le même `404` après le même
+/// travail (C9), dont la signature est la part qui compte.
+#[derive(Debug, Clone)]
+pub struct JetonRassemble {
+    /// La résolution de `GET /v1/ou/{m}/asl-echo`, si elle est complète :
+    /// le demandeur, la cible, les autorisations, et l'annonce de l'écho.
+    pub resolution: Option<Resolution>,
+    /// Le jeton signé par la clé d'identité de cette racine.
+    pub jeton: asl_echo::Jeton,
 }
 
 /// Une machine rassemblée pour `GET /v1/utilisateurs/{u}/machines`, telle que
@@ -1296,6 +1323,8 @@ pub enum Trouvaille {
     Racines(alloc::vec::Vec<alloc::vec::Vec<u8>>),
     /// L'annuaire d'un membre et ses membres acceptés (0.36.0, décision 70).
     Paire(asl_api::annuaire::PaireRendue),
+    /// De quoi décider d'un jeton d'écho, et le jeton (décision 91).
+    JetonEcho(alloc::boxed::Box<JetonRassemble>),
 }
 
 /// Ce qu'une session sait d'une connexion.
@@ -1965,6 +1994,14 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
             Err(_) => Besoin::Deja(StatusCode::BAD_REQUEST),
         },
         Ressource::Racines => Besoin::Racines,
+        // **LA MACHINE VISÉE EST DANS LE CORPS**, jamais la clé du sondeur :
+        // celle-là, la connexion la porte (`protocole.md` §3 quater).
+        Ressource::JetonsEcho => asl_api::echo::DemandeDeJeton::decoder(corps).map_or(
+            Besoin::Deja(StatusCode::BAD_REQUEST),
+            |demande| Besoin::JetonEcho {
+                machine: demande.machine,
+            },
+        ),
         Ressource::EtatAnnuaire => lire_une_demande_d_etat(session, corps),
         Ressource::Inscriptions => Besoin::InscriptionsEnAttente,
         Ressource::DecisionInscription { membre } => {
@@ -3071,6 +3108,27 @@ pub fn repondre<'o>(
             Trouvaille::Racines(quoi) => composer_une_liste_sous(MAL_ADRESSEE, quoi, sortie),
             _ => composer(MAL_ADRESSEE, PROBLEME_MEDIA, probleme(MAL_ADRESSEE), sortie),
         },
+        // **`asl-auth` DÉCIDE, COMME POUR `GET /v1/ou`** (décision 91) : qui
+        // peut localiser l'écho de cette machine obtient un jeton pour le
+        // sonder. Tout le reste — pas de machine, pas d'écho annoncé, pas le
+        // droit — rend le MÊME `404` (C9). `429` au-delà du débit, qui ne dit
+        // rien de la cible ; `500` si cette racine n'a pas de clé d'identité
+        // pour signer, ce qui ne dépend pas de la cible non plus.
+        Besoin::JetonEcho { .. } => match trouvaille {
+            Trouvaille::JetonEcho(quoi) => rendre_un_jeton(quoi, sortie),
+            Trouvaille::TropDEssais => composer(
+                StatusCode::TOO_MANY_REQUESTS,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::TOO_MANY_REQUESTS),
+                sortie,
+            ),
+            _ => composer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::INTERNAL_SERVER_ERROR),
+                sortie,
+            ),
+        },
         Besoin::Racines => match trouvaille {
             Trouvaille::Racines(quoi) => composer_une_liste(quoi, sortie),
             _ => composer(
@@ -3430,6 +3488,39 @@ fn rendre_la_version<'a>(
     }
     corps.pousser(br#""}"#);
     composer(StatusCode::OK, JSON_MEDIA, corps.rendu(), sortie)
+}
+
+/// Rend le jeton d'écho, ou le `404` de C9.
+///
+/// **Le jeton ne sort que si la décision de `GET /v1/ou/{m}/asl-echo` sert ET
+/// qu'un écho est annoncé** : sans annonce, il n'y a rien à sonder, et le
+/// dire autrement que par `404` distinguerait « pas d'écho » de « pas le
+/// droit ».
+fn rendre_un_jeton<'o>(quoi: &JetonRassemble, sortie: &'o mut [u8]) -> Reponse<'o> {
+    let servi = quoi.resolution.as_ref().is_some_and(|resolution| {
+        resolution.annonce.is_some()
+            && asl_auth::decider_resolution(
+                &resolution.demandeur,
+                &resolution.cible,
+                &resolution.autorisations,
+            ) == asl_auth::Decision::Servir
+    });
+    let mut corps = [0_u8; asl_api::echo::JETON_RENDU_MAX];
+    let rendu = asl_api::echo::JetonRendu { jeton: quoi.jeton }.encoder(&mut corps);
+    match (servi, rendu) {
+        (true, Ok(combien)) => composer(
+            StatusCode::OK,
+            JSON_MEDIA,
+            corps.get(..combien).unwrap_or_default(),
+            sortie,
+        ),
+        _ => composer(
+            StatusCode::NOT_FOUND,
+            PROBLEME_MEDIA,
+            probleme(StatusCode::NOT_FOUND),
+            sortie,
+        ),
+    }
 }
 
 /// Rend l'`asl-directory` d'un annuaire local, ou le `404` de C9.
@@ -10297,5 +10388,242 @@ mod voie_de_l_annuaire_local {
             &mut sortie,
         );
         assert_eq!(reponse.status(), MAL_ADRESSEE);
+    }
+}
+
+#[cfg(test)]
+mod jeton_echo {
+    //! `POST /v1/echo/jetons` (décision 91) : la décision de `GET /v1/ou`,
+    //! le même `404` pour tout ce qui n'est pas servi (C9), `421` chez un
+    //! annuaire local.
+
+    extern crate alloc;
+
+    use alloc::vec::Vec;
+    use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode};
+    use asl_cle::{CleSecrete, LiaisonDeCanal};
+    use asl_id::{Genre, Identifiant};
+
+    use super::{
+        Besoin, CleTrouvee, JetonRassemble, MAL_ADRESSEE, Resolution, Session, Trouvaille, besoin,
+        besoin_d_un_annuaire_local, repondre,
+    };
+
+    fn liaison() -> LiaisonDeCanal {
+        LiaisonDeCanal::depuis_octets([0x11; asl_cle::LIAISON_OCTETS])
+    }
+
+    fn tete<'a>(verbe: &'a [u8], cible: &'a [u8]) -> RequestHead<'a> {
+        let limites = Limits::default();
+        let mut constructeur = HeadBuilder::new(&limites);
+        constructeur.field(b":method", verbe).expect("le verbe");
+        constructeur.field(b":scheme", b"https").expect("le schéma");
+        constructeur
+            .field(b":authority", b"annuaire.example")
+            .expect("l'autorité");
+        constructeur.field(b":path", cible).expect("la cible");
+        constructeur.finish().expect("une tête complète")
+    }
+
+    fn un(genre: Genre, graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(genre, [graine; 16])
+    }
+
+    fn racine() -> CleSecrete {
+        CleSecrete::depuis_entropie([0x11; 32])
+    }
+
+    /// Une session sur laquelle la machine `un(Machine, 1)` a prouvé sa clé.
+    fn session_authentifiee() -> Session {
+        let secrete = CleSecrete::depuis_entropie([7; 32]);
+        let machine = un(Genre::Machine, 1);
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 256];
+        let quoi = besoin(&session, &tete(b"GET", b"/v1/defi"), b"");
+        let voulu = asl_cle::Defi::depuis_octets([9; 32]);
+        let _ = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Rien,
+            Some(voulu),
+            &mut sortie,
+        );
+        let signature = secrete
+            .signer(machine, &voulu, &liaison())
+            .expect("elle signe");
+        let mut corps = Vec::new();
+        corps.push(Genre::Machine.prefixe());
+        corps.extend_from_slice(machine.octets());
+        corps.extend_from_slice(signature.octets());
+        let quoi = besoin(&session, &tete(b"POST", b"/v1/defi"), &corps);
+        let reponse = repondre(
+            &mut session,
+            &quoi,
+            &Trouvaille::Cle(CleTrouvee::Machine(secrete.publique())),
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::NO_CONTENT);
+        session
+    }
+
+    fn corps_pour(machine: Identifiant) -> alloc::string::String {
+        alloc::format!(r#"{{"machine":"{}"}}"#, machine.texte().as_str())
+    }
+
+    /// Une résolution : même propriétaire (servie) ou non, écho annoncé ou non.
+    fn resolution(meme_proprietaire: bool, annonce: bool) -> Resolution {
+        Resolution {
+            demandeur: asl_auth::Machine::nouvelle(
+                un(Genre::Machine, 1),
+                un(Genre::Utilisateur, 1),
+                asl_auth::Capacites::LECTURE,
+            )
+            .expect("une machine"),
+            cible: asl_auth::Cible::nouvelle(
+                un(Genre::Service, 1),
+                un(Genre::Machine, 2),
+                un(Genre::Utilisateur, if meme_proprietaire { 1 } else { 2 }),
+            )
+            .expect("une cible"),
+            autorisations: Vec::new(),
+            annonce: annonce.then(|| br#"{"service":"s-abc","joignabilite":[]}"#.to_vec()),
+        }
+    }
+
+    fn jeton() -> asl_echo::Jeton {
+        asl_echo::Jeton::emettre(
+            &racine(),
+            un(Genre::Machine, 2),
+            CleSecrete::depuis_entropie([2; 32]).publique(),
+            un(Genre::Machine, 1),
+            CleSecrete::depuis_entropie([7; 32]).publique(),
+            1_789_217_731_000,
+        )
+        .expect("un jeton")
+    }
+
+    /// Le statut et le corps rendus pour cette trouvaille.
+    fn rendre(trouvaille: &Trouvaille) -> (StatusCode, Vec<u8>) {
+        let mut session = session_authentifiee();
+        let mut sortie = [0_u8; 1024];
+        let reponse = repondre(
+            &mut session,
+            &Besoin::JetonEcho {
+                machine: un(Genre::Machine, 2),
+            },
+            trouvaille,
+            None,
+            &mut sortie,
+        );
+        (reponse.status(), reponse.body().to_vec())
+    }
+
+    fn rassemble(resolution: Option<Resolution>) -> Trouvaille {
+        Trouvaille::JetonEcho(alloc::boxed::Box::new(JetonRassemble {
+            resolution,
+            jeton: jeton(),
+        }))
+    }
+
+    #[test]
+    fn la_demande_se_route_sur_la_voie_machine_avec_sa_machine() {
+        let session = session_authentifiee();
+        let visee = un(Genre::Machine, 2);
+        let corps = corps_pour(visee);
+        assert_eq!(
+            besoin(
+                &session,
+                &tete(b"POST", b"/v1/echo/jetons"),
+                corps.as_bytes()
+            ),
+            Besoin::JetonEcho { machine: visee }
+        );
+        // Sans preuve de machine : `401`, avant toute lecture.
+        let anonyme = Session::new(liaison());
+        assert_eq!(
+            besoin(
+                &anonyme,
+                &tete(b"POST", b"/v1/echo/jetons"),
+                corps.as_bytes()
+            ),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+        // Un corps qui ne nomme pas une machine : `400`.
+        for mauvais in [
+            &br#"{"machine":"u-00000000000000000000000000"}"#[..],
+            br#"{"cible":"m-x"}"#,
+            b"",
+        ] {
+            assert_eq!(
+                besoin(&session, &tete(b"POST", b"/v1/echo/jetons"), mauvais),
+                Besoin::Deja(StatusCode::BAD_REQUEST)
+            );
+        }
+        // Un `GET` n'est pas servi.
+        assert_eq!(
+            besoin(&session, &tete(b"GET", b"/v1/echo/jetons"), b""),
+            Besoin::Deja(StatusCode::METHOD_NOT_ALLOWED)
+        );
+    }
+
+    #[test]
+    fn un_annuaire_local_renvoie_aux_racines() {
+        let session = session_authentifiee();
+        let corps = corps_pour(un(Genre::Machine, 2));
+        assert_eq!(
+            besoin_d_un_annuaire_local(
+                &session,
+                &tete(b"POST", b"/v1/echo/jetons"),
+                corps.as_bytes()
+            ),
+            Besoin::AuxRacines
+        );
+        let mut session = session;
+        let mut sortie = [0_u8; 256];
+        let reponse = repondre(
+            &mut session,
+            &Besoin::AuxRacines,
+            &Trouvaille::Rien,
+            None,
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), MAL_ADRESSEE);
+    }
+
+    #[test]
+    fn qui_localise_l_echo_recoit_le_jeton() {
+        let (statut, corps) = rendre(&rassemble(Some(resolution(true, true))));
+        assert_eq!(statut, StatusCode::OK);
+        let rendu = asl_api::echo::JetonRendu::decoder(&corps).expect("un jeton rendu");
+        assert_eq!(rendu.jeton, jeton());
+    }
+
+    #[test]
+    fn pas_de_machine_pas_d_echo_pas_le_droit_le_meme_404() {
+        let refus: Vec<(StatusCode, Vec<u8>)> = [
+            rassemble(None),
+            rassemble(Some(resolution(true, false))),
+            rassemble(Some(resolution(false, true))),
+        ]
+        .iter()
+        .map(rendre)
+        .collect();
+        for (statut, corps) in &refus {
+            assert_eq!(*statut, StatusCode::NOT_FOUND);
+            assert_eq!(corps, &refus[0].1, "C9 : octet pour octet");
+        }
+    }
+
+    #[test]
+    fn le_debit_rend_429_et_sans_cle_d_identite_500() {
+        assert_eq!(
+            rendre(&Trouvaille::TropDEssais).0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            rendre(&Trouvaille::Rien).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

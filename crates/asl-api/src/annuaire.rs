@@ -54,7 +54,7 @@ const fn borner(octets: &[u8], maximum: usize) -> Result<(), Erreur> {
 }
 
 /// Lit `"<champ>":` à la position du lecteur.
-fn champ(lecteur: &mut Lecteur<'_>, nom: &str) -> Result<(), Erreur> {
+pub(crate) fn champ(lecteur: &mut Lecteur<'_>, nom: &str) -> Result<(), Erreur> {
     lecteur.sauter_blancs();
     let position = lecteur.position();
     if lecteur.chaine()? != nom {
@@ -74,7 +74,7 @@ fn ouvrir_jusqu_a<'a>(octets: &'a [u8], nom: &str, maximum: usize) -> Result<Lec
 }
 
 /// Lit `{"<champ>": ` et rend le lecteur placé sur la valeur.
-fn ouvrir<'a>(octets: &'a [u8], nom: &str) -> Result<Lecteur<'a>, Erreur> {
+pub(crate) fn ouvrir<'a>(octets: &'a [u8], nom: &str) -> Result<Lecteur<'a>, Erreur> {
     ouvrir_jusqu_a(octets, nom, CORPS_MAX)
 }
 
@@ -117,7 +117,7 @@ fn tableau_de_chaines<'a, const N: usize>(
 }
 
 /// Lit `}` et la fin du corps.
-fn fermer(lecteur: &mut Lecteur<'_>) -> Result<(), Erreur> {
+pub(crate) fn fermer(lecteur: &mut Lecteur<'_>) -> Result<(), Erreur> {
     lecteur.attendre(b'}', "la fin de l'objet")?;
     lecteur.fin()
 }
@@ -906,7 +906,7 @@ fn n_de(lecteur: &mut Lecteur<'_>) -> Result<Identifiant, Erreur> {
 
 /// Écrit un entier en décimal, sans allocation : vingt chiffres suffisent à
 /// un `u64`.
-fn ecrire_un_entier(valeur: u64, tampon: &mut [u8; 20]) -> &[u8] {
+pub(crate) fn ecrire_un_entier(valeur: u64, tampon: &mut [u8; 20]) -> &[u8] {
     let mut reste = valeur;
     let mut debut = tampon.len();
     for place in tampon.iter_mut().rev() {

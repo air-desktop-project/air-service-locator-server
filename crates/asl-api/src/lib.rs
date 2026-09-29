@@ -47,6 +47,7 @@ pub mod annuaire;
 pub mod corps;
 pub mod domaine;
 pub mod droit;
+pub mod echo;
 pub mod groupe;
 pub mod point;
 
@@ -656,6 +657,21 @@ pub enum Ressource<'a> {
     /// doit pouvoir lire, et la connexion qui le porte est déjà vérifiée par
     /// clé — c'est elle, la signature.
     Racines,
+    /// `/v1/echo/jetons` — **un jeton pour sonder l'écho d'une machine**
+    /// (`protocole.md` §3 quater, décision 91), aux racines.
+    ///
+    /// # SUR LA VOIE MACHINE, ET SOUS LA DÉCISION DE `GET /v1/ou`
+    ///
+    /// C'est `asl ping` qui le demande, sur la machine qui sonde : sa clé,
+    /// prouvée par la connexion, est celle que le jeton liera. La décision est
+    /// celle de `GET /v1/ou/{m}/asl-echo` — qui peut LOCALISER l'écho peut le
+    /// sonder —, d'où la même exigence, [`Exigence::MachineLecture`]. Un
+    /// annuaire local ne la sert pas : il renvoie aux racines (`421`).
+    ///
+    /// **Un `POST`, et non un champ de plus dans `GET /v1/ou`** : un jeton se
+    /// délivre, se journalise et se limite — c'est un acte, pas une lecture —,
+    /// et le décodeur de la réponse d'annonce refuse tout champ inconnu.
+    JetonsEcho,
     /// `/v1/replication` — **l'état de la voie entre racines, vu d'ici**
     /// (`replication.md` §8) : le pair, la voie ouverte ou coupée, notre
     /// compteur, et jusqu'où l'on a appliqué ce que le pair a écrit — ou
@@ -690,7 +706,8 @@ impl Ressource<'_> {
             | Self::EtatAnnuaire
             | Self::MembresAnnuaire { .. }
             | Self::DecisionInscription { .. }
-            | Self::FederationEtat => &[Methode::Post],
+            | Self::FederationEtat
+            | Self::JetonsEcho => &[Methode::Post],
             Self::Utilisateur { .. }
             | Self::MachinesUtilisateur { .. }
             | Self::Moi
@@ -804,9 +821,10 @@ impl Ressource<'_> {
             | Self::Racines
             | Self::Utilisateur { .. } => Exigence::Aucune,
             Self::Annonce | Self::Poussees => Exigence::MachineAnnonce,
-            Self::Ou { .. } | Self::OuAnnuaire { .. } | Self::OuParNom { .. } => {
-                Exigence::MachineLecture
-            }
+            Self::Ou { .. }
+            | Self::OuAnnuaire { .. }
+            | Self::OuParNom { .. }
+            | Self::JetonsEcho => Exigence::MachineLecture,
             Self::Moi | Self::AppareilsDuProprietaire | Self::Replication => Exigence::Machine,
             // **Les lectures de domaine, sur les deux voies** (0.39.0) ; leurs
             // écritures, à un appareil : voir
@@ -1286,6 +1304,7 @@ fn router<'a>(segments: &[&'a str], requete: &'a [u8]) -> Result<Ressource<'a>, 
         ["v1", "federation", "locateurs"] => Ok(Ressource::FederationLocateurs),
         ["v1", "federation", "paire"] => Ok(Ressource::FederationPaire),
         ["v1", "racines"] => Ok(Ressource::Racines),
+        ["v1", "echo", "jetons"] => Ok(Ressource::JetonsEcho),
         _ => Err(Erreur::RessourceInconnue),
     }
 }

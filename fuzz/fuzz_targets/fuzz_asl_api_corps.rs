@@ -130,6 +130,25 @@ const fn invisible(caractere: char) -> bool {
 }
 
 fuzz_target!(|octets: &[u8]| {
+    // ── LE JETON D'ÉCHO (0.42.0, décision 91) : la demande et la réponse se
+    // réécrivent et se relisent à l'identique ; une réponse lue porte
+    // l'expiration de son jeton.
+    if let Ok(demande) = asl_api::echo::DemandeDeJeton::decoder(octets) {
+        let mut sortie = [0_u8; 64];
+        let combien = demande.encoder(&mut sortie).expect("elle tient");
+        assert_eq!(
+            asl_api::echo::DemandeDeJeton::decoder(&sortie[..combien]),
+            Ok(demande)
+        );
+    }
+    if let Ok(rendu) = asl_api::echo::JetonRendu::decoder(octets) {
+        let mut sortie = [0_u8; asl_api::echo::JETON_RENDU_MAX];
+        let combien = rendu.encoder(&mut sortie).expect("il tient");
+        assert_eq!(
+            asl_api::echo::JetonRendu::decoder(&sortie[..combien]),
+            Ok(rendu)
+        );
+    }
     // ── LA PAIRE (0.36.0, décision 70) : ce qui se lit se réécrit et se relit
     // à l'identique.
     if let Ok(declaration) = asl_api::annuaire::DeclarationDePair::decoder(octets) {

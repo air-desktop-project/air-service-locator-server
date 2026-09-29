@@ -7074,6 +7074,17 @@ async fn un_annuaire_local_renvoie_aux_racines(
     assert_eq!(statut, b"421", "{corps}");
     let (statut, corps) = lire_json(&mut egare, 8, b"/v1/version").await;
     assert_eq!(statut, b"200", "{corps}");
+    // **LE JETON D'ÉCHO SE DÉLIVRE AUX RACINES** (décision 91) : un annuaire
+    // local ne sait rien des droits, il renvoie.
+    let (statut, corps) = poster(
+        &mut egare,
+        12,
+        b"/v1/echo/jetons",
+        br#"{"machine":"m-00000000000000000000000000"}"#,
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"421", "{}", String::from_utf8_lossy(&corps));
     // Une racine ne renvoie rien de tout cela : une machine n'a pas droit aux
     // groupes, c'est `401` — pas `421`. (Les domaines, eux, se LISENT sur la
     // voie machine depuis la 0.39.0 : la même racine les sert, `200`.)
@@ -8206,6 +8217,9 @@ async fn monter_une_scene_d_annuaire(nom: &str) -> SceneDAnnuaire {
             exploitant: Some(exploitant_cle.publique()),
             expiration_federee_us: Some(3_000_000),
             entrepot_partage: Some(rendre_entrepot),
+            // La clé d'identité de la racine, qui signe les jetons d'écho
+            // (décision 91) — la même que celle du banc, comme le binaire.
+            identite: Some(identite),
             ..ClesDeLExploitant::default()
         },
     )
@@ -9638,5 +9652,226 @@ async fn les_droits_d_un_domaine_valent_sur_les_machines_des_autres_qui_y_sont_r
 
     drop(daemon);
     scene.bob = bob;
+    scene.arreter().await;
+}
+
+/// Demande un jeton d'écho pour cette machine : le statut et le corps.
+async fn demander_un_jeton(
+    client: &mut ams_quic_client::Client,
+    flux: &mut u64,
+    machine: Identifiant,
+) -> (Vec<u8>, Vec<u8>) {
+    let corps = format!(r#"{{"machine":"{}"}}"#, machine.texte());
+    poster(
+        client,
+        suivant(flux),
+        b"/v1/echo/jetons",
+        corps.as_bytes(),
+        b"application/json",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn un_jeton_d_echo_se_delivre_a_qui_localise_l_echo_et_ne_sert_qu_a_sa_cle() {
+    // ── CE QUE CET ESSAI PROUVE (décision 91, 0.42.0) ───────────────────────
+    //
+    // Alice range son grenier chez bob, qui y tient donc `localiser` sans
+    // droit écrit (décision 103), et le grenier annonce `asl-echo`.
+    //
+    // 1. **Accordé** : la console de bob obtient un jeton, signé par la clé
+    //    d'identité de la racine, qui nomme le grenier et SA clé, la console
+    //    et SA clé ; l'écho le croit, hors ligne, et une ligne va au journal.
+    // 2. **Lié à une autre clé** : une sonde munie de ce jeton mais signée
+    //    d'une autre clé que celle de la console est refusée ; un jeton pour le
+    //    grenier ne vaut pas sous une autre clé de grenier.
+    // 3. **Expiré** : au-delà de soixante secondes et des deux minutes de
+    //    tolérance, l'écho ne le croit plus.
+    // 4. **Refusé** : `voir` seul, aucun droit, une machine qui n'existe pas,
+    //    une machine sans écho — le MÊME `404`, octet pour octet (C9, C10).
+    let mut scene = monter_une_scene_d_annuaire("jeton-echo").await;
+    let chez_bob = asl_registre::premier_domaine(scene.compte_b);
+
+    let cle_g = asl_cle::CleSecrete::depuis_entropie([0xE1; 32]);
+    let flux = suivant(&mut scene.flux_alice);
+    let grenier = machine_du_compte(
+        &mut scene.alice,
+        flux,
+        &scene.racine,
+        scene.adresse,
+        br#"{"nom":"grenier","capacites":["annonce","lecture"]}"#,
+        &cle_g,
+    )
+    .await;
+    let compte_alice = scene.compte_a;
+    let mut bob = std::mem::replace(
+        &mut scene.bob,
+        connecter(&scene.racine, scene.adresse).await,
+    );
+    let mut flux_bob = scene.flux_bob;
+    let _ = accorder(
+        &mut bob,
+        &mut flux_bob,
+        compte_alice,
+        chez_bob,
+        r#"["rattacher"]"#,
+    )
+    .await;
+    let flux = suivant(&mut scene.flux_alice);
+    assert_eq!(
+        poser_json(
+            &mut scene.alice,
+            flux,
+            format!("/v1/machines/{}/domaine", grenier.texte()).as_bytes(),
+            format!("{{\"domaine\":\"{}\"}}", chez_bob.texte()).as_bytes(),
+        )
+        .await,
+        b"204"
+    );
+
+    // Le grenier annonce son écho : un seul point, UDP.
+    let mut daemon = connecter(&scene.racine, scene.adresse).await;
+    authentifier(&mut daemon, grenier, &cle_g, 0, 4).await;
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"asl-echo","points":[{{"protocole":"udp","port":41877}}]}}"#,
+        grenier.texte()
+    );
+    let (statut, rendu) = poster(
+        &mut daemon,
+        8,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"200", "{}", String::from_utf8_lossy(&rendu));
+
+    // Les demandeurs : la console de bob, carole (`voir`), dan (rien).
+    let (console, mut bob_lit, mut flux_bl, cle_console) = une_machine_prouvee(
+        &scene,
+        &mut bob,
+        &mut flux_bob,
+        br#"{"nom":"console","capacites":["lecture"]}"#,
+        0xB2,
+    )
+    .await;
+    let (mut carole, mut flux_carole, compte_c) = un_compte(&scene, 0xC1).await;
+    let (_, mut carole_lit, mut flux_cl, _) = une_machine_prouvee(
+        &scene,
+        &mut carole,
+        &mut flux_carole,
+        br#"{"nom":"portable","capacites":["lecture"]}"#,
+        0xC2,
+    )
+    .await;
+    let _ = accorder(&mut bob, &mut flux_bob, compte_c, chez_bob, r#"["voir"]"#).await;
+    let (mut dan, mut flux_dan, _) = un_compte(&scene, 0xD4).await;
+    let (curieux, mut dan_lit, mut flux_dl, _) = une_machine_prouvee(
+        &scene,
+        &mut dan,
+        &mut flux_dan,
+        br#"{"nom":"curieux","capacites":["lecture"]}"#,
+        0xD5,
+    )
+    .await;
+
+    // ── 1. ACCORDÉ ──────────────────────────────────────────────────────────
+    let (statut, corps) = demander_un_jeton(&mut bob_lit, &mut flux_bl, grenier).await;
+    assert_eq!(statut, b"200", "{}", String::from_utf8_lossy(&corps));
+    let jeton = asl_api::echo::JetonRendu::decoder(&corps)
+        .expect("un jeton rendu se lit")
+        .jeton;
+    let racine = asl_cle::identifiant_de_racine(&scene.identite.publique());
+    assert_eq!(
+        jeton.racine(),
+        racine,
+        "signé par la clé d'identité de la racine"
+    );
+    assert_eq!(jeton.cible(), grenier);
+    assert_eq!(jeton.cle_cible(), cle_g.publique(), "la clé de la cible");
+    assert_eq!(jeton.sondeur(), console);
+    assert_eq!(
+        jeton.cle_sondeur(),
+        cle_console.publique(),
+        "la clé que la connexion a prouvée"
+    );
+    assert_eq!(
+        jeton.expire_a().checked_sub(jeton.emis_a()),
+        Some(asl_echo::DUREE_JETON_MS),
+        "soixante secondes"
+    );
+    let identite = scene.identite;
+    let racines = move |n: Identifiant| (n == racine).then(|| identite.publique());
+    assert_eq!(
+        jeton.verifier(grenier, &cle_g.publique(), &racines, jeton.emis_a()),
+        Ok(()),
+        "l'écho le croit, hors ligne"
+    );
+    assert!(
+        JOURNAL
+            .lock()
+            .expect("le journal")
+            .iter()
+            .any(|ligne| ligne.contains("jeton d'écho délivré")
+                && ligne.contains(console.texte().as_str())
+                && ligne.contains(grenier.texte().as_str())),
+        "une ligne au journal par jeton délivré"
+    );
+
+    // ── 2. LIÉ À LA CLÉ DU SONDEUR, ET À CELLE DE LA CIBLE ──────────────────
+    let defi = asl_echo::DefiEcho::depuis_octets([0x5E; 16]);
+    let volee = asl_echo::SondeJeton::signer(
+        defi,
+        jeton,
+        &asl_cle::CleSecrete::depuis_entropie([0x66; 32]),
+    );
+    assert_eq!(
+        volee.accepter(grenier, &cle_g.publique(), &racines, jeton.emis_a()),
+        Err(asl_echo::RefusSonde::SignatureDuSondeur),
+        "un jeton intercepté ne sert à rien sans la clé qu'il nomme"
+    );
+    let sonde = asl_echo::SondeJeton::signer(defi, jeton, &cle_console);
+    let acceptee = sonde
+        .accepter(grenier, &cle_g.publique(), &racines, jeton.emis_a())
+        .expect("la console, avec sa clé, fait répondre l'écho");
+    assert_eq!(acceptee.sondeur(), console);
+    assert_eq!(
+        jeton.verifier(
+            grenier,
+            &asl_cle::CleSecrete::depuis_entropie([0x67; 32]).publique(),
+            &racines,
+            jeton.emis_a()
+        ),
+        Err(asl_echo::RefusJeton::AutreCible),
+        "ré-enrôlé sous une autre clé, le grenier ne croit plus ce jeton"
+    );
+
+    // ── 3. EXPIRÉ ───────────────────────────────────────────────────────────
+    let trop_tard = jeton
+        .expire_a()
+        .saturating_add(asl_echo::FENETRE_HORLOGE_MS)
+        .saturating_add(1);
+    assert_eq!(
+        jeton.verifier(grenier, &cle_g.publique(), &racines, trop_tard),
+        Err(asl_echo::RefusJeton::Expire)
+    );
+    assert_eq!(
+        sonde.accepter(grenier, &cle_g.publique(), &racines, trop_tard),
+        Err(asl_echo::RefusSonde::Jeton(asl_echo::RefusJeton::Expire))
+    );
+
+    // ── 4. REFUSÉ : LE MÊME 404 ─────────────────────────────────────────────
+    let inconnue = Identifiant::depuis_entropie(Genre::Machine, [0x99; 16]);
+    let refus = [
+        demander_un_jeton(&mut carole_lit, &mut flux_cl, grenier).await,
+        demander_un_jeton(&mut dan_lit, &mut flux_dl, grenier).await,
+        demander_un_jeton(&mut dan_lit, &mut flux_dl, inconnue).await,
+        demander_un_jeton(&mut dan_lit, &mut flux_dl, curieux).await,
+    ];
+    for (statut, corps) in &refus {
+        assert_eq!(statut, b"404", "{}", String::from_utf8_lossy(corps));
+        assert_eq!(corps, &refus[0].1, "C9 : la même réponse, octet pour octet");
+    }
+
     scene.arreter().await;
 }

@@ -11,6 +11,7 @@ repository.workspace = true
 asl-api.workspace = true
 asl-auth.workspace = true
 asl-cle.workspace = true
+asl-echo.workspace = true
 asl-id.workspace = true
 asl-proto.workspace = true
 asl-registre.workspace = true

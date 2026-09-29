@@ -765,6 +765,33 @@ journalctl -u asl-server --since -2min | grep 'nom rangé sous'
 restent, et la 0.39.2 les lit comme des services nés aux racines — ce
 qu'elle sait faire depuis la décision 99.
 
+### Déployer la 0.42.0 — le jeton d'écho
+
+**Ce qui change** (`docs/protocole.md` §3 quater, décision 91) : les racines
+servent `POST /v1/echo/jetons` sur la voie machine — un jeton de soixante
+secondes, signé par leur **clé d'identité** (`--identity-key`), à qui peut
+localiser l'`asl-echo` de la machine visée. Rien d'autre ne bouge : aucune
+table, aucune opération répliquée, aucun format existant. Les annuaires
+locaux renvoient cette route aux racines (`421`) sans rien à faire.
+
+**Rien à régler** : la clé qui signe est celle que le binaire exige déjà
+(`--identity-key`, 0.29.0), et nitrogen et argon la portent. L'ordre est
+libre ; les deux à la suite — une racine encore en 0.41.0 rend `404` à cette
+route, le temps de la passer à son tour.
+
+```sh
+# nitrogen, puis argon
+sudo dpkg -i asl-server_0.42.0_amd64.deb
+sudo systemctl restart asl-server
+asl-server --version            # 0.42.0
+journalctl -u asl-server --since -2min | grep "jeton d'écho"
+```
+
+**Ce qu'on voit au journal** : une ligne par jeton délivré, `jeton d'écho
+délivré : m-… pour m-…, jusqu'à <ms>` ; et `jeton d'écho refusé : m-… en
+demande plus d'un par seconde` au-delà du débit. **Le retour arrière** est un
+`dpkg -i` de la 0.41.0 : la route redevient inconnue (`404`), rien n'est rangé.
+
 ### Frapper la clé d'exploitation, et émettre (depuis 0.15.0)
 
 Les deux gestes sont dans le même binaire, et **aucun ne tourne sur un banc** :
