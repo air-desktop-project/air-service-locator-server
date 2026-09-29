@@ -8174,12 +8174,15 @@ struct SceneDAnnuaire {
     compte_b: Identifiant,
     domaine_a: Identifiant,
     n_speedy: Identifiant,
+    /// L'entrepôt de la racine, pour voir ce qui est rangé sur son disque.
+    entrepot: Arc<Entrepot>,
 }
 
 async fn monter_une_scene_d_annuaire(nom: &str) -> SceneDAnnuaire {
     let (racine, identite) = banc(nom);
     let (base, fichier) = entrepot(nom);
     let exploitant_cle = asl_cle::CleSecrete::depuis_entropie([0x0E; 32]);
+    let (rendre_entrepot, entrepot_racine) = tokio::sync::oneshot::channel();
     let (adresse, dire_stop, tache) = lever_complet(
         identite,
         base,
@@ -8190,10 +8193,12 @@ async fn monter_une_scene_d_annuaire(nom: &str) -> SceneDAnnuaire {
         ClesDeLExploitant {
             exploitant: Some(exploitant_cle.publique()),
             expiration_federee_us: Some(3_000_000),
+            entrepot_partage: Some(rendre_entrepot),
             ..ClesDeLExploitant::default()
         },
     )
     .await;
+    let entrepot_racine = entrepot_racine.await.expect("l'entrepôt de la racine");
     let mut alice = connecter(&racine, adresse).await;
     let (compte_a, _, _) = creer_un_compte(&mut alice, 0, 0xA1).await;
     let mut bob = connecter(&racine, adresse).await;
@@ -8263,6 +8268,7 @@ async fn monter_une_scene_d_annuaire(nom: &str) -> SceneDAnnuaire {
         compte_b,
         domaine_a,
         n_speedy,
+        entrepot: entrepot_racine,
     }
 }
 
@@ -9087,5 +9093,144 @@ async fn un_administrateur_des_racines_range_ses_machines_dans_le_domaine_racine
     let (_, detail) = lire_json(&mut bob, suivant(&mut flux_bob), detail_r.as_bytes()).await;
     assert!(detail.contains("\"machines\":[]"), "{detail}");
 
+    scene.arreter().await;
+}
+
+#[tokio::test]
+async fn un_service_ne_aux_racines_puis_confie_suit_l_annuaire_local() {
+    // ── CE QUE CET ESSAI PROUVE (0.39.2) ────────────────────────────────────
+    //
+    // Un service né aux racines — sa ligne y est rangée — dont la machine
+    // passe ensuite dans un domaine confié à un annuaire local : **la ligne
+    // ne donne que l'identité, l'état vivant vient de l'annuaire local**.
+    // Avant la 0.39.2, la ligne l'emportait, et le vivier vide des racines
+    // le disait parti alors que l'annuaire local le voyait vivant.
+    let mut scene = monter_une_scene_d_annuaire("ne-aux-racines").await;
+    let n_speedy = scene.n_speedy;
+    let domaine_a = scene.domaine_a;
+
+    // Le grenier d'alice, HORS de tout domaine confié ; son portable, qui lit.
+    let cle_d = asl_cle::CleSecrete::depuis_entropie([0xD1; 32]);
+    let flux = suivant(&mut scene.flux_alice);
+    let machine_d = machine_du_compte(
+        &mut scene.alice,
+        flux,
+        &scene.racine,
+        scene.adresse,
+        br#"{"nom":"grenier","capacites":["annonce"]}"#,
+        &cle_d,
+    )
+    .await;
+    let mut alice = std::mem::replace(
+        &mut scene.alice,
+        connecter(&scene.racine, scene.adresse).await,
+    );
+    let mut flux_alice = scene.flux_alice;
+    let (_, mut portable, mut flux_p, _) = une_machine_prouvee(
+        &scene,
+        &mut alice,
+        &mut flux_alice,
+        br#"{"nom":"portable","capacites":["lecture"]}"#,
+        0xD2,
+    )
+    .await;
+
+    // ── NÉ AUX RACINES : ANNONCÉ SUR UN AUTRE PORT, ET TROUVÉ ──────────────
+    //
+    // **La session des racines reste peut-être ouverte** : rien ne dit quand
+    // la racine la verra tomber. Le port la distingue — 40000 ici, 49152
+    // chez l'annuaire local : c'est ce dernier qu'on doit trouver.
+    let mut aux_racines = connecter(&scene.racine, scene.adresse).await;
+    authentifier(&mut aux_racines, machine_d, &cle_d, 0, 4).await;
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":40000}}]}}"#,
+        machine_d.texte()
+    );
+    let (statut, corps) = poster(
+        &mut aux_racines,
+        8,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"200", "{}", String::from_utf8_lossy(&corps));
+    let (_, trouve) = chercher_jusqu_a(
+        &mut portable,
+        &mut flux_p,
+        machine_d,
+        b"200",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("annoncé aux racines, il s'y trouve");
+    assert!(trouve.contains("40000"), "{trouve}");
+    assert!(
+        scene
+            .entrepot
+            .service_par_nom(machine_d, "depot")
+            .expect("une lecture")
+            .is_some(),
+        "sa ligne est rangée aux racines"
+    );
+    drop(aux_racines);
+
+    // ── LA MACHINE PASSE DANS LE DOMAINE CONFIÉ À SPEEDY ────────────────────
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            suivant(&mut flux_alice),
+            format!("/v1/machines/{}/domaine", machine_d.texte()).as_bytes(),
+            format!("{{\"domaine\":\"{}\"}}", domaine_a.texte()).as_bytes(),
+        )
+        .await,
+        b"204"
+    );
+    let speedy_local = scene.lever_speedy("ne-aux-racines-speedy").await;
+    speedy_local.attendre_la_machine(machine_d).await;
+    let mut chez_speedy = connecter(&speedy_local.racine, speedy_local.adresse).await;
+    let (statut, corps) = annoncer_depot(&mut chez_speedy, machine_d, &cle_d).await;
+    assert_eq!(statut, b"200", "{corps}");
+
+    // ── PAR LA RACINE, IL SE TROUVE : L'ÉTAT FÉDÉRÉ L'EMPORTE ───────────────
+    let (_, trouve) = chercher_jusqu_a(
+        &mut portable,
+        &mut flux_p,
+        machine_d,
+        b"200",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("la ligne rangée ne masque plus ce que l'annuaire local voit vivant");
+    assert!(
+        trouve.contains("49152") && !trouve.contains("40000"),
+        "l'adresse vient de l'annuaire local : {trouve}"
+    );
+    let (statut, services) = lire_json(
+        &mut alice,
+        suivant(&mut flux_alice),
+        format!("/v1/machines/{}/services", machine_d.texte()).as_bytes(),
+    )
+    .await;
+    assert_eq!(statut, b"200", "{services}");
+    assert!(
+        services.contains("\"etat\":\"annonce\"")
+            && services.contains(&format!("\"sonde_par\":\"{}\"", n_speedy.texte().as_str())),
+        "l'écran le voit vivant, sondé par l'annuaire local : {services}"
+    );
+    assert_eq!(
+        services.matches("\"nom\":\"depot\"").count(),
+        1,
+        "un seul service, sous l'identité de sa ligne : {services}"
+    );
+    let derive = asl_registre::service_derive(machine_d, b"depot");
+    assert!(
+        services.contains(&format!("\"service\":\"{}\"", derive.texte().as_str())),
+        "{services}"
+    );
+
+    drop(chez_speedy);
+    speedy_local.arreter().await;
+    scene.alice = alice;
     scene.arreter().await;
 }

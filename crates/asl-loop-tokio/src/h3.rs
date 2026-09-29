@@ -2459,6 +2459,7 @@ impl Service<'_> {
         // qui sont partis (`docs/modele.md` §4.2) : un service déclaré dont la
         // connexion est tombée doit apparaître, sans quoi il semblerait n'avoir
         // jamais existé.
+        let confiee = self.confiee_a_un_annuaire_local(machine);
         let annonces = services
             .into_iter()
             .filter_map(|(quel, enregistre)| {
@@ -2466,6 +2467,20 @@ impl Service<'_> {
                 // toujours de l'UTF-8 valide ; un octet corrompu n'affole rien —
                 // le service est simplement omis.
                 let nom = core::str::from_utf8(enregistre.nom.octets()).ok()?;
+                // **LA LIGNE DONNE L'IDENTITÉ, L'ANNUAIRE LOCAL L'ÉTAT**
+                // (0.39.2) : une machine confiée ne s'annonce plus ici, et
+                // son vivier vide dirait « parti » ce que l'annuaire local
+                // voit vivant. Rien de rapporté : parti, motif inconnu.
+                if confiee
+                    && let Some(lue) = self.etat_federe.lire(
+                        machine,
+                        enregistre.nom.octets(),
+                        maintenant(),
+                        self.expiration_federee_us,
+                    )
+                {
+                    return self.rendre_un_service_federe(quel, nom, &lue);
+                }
                 let mut sortie = alloc_reponse();
                 let combien = match self.vivier.annonce(quel) {
                     // Dans le vivier, mais peut-être en instance de départ tant
@@ -2518,8 +2533,9 @@ impl Service<'_> {
         // **ET CE QU'EN RAPPORTENT LES ANNUAIRES LOCAUX** (décision 60). Une
         // machine d'un domaine confié s'annonce chez l'annuaire local, et rien
         // n'en est rangé ici : ses services n'existent pour la racine que dans
-        // l'état fédéré, en mémoire (C13). Un nom déjà rendu d'ici l'emporte —
-        // c'est la mémoire de CETTE racine, et elle n'a pas à douter d'elle.
+        // l'état fédéré, en mémoire (C13). Un nom déjà rendu d'ici n'est pas
+        // rendu deux fois : sa ligne a déjà pris l'état fédéré si la machine
+        // est confiée (0.39.2), et sinon c'est la mémoire de CETTE racine.
         let mut annonces = annonces;
         annonces.extend(self.services_federes(machine, &noms_d_ici));
 
@@ -2546,29 +2562,54 @@ impl Service<'_> {
             .filter(|(nom, _)| !deja.contains(nom))
             .filter_map(|(nom, lue)| {
                 let nom = core::str::from_utf8(&nom).ok()?;
-                let sonde = asl_api::corps::SondeFederee {
-                    par: lue.membre,
-                    locale: lue
-                        .reponse
-                        .as_deref()
-                        .is_some_and(|reponse| self.sonde_de_l_interieur(lue.membre, reponse)),
-                };
-                let mut sortie = alloc_reponse();
-                let combien = asl_api::corps::ServiceRendu {
-                    service: lue.service,
-                    nom,
-                    etat: match lue.reponse.as_deref() {
-                        Some(annonce) => asl_api::corps::ServiceEtat::Annonce { annonce },
-                        None => asl_api::corps::ServiceEtat::Parti { volontaire: None },
-                    },
-                    sonde: Some(sonde),
-                }
-                .encoder(&mut sortie)
-                .ok()?;
-                sortie.truncate(combien);
-                Some(sortie)
+                self.rendre_un_service_federe(lue.service, nom, &lue)
             })
             .collect()
+    }
+
+    /// Un service tel qu'un annuaire local le rapporte, encodé comme l'écran
+    /// le lit, sous cet identifiant — le sien, ou celui de la ligne que
+    /// cette racine tient (0.39.2 : la ligne donne l'identité, le rapport
+    /// l'état).
+    fn rendre_un_service_federe(
+        &self,
+        service: Identifiant,
+        nom: &str,
+        lue: &crate::federation::LueFederee,
+    ) -> Option<Vec<u8>> {
+        let sonde = asl_api::corps::SondeFederee {
+            par: lue.membre,
+            locale: lue
+                .reponse
+                .as_deref()
+                .is_some_and(|reponse| self.sonde_de_l_interieur(lue.membre, reponse)),
+        };
+        let mut sortie = alloc_reponse();
+        let combien = asl_api::corps::ServiceRendu {
+            service,
+            nom,
+            etat: match lue.reponse.as_deref() {
+                Some(annonce) => asl_api::corps::ServiceEtat::Annonce { annonce },
+                None => asl_api::corps::ServiceEtat::Parti { volontaire: None },
+            },
+            sonde: Some(sonde),
+        }
+        .encoder(&mut sortie)
+        .ok()?;
+        sortie.truncate(combien);
+        Some(sortie)
+    }
+
+    /// Cette machine est-elle rangée dans un domaine confié à un annuaire
+    /// local ? Alors ce qui vit d'elle, c'est l'état fédéré qui le dit — même
+    /// pour un service dont cette racine tient la ligne (0.39.2).
+    fn confiee_a_un_annuaire_local(&self, machine: Identifiant) -> bool {
+        self.entrepot
+            .domaine_de_machine(machine)
+            .ok()
+            .flatten()
+            .and_then(|domaine| self.entrepot.hebergeur_de_domaine(domaine).ok().flatten())
+            .is_some()
     }
 
     /// Le membre s'est-il sondé de l'intérieur ? La règle est
@@ -2911,6 +2952,22 @@ impl Service<'_> {
         // la même : ce qu'on rend d'un service fédéré, on le rend à qui peut
         // le localiser, et à personne d'autre (`annuaires.md` §5.4).
         let (service, annonce) = match self.entrepot.service_par_nom(machine, nom).ok().flatten() {
+            // **UNE LIGNE RANGÉE ICI, MAIS UNE MACHINE CONFIÉE À UN ANNUAIRE
+            // LOCAL** (0.39.2) : le service est né aux racines, puis son
+            // domaine a été confié. La ligne ne dit plus que l'IDENTITÉ ; ce
+            // qui vit, et où, c'est l'annuaire local qui le rapporte — le
+            // vivier des racines n'en tiendra plus rien (`421`).
+            Some(service) if self.confiee_a_un_annuaire_local(machine) => (
+                service,
+                self.etat_federe
+                    .lire(
+                        machine,
+                        nom.as_bytes(),
+                        maintenant(),
+                        self.expiration_federee_us,
+                    )
+                    .and_then(|lue| lue.reponse),
+            ),
             // **CE QUI EST ANNONCÉ, LU MAINTENANT ET RÉVÉLÉ PLUS TARD.** C'est
             // notre propre mémoire : la lire ne dit rien à personne. La RENDRE
             // est une décision, et elle se prend à l'étage 2, après
