@@ -671,13 +671,13 @@ l'annuaire sur sa tuile, lu dans `GET /v1/annuaires` — le champ `voie` de
 chaque membre —, jamais dans les services d'une machine (décisions 84 et 86).
 
 **Un service que chaque machine enrôlée peut porter : l'`asl-echo`**
-(décidé le 2026-09-29, Thierry ; décision 89 ; la forme est proposée,
-`protocole.md` §3 quater). `asl echo` l'annonce sur **un port tiré au hasard**,
+(décidé le 2026-09-29, Thierry ; décisions 89 à 94, `protocole.md` §3
+quater). `asl echo` l'annonce sur **un port tiré au hasard**,
 en UDP, et tient son bail comme `asl announce` ; il ne répond qu'aux sondes
 autorisées — celle de l'annuaire qui tient son bail, et celle d'`asl ping`
 munie d'un jeton —, **par une signature de la clé de la machine**. C'est
 une annonce ordinaire, sous le `m-…` de la machine, et non un service
-synthétisé ; son nom est proposé réservé à sa forme (un seul point, UDP).
+synthétisé ; son nom est réservé à sa forme — un seul point, UDP (décision 90).
 
 ### 2.5 Autorisation
 
@@ -1445,8 +1445,8 @@ derrière un NAT, les deux diffèrent, et c'est le cas courant.
 **`joignable` porte toujours sa date et son candidat.** Un « joignable » sans
 date est un mensonge à retardement : il décrit le passé au présent.
 
-**Sur le point de l'`asl-echo`, `joignable` dit plus** (proposé ; décision
-89) : l'annuaire n'a pas seulement vu un chemin aboutir, il a reçu **une
+**Sur le point de l'`asl-echo`, `joignable` dit plus** (décisions 89 et
+92) : l'annuaire n'a pas seulement vu un chemin aboutir, il a reçu **une
 réponse signée par la clé de cette machine**, vérifiée — « joignable, preuve
 de clé vérifiée, constaté à … » (§4.3, « L'écho »). Le mot sur le fil ne
 change pas ; l'état par machine (`echo`) le dit en clair.
@@ -1520,7 +1520,7 @@ protocole sans rien ajouter.
   n'écoute ». Un point d'écoute UDP reste donc à `annoncé`, jamais `joignable`,
   et l'application le montre différemment plutôt que de laisser croire à un
   échec.
-  **Sauf l'écho** (décision 89, proposé) : l'`asl-echo` est un point UDP qui
+  **Sauf l'écho** (décisions 89 et 92) : l'`asl-echo` est un point UDP qui
   répond, et qui signe — le seul qui devienne `joignable` (ci-dessous).
 - **Elle sonde depuis l'annuaire, pas depuis le client.** Un service joignable
   depuis notre machine peut ne pas l'être depuis ailleurs — pare-feu de sortie,
@@ -1548,9 +1548,11 @@ UDP, et sa réponse est **signée par la clé de la machine** sur un défi du
 sondeur. Un port ouvert chez quelqu'un d'autre — une adresse réattribuée, un
 NAT partagé — ne produit pas cette signature ; un point UDP qui écoute, si.
 
-**La forme est proposée**, et se lit dans `protocole.md` §3 quater — les
-datagrammes, le jeton, qui sonde et d'où, l'installation, et les questions
-E1 à E14. Ce qu'elle garde de cette section :
+**La forme est tranchée** (décisions 90 à 93, les réponses de Thierry aux
+questions E1 à E14) et se lit dans `protocole.md` §3 quater — les
+datagrammes, le jeton, qui sonde et d'où, l'installation ; **l'écho parle
+UPnP** à la box pour ouvrir son seul port (décision 94 ; la forme proposée,
+questions E15 et suivantes). Ce qu'elle garde de cette section :
 
 - **toujours le seul candidat réflexif** pour la sonde de l'annuaire, jamais
   une adresse annoncée ;
@@ -1614,6 +1616,10 @@ Nommé ici plutôt que supposé ailleurs.
    **La v1 ne choisit pas.** Elle mesure, et dit à l'administrateur que son
    daemon n'est pas joignable — ce qui est déjà ce que personne d'autre ne lui
    dit.
+   **Pour l'écho seul, la première route est prise** (décision 94,
+   2026-09-29) : `asl echo` demande à la box, par UPnP, une redirection de
+   son seul port — et la sonde par l'écho (§4.3) est ce qui dit si elle
+   tient. Les daemons des autres ne sont pas concernés.
 4. **La rétention.** Combien de temps garde-t-on un service expiré, et son
    historique de joignabilité ?
 5. **Le bénéficiaire peut-il refuser ?** La v1 le notifie et lui montre

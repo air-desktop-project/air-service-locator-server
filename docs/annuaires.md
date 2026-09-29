@@ -819,8 +819,9 @@ c'est **le membre de l'annuaire local qui tient son bail** qui la sonde par
 l'écho, avec la clé que `GET /v1/federation/machines` lui a transmise, et qui
 rapporte le verdict aux racines par sa voie ; il sonde souvent « de
 l'intérieur », et l'état le dit (`echo_depuis`, la règle de `sonde_locale`).
-Que les racines sondent aussi, du dehors, l'écho d'une machine hébergée est
-proposé, borné, et attend Thierry (question E8).
+**Les racines sondent aussi, du dehors**, l'écho d'une machine hébergée —
+vers l'adresse globale que le membre a vue, bornées (décision 92) — et l'écho
+croit leurs `n-…` embarquées (décision 91).
 
 ### La réponse de `GET /v1/ou` — plusieurs (adresse, `n-…`), la forme du `421`
 

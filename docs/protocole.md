@@ -2360,8 +2360,15 @@ d'aujourd'hui laisse (`modele.md` §4.3) :
   `lancer_les_sondes`), jamais quand quelqu'un se demande « est-ce que je la
   joins, d'ici, maintenant ? ».
 
-**Tout ce qui suit est PROPOSÉ** par la spécification, et attend Thierry : les
-questions E1 à E14, en fin de section, disent ce qui reste à trancher.
+**La forme a été proposée par la spécification, puis tranchée** : Thierry a
+retenu chacune des recommandations des questions E1 à E14 (« d'accord pour
+tout », 2026-09-29), inscrites comme **décisions 90 à 93** — 90 : le
+transport, la socket, la signature, le nom (E1, E2, E3, E13) ; 91 : qui
+l'écho croit, le jeton, les droits (E4, E5, E6, E7) ; 92 : les sondes des
+annuaires (E8, E9) ; 93 : l'installation, `asl ping`, l'activation (E10,
+E11, E12, E14). **Décision 94** : l'écho parle UPnP derrière une passerelle
+résidentielle. Ce qui reste ouvert est aux questions E15 et suivantes, en fin
+de section.
 
 ### Ce que l'écho est, et ce qu'il n'est pas
 
@@ -2381,7 +2388,7 @@ AUTRES services de la machine sont joignables — chacun a son port, son
 pare-feu, son daemon. L'écho mesure la machine et son chemin, pas ses
 services ; la sonde TCP des services reste ce qu'elle est.
 
-**Le nom est réservé à cette forme** (proposé ; question E13) : une annonce
+**Le nom est réservé à cette forme** (décision 90 ; E13) : une annonce
 `asl-echo` porte exactement un point, en UDP, sinon `400`. Qui annonce ce nom
 n'a pas à être `asl echo` — la clé est par machine (`modele.md` §2.3), tout
 processus qui la lit peut s'annoncer sous n'importe quel nom —, et ce n'est
@@ -2389,8 +2396,8 @@ pas une faille : la preuve est la signature, pas le programme qui la fait.
 
 ### Le transport : des datagrammes UDP bruts, et pourquoi pas QUIC
 
-**Proposé : des datagrammes UDP, un aller et un retour, dans un format
-binaire à nous, versionné** (question E1).
+**Des datagrammes UDP, un aller et un retour, dans un format binaire à
+nous, versionné** (décision 90 ; E1).
 
 | | UDP brut, un défi signé | QUIC (poignée de main, puis une requête) |
 |---|---|---|
@@ -2405,17 +2412,17 @@ binaire à nous, versionné** (question E1).
 une seconde pile QUIC, il n'en a pas besoin.
 
 **Le codec est un codec** (C1) : une crate d'étage 1, sans entrée-sortie,
-couverte à 100 % (C2), fuzzée (C3), sans une ligne de C (C4) — proposée sous le
+couverte à 100 % (C2), fuzzée (C3), sans une ligne de C (C4) — sous le
 nom `asl-echo`, dans ce dépôt, tirée par le client comme `asl-proto` l'est
 (`Cargo.toml` du client, `rev` épinglée).
 
-**TCP** : pas en v1 (question E1). Si un réseau de sondeur bloque l'UDP
+**TCP** : pas en v1 (décision 90 ; E1). Si un réseau de sondeur bloque l'UDP
 sortant, le même format voyagerait sur TCP, préfixé de sa longueur — une
 extension, pas un second protocole. Rien aujourd'hui ne dit qu'il le faut.
 
 ### La socket : celle du bail, et c'est ce qui rend l'UDP joignable derrière un NAT
 
-**Proposé (question E2) : `asl echo` tient son bail SUR la socket où il
+**Décidé (décision 90 ; E2) : `asl echo` tient son bail SUR la socket où il
 écoute.** Une seule socket UDP, liée à un port éphémère ; la connexion QUIC
 vers l'annuaire en part, et les datagrammes de l'écho y arrivent.
 
@@ -2452,7 +2459,7 @@ précisément la question que `asl ping` sert à poser : **l'annuaire dit
 « joignable depuis l'annuaire », `asl ping` dit « joignable d'ici »**, et les
 deux peuvent différer.
 
-**L'alternative** (E2, b) : une socket d'écho distincte de celle du bail. Plus
+**L'alternative écartée** (E2, b) : une socket d'écho distincte de celle du bail. Plus
 simple côté client — rien ne change dans `asl-client-tokio` —, mais derrière
 un NAT IPv4 le candidat réflexif n'y vaut que si l'on a redirigé le port à la
 main, et le mapping n'est tenu par rien.
@@ -2467,6 +2474,197 @@ sondeur du même réseau essaie les annoncées, un sondeur du dehors la
 réflexive. **Le candidat réflexif est d'une seule famille**, celle du bail :
 une machine joignable en IPv6 et en IPv4 ne le verra dit que dans la
 première. Tenir deux baux pour avoir les deux est écarté en v1.
+
+### La passerelle : UPnP, pour mettre toutes les chances de son côté
+
+**Décidé (2026-09-29, Thierry ; décision 94) : « pour mettre toutes les
+chances de son côté, `asl echo` doit aussi parler UPnP quand il est derrière
+une passerelle résidentielle ; normalement toutes les box le proposent. »**
+C'est la première route de `modele.md` §6.3 — « le daemon demande lui-même
+une redirection à sa box » —, prise **pour l'écho seul**. Ce qui suit est la
+forme **proposée** ; les points ouverts sont les questions E15 à E23.
+
+**Ce que la passerelle ajoute à la socket partagée (décision 90).** Le bail
+tient déjà un mapping NAT ouvert, mais il ne laisse entrer que ce que le NAT
+veut bien laisser entrer : un NAT à filtrage dépendant de l'adresse ne laisse
+passer que l'annuaire. **Une redirection demandée à la box laisse entrer
+tout le monde** sur ce port-là — c'est ce qui rend l'écho joignable d'un
+`asl ping` lancé d'ailleurs.
+
+#### IPv4 : une redirection du port de l'écho, et de lui seul
+
+- **La découverte** : SSDP, **sur le réseau local seulement** — un `M-SEARCH`
+  vers `239.255.255.250:1900` (IPv4) et `[ff02::c]:1900` (IPv6, lien local),
+  `ST: urn:schemas-upnp-org:device:InternetGatewayDevice:2` puis `:1`, portée
+  d'un saut. **Aucun tiers n'est appelé** (C19) : ni serveur STUN, ni service
+  « quelle est mon adresse ». **Aucun DNS** (C20) : la réponse donne une URL
+  `LOCATION` ; elle n'est suivie que si son hôte est **une adresse littérale
+  égale à celle qui a répondu**, privée ou de lien local — un nom est ignoré.
+- **La description** (`GET` de `LOCATION`, HTTP/1.1 en clair, sur le réseau
+  local) donne l'URL de contrôle du service `WANIPConnection:2`, sinon `:1`
+  (ou `WANPPPConnection:1`).
+- **La redirection** : IGD v2 — `AddAnyPortMapping`, qui laisse la box
+  choisir le port externe et le rend ; IGD v1 — `AddPortMapping`, en
+  demandant d'abord **le même port externe que le port local**, puis, sur
+  `718 ConflictInMappingEntry`, trois ports tirés au hasard. Toujours
+  `NewProtocol = UDP`, `NewInternalPort` = **le port de l'écho**,
+  `NewInternalClient` = **l'adresse locale d'où l'on a parlé à la box**,
+  `NewRemoteHost` vide, `NewPortMappingDescription = "asl-echo"`.
+- **L'adresse externe** : `GetExternalIPAddress`, comparée à `vu_depuis` que
+  l'annuaire a rendu à l'annonce. **Égales** : la box est bien le dernier
+  NAT, et la redirection vaut depuis l'Internet. **Différentes** — une adresse
+  `100.64.0.0/10`, une autre privée, une autre publique — : il y a **un
+  second NAT** au-dessus (celui de l'opérateur, ou une box derrière une box),
+  la redirection ne sert à rien depuis l'Internet, et `asl echo` le dit
+  (« double NAT : la box n'est pas la dernière — la redirection ne suffira
+  pas ») sans rien annoncer de plus (question E19).
+
+#### IPv6 : un trou dans le pare-feu, si la box le propose — et c'est rare
+
+En IPv6, il n'y a rien à traduire : l'adresse de la machine est globale. Ce
+qui bloque est **le pare-feu à état de la box** — la mesure de `modele.md`
+§4.1 l'a montré, la borne est la même qu'en IPv4. IGD v2 définit pour cela
+`WANIPv6FirewallControl:1` : `GetFirewallStatus` (le pare-feu est-il actif,
+et les trous permis ?), puis `AddPinhole` — `RemoteHost` et `RemotePort`
+libres, `InternalClient` = l'adresse IPv6 globale d'où le bail part,
+`InternalPort` = le port de l'écho, `Protocol = 17` (UDP), `LeaseTime` — qui
+rend un `UniqueID`, renouvelé par `UpdatePinhole` et retiré par
+`DeletePinhole`.
+
+**Il faut le dire honnêtement : c'est rare.** Beaucoup de box n'annoncent pas
+ce service ; quand elles l'annoncent, `GetFirewallStatus` rend souvent
+`InboundPinholeAllowed = 0`, et l'on n'a alors le droit de rien. Rien n'en a
+été mesuré ici : le banc `bancs/nat` devra relever, box par box, ce qu'elles
+proposent. **Ne pas l'obtenir n'est pas une panne** : `asl echo` tente, et se
+tait si le service est absent (il le dit en mode bavard) — question E20.
+
+#### La durée : un bail court, renouvelé, retiré au propre
+
+- **Une heure, renouvelée à mi-course** (toutes les trente minutes), tant que
+  l'écho tourne — IGD v2 interdit d'ailleurs le bail infini
+  (`NewLeaseDuration = 0`).
+- **Une box qui n'accepte que le permanent** (`725
+  OnlyPermanentLeasesSupported`, fréquent en IGD v1) : on le demande
+  permanent, et c'est alors à nous de le retirer (question E18).
+- **À l'arrêt** — Ctrl-C, `SIGTERM` de systemd ou de launchd — :
+  `DeletePortMapping` et `DeletePinhole`, **avant** de fermer le bail.
+- **Après un arrêt brutal** : `asl echo` retient dans son répertoire d'état
+  ce qu'il a ouvert (port externe, `UniqueID`), et **le retire au démarrage
+  suivant** avant d'ouvrir autre chose. Un bail d'une heure borne de toute
+  façon ce qui traîne.
+- **Quand la box refuse, ou n'a pas UPnP** — aucune réponse SSDP,
+  `606 Action not authorized`, UPnP désactivé dans son interface — :
+  **l'écho continue sans**, avec la socket du bail seule, et le dit une fois
+  (« pas de passerelle UPnP : joignable depuis l'annuaire, peut-être pas
+  d'ailleurs »). Il recherche la passerelle au démarrage, toutes les trente
+  minutes, et quand son adresse change (question E23).
+
+#### Comment l'annuaire l'apprend, la sonde, et le dit
+
+**L'annonce de l'écho porte ce que la box a accordé** — proposé (question
+E21) : un champ de plus, propre à l'annonce `asl-echo`,
+
+```jsonc
+"passerelle": {"port": 51377, "via": "upnp"}
+```
+
+**Le port seul, jamais l'adresse.** L'annuaire en fait un candidat avec
+**l'adresse qu'il a observée** (`vu_depuis`) et ce port ; il le place en tête,
+avant le candidat du bail (adresse observée, port observé), et les sonde dans
+cet ordre. C'est la règle de `modele.md` §4.3 qui tient : **il ne parle qu'à
+l'adresse qui lui a parlé** — comme aujourd'hui, où le candidat réflexif est
+l'adresse observée et le port annoncé. Une adresse externe choisie par le
+client ferait de l'annuaire un balayeur ; il n'y en a donc pas, et c'est
+aussi pourquoi `asl echo` ne l'annonce que si `GetExternalIPAddress` est
+égale à `vu_depuis` (le double NAT ci-dessus). Pour un trou IPv6, le port est
+celui de l'écho, `"via":"upnp"`, et rien ne change au candidat.
+
+**Le champ demande un annuaire qui le connaît** : le décodeur d'annonce
+refuse un champ inconnu (`asl-proto`, `crates/asl-proto/src/cadrage.rs:38`,
+« Aucun champ inconnu »). `asl echo` lit donc `GET /v1/version` et n'envoie
+`passerelle` qu'à un annuaire qui l'accepte — racines et membres d'annuaire
+local. **L'annonce est faite deux fois** : sans le champ d'abord, pour
+apprendre `vu_depuis` ; avec, une fois la box interrogée — la réannonce dans
+la même connexion (§1.2), qui relance la sonde.
+
+**Les racines, pour une machine d'un domaine hébergé** (décision 92) : le
+membre de l'annuaire local rapporte le candidat de la passerelle avec les
+autres, et la racine le sonde du dehors sous les mêmes bornes — une adresse
+globale, qui est celle que le membre a vue.
+
+**Ce que l'état d'écho dit en plus** — proposé (question E21) : **par où la
+preuve est arrivée**, une chaîne de plus sur la machine :
+
+```jsonc
+"echo_via": "upnp"    // par la redirection ou le trou que la box a accordés
+          | "nat"     // par le mapping que le bail tient ouvert, adresse ou port traduits
+          | "direct"  // l'adresse observée est une adresse de la machine : ni traduction, ni passerelle
+```
+
+présente seulement avec `"echo":"verifie"`. **Une chaîne, et un mot inconnu
+se dit tel quel** : les décodeurs déployés des applications lisent la machine
+par clés et ignorent le reste, quelle qu'en soit la valeur
+(`air-service-locator-android`, `coeur-reseau/…/reel/AnnuaireReel.kt:556-565` ;
+`air-service-locator-ios`, `Sources/Coeur/Reseau/Reel/AnnuaireReel.swift:581-588`),
+et celui d'`asl domain` saute un champ inconnu quelle que soit sa valeur
+(`air-service-locator-client`, `crates/asl-client-tokio/src/domaines.rs:34`).
+Si NAT-PMP ou PCP venaient (E16), `natpmp` et `pcp` s'ajouteraient.
+
+#### La sécurité : un seul port, le sien
+
+- **On n'ouvre que le port de l'écho, jamais un autre** — ni celui d'un
+  daemon annoncé par `asl announce`, ni un port TCP, ni un port qu'on
+  demanderait par la ligne de commande. `asl echo` ne sait redemander que
+  `(UDP, son port, son adresse locale)`.
+- **Ce qui entre par là ne trouve que l'écho**, qui se tait devant toute
+  sonde non autorisée (« Qui l'écho croit ») : la redirection ne rend pas la
+  machine plus bavarde, elle rend l'écho atteignable.
+- **UPnP n'a aucune authentification** : n'importe quel appareil du réseau
+  local peut répondre au `M-SEARCH`, ou se faire passer pour la box. Le pire
+  qu'il obtienne : que l'écho croie avoir une redirection qu'il n'a pas — et
+  la sonde de l'annuaire le détrompe (`injoignable`, ou `echo_via: nat`) —, ou
+  qu'il apprenne le port de l'écho, qui ne répond qu'aux sondes signées.
+- **L'écho n'active pas UPnP sur la box** ; si elle l'a désactivé, il s'en
+  passe.
+- **`--no-upnp`** désactive tout cela (et `ASL_ECHO_UPNP=0` dans
+  l'environnement, pour une unité). **Proposé : activé par défaut**, puisque
+  Thierry veut toutes les chances — à confirmer (question E15).
+
+#### Le code : sans une ligne de C (C4)
+
+**`igd-next`** existe (0.17.1, licence **MIT**, Rust pur, **aucun `unsafe`**
+dans ses sources ; dépôt `dariusc93/rust-igd`). Relevé sur ses manifestes,
+sans rien ajouter au dépôt :
+
+- elle sait **IGD v1 et v2** côté redirection (`AddPortMapping`,
+  `AddAnyPortMapping`, `GetExternalIPAddress`, `DeletePortMapping`), en
+  synchrone ou, avec `aio_tokio`, sur tokio ;
+- elle **ne sait PAS** `WANIPv6FirewallControl` : pas de trou IPv6 — il
+  faudrait l'écrire à côté ;
+- sa découverte ne vise que `239.255.255.250:1900` par défaut ;
+- ses dépendances : `attohttpc` **sans ses fonctions par défaut** (donc sans
+  `native-tls` : pas de C), `url` — qui amène `idna` et la famille `icu_*` —,
+  `xmltree` (`xml-rs`), `rand` 0.10, `log`, `base64`, `http` ; en `aio_tokio`,
+  `hyper` en plus. **Une trentaine d'unités** construites de plus, estimées
+  sans construire ; `check-sans-c.sh` du client, qui lit tout le workspace,
+  n'y trouverait pas de C.
+- **mais ses décodeurs ne sont pas les nôtres** : elle lit du XML et du HTTP
+  **venus d'un appareil du réseau local, que personne n'authentifie** — et C3
+  demande que tout décodeur soit fuzzé, C1 qu'il ne fasse aucune
+  entrée-sortie.
+
+**L'autre voie : l'écrire** — un codec d'étage 1 (C1), dans le dépôt client,
+réservé à `asl-cli` : le `M-SEARCH` et sa réponse, une requête et une réponse
+HTTP/1.1 minimales (`Content-Length` seul, pas de `chunked`), un lecteur XML
+réduit à ce que la description et les réponses SOAP portent, les six actions
+(`AddAnyPortMapping`, `AddPortMapping`, `DeletePortMapping`,
+`GetExternalIPAddress`, `GetFirewallStatus`, `AddPinhole`/`UpdatePinhole`/`DeletePinhole`)
+— quelques centaines de lignes, couvertes (C2) et fuzzées (C3), aucune
+dépendance. Question E17.
+
+**Dans un cas comme dans l'autre, UPnP reste hors d'`asl-client`** : c'est
+l'utilitaire `asl` qui le parle, pas la bibliothèque chargée dans les
+programmes des autres (C4).
 
 ### Les datagrammes — version 1
 
@@ -2519,7 +2717,7 @@ signature = Ed25519, clé de la machine, sur
   "air-service-locator/v1/echo-reponse\x00" ‖ défi ‖ machine ‖ adresse observée ‖ sondeur
 ```
 
-**Ce que la réponse signe, et pourquoi** (question E3) :
+**Ce que la réponse signe, et pourquoi** (décision 90 ; E3) :
 
 - **le défi du sondeur** : c'est lui qui fait la fraîcheur. Seize octets tirés
   par le sondeur, jamais réutilisés : une réponse ne vaut que pour la sonde
@@ -2535,7 +2733,7 @@ signature = Ed25519, clé de la machine, sur
   présente pas comme faite pour un autre. Sans elle, un sondeur autorisé
   pourrait faire signer le défi d'un tiers et lui revendre la preuve.
 
-**Ce qu'elle ne signe pas : l'heure de l'écho** (recommandé, E3). Le défi
+**Ce qu'elle ne signe pas : l'heure de l'écho** (décision 90 ; E3). Le défi
 suffit à la fraîcheur ; une date n'ajouterait rien que le sondeur ne sache
 déjà — il sait quand il a envoyé —, et dirait l'horloge de la machine à qui
 l'interroge. Si Thierry veut la date « constaté à » signée par la machine
@@ -2553,10 +2751,13 @@ il n'appelle personne pour savoir s'il doit répondre.
 
 **Une sonde d'annuaire** (`0x01`) est acceptée si et seulement si :
 
-1. **l'annuaire est celui qui tient son bail** (proposé ; question E4) — le
-   `n-…` que la poignée de main de SA connexion a vérifié (§0) : une racine
-   s'il s'annonce aux racines, **le membre de l'annuaire local** s'il a été
-   renvoyé (`421`, décision 59) — et la signature tient sous cette clé ;
+1. **l'annuaire est celui qui tient son bail, OU l'une des racines
+   embarquées** (décision 91 ; E4, réponse (b), puisque les racines sondent
+   aussi du dehors — décision 92) : le `n-…` que la poignée de main de SA
+   connexion a vérifié (§0) — une racine s'il s'annonce aux racines, **le
+   membre de l'annuaire local** s'il a été renvoyé (`421`, décision 59) —, ou
+   l'une des `n-…` de la liste que le binaire porte ; et la signature tient
+   sous cette clé ;
 2. la cible est **son** `m-…` ;
 3. `émise_a` est à moins de **deux minutes** de son horloge ;
 4. le défi n'a pas été vu dans ces deux minutes (l'anti-rejeu : une mémoire
@@ -2585,11 +2786,11 @@ coûte des dizaines de microsecondes, et un inconnu ne doit pas pouvoir les
 faire dépenser à volonté : **cinq réponses par seconde et par source** (une
 `/64` en IPv6, une adresse en IPv4), **dix d'avance** ; **cinquante par
 seconde en tout** ; au-delà, silence, et une ligne de journal par minute au
-plus. Proposé ; les chiffres se mesureront.
+plus. Les chiffres se mesureront.
 
 ### Le jeton — `POST /v1/echo/jetons`
 
-**Proposé.** Sur la voie machine, aux racines :
+**Décidé (décision 91).** Sur la voie machine, aux racines :
 
 ```
 POST /v1/echo/jetons
@@ -2611,7 +2812,7 @@ signature = Ed25519, clé d'identité de la racine, sur
 ```
 
 - **Qui l'obtient : qui tient `localiser` sur `asl-echo` de cette machine**
-  (proposé ; question E6) — c'est-à-dire la décision même de
+  (décision 91 ; E6) — c'est-à-dire la décision même de
   `GET /v1/ou/{m}/asl-echo`, calculée par `asl-auth` à partir du propriétaire
   de la machine qui demande (C10) : un droit sur la machine ou sur son
   domaine y mène ; un droit sur UN AUTRE service de la machine, non.
@@ -2622,7 +2823,7 @@ signature = Ed25519, clé d'identité de la racine, sur
   qui ne quitte pas sa machine (C14). Un secret partagé n'est nulle part.
 - **Lié à la cible, et à sa clé** : il ne vaut que pour cette machine, sous la
   clé qu'elle a aujourd'hui.
-- **Court : soixante secondes** (proposé ; question E5) — le temps d'un
+- **Court : soixante secondes** (décision 91 ; E5) — le temps d'un
   `asl ping` et de ses reprises. L'horloge de l'écho doit être juste à deux
   minutes près ; une machine sans heure (pas de NTP) ne répondra qu'à la sonde
   de l'annuaire… qui porte aussi une date. **Une machine dont l'horloge dérive
@@ -2645,11 +2846,11 @@ signature = Ed25519, clé d'identité de la racine, sur
 
 ### `asl ping <m-…|alias>` — ce qu'il fait, et ce qu'il dit
 
-**Proposé.** Sur la machine qui sonde — une machine enrôlée, qui porte
+**Décidé (décision 93).** Sur la machine qui sonde — une machine enrôlée, qui porte
 `lecture` :
 
 1. **résoudre la cible** : un `m-…` tel quel ; sinon un nom ou un alias,
-   cherché parmi les machines que ce compte voit (question E12) — plusieurs
+   cherché parmi les machines que ce compte voit (décision 93 ; E12) — plusieurs
    réponses, et `asl ping` les liste et refuse de choisir ;
 2. **`GET /v1/ou/{m}/asl-echo`** aux racines : les candidats, réflexif
    d'abord, IPv6 d'abord (§3, « Les candidats sont ordonnés ») ;
@@ -2690,7 +2891,7 @@ autorisé écrirait l'état d'une machine qui n'est pas la sienne.
 
 ### La sonde de l'annuaire, par l'écho
 
-**Proposé.** Quand une machine annonce `asl-echo`, l'annuaire qui tient ce bail
+**Décidé (décision 92).** Quand une machine annonce `asl-echo`, l'annuaire qui tient ce bail
 le sonde **par l'écho**, et non par un trois-temps :
 
 - **vers le seul candidat réflexif** — la règle de `modele.md` §4.3 ne change
@@ -2730,12 +2931,13 @@ entiers seulement** — les décodeurs déployés ne sautent qu'une clé inconnu
 ces deux sortes (décision 86) :
 
 ```jsonc
-// GET /v1/machines (le propriétaire) ; GET /v1/domaines/{d}, "machines" (qui a `voir`, question E7)
+// GET /v1/machines (le propriétaire) ; GET /v1/domaines/{d}, "machines" (qui a `voir`, décision 91 ; E7)
 {"machine":"m-…","nom":"grenier", …,
  "echo":"verifie",            // "verifie" | "injoignable" | "autre_cle" | "en_cours"
  "echo_a":1789217751000,      // l'instant de la mesure — absent sur "en_cours"
  "echo_par":"n-…",            // l'annuaire qui a sondé
- "echo_depuis":"exterieur"}   // "exterieur" | "interieur" (la règle de `sonde_locale`)
+ "echo_depuis":"exterieur",   // "exterieur" | "interieur" (la règle de `sonde_locale`)
+ "echo_via":"upnp"}           // "upnp" | "nat" | "direct" — décision 94, question E21 ; avec "verifie" seulement
 ```
 
 - **Absent** : aucun `asl-echo` n'est annoncé — « pas d'écho », qui n'est ni
@@ -2752,8 +2954,8 @@ ces deux sortes (décision 86) :
   (`GET /v1/machines/{m}/services`), où ils disent la même chose du point
   `asl-echo`.
 
-**Quand l'annuaire sonde** (question E9) : à l'annonce et à chaque changement
-de candidat, comme aujourd'hui (`modele.md` §4.3) — **et, proposé, toutes les
+**Quand l'annuaire sonde** (décision 92 ; E9) : à l'annonce et à chaque changement
+de candidat, comme aujourd'hui (`modele.md` §4.3) — **et toutes les
 quinze minutes** tant que le bail tient : un datagramme de 384 octets, pour
 que « constaté à » ne vieillisse pas indéfiniment et qu'un pare-feu fermé
 depuis se voie. La poussée (§1.4) porte le nouveau verdict à `asl echo` quand
@@ -2773,19 +2975,19 @@ racines le rendent avec `sonde_par` et `echo_par` à son `n-…`.
 dit que la clé est là, pas qu'on la joint du dehors — l'essai de speedy
 (27/09, `sonde_locale`) vaut ici aussi.
 
-**Les racines pourraient sonder elles-mêmes, du dehors** (question E8) — c'est
-ce qui manquerait pour qu'un « joignable » d'un domaine hébergé veuille dire
-« depuis l'Internet ». Proposé : **oui, et borné** — vers l'adresse que le
+**Les racines sondent aussi, du dehors** (décision 92 ; E8) — c'est ce qui
+manquait pour qu'un « joignable » d'un domaine hébergé veuille dire « depuis
+l'Internet ». **Oui, et borné** — vers l'adresse que le
 membre a vue, **seulement si elle est globale** (ni privée, ni lien-local, ni
 ULA, ni `::ffff:` d'une privée), une fois par changement et par quart d'heure,
 dans la borne de soixante-quatre sondes en vol (`sonde.rs:60`). **Et l'écho
-doit alors croire aussi les racines embarquées** pour une sonde d'annuaire
-(question E4, b) : leur `n-…` est dans le binaire. Le risque se nomme : une
+croit donc aussi les racines embarquées** pour une sonde d'annuaire
+(décision 91 ; E4, b) : leur `n-…` est dans le binaire. Le risque se nomme : une
 racine enverrait un datagramme vers une adresse qu'un annuaire local lui a
 rapportée, c'est-à-dire désignée par un tiers ; il est borné — un datagramme
 de 384 octets, signé, qui nomme sa cible, sans réponse amplifiée — et
-l'annuaire local est l'autorité de son domaine (C11). Sans cela, `asl ping`
-depuis une machine du dehors reste le seul moyen de le savoir.
+l'annuaire local est l'autorité de son domaine (C11). L'état porte alors le
+`n-…` de la racine dans `echo_par`, et `echo_depuis: exterieur`.
 
 **Ce n'est pas la sonde de l'`asl-directory`** (décision 83, qui ne change
 pas) : l'écho prouve une MACHINE. Une machine qui héberge un annuaire local et
@@ -2796,9 +2998,9 @@ est là, pas que le port de l'annuaire est ouvert.
 
 | Geste | Qui | Ce qu'il apprend |
 |---|---|---|
-| Voir l'état d'écho d'une machine | Le propriétaire ; **qui a `voir` sur son domaine** (proposé, E7) | `echo`, `echo_a`, `echo_par`, `echo_depuis` — pas d'adresse, pas de port |
+| Voir l'état d'écho d'une machine | Le propriétaire ; **qui a `voir` sur son domaine** (décision 91 ; E7) | `echo`, `echo_a`, `echo_par`, `echo_depuis`, `echo_via` — pas d'adresse, pas de port |
 | Résoudre `asl-echo` | Qui a `localiser` sur le service (règle ordinaire de `GET /v1/ou`) | Les candidats : adresses et port |
-| Obtenir un jeton, donc `asl ping` | **Qui a `localiser`** (proposé, E6) — la même décision | La clé publique de la cible, et, par la sonde, sa joignabilité d'ici |
+| Obtenir un jeton, donc `asl ping` | **Qui a `localiser`** (décision 91 ; E6) — la même décision | La clé publique de la cible, et, par la sonde, sa joignabilité d'ici |
 | Faire répondre l'écho | L'annuaire du bail ; le porteur d'un jeton **et de la clé qu'il nomme** | La preuve signée, et son adresse vue par l'écho |
 
 - **C9** : `POST /v1/echo/jetons` rend le même `404`, après le même travail,
@@ -2823,7 +3025,7 @@ en repli : `crates/asl-cli/src/etat.rs:84-137` du client). L'écho doit donc
 tourner **sous le compte qui la détient**, et jamais en root — `asl echo`
 refuse de démarrer sous `uid 0`, comme l'annuaire (C8).
 
-**Linux — proposé : une unité systemd UTILISATEUR** (question E10), posée par
+**Linux — une unité systemd UTILISATEUR** (décision 93 ; E10), posée par
 le paquet `asl` en `/usr/lib/systemd/user/asl-echo.service`, **désactivée** :
 
 ```ini
@@ -2852,13 +3054,14 @@ WantedBy=default.target
   client (« aucune unité systemd … aucun `postinst` ») qui change, et seulement
   sur son premier tiret : une unité est posée, et c'est à l'utilisateur de
   l'activer.
-- **L'alternative** (E10, b) : une unité SYSTÈME modèle, `asl-echo@.service`,
+- **L'alternative, écartée en v1** (E10, b) : une unité SYSTÈME modèle, `asl-echo@.service`,
   avec `User=%i` et `ExecStart=/usr/bin/asl echo` — `%h` y vaut la maison de
   `User=`. Elle démarre au boot sans *linger*, mais c'est root qui l'active :
   un geste d'administrateur pour une clé d'utilisateur.
 
-**macOS — proposé : un LaunchAgent**, `~/Library/LaunchAgents/org.airdesktop.asl-echo.plist`
-(question E11) :
+**macOS — deux chemins, un seul label** (décision 93 ; E11). **Pour qui a
+installé `asl`** : un LaunchAgent,
+`~/Library/LaunchAgents/org.airdesktop.asl-echo.plist` :
 
 ```xml
 <dict>
@@ -2870,13 +3073,43 @@ WantedBy=default.target
 ```
 
 posé par `asl echo --install` (et retiré par `--uninstall`), chargé par
-`launchctl bootstrap gui/$(id -u)`. **L'application Mac** l'active depuis la
-fiche « ce Mac » (« Répondre aux sondes de l'annuaire ») : une application
-dans un bac à sable n'écrit pas dans `~/Library/LaunchAgents` — elle
-enregistrerait un agent embarqué dans son paquet (`SMAppService.agent`,
-macOS 13), qui doit lire l'identité **dans le conteneur de l'application**.
-**Cela reste à vérifier dans le dépôt Mac** (E11) : le partage du conteneur
-entre l'application et son agent n'est pas acquis.
+`launchctl bootstrap gui/$(id -u)`. **Pour un Mac enrôlé par l'application** :
+elle l'active depuis la fiche « ce Mac » (« Répondre aux sondes de
+l'annuaire ») en enregistrant **un agent embarqué dans son paquet**
+(`SMAppService.agent`, macOS 13) — une application en bac à sable n'écrit pas
+dans `~/Library/LaunchAgents`.
+
+**La réserve de E11 est levée — précisé le 2026-09-29, par un essai réel**
+(oxygen, macOS 15.7.9) :
+
+- **un agent lancé par launchd, NON sandboxé** — signé Developer ID (équipe
+  `SB7H9B6TY8`, runtime renforcé) ou ad hoc — **lit** l'identité de machine
+  rangée dans `~/Library/Containers/org.airdesktop.servicelocator.mac/Data/Library/Application Support/asl/identite`
+  (mode 600), **sans invite TCC** ;
+- **un agent en bac à sable** (`app-sandbox`) : lecture **refusée** — le
+  processus est enfermé dans son propre conteneur.
+
+**D'où la forme retenue pour la v1, distribuée en Developer ID : l'agent
+`SMAppService` n'est PAS sandboxé.** C'est permis hors App Store ; il lit
+l'identité là où elle est, sans migration, et reçoit l'UDP entrant sans
+restriction. C'est aussi ce que `asl` fait déjà : il lit ce conteneur en
+repli (`crates/asl-cli/src/etat.rs:84-137` du client).
+
+**Le constat de sécurité, qu'il faut dire** : n'importe quel processus NON
+sandboxé de l'utilisateur lit la graine de la machine dans le conteneur de
+l'application. C'est la même exposition que `~/.config/asl/identite` sous
+Linux — un fichier 600, lisible par le même utilisateur —, mais **le conteneur
+ne protège pas la clé des autres programmes de l'utilisateur**, et personne ne
+doit le croire. Seul un stockage dans le trousseau, ou le matériel sécurisé,
+changerait cela ; ce n'est pas l'objet de cette décision.
+
+**Si l'agent devait un jour être sandboxé** (l'App Store) — ouvert, question
+E22 : un conteneur de **groupe d'applications**
+`SB7H9B6TY8.org.airdesktop.servicelocator` (droit
+`com.apple.security.application-groups`), sur l'application et sur l'agent ;
+l'identité y déménage (migration au premier lancement de l'application), et
+`asl` sur macOS doit la chercher aussi dans
+`~/Library/Group Containers/SB7H9B6TY8.org.airdesktop.servicelocator/…`.
 
 **Les applications** :
 
@@ -2893,7 +3126,7 @@ entre l'application et son agent n'est pas acquis.
 
 ### Travail à faire
 
-**Serveur** (`air-service-locator-server`), trois PR, après les réponses :
+**Serveur** (`air-service-locator-server`), trois PR :
 
 1. **Le codec `asl-echo`** (mineur) : la crate d'étage 1 — les trois
    datagrammes et le jeton, écrits et lus, longueurs fixes, bourrage vérifié ;
@@ -2910,7 +3143,10 @@ entre l'application et son agent n'est pas acquis.
    `asl-loop-tokio::sonde` ; `echo`, `echo_a`, `echo_par`, `echo_depuis` dans
    `GET /v1/machines` et `GET /v1/domaines/{d}` ; la même sonde chez un annuaire
    local, et son verdict dans l'état fédéré ; la sonde des racines vers les
-   échos fédérés si E8 la retient ; la cadence de E9.
+   échos fédérés (décision 92) ; la cadence de E9. **Et la passerelle**
+   (décision 94, si E21 a) : le champ `passerelle` de l'annonce `asl-echo`
+   dans `asl-proto` (décodé, fuzzé), son candidat en tête — adresse observée,
+   port accordé —, rapporté par un membre d'annuaire local, et `echo_via`.
 
 **Client** (`air-service-locator-client`), quatre PR :
 
@@ -2925,12 +3161,26 @@ entre l'application et son agent n'est pas acquis.
    les codes de sortie ; l'ABI (`asl-client-ffi`) si une liaison en veut.
 4. **Le paquet** : l'unité `asl-echo.service` posée par `scripts/paquet.sh`,
    désactivée, et `check-paquet.sh` qui le vérifie ; la page de manuel.
+5. **UPnP** (décision 94) : le client IGD — le nôtre, codec d'étage 1 fuzzé,
+   ou `igd-next` (E17) — dans `asl-cli` seulement, jamais dans `asl-client`
+   (C4) ; SSDP sur le lien local (IPv4 et IPv6), `LOCATION` littérale
+   seulement (C20) ; `AddAnyPortMapping`/`AddPortMapping` du seul port de
+   l'écho, `GetExternalIPAddress` comparée à `vu_depuis` (double NAT, E19) ;
+   `AddPinhole` si la box le permet (E20) ; le bail d'une heure renouvelé,
+   le retrait à l'arrêt et au démarrage suivant (E18) ; la recherche
+   périodique (E23) ; `--no-upnp` et `ASL_ECHO_UPNP=0` (E15) ; la réannonce
+   avec `passerelle` vers un annuaire qui le connaît (E21).
+6. **NAT-PMP et PCP**, si E16 le retient : une PR à part, après UPnP.
 
-**Applications** : Mac — activer l'écho depuis « ce Mac » (et vérifier le
-conteneur partagé, E11) ; Mac, iOS, Android — afficher l'état d'écho sur la
+**Applications** : Mac — activer l'écho depuis « ce Mac », par un agent
+`SMAppService` non sandboxé (décision 93, précisée) ; Mac, iOS, Android — afficher l'état d'écho sur la
 fiche d'une machine, décodeur tolérant.
 
-### Questions pour Thierry
+### Les questions E1 à E14 — tranchées
+
+**Thierry a répondu le 2026-09-29 : « d'accord pour tout ».** Chaque
+recommandation est devenue une décision ; les questions restent écrites avec
+leurs options, pour qu'on sache ce qui a été écarté.
 
 **E1. Par quoi l'écho répond-il ?**
 - (a) **Des datagrammes UDP bruts, un aller-retour signé.** Pas d'état avant
@@ -2939,7 +3189,7 @@ fiche d'une machine, décodeur tolérant.
   deux allers-retours, et une connexion lourde que n'importe qui peut ouvrir.
 - (c) UDP, avec un repli TCP (même format, préfixé de sa longueur). Pour les
   réseaux qui bloquent l'UDP sortant ; un second chemin à tenir.
-- **Recommandation : (a)**, et (c) plus tard si un réseau réel le demande.
+- **Décidé (2026-09-29, Thierry ; décision 90) : (a)**, et (c) plus tard si un réseau réel le demande.
 
 **E2. L'écho écoute-t-il sur la socket de son propre bail ?**
 - (a) **Oui.** Derrière une box IPv4, le port vu par l'annuaire est celui de
@@ -2949,7 +3199,7 @@ fiche d'une machine, décodeur tolérant.
 - (b) Non, une socket à part. Rien à modifier côté bibliothèque, mais derrière
   un NAT IPv4, l'écho n'est joignable que si l'on redirige son port — qui
   change à chaque démarrage.
-- **Recommandation : (a).**
+- **Décidé (2026-09-29, Thierry ; décision 90) : (a).**
 
 **E3. Que signe la réponse ?**
 - (a) **Le défi, le `m-…`, l'adresse vue du sondeur, et l'identité du
@@ -2958,14 +3208,14 @@ fiche d'une machine, décodeur tolérant.
   elle-même ; mais elle dévoile son horloge, et le défi suffit déjà.
 - (c) Le défi et le `m-…` seulement. Plus court, mais une preuve pourrait être
   obtenue pour le compte d'un autre.
-- **Recommandation : (a).**
+- **Décidé (2026-09-29, Thierry ; décision 90) : (a).**
 
 **E4. Quelles sondes d'annuaire l'écho croit-il ?**
 - (a) **Celle de l'annuaire qui tient son bail, et elle seule.** La règle la
   plus étroite ; les racines ne sondent pas une machine d'un domaine hébergé.
 - (b) Celle-là, et celles des racines embarquées. Nécessaire si l'on répond
   « oui » à E8.
-- **Recommandation : (b) si E8 est « oui », (a) sinon.**
+- **Décidé (2026-09-29, Thierry ; décision 91) : (b)**, puisque E8 est « oui ».
 
 **E5. Combien de temps vit un jeton, et à quoi est-il lié ?**
 - (a) **Soixante secondes, lié à la clé du sondeur et à celle de la cible** ;
@@ -2974,7 +3224,7 @@ fiche d'une machine, décodeur tolérant.
   droit retiré continue de servir cinq minutes.
 - (c) Lié à l'adresse du sondeur plutôt qu'à sa clé : pas de signature du
   sondeur, mais faux dès que la machine change d'adresse ou de famille.
-- **Recommandation : (a).**
+- **Décidé (2026-09-29, Thierry ; décision 91) : (a).**
 
 **E6. Qui peut lancer `asl ping` vers une machine ?**
 - (a) **Qui tient `localiser`** sur elle (ou son domaine) — la règle de
@@ -2982,14 +3232,14 @@ fiche d'une machine, décodeur tolérant.
 - (b) Qui tient `voir` : plus large, mais `asl ping` révèle l'adresse, que
   `voir` ne donne pas (décision 80).
 - (c) Son propriétaire seulement.
-- **Recommandation : (a).**
+- **Décidé (2026-09-29, Thierry ; décision 91) : (a).**
 
 **E7. Qui voit l'état d'écho (vérifié, injoignable, autre clé) ?**
 - (a) Le propriétaire seulement (`GET /v1/machines`).
 - (b) **Le propriétaire, et qui tient `voir` sur le domaine**
   (`GET /v1/domaines/{d}`) — `voir` donne déjà « l'état » (`modele.md` §2.13),
   sans adresse.
-- **Recommandation : (b).**
+- **Décidé (2026-09-29, Thierry ; décision 91) : (b).**
 
 **E8. Les racines sondent-elles aussi, du dehors, l'écho d'une machine d'un
 domaine hébergé par un annuaire local ?**
@@ -2999,7 +3249,7 @@ domaine hébergé par un annuaire local ?**
   globale, une fois par changement et par quart d'heure. On sait enfin si la
   maison est joignable de l'Internet ; en échange, les racines envoient un
   datagramme vers une adresse qu'un annuaire local leur a rapportée.
-- **Recommandation : (b)** — c'est exactement le cas du pare-feu de speedy
+- **Décidé (2026-09-29, Thierry ; décision 92) : (b)** — c'est exactement le cas du pare-feu de speedy
   (27/09).
 
 **E9. Quand l'annuaire sonde-t-il l'écho ?**
@@ -3007,7 +3257,7 @@ domaine hébergé par un annuaire local ?**
 - (b) **Cela, et toutes les quinze minutes** tant que le bail tient : un
   datagramme, pour que « constaté à » reste frais et qu'un pare-feu fermé
   depuis se voie.
-- **Recommandation : (b).**
+- **Décidé (2026-09-29, Thierry ; décision 92) : (b).**
 
 **E10. Comment l'écho tourne-t-il sous Linux ?**
 - (a) **Une unité utilisateur** (`systemctl --user`), posée désactivée par le
@@ -3016,7 +3266,7 @@ domaine hébergé par un annuaire local ?**
   au boot sans rien de plus, mais c'est root qui décide pour la clé d'un
   utilisateur.
 - (c) Les deux.
-- **Recommandation : (a)**, et (b) seulement si un parc réel le demande.
+- **Décidé (2026-09-29, Thierry ; décision 93) : (a)**, et (b) seulement si un parc réel le demande.
 
 **E11. Comment l'écho tourne-t-il sur un Mac ?**
 - (a) **Un LaunchAgent** `~/Library/LaunchAgents/org.airdesktop.asl-echo.plist`
@@ -3025,9 +3275,10 @@ domaine hébergé par un annuaire local ?**
   pour un Mac enrôlé par l'application.
 - (b) Seulement le LaunchAgent d'`asl` : l'application ne fait que montrer
   l'état et dire la commande à taper.
-- **Recommandation : (a)**, sous réserve de vérifier dans le dépôt Mac que
-  l'agent peut lire l'identité rangée dans le conteneur de l'application ;
-  sinon (b) d'abord.
+- **Décidé (2026-09-29, Thierry ; décision 93) : (a).** **Précisé le même jour** : la
+  réserve est levée par un essai réel — un agent non sandboxé lit l'identité
+  dans le conteneur de l'application ; l'agent de la v1 n'est donc pas
+  sandboxé (« L'installation », ci-dessus). Le cas sandboxé est la question E22.
 
 **E12. Que peut-on donner à `asl ping` ?**
 - (a) Un `m-…` seulement.
@@ -3036,7 +3287,7 @@ domaine hébergé par un annuaire local ?**
   fait à sa place. (Aucune route ne résout un alias de machine aujourd'hui :
   `modele.md` §6.0 ; la recherche se ferait dans `asl`, sur ce qu'il sait
   lister.)
-- **Recommandation : (b).**
+- **Décidé (2026-09-29, Thierry ; décision 93) : (b).**
 
 **E13. Le nom `asl-echo` est-il réservé ?**
 - (a) **Réservé à sa forme** : une annonce `asl-echo` porte un seul point, en
@@ -3045,7 +3296,7 @@ domaine hébergé par un annuaire local ?**
   une promesse que le serveur ne peut pas tenir.
 - (c) Pas réservé : un daemon qui prendrait ce nom pour autre chose serait
   sondé par l'écho et dit injoignable.
-- **Recommandation : (a).**
+- **Décidé (2026-09-29, Thierry ; décision 90) : (a).**
 
 **E14. L'écho est-il actif par défaut ?**
 - (a) **Non** : le paquet pose l'unité désactivée ; `asl enroll` suggère de
@@ -3053,6 +3304,96 @@ domaine hébergé par un annuaire local ?**
 - (b) Oui, dès l'enrôlement : chaque machine est vérifiable d'office, mais un
   port s'ouvre sans que personne l'ait demandé — et le paquet devrait exécuter
   un script pour l'activer.
+- **Décidé (2026-09-29, Thierry ; décision 93) : (a).**
+
+### Questions pour Thierry — E15 et suivantes
+
+**E15. UPnP est-il actif par défaut ?**
+- (a) **Oui** : `asl echo` demande une redirection à la box sans qu'on le lui
+  dise, et `--no-upnp` l'en empêche. Toutes les chances, comme tu le veux ;
+  en échange, un port s'ouvre sur la box dès que l'écho tourne (l'écho, lui,
+  n'est pas actif par défaut : décision 93).
+- (b) Non : il faut `--upnp`. Rien ne change sur la box sans un geste, mais
+  la plupart des gens ne le feront pas, et l'écho restera injoignable du
+  dehors derrière une box IPv4.
+- **Recommandation : (a).**
+
+**E16. Faut-il aussi parler NAT-PMP ou PCP, quand UPnP ne répond pas ?**
+- (a) Non, UPnP seul en v1 : un protocole de moins.
+- (b) PCP seul (RFC 6887) : il sait aussi ouvrir un trou IPv6, et certaines
+  box le préfèrent à UPnP.
+- (c) PCP, et NAT-PMP (RFC 6886) quand la box ne connaît que lui : les deux
+  partagent le port 5351, et PCP prévoit ce repli. Un codec binaire de plus,
+  petit ; il faut trouver l'adresse de la passerelle (la route par défaut),
+  différemment sous Linux et sous macOS.
+- **Recommandation : (c)**, après UPnP, dans une PR à part : c'est ce qui
+  donne le plus de chances, et le format est bien plus simple que celui
+  d'UPnP.
+
+**E17. Utiliser `igd-next`, ou écrire notre propre client UPnP ?**
+- (a) `igd-next` : MIT, Rust pur, IGD v1 et v2 déjà écrits. Mais une trentaine
+  de crates de plus, pas de trou IPv6, et des décodeurs XML et HTTP qui lisent
+  ce qu'envoie un appareil du réseau sans être fuzzés par nous (C3).
+- (b) **Le nôtre**, dans le dépôt client, réservé à `asl` : quelques centaines
+  de lignes, aucune dépendance, fuzzé, et le trou IPv6 compris.
+- **Recommandation : (b)**, en lisant `igd-next` comme référence.
+
+**E18. Combien de temps dure la redirection ?**
+- (a) **Une heure, renouvelée toutes les trente minutes** ; permanente
+  seulement si la box n'accepte que cela, et retirée au démarrage suivant si
+  l'écho s'est arrêté brutalement.
+- (b) Toujours permanente : plus simple, mais une redirection oubliée reste
+  sur la box pour toujours si la machine disparaît.
+- (c) Jamais permanente : on se passe d'UPnP sur les box qui l'exigent (les
+  vieilles, souvent).
+- **Recommandation : (a).**
+
+**E19. Et s'il y a deux NAT (la box derrière celle de l'opérateur, ou derrière
+une autre box) ?**
+- (a) **On ne l'annonce pas, et on le dit** : « double NAT, la redirection ne
+  suffira pas ». La redirection reste posée (elle ne gêne pas), mais
+  l'annuaire n'en entend pas parler.
+- (b) On essaie aussi d'ouvrir la box du dessus : UPnP ne le permet pas (on ne
+  la voit pas depuis le réseau local), et PCP seulement si l'opérateur le
+  sert.
+- **Recommandation : (a).**
+
+**E20. Le trou IPv6 dans le pare-feu de la box (`AddPinhole`) ?**
+- (a) **On le tente si la box le propose** et l'autorise ; sinon on se tait (le
+  dire seulement en mode bavard). C'est rare, mais ça ne coûte presque rien.
+- (b) Pas en v1 : moins de code, mais une machine en IPv6 derrière un pare-feu
+  de box reste injoignable du dehors, même quand la box aurait accepté.
+- **Recommandation : (a).**
+
+**E21. Comment l'annuaire apprend-il la redirection, et comment le dit-il ?**
+- (a) **Un champ `passerelle` dans l'annonce de l'écho (le port seul, et
+  `via`), l'adresse étant toujours celle que l'annuaire a observée ; puis
+  `echo_via` = `upnp` | `nat` | `direct` sur la machine**, en chaînes. Il
+  faut un annuaire à jour ; l'écho vérifie sa version avant d'envoyer le champ.
+- (b) Aucun champ : on compte sur la box pour que les paquets sortants
+  prennent le port de la redirection. Souvent faux, et l'annuaire ne saurait
+  pas par où la preuve est passée.
+- (c) Un champ avec l'adresse externe aussi : écarté — l'annuaire sonderait
+  une adresse que le client choisit, c'est-à-dire n'importe laquelle.
+- **Recommandation : (a).**
+
+**E22. Si l'agent de l'application Mac devait un jour être en bac à sable
+(App Store) ?**
+- (a) **Rien pour l'instant** : la v1 est distribuée en Developer ID, l'agent
+  n'est pas sandboxé et lit l'identité là où elle est (décision 93, précisée).
+- (b) Préparer dès maintenant un conteneur de groupe
+  `SB7H9B6TY8.org.airdesktop.servicelocator` sur l'application et l'agent :
+  l'identité y déménage au premier lancement, et `asl` doit aussi la chercher
+  dans `~/Library/Group Containers/SB7H9B6TY8.org.airdesktop.servicelocator/…`.
+  Une migration à écrire et à éprouver, pour un besoin qui n'existe pas encore.
+- **Recommandation : (a)**, et (b) le jour où l'App Store devient une cible.
+
+**E23. Quand l'écho cherche-t-il la box ?**
+- (a) **Au démarrage, toutes les trente minutes, et quand l'adresse de la
+  machine change** (une migration du bail, un autre réseau) : une box
+  redémarrée, ou un portable qui change de Wi-Fi, retrouve sa redirection.
+- (b) Au démarrage seulement : plus simple, mais une box redémarrée qui a perdu
+  la redirection n'en redonne pas avant le redémarrage de l'écho.
 - **Recommandation : (a).**
 
 ## 4. Ce qui est nommé et repoussé
