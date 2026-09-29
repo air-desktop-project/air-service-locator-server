@@ -326,7 +326,9 @@ tiennent et qui se lit. Rien de ce que C10 interdit ne revient :
   calculé pour le demandeur, comme elle prenait hier ses arêtes.
 - **Le domaine racine ne transmet rien** : un droit sur lui ne descend pas dans
   les domaines des utilisateurs. Sans cette règle, administrer les racines
-  serait lire tout le monde.
+  serait lire tout le monde. Ses administrateurs y rangent leurs machines
+  (0.39.0, `replication.md` décision 88) et voient ce qui y est rangé — rien
+  au-delà.
 
 **Ce qui s'ajoute aux essais** : un compte tiers qui n'est membre d'aucun
 groupe ayant un droit ; un ancien membre retiré d'un groupe, dont la machine

@@ -597,11 +597,20 @@ impl Entrepot {
     /// Ce compte peut-il ranger SES machines dans ce domaine ? Il
     /// l'administre, ou l'un de ses groupes a reçu `rattacher` sur lui.
     ///
+    /// **Le domaine racine aussi, depuis la 0.39.0** (`replication.md`
+    /// décision 88) : ses administrateurs — le groupe des administrateurs des
+    /// racines, et lui seul, puisqu'aucun droit ne s'écrit sur lui — y rangent
+    /// leurs machines. Il n'a pas de rangée : il ne se cherche pas dans la
+    /// table.
+    ///
     /// # Errors
     ///
     /// [`Faute::Base`] ou [`Faute::Enregistrement`].
     pub fn peut_ranger(&self, compte: Identifiant, domaine: Identifiant) -> Result<bool, Faute> {
-        if domaine == domaine_racine() || self.domaine(domaine)?.is_none() {
+        if domaine == domaine_racine() {
+            return self.administre(compte, domaine);
+        }
+        if self.domaine(domaine)?.is_none() {
             return Ok(false);
         }
         Ok(self.administre(compte, domaine)?
@@ -614,8 +623,13 @@ impl Entrepot {
     /// la propriété donne (les quatre), de ce que son groupe d'administrateurs
     /// donne (`administrer`, `rattacher`, `voir`), et des droits reçus sur lui
     /// — `administrer` emportant `rattacher` et `voir`, `localiser` emportant
-    /// `voir`. Aucun pour un domaine mort ou le domaine racine, qui a sa
-    /// propre règle.
+    /// `voir`. Aucun pour un domaine mort.
+    ///
+    /// **Le domaine racine a sa propre règle** (décision 88) : ses
+    /// administrateurs — le groupe des administrateurs des racines, où son
+    /// propriétaire est — y tiennent les quatre, comme le propriétaire d'un
+    /// domaine ordinaire ; les autres, rien, puisqu'aucun droit ne s'écrit sur
+    /// lui (décision 44).
     ///
     /// # Errors
     ///
@@ -626,7 +640,11 @@ impl Entrepot {
         domaine: Identifiant,
     ) -> Result<Droits, Faute> {
         if domaine == domaine_racine() {
-            return Ok(Droits::AUCUN);
+            return Ok(if self.administre(compte, domaine)? {
+                Droits::TOUS
+            } else {
+                Droits::AUCUN
+            });
         }
         let Some(rangee) = self.domaine(domaine)? else {
             return Ok(Droits::AUCUN);
@@ -684,6 +702,11 @@ impl Entrepot {
     /// le propriétaire, ou administrer le domaine où elle est rangée
     /// (décision 40 : ranger sa machine, c'est confier à ses administrateurs
     /// le droit de la partager).
+    ///
+    /// **Le domaine racine suit la même règle** (décision 88) : ses
+    /// administrateurs partagent ce qui y est rangé, comme ceux de tout
+    /// domaine ; rien au-delà, puisque le domaine racine ne contient aucun
+    /// autre domaine.
     ///
     /// # Errors
     ///

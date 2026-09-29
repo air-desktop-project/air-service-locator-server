@@ -2429,15 +2429,16 @@ impl Service<'_> {
 
     /// Tous les services d'une machine, tels qu'ils sont annoncés.
     ///
-    /// **LE DEMANDEUR EST UN APPAREIL, ET NON UNE MACHINE** : c'est
-    /// l'application mobile qui regarde. On rassemble donc au nom de son COMPTE,
-    /// et l'on emprunte la même décision — celle qui sert la résolution — parce
-    /// qu'il n'y a aucune raison qu'un écran voie ce qu'un daemon ne verrait pas.
+    /// **LE DEMANDEUR EST UN COMPTE** : celui de l'appareil — l'application
+    /// mobile qui regarde —, ou, depuis la 0.39.0, celui de la machine qui lit
+    /// — le client en ligne de commande. On rassemble donc au nom de son
+    /// COMPTE, et la décision est la même sur les deux voies.
     fn rassembler_les_services(&self, machine: Identifiant) -> Trouvaille {
-        let Some(appareil) = self.session.appareil() else {
-            return Trouvaille::Rien;
-        };
-        let Ok(Some(rangee)) = self.entrepot.appareil(appareil) else {
+        // **L'APPAREIL, OU UNE MACHINE QUI PORTE `lecture`** (0.39.0) : le
+        // client en ligne de commande lit avec la clé de sa machine. La règle
+        // ne change pas — le propriétaire, et lui seul
+        // (`asl_auth::decider_services_de_machine`).
+        let Some(demandeur) = self.compte_qui_lit() else {
             return Trouvaille::Rien;
         };
         // **LA MACHINE VISÉE EST LUE MAINTENANT, ET LA DÉCISION SE PREND APRÈS.**
@@ -2523,7 +2524,7 @@ impl Service<'_> {
         annonces.extend(self.services_federes(machine, &noms_d_ici));
 
         Trouvaille::ServicesDeMachine {
-            demandeur: rangee.proprietaire,
+            demandeur,
             proprietaire: visee.proprietaire,
             annonces,
         }

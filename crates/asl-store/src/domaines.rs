@@ -1039,6 +1039,11 @@ impl Entrepot {
     /// Rend `false` si la machine n'existe pas, ou si le domaine nommé n'est
     /// pas vivant. **Les droits se jugent avant** : l'entrepôt ne décide pas.
     ///
+    /// **Le domaine racine est toujours vivant** (décision 88) : calculé, sans
+    /// rangée (décision 43), il reçoit un rattachement ordinaire — le même
+    /// enregistrement, la même opération `machine-domaine`, et rien d'écrit
+    /// pour lui.
+    ///
     /// # Errors
     ///
     /// [`Faute::Base`] ou [`Faute::Enregistrement`].
@@ -1056,6 +1061,7 @@ impl Entrepot {
             return Ok(false);
         }
         if let Some(quel) = domaine
+            && quel != domaine_racine()
             && vivant_dans_l_ecriture(&ecriture, quel)?.is_none()
         {
             return Ok(false);
@@ -1178,12 +1184,13 @@ impl Entrepot {
 
     /// Les machines rangées dans ce domaine, s'il est vivant — celles dont le
     /// propriétaire l'administre encore (voir [`Entrepot::domaine_de_machine`]).
+    /// Le domaine racine, calculé, l'est toujours (décision 88).
     ///
     /// # Errors
     ///
     /// [`Faute::Base`] ou [`Faute::Enregistrement`].
     pub fn machines_du_domaine(&self, domaine: Identifiant) -> Result<Vec<Identifiant>, Faute> {
-        if self.domaine(domaine)?.is_none() {
+        if domaine != domaine_racine() && self.domaine(domaine)?.is_none() {
             return Ok(Vec::new());
         }
         let candidates = {

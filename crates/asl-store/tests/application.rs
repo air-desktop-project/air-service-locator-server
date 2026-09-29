@@ -3467,3 +3467,273 @@ fn l_alias_du_domaine_racine_passe_d_une_racine_a_l_autre() {
     assert!(base.alias_de_domaine(inconnu).expect("lisible").is_none());
     let _ = std::fs::remove_file(&chemin);
 }
+
+// ── Des machines dans le domaine racine (décision 88, 0.39.0) ──────────────
+
+/// Déclare cette machine de ce compte, reçue du pair.
+fn une_machine(base: &Entrepot, quelle: Identifiant, qui: Identifiant, compteur: u64) {
+    appliquer(
+        base,
+        est(pair(), compteur),
+        Operation::Machine {
+            machine: quelle,
+            enregistrement: machine(est(pair(), compteur), qui, "machine"),
+        },
+    );
+}
+
+#[test]
+fn les_administrateurs_du_domaine_racine_y_rangent_leurs_machines() {
+    // **Décision 88** : le domaine racine se comporte comme un domaine que ses
+    // administrateurs possèdent — ils y tiennent les quatre droits et y
+    // rangent LEURS machines ; il n'est pas un ancêtre, et ils ne gagnent
+    // rien sur ce qui n'y est pas rangé.
+    let (base, chemin) = entrepot("machines-dans-r");
+    let racine = asl_registre::domaine_racine();
+    let thierry = un(Genre::Utilisateur, 1);
+    let bob = un(Genre::Utilisateur, 2);
+    let carole = un(Genre::Utilisateur, 3);
+    for (rang, qui) in [thierry, bob, carole].into_iter().enumerate() {
+        creer(&base, qui, u64::try_from(rang).unwrap() + 1);
+    }
+    for qui in [thierry, bob] {
+        assert_eq!(
+            base.nommer_administrateur_des_racines(qui).expect("nommé"),
+            asl_store::EcritureDeGroupe::Faite
+        );
+    }
+    let nitrogen = un(Genre::Machine, 1);
+    let argon = un(Genre::Machine, 2);
+    let console = un(Genre::Machine, 3);
+    let portable = un(Genre::Machine, 4);
+    for (compteur, quelle, qui) in [
+        (10, nitrogen, thierry),
+        (11, argon, thierry),
+        (12, console, bob),
+        (13, portable, carole),
+    ] {
+        une_machine(&base, quelle, qui, compteur);
+    }
+
+    // ── Qui y range ─────────────────────────────────────────────────────────
+    assert!(base.peut_ranger(thierry, racine).expect("lisible"));
+    assert!(base.peut_ranger(bob, racine).expect("lisible"));
+    assert!(!base.peut_ranger(carole, racine).expect("lisible"));
+    assert_eq!(
+        base.droits_sur_domaine(thierry, racine).expect("lisible"),
+        asl_registre::Droits::TOUS,
+        "les quatre, comme sur un domaine qu'on possède"
+    );
+    assert!(
+        base.droits_sur_domaine(carole, racine)
+            .expect("lisible")
+            .est_vide()
+    );
+    for quelle in [nitrogen, argon] {
+        assert!(
+            base.rattacher_machine(quelle, Some(racine))
+                .expect("rangée")
+        );
+    }
+    assert!(
+        base.rattacher_machine(console, Some(racine))
+            .expect("rangée")
+    );
+    assert_eq!(
+        base.domaine_de_machine(nitrogen).expect("lisible"),
+        Some(racine)
+    );
+    assert!(
+        base.domaine(racine).expect("lisible").is_none(),
+        "toujours calculé, sans rangée"
+    );
+    let mut dans_r = base.machines_du_domaine(racine).expect("lisible");
+    dans_r.sort();
+    let mut attendues = vec![nitrogen, argon, console];
+    attendues.sort();
+    assert_eq!(dans_r, attendues);
+
+    // ── Ce qu'un administrateur a sur la machine d'un autre, rangée dans R ──
+    // La logique d'un domaine ordinaire à plusieurs administrateurs : il la
+    // voit, il peut la partager (décision 40) ; `localiser` ne descend pas
+    // d'un domaine qu'on administre — il faut un droit écrit.
+    let voir = base
+        .acces(thierry, asl_store::Voulu::Voir)
+        .expect("lisible");
+    assert_eq!(
+        voir,
+        vec![asl_store::Acces {
+            proprietaire: bob,
+            portee: Portee::UneMachine(console),
+        }]
+    );
+    assert!(
+        base.acces(thierry, asl_store::Voulu::Localiser)
+            .expect("lisible")
+            .is_empty()
+    );
+    assert!(
+        base.peut_accorder_sur_la_machine(thierry, console)
+            .expect("lisible")
+    );
+    assert!(
+        base.acces(carole, asl_store::Voulu::Voir)
+            .expect("lisible")
+            .is_empty(),
+        "qui n'administre pas les racines ne voit rien de R"
+    );
+
+    // ── Le domaine racine n'est pas un ancêtre ──────────────────────────────
+    let chez_carole = asl_registre::premier_domaine(carole);
+    let chez_bob = asl_registre::premier_domaine(bob);
+    base.rattacher_machine(portable, Some(chez_carole))
+        .expect("rangée");
+    assert!(
+        base.droits_sur_domaine(thierry, chez_carole)
+            .expect("lisible")
+            .est_vide()
+    );
+    assert!(!base.peut_ranger(thierry, chez_carole).expect("lisible"));
+    assert!(!base.administre(thierry, chez_carole).expect("lisible"));
+    assert!(
+        !base
+            .peut_accorder_sur_la_machine(thierry, portable)
+            .expect("lisible")
+    );
+    // Sortie de R vers un domaine de son propriétaire, la machine de bob
+    // n'est plus rien pour thierry.
+    base.rattacher_machine(console, Some(chez_bob))
+        .expect("rangée");
+    assert_eq!(
+        base.domaine_de_machine(console).expect("lisible"),
+        Some(chez_bob)
+    );
+    assert!(
+        base.acces(thierry, asl_store::Voulu::Voir)
+            .expect("lisible")
+            .is_empty()
+    );
+    assert!(
+        !base
+            .peut_accorder_sur_la_machine(thierry, console)
+            .expect("lisible")
+    );
+
+    // ── Retirer, changer de domaine ─────────────────────────────────────────
+    base.rattacher_machine(argon, None).expect("sortie");
+    assert_eq!(base.domaine_de_machine(argon).expect("lisible"), None);
+    let chez_thierry = asl_registre::premier_domaine(thierry);
+    base.rattacher_machine(nitrogen, Some(chez_thierry))
+        .expect("déplacée");
+    assert_eq!(
+        base.domaine_de_machine(nitrogen).expect("lisible"),
+        Some(chez_thierry)
+    );
+    base.rattacher_machine(nitrogen, Some(racine))
+        .expect("revenue");
+
+    // ── Retiré des administrateurs, ses machines se lisent détachées ───────
+    base.rattacher_machine(console, Some(racine))
+        .expect("revenue");
+    assert_eq!(
+        base.retirer_administrateur_des_racines(bob)
+            .expect("retiré"),
+        asl_store::EcritureDeGroupe::Faite
+    );
+    assert_eq!(base.domaine_de_machine(console).expect("lisible"), None);
+    assert_eq!(
+        base.machines_du_domaine(racine).expect("lisible"),
+        vec![nitrogen]
+    );
+    assert!(!base.peut_ranger(bob, racine).expect("lisible"));
+
+    // **L'hébergement ne s'y applique pas** : même écrit, le domaine racine
+    // se lit aux racines.
+    base.confier_domaine(racine, Some(un(Genre::Annuaire, 0x51)))
+        .expect("écrit");
+    assert_eq!(base.hebergeur_de_domaine(racine).expect("lisible"), None);
+    let _ = std::fs::remove_file(&chemin);
+}
+
+#[test]
+fn un_rattachement_au_domaine_racine_passe_d_une_racine_a_l_autre() {
+    // **Décision 88, la réplication** : un rattachement vers le domaine racine
+    // est une opération `machine-domaine` ordinaire. L'autre racine la range
+    // (le domaine visé n'est pas regardé, §5.2) et la lit — par son journal
+    // comme par un instantané.
+    let racine = asl_registre::domaine_racine();
+    let thierry = un(Genre::Utilisateur, 1);
+    let nitrogen = un(Genre::Machine, 1);
+    let preparer = |base: &Entrepot| {
+        creer(base, thierry, 1);
+        une_machine(base, nitrogen, thierry, 2);
+        appliquer(
+            base,
+            est(pair(), 3),
+            Operation::GroupeMembre {
+                groupe: asl_registre::groupe_d_administrateurs(racine),
+                compte: thierry,
+            },
+        );
+    };
+    let (ici, chemin) = entrepot("machines-dans-r-replication");
+    preparer(&ici);
+    let apres = ici.derniere_operation();
+    assert!(
+        ici.rattacher_machine(nitrogen, Some(racine))
+            .expect("rangée")
+    );
+    let cadres = match ici.operations_apres(apres).expect("le journal") {
+        asl_store::Rattrapage::Operations(cadres) => cadres,
+        asl_store::Rattrapage::HorsJournal { .. } => panic!("rien d'expiré"),
+    };
+    assert_eq!(cadres.len(), 1, "une opération, et une seule");
+    let (cadre, _) = Cadre::lire(&cadres[0]).expect("un cadre");
+    assert!(
+        matches!(
+            cadre,
+            Cadre::Operation {
+                operation: Operation::MachineDomaine {
+                    enregistrement: asl_registre::Rattachement {
+                        domaine: Some(vise),
+                        ..
+                    },
+                    ..
+                },
+                ..
+            } if vise == racine
+        ),
+        "{cadre:?}"
+    );
+
+    // L'autre racine l'applique, et la lit.
+    let la_bas = Entrepot::en_memoire(autre()).expect("en mémoire");
+    preparer(&la_bas);
+    let fait = la_bas.appliquer(locale(), &cadre, false).expect("appliqué");
+    assert!(matches!(fait, Applique::Faite { .. }), "{fait:?}");
+    assert_eq!(
+        la_bas.domaine_de_machine(nitrogen).expect("lisible"),
+        Some(racine)
+    );
+    assert_eq!(
+        la_bas.machines_du_domaine(racine).expect("lisible"),
+        vec![nitrogen]
+    );
+
+    // Et un instantané le porte : une racine qu'on amorce le reçoit aussi.
+    let amorcee = Entrepot::en_memoire(autre()).expect("en mémoire");
+    let suite: Vec<Cadre> = ici
+        .instantane()
+        .expect("l'instantané")
+        .iter()
+        .map(|brut| Cadre::lire(brut).expect("un cadre").0)
+        .collect();
+    amorcee
+        .appliquer_la_suite(locale(), &suite, true)
+        .expect("appliqué");
+    assert_eq!(
+        amorcee.domaine_de_machine(nitrogen).expect("lisible"),
+        Some(racine)
+    );
+    let _ = std::fs::remove_file(&chemin);
+}

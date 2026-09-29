@@ -1682,6 +1682,13 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
         }
     }
 
+    // **UNE ÉCRITURE QUI RESTE À UN APPAREIL** (0.39.0) : `/v1/domaines`,
+    // `/v1/domaines/{d}` et `/v1/machines/{m}/services` se lisent aussi sur la
+    // voie machine ; les créer ou les supprimer, non.
+    if resolu.ressource.ecriture_reservee_a_un_appareil(methode) && session.appareil().is_none() {
+        return Besoin::Deja(StatusCode::UNAUTHORIZED);
+    }
+
     match resolu.ressource {
         // **L'ALIAS SE RANGE EN NFC AVANT QU'ON LE CHERCHE**, sous la même
         // règle qu'à l'écriture : deux écritures d'un même alias trouvent le
@@ -8939,9 +8946,19 @@ mod domaines {
                 alias: AliasDeDomaine::nouveau("Maison").unwrap()
             }
         );
-        // Mais mes domaines, eux, sont l'affaire d'un appareil.
+        // Mes domaines se LISENT aussi sur la voie machine (0.39.0) — la
+        // capacité `lecture` se juge à l'étage 3 ; les créer reste l'affaire
+        // d'un appareil.
         assert_eq!(
             lire(&machine, b"GET", b"/v1/domaines", b""),
+            Besoin::MesDomaines
+        );
+        assert_eq!(
+            lire(&machine, b"POST", b"/v1/domaines", b"{}"),
+            Besoin::Deja(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            lire(&personne, b"GET", b"/v1/domaines", b""),
             Besoin::Deja(StatusCode::UNAUTHORIZED)
         );
     }

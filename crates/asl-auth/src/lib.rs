@@ -325,7 +325,9 @@ impl Cible {
 
 // ── Les décisions ───────────────────────────────────────────────────────────
 
-/// Un appareil peut-il voir les services de cette machine ?
+/// Un compte peut-il voir les services de cette machine ? Celui d'un appareil,
+/// ou — depuis la 0.39.0 — celui d'une machine qui porte `lecture` : la règle
+/// est la même sur les deux voies.
 ///
 /// # UNE RÈGLE, ET NON UNE COMPARAISON ÉGARÉE DANS LA BOUCLE
 ///

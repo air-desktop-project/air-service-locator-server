@@ -978,9 +978,10 @@ l'inscription d'un annuaire local (§2.7, `replication.md` décisions 32 et 33).
 | Règle | Pourquoi |
 |---|---|
 | **Son identifiant se DÉDUIT d'une étiquette fixe** — les seize premiers octets d'un SHA-256 à domaine séparé de la chaîne `asl domaine racine` —, et non d'un tirage (décidé le 2026-09-26, codé en 0.24.0 : `asl_registre::domaine_racine`) | Les deux racines et tout annuaire local le calculent pareil, sans rien échanger ni rien amorcer : il n'y a pas de fenêtre où l'une le connaîtrait et l'autre non, et on peut l'écrire dans le code comme les clés des racines. |
-| ~~Il naît au premier démarrage d'une racine qui tient `--operator-key`~~ **Il n'est écrit nulle part : il se CALCULE** (0.24.0, `replication.md` décision 43), vide ; **son propriétaire est le premier compte nommé administrateur sous la clé d'exploitant** — celui dont l'ajout, encore vivant, est le plus ancien (décidé le 2026-09-26) | La caution des invitations et du groupe des administrateurs est déjà cette clé ; il n'en faut pas une autre. **Pourquoi ne pas l'écrire au démarrage** : son propriétaire est le premier nommé, et deux racines qui nommeraient chacune un premier administrateur dans la même fenêtre écriraient deux domaines racines de propriétaires différents — « insérer si absent » dépendrait de l'ordre d'arrivée. Calculé sur l'ensemble des nominations, il est le même des deux côtés. |
-| **Il ne contient aucune machine en v1** (décidé le 2026-09-26) — ni alias, ni autre groupe que son groupe d'administrateurs | Les racines ne sont pas des machines enrôlées : elles ne s'annoncent pas, et rien ne s'y résout. Le domaine racine est un point d'attache et le porteur d'un groupe, pas un lieu. |
-| **Il n'est PAS un ancêtre pour les droits** | Un droit posé sur le domaine racine ne descend pas dans les domaines du niveau 1 (§2.13). Sans cette règle, administrer les racines donnerait à voir les machines de tout le monde — exactement ce que la décision 33 promettait d'éviter : un administrateur des racines accepte ou refuse une inscription, **et rien d'autre**. |
+| ~~Il naît au premier démarrage d'une racine qui tient `--operator-key`~~ **Il n'est écrit nulle part : il se CALCULE** (0.24.0, `replication.md` décision 43), sans rangée ; **son propriétaire est le premier compte nommé administrateur sous la clé d'exploitant** — celui dont l'ajout, encore vivant, est le plus ancien (décidé le 2026-09-26) | La caution des invitations et du groupe des administrateurs est déjà cette clé ; il n'en faut pas une autre. **Pourquoi ne pas l'écrire au démarrage** : son propriétaire est le premier nommé, et deux racines qui nommeraient chacune un premier administrateur dans la même fenêtre écriraient deux domaines racines de propriétaires différents — « insérer si absent » dépendrait de l'ordre d'arrivée. Calculé sur l'ensemble des nominations, il est le même des deux côtés. |
+| ~~Il ne contient aucune machine en v1 — ni alias, ni autre groupe que son groupe d'administrateurs~~ **Corrigé le 2026-09-29 : cette règle n'avait pas été décidée par Thierry**, et deux de ses trois termes étaient déjà faux dans le code — l'alias s'y écrit depuis la 0.31.1. **Il se comporte comme un domaine que ses administrateurs possèdent** (`replication.md` décision 88, 0.39.0) : ils y tiennent `administrer`, `rattacher`, `voir` et `localiser`, et **y rangent LEURS machines**. Il ne porte toujours aucun autre groupe que son groupe d'administrateurs | Les racines elles-mêmes ne s'y rangent pas — elles ne sont pas des machines enrôlées, elles ne s'annoncent pas. Mais les machines qui les hébergent le sont : nitrogen (`m-0Z971MJ6TZRWXE8C5CE8VBD2AY`) et argon (`m-5N5A5Z42DJRZSB6G3HF9PH99AD`), machines du compte de Thierry, trouvent leur place naturelle dans le domaine racine, et non dans un domaine de la maison. |
+| **Ce qu'il n'accepte PAS, lui seul** (décision 88) | Il ne se confie à aucun annuaire local (`PUT /v1/domaines/{d}/hebergeur` : `404`, il n'est à personne au sens d'une rangée, et `heberge_par` reste `racines` même si un hébergement arrivait) ; il ne se supprime pas ; **aucun droit ne s'écrit sur lui** (décision 44) — ses quatre droits viennent de son groupe d'administrateurs, et de lui seul. Pour que les applications le sachent sans le deviner, `GET /v1/domaines` et `GET /v1/domaines/{d}` portent sur son objet, **et sur lui seul**, `"sorte":"racine"` (`protocole.md` §2.2). |
+| **Il n'est PAS un ancêtre pour les droits** | Un droit posé sur le domaine racine ne descend pas dans les domaines du niveau 1 (§2.13) — il ne contient aucun domaine, seulement les machines que ses administrateurs y rangent. Sans cette règle, administrer les racines donnerait à voir les machines de tout le monde — exactement ce que la décision 33 promettait d'éviter : **un administrateur des racines ne gagne rien sur les domaines du niveau 1, ni sur une machine d'un autre qui n'est pas rangée dans le domaine racine.** |
 | **Son groupe d'administrateurs ne change que sous la clé d'exploitant** | Contrairement aux autres domaines, où un administrateur en nomme un autre : ici, nommer un administrateur, c'est donner le pouvoir de juger des annuaires qui parleront au nom des racines. La règle de la décision 33 tient. |
 
 #### Un domaine à la création du compte — et jamais moins d'un
@@ -1147,7 +1148,7 @@ et qui garde tout ce que la décision 33 promettait :
 |---|---|
 | **Un seul administrateur suffit** | pour accepter comme pour refuser une inscription. Pas de quorum : deux racines n'ont pas de majorité (`annuaires.md` §6), et un groupe de deux n'en aurait pas davantage. |
 | **Ses membres se nomment et se retirent sous la clé d'exploitant, et sous elle seule** | `--operator-key`, `protocole.md` §2.2 — la même caution que les invitations ; l'outil est `asl-server --add-admin <u-…>` / `--remove-admin <u-…>`, sur un annuaire EN MARCHE, la clé privée restant chez l'exploitant (0.24.0). Le premier est le compte de Thierry — **aucun compte n'est écrit dans le code** : c'est l'exploitant qui le nomme. Un administrateur des racines n'en nomme pas un autre, contrairement aux autres domaines. Retirer est une révocation, et gagne toujours (`replication.md` §3.2). |
-| **Ce qu'un administrateur des racines peut** | Accepter ou refuser une inscription — **rien d'autre** : le domaine racine n'est pas un ancêtre pour les droits (§2.11, §2.13), il ne lit aucun compte, n'en efface aucun, ne voit aucun service qui ne lui a pas été accordé comme à n'importe qui. |
+| **Ce qu'un administrateur des racines peut** | Accepter ou refuser une inscription ; **et, dans le domaine racine, ce que l'administrateur d'un domaine y peut** (décision 88, 0.39.0) : y ranger et en retirer SES machines, voir ce qui y est rangé, partager ce qui y est rangé (décision 40), poser l'alias. **Rien d'autre** : le domaine racine n'est pas un ancêtre pour les droits (§2.11, §2.13), il ne lit aucun compte, n'en efface aucun, ne voit aucun service hors du domaine racine qui ne lui a pas été accordé comme à n'importe qui. |
 
 **CE QUE CELA RENVERSE, ET IL FAUT LE DIRE.** La posture `invitation` avait
 écarté « un compte d'exploitation » pour une raison écrite : il aurait mis dans
@@ -1159,7 +1160,8 @@ qu'on scripte sur la machine qui tient la clé : il se fait depuis une
 application, sous biométrie, par quelqu'un qui peut n'être pas devant le
 serveur. **Ce que le renversement garde de l'ancienne raison** : la clé
 d'exploitant reste la seule à pouvoir nommer un administrateur des racines, et
-ce qu'il peut se limite à l'inscription.
+ce qu'il peut se limite à l'inscription — et au domaine racine lui-même, où il
+range ses machines (décision 88).
 
 **Ce que les groupes ne sont PAS en v1** (§6) : ils ne s'imbriquent pas — un
 groupe n'est pas membre d'un groupe —, ils n'ont pas de nombre maximal de
@@ -1246,7 +1248,28 @@ sort la machine du domaine, ou on accorde machine par machine. Les droits
 négatifs sont nommés au §6.
 
 **Le domaine racine ne transmet rien** (§2.11) : la chaîne « ce qui contient »
-s'arrête au domaine de la machine.
+s'arrête au domaine de la machine. Une machine rangée DANS le domaine racine
+l'a pour domaine, comme toute autre (décision 88) ; mais il ne contient aucun
+domaine, et rien de ce qu'on peut sur lui ne descend ailleurs.
+
+**Le domaine racine, avec plusieurs administrateurs** (décidé le 2026-09-29,
+Thierry ; décision 88). Ses administrateurs y tiennent les quatre droits, comme
+le propriétaire d'un domaine ordinaire, et **la logique est celle d'un domaine
+ordinaire à plusieurs administrateurs** pour la machine qu'un AUTRE
+administrateur y a rangée :
+
+| Ce qu'un administrateur des racines a sur la machine d'un autre, rangée dans le domaine racine | |
+|---|---|
+| `voir` | **Oui** : il la voit — le détail du domaine la liste, avec son nom ; `GET /v1/utilisateurs/{u}/machines` la rend. Comme tout administrateur voit ce qui est rangé dans son domaine (`administrer` emporte `voir`). |
+| Accorder sur elle | **Oui** : ranger sa machine dans un domaine, c'est confier à ses administrateurs le droit de la partager (décision 40), et le domaine racine ne fait pas exception — l'application le dit au moment de ranger. |
+| `localiser` | **Non, pas de lui-même** — la forme codée en 0.39.0, **à confirmer par Thierry** : `localiser` sur un domaine, tenu par sa propriété ou son administration, ne se transforme pas en adresse d'une machine d'un AUTRE compte — c'est vrai de tout domaine, où seuls les droits ÉCRITS (§2.13, décision 44) ouvrent `GET /v1/ou`. Il l'obtient en s'accordant `localiser` sur la machine ou le service — un geste écrit, daté, qui se voit et se retire (décision 87) ; pas sur le domaine racine, sur lequel aucun droit ne s'écrit. |
+
+Ses propres machines, il les localise toujours : c'est la propriété, pas le
+domaine. Et ce qu'il a sur la machine d'un autre ne vaut que tant qu'elle est
+rangée dans le domaine racine **et** que son propriétaire en est encore
+administrateur : retiré du groupe sous la clé d'exploitant, ses machines s'en
+détachent à la lecture (décision 43, point 5), et ce qu'on en avait partagé
+avec elles (décision 44, point 3).
 
 #### Les autorisations d'hier — converties, et ce qu'elles deviennent
 
