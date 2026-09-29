@@ -936,11 +936,13 @@ l'`asl-directory` répond à un compte, selon ses droits.
 ### L'état de l'annuaire dans les applications — `GET /v1/annuaires`, pas `asl-directory`
 
 **Décidé (2026-09-29, Thierry ; décision 86)** : **les applications ne lisent
-pas `asl-directory`**. `GET /v1/annuaires` — la vue du propriétaire (et
-`GET /v1/inscriptions`, celle des administrateurs des racines) — porte déjà,
-membre par membre, `membre`, `annuaire`, `adresse`, `locateurs` et, depuis la
-0.36.0, `paire` (décision 70). **Elle gagne, par membre, `voie`** : ce que la
-racine qui répond sait de la voie de fédération de ce membre vers elle.
+pas `asl-directory`**. `GET /v1/annuaires` — la vue du propriétaire — porte
+déjà, membre par membre, `membre`, `annuaire`, `adresse`, `locateurs` et,
+depuis la 0.36.0, `paire` (décision 70). **Elle gagne, par membre, `voie`** :
+ce que la racine qui répond sait de la voie de fédération de ce membre vers
+elle. **Pas `GET /v1/inscriptions`** (précisé le 2026-09-29, Thierry) : la vue
+des administrateurs des racines ne rend que les inscriptions en attente, et
+`voie` n'est dite que d'un membre accepté — elle n'y paraîtrait jamais.
 
 ```jsonc
 {"membre":"n-7MSV…","annuaire":"n-7MSV…","etat":"acceptée",
@@ -1052,9 +1054,8 @@ client (ci-dessous) — et, côté serveur, un annuaire local nomme ses racines 
 ### Travail à faire
 
 **Serveur** (`air-service-locator-server`) — **fait en 0.38.0**, tel que
-décrit ci-dessous ; `GET /v1/inscriptions` ne rendant que les inscriptions
-**en attente**, `voie` n'y paraît jamais (une inscription non acceptée n'en
-porte pas) — le champ y est câblé, et s'y écrira si la vue s'élargit :
+décrit ci-dessous ; `voie` retiré de `GET /v1/inscriptions` en 0.38.1, qui ne
+rend que les inscriptions en attente :
 
 - **La synthèse aux racines** : pour chaque inscription acceptée, un service
   `asl-directory` sous le `n-…` titulaire, son `s-…` dérivé (`"asl/annuaire/1"`),
@@ -1072,7 +1073,7 @@ porte pas) — le champ y est câblé, et s'y écrira si la vue s'élargit :
   qui n'est pas une machine, deux niveaux de réponse, éprouvés à 100 % (C2) —
   **`administrer` sans `localiser` reçoit la réponse réduite** (décision 87),
   un cas d'essai à part. **Le `421` ne change pas.**
-- **Le champ `voie` dans `GET /v1/annuaires` et `GET /v1/inscriptions`**
+- **Le champ `voie` dans `GET /v1/annuaires`**, et lui seul
   (décision 86) : par membre accepté, `"ouverte"` ou `"tombee"` d'après les
   voies que cette racine tient (la même source qui fait vivre
   l'`asl-directory`), absent tant que le membre ne lui a pas parlé depuis
@@ -1826,9 +1827,11 @@ Rassemblé, plutôt que dispersé.
     répond, absent tant que ce membre ne lui a pas parlé depuis qu'elle tourne
     —, et la tuile « Mon annuaire local » en tire vivant, parti ou pas de
     nouvelles (§2 quinquies, « L'état de l'annuaire dans les applications »).
-    **Conséquence assumée** : qui tient un droit sur un domaine hébergé sans
-    être propriétaire de l'annuaire n'a pas de tuile, et ne voit pas cet état
-    dans l'application (question 28).
+    **Précisé (2026-09-29, Thierry)** : pas dans `GET /v1/inscriptions`, qui
+    ne rend que les inscriptions en attente. **Conséquence assumée** : qui
+    tient un droit sur un domaine hébergé sans être propriétaire de l'annuaire
+    n'a pas de tuile, et ne voit pas cet état dans l'application (question
+    28).
 27. ~~**`administrer` emporte-t-il `localiser` sur l'`asl-directory` ?**~~
     **Décidé (2026-09-29, Thierry ; décision 87)** : **non, la règle est
     stricte** — la décision 44 ne change pas. Un administrateur d'un domaine

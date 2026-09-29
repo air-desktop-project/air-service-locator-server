@@ -284,7 +284,8 @@ pub struct InscriptionRendue<'a> {
     pub paire: Option<EtatDePaire>,
     /// La voie de fédération de ce membre vers la racine qui répond
     /// (0.38.0, décision 86) — absente tant qu'il ne lui a pas parlé depuis
-    /// qu'elle tourne, et pour toute inscription qui n'est pas acceptée.
+    /// qu'elle tourne, et pour toute inscription qui n'est pas acceptée ;
+    /// écrite par `GET /v1/annuaires` seulement.
     pub voie: Option<EtatDeVoie>,
 }
 
@@ -726,8 +727,8 @@ impl EtatDePaire {
 }
 
 /// La voie de fédération d'un membre vers la racine qui répond, telle que
-/// `GET /v1/annuaires` et `GET /v1/inscriptions` la disent (0.38.0,
-/// décision 86).
+/// `GET /v1/annuaires` la dit (0.38.0, décision 86 ; pas
+/// `GET /v1/inscriptions`, qui ne rend que ce qui attend : 0.38.1).
 ///
 /// | Mot | Ce que la racine a constaté |
 /// |---|---|
