@@ -136,6 +136,7 @@ fn chemin_de(ressource: &Ressource<'_>) -> String {
         Ressource::DecisionInscription { membre } => format!("/v1/inscriptions/{membre}/decision"),
         Ressource::HebergeurDomaine { domaine } => format!("/v1/domaines/{domaine}/hebergeur"),
         Ressource::Racines => "/v1/racines".to_owned(),
+        Ressource::JetonsEcho => "/v1/echo/jetons".to_owned(),
     }
 }
 

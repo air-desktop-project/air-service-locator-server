@@ -1597,3 +1597,20 @@ fn l_asl_directory_se_route_sous_un_n_et_sous_ce_seul_nom() {
         Ok(Ressource::OuParNom { .. })
     ));
 }
+
+#[test]
+fn le_jeton_d_echo_se_demande_par_post_sur_la_voie_machine() {
+    // **Décision 91** : la décision de `GET /v1/ou`, donc son exigence.
+    let jetons = resoudre(Methode::Post, b"/v1/echo/jetons").unwrap();
+    assert_eq!(jetons.ressource, Ressource::JetonsEcho);
+    assert!(jetons.sert);
+    assert_eq!(jetons.exigence, Exigence::MachineLecture);
+    assert!(!resoudre(Methode::Get, b"/v1/echo/jetons").unwrap().sert);
+    for cible in ["/v1/echo", "/v1/echo/jeton", "/v1/echo/jetons/x"] {
+        assert_eq!(
+            resoudre_get(cible),
+            Err(Erreur::RessourceInconnue),
+            "{cible}"
+        );
+    }
+}

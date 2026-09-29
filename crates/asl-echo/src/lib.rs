@@ -65,6 +65,11 @@ pub use sonde::{RefusRequete, RefusSonde, SondeAcceptee, SondeAnnuaire, SondeJet
 use asl_id::Genre;
 use core::net::{IpAddr, Ipv6Addr, SocketAddr};
 
+/// Le nom du service que l'écho annonce — celui que `POST /v1/echo/jetons`
+/// résout comme `GET /v1/ou/{m}/asl-echo`, sous la même décision
+/// (décision 91).
+pub const NOM_SERVICE: &str = "asl-echo";
+
 /// Le premier octet d'un datagramme d'écho, version 1.
 ///
 /// `0x0B` à `0x0F` sont gardés pour les versions suivantes, `0x04` à `0x09`

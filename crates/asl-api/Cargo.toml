@@ -10,6 +10,15 @@ repository.workspace = true
 [dependencies]
 asl-id.workspace = true
 asl-proto.workspace = true
+# `asl-echo` POUR LE JETON D'ÉCHO que `POST /v1/echo/jetons` rend en
+# hexadécimal : le corps se lit en un `Jeton` déjà vérifié dans sa forme, et
+# l'écriture comme la lecture restent celles du codec, à un seul endroit.
+asl-echo.workspace = true
+
+[dev-dependencies]
+# Pour SIGNER le jeton que les essais de `echo` relisent : le corps en porte
+# un, et il n'y a pas d'autre façon honnête d'en fabriquer un.
+asl-cle.workspace = true
 
 [lints]
 workspace = true

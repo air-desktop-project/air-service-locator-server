@@ -520,6 +520,60 @@ impl EchecsParAdresse {
     }
 }
 
+/// Le débit des jetons d'écho : **un par seconde et par machine qui
+/// demande, dix d'avance** (`protocole.md` §3 quater, « Le jeton »).
+///
+/// Un seau à la façon de GCRA : pour chaque machine, l'instant théorique où
+/// son prochain jeton serait « dû ». Une demande passe si cet instant n'est pas
+/// à plus de neuf secondes dans l'avenir — dix jetons d'un coup —, et le
+/// repousse d'une seconde. **Par machine qui DEMANDE, jamais par cible** :
+/// refuser au nom de la cible dirait qu'elle existe (C9).
+///
+/// En mémoire, jamais répliqué, oublié au redémarrage — pour la raison de
+/// [`EchecsParAdresse`].
+struct DebitDeJetons {
+    /// Par machine, l'instant théorique du prochain jeton, en millisecondes.
+    dus: std::collections::HashMap<Identifiant, u64>,
+}
+
+/// Un jeton par seconde.
+const JETON_TOUS_LES_MS: u64 = 1_000;
+
+/// Dix d'avance : l'instant dû peut précéder de neuf intervalles.
+const JETONS_D_AVANCE: u64 = 10;
+
+/// Au-delà, on oublie les machines dont le seau est plein.
+const DEBITS_TENUS_MAX: usize = 4_096;
+
+impl DebitDeJetons {
+    /// Aucune machine connue.
+    fn neuf() -> Self {
+        Self {
+            dus: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Cette machine peut-elle avoir un jeton maintenant ? Si oui, il est
+    /// compté.
+    fn prendre(&mut self, qui: Identifiant, maintenant: u64) -> bool {
+        if self.dus.len() >= DEBITS_TENUS_MAX {
+            self.dus.retain(|_, du| *du > maintenant);
+        }
+        let du = self
+            .dus
+            .get(&qui)
+            .copied()
+            .unwrap_or(maintenant)
+            .max(maintenant);
+        let avance = JETON_TOUS_LES_MS.saturating_mul(JETONS_D_AVANCE.saturating_sub(1));
+        if du > maintenant.saturating_add(avance) {
+            return false;
+        }
+        self.dus.insert(qui, du.saturating_add(JETON_TOUS_LES_MS));
+        true
+    }
+}
+
 /// Une trame `DATA` qui porte ces cadres à la suite, sans enveloppe.
 ///
 /// Vide si rien n'est à porter : une trame de zéro octet ne dit rien de plus
@@ -631,6 +685,8 @@ struct Service<'a> {
     /// Les échecs récents de `POST /v1/comptes` sous plate-forme `3`, par
     /// adresse (`protocole.md` §2.2).
     echecs_d_invitation: &'a mut EchecsParAdresse,
+    /// Le débit des jetons d'écho, par machine qui demande.
+    debit_de_jetons: &'a mut DebitDeJetons,
     /// Ce qui se souvient.
     entrepot: &'a Entrepot,
     /// Ce qui vit.
@@ -713,7 +769,20 @@ impl ams_h3::Service for Service<'_> {
         };
         self.corps = corps.to_vec();
         let trouvaille = self.chercher(&besoin);
-        asl_session::repondre(self.session, &besoin, &trouvaille, self.defi, sortie)
+        let reponse = asl_session::repondre(self.session, &besoin, &trouvaille, self.defi, sortie);
+        // **UNE LIGNE PAR JETON DÉLIVRÉ** (décision 91) : qui, pour quelle
+        // machine, jusqu'à quand. La décision est celle de l'étage 2, et
+        // c'est sa réponse qui dit si le jeton est sorti.
+        if let (Besoin::JetonEcho { machine }, Trouvaille::JetonEcho(quoi)) = (&besoin, &trouvaille)
+            && reponse.status() == ams_proto_http::StatusCode::OK
+        {
+            (self.voie.journal)(&format!(
+                "jeton d'écho délivré : {} pour {machine}, jusqu'à {}",
+                quoi.jeton.sondeur(),
+                quoi.jeton.expire_a()
+            ));
+        }
+        reponse
     }
 }
 
@@ -874,6 +943,8 @@ impl Service<'_> {
             Besoin::Ou { machine, service } => self
                 .rassembler(*machine, service)
                 .map_or(Trouvaille::Rien, Trouvaille::Resolution),
+            // **LE JETON D'ÉCHO** (décision 91) : voir `delivrer_un_jeton`.
+            Besoin::JetonEcho { machine } => self.delivrer_un_jeton(*machine),
             // **L'`asl-directory`** (0.38.0) : synthétisé de l'inscription,
             // des voies ouvertes et du cercle — voir `rassembler_un_annuaire`.
             Besoin::OuAnnuaire { annuaire } => self.rassembler_un_annuaire(*annuaire),
@@ -3010,6 +3081,84 @@ impl Service<'_> {
     }
 }
 
+impl Service<'_> {
+    /// Rassemble de quoi décider d'un jeton d'écho, et le signe
+    /// (`POST /v1/echo/jetons`, décision 91).
+    ///
+    /// # LE MÊME TRAVAIL, QUOI QU'ON DÉCIDE (C9)
+    ///
+    /// La résolution est celle de `GET /v1/ou/{m}/asl-echo` — même lecture,
+    /// même décision à l'étage 2 —, et **un jeton est signé dans tous les
+    /// cas** : le vrai quand la machine, sa clé et celle du demandeur sont là,
+    /// un leurre sinon, signé de la même clé et jamais rendu. « Pas de
+    /// machine » ne répond donc pas plus vite que « pas le droit ».
+    ///
+    /// **Le débit d'abord** — un par seconde et par machine qui demande, dix
+    /// d'avance —, avant toute lecture : il ne dépend que du demandeur.
+    /// **Sans clé d'identité**, cette racine ne signe rien : `500`, le même
+    /// pour toute cible.
+    fn delivrer_un_jeton(&mut self, machine: Identifiant) -> Trouvaille {
+        let Some(cle_racine) = self.voie.identite else {
+            (self.voie.journal)(
+                "jeton d'écho refusé : cette racine n'a pas de clé d'identité pour le signer",
+            );
+            return Trouvaille::Rien;
+        };
+        let Some(qui) = self.session.machine() else {
+            return Trouvaille::Rien;
+        };
+        let maintenant_ms = maintenant().saturating_div(1_000);
+        if !self.debit_de_jetons.prendre(qui, maintenant_ms) {
+            (self.voie.journal)(&format!(
+                "jeton d'écho refusé : {qui} en demande plus d'un par seconde"
+            ));
+            return Trouvaille::TropDEssais;
+        }
+        let resolution = self.rassembler(machine, asl_echo::NOM_SERVICE);
+        let cle_de = |m: Identifiant| {
+            self.entrepot
+                .machine(m)
+                .ok()
+                .flatten()
+                .and_then(|lue| lue.cle)
+                .and_then(|liee| ClePublique::depuis_octets(liee.cle).ok())
+        };
+        let vrai = match (cle_de(machine), cle_de(qui)) {
+            (Some(cle_cible), Some(cle_sondeur)) => asl_echo::Jeton::emettre(
+                cle_racine,
+                machine,
+                cle_cible,
+                qui,
+                cle_sondeur,
+                maintenant_ms,
+            )
+            .ok(),
+            _ => None,
+        };
+        let (resolution, jeton) = match vrai {
+            Some(jeton) => (resolution, jeton),
+            // **LE LEURRE** : la même signature, sur la clé de cette racine
+            // prise pour les deux machines. Il ne sort jamais — sans
+            // résolution, l'étage 2 rend `404`.
+            None => {
+                let leurre = cle_racine.publique();
+                match asl_echo::Jeton::emettre(
+                    cle_racine,
+                    machine,
+                    leurre,
+                    qui,
+                    leurre,
+                    maintenant_ms,
+                ) {
+                    Ok(jeton) => (None, jeton),
+                    Err(_) => return Trouvaille::Rien,
+                }
+            }
+        };
+        Trouvaille::JetonEcho(Box::new(asl_session::JetonRassemble { resolution, jeton }))
+    }
+}
+
 /// Un service encodé sous ses deux formes (décision 104) : l'entière, et
 /// celle **sans adresse**, où l'objet d'annonce d'un vivant est vide — `{}`.
 /// Les décodeurs déployés (`asl` 0.22, les applications) lisent un objet
@@ -3154,6 +3303,9 @@ pub struct Annuaire<'a> {
     /// redémarrage, et c'est voulu — ce n'est pas un état du produit, c'est
     /// une garde du moment.
     echecs_d_invitation: EchecsParAdresse,
+    /// Le débit des jetons d'écho (`POST /v1/echo/jetons`), par machine —
+    /// en mémoire, comme celui des invitations.
+    debit_de_jetons: DebitDeJetons,
     /// Les pairs révoqués dont il reste des connexions à fermer.
     revoques: Vec<Identifiant>,
     /// Ce que le tireur demande de fermer ici : une clé de machine révoquée,
@@ -3286,6 +3438,7 @@ impl<'a> Annuaire<'a> {
             dernier_passage_des_orphelins: 0,
             invitation_ttl_ms: INVITATION_TTL_DEFAUT_MS,
             echecs_d_invitation: EchecsParAdresse::neufs(),
+            debit_de_jetons: DebitDeJetons::neuf(),
             revoques: Vec::new(),
             voie,
             pair_attendu,
@@ -4014,6 +4167,7 @@ impl Application for Annuaire<'_> {
             attestations: self.attestations,
             invitation_ttl_ms: self.invitation_ttl_ms,
             echecs_d_invitation: &mut self.echecs_d_invitation,
+            debit_de_jetons: &mut self.debit_de_jetons,
             a_fermer: &mut self.revoques,
             entrepot: self.entrepot,
             vivier: &mut self.vivier,
@@ -4158,5 +4312,36 @@ impl Application for Annuaire<'_> {
                 "voie depuis {racine} fermée : la connexion de l'autre racine est tombée"
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod debit_de_jetons {
+    use super::{DebitDeJetons, JETON_TOUS_LES_MS, JETONS_D_AVANCE};
+    use asl_id::{Genre, Identifiant};
+
+    fn machine(graine: u8) -> Identifiant {
+        Identifiant::depuis_entropie(Genre::Machine, [graine; 16])
+    }
+
+    #[test]
+    fn dix_d_avance_puis_un_par_seconde_et_par_machine() {
+        let mut debit = DebitDeJetons::neuf();
+        let t = 1_789_217_731_000;
+        for rang in 0..JETONS_D_AVANCE {
+            assert!(debit.prendre(machine(1), t), "le jeton {rang} passe");
+        }
+        assert!(!debit.prendre(machine(1), t), "le onzième attend");
+        // Une autre machine n'est pas touchée : le débit est par demandeur.
+        assert!(debit.prendre(machine(2), t));
+        // Une seconde plus tard, un de plus — et un seul.
+        assert!(debit.prendre(machine(1), t + JETON_TOUS_LES_MS));
+        assert!(!debit.prendre(machine(1), t + JETON_TOUS_LES_MS));
+        // Après un long silence, le seau est de nouveau plein, pas davantage.
+        let plus_tard = t + 3_600_000;
+        for _ in 0..JETONS_D_AVANCE {
+            assert!(debit.prendre(machine(1), plus_tard));
+        }
+        assert!(!debit.prendre(machine(1), plus_tard));
     }
 }

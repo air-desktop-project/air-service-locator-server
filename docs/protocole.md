@@ -1895,7 +1895,7 @@ recopier des `m-…`.
 | `GET /v1/domaines/{d}` | **0.39.0**, une machine qui porte `lecture` | Le même objet que sur la voie appareil : `machines` pour qui a `voir` (ou `localiser`, ou `administrer`) sur le domaine, `groupes` pour qui l'administre ; `404` pour qui n'y tient rien, et pour une machine sans `lecture` (C10). |
 | `GET /v1/machines/{m}/services` | **0.39.0**, une machine qui porte `lecture` | Le propriétaire de `m` : tout ; **depuis la 0.40.0** (décision 104), qui tient `localiser` sur le domaine où `m` est rangée : tout ; qui n'y tient que `voir` (ou `administrer`) : les services **sans adresse** ; `[]` sinon (`asl_auth::decider_services_de_machine`). |
 | `GET /v1/ou/{m}/{s}`, `GET /v1/ou?service=…` | Déjà | `localiser` (§3 ci-dessus). |
-| `POST /v1/echo/jetons` | **Proposé** (décision 89, §3 quater) | `localiser` sur `asl-echo` de la machine visée — la décision de `GET /v1/ou/{m}/asl-echo` ; `404` sinon (C9). |
+| `POST /v1/echo/jetons` | **0.42.0** (décision 91, §3 quater), une machine qui porte `lecture` ; aux racines seulement — un annuaire local rend `421` | `localiser` sur `asl-echo` de la machine visée — la décision de `GET /v1/ou/{m}/asl-echo` ; `404` sinon (C9). |
 
 **Seules ces lectures s'ouvrent** : créer, supprimer, nommer, confier un
 domaine, y ranger une machine, ses groupes, ses droits restent à un appareil
@@ -2916,6 +2916,21 @@ signature = Ed25519, clé d'identité de la racine, sur
 - **Une ligne au journal** par jeton délivré : qui, pour quelle machine, quand
   — le journal ordinaire (`journal.md`), agrégé puis jeté (C18). **Un débit** :
   un jeton par seconde et par machine qui demande, dix d'avance.
+- **Fait en 0.42.0.** `asl-api` route `POST /v1/echo/jetons`
+  (`Ressource::JetonsEcho`, exigence `MachineLecture`) et lit ses corps
+  (`asl_api::echo::{DemandeDeJeton, JetonRendu}` — le jeton en hexadécimal
+  se relit en `asl_echo::Jeton`, et un `expire_a` qui ne serait pas le sien
+  est refusé). `asl-session` décide : la résolution de
+  `GET /v1/ou/{m}/asl-echo`, `asl_auth::decider_resolution`, un écho
+  annoncé — `200` et le jeton, sinon le même `404` octet pour octet ;
+  `429` au-delà du débit ; `500` si la racine n'a pas de clé d'identité
+  (`--identity-key`), ce qui ne dépend pas de la cible. L'étage 3 signe
+  **toujours** un jeton — un leurre quand la machine ou une clé manque,
+  jamais rendu —, pour que « pas de machine » ne réponde pas plus vite que
+  « pas le droit ». Le débit est tenu en mémoire, par machine qui demande
+  (GCRA, dix d'avance). La ligne de journal : `jeton d'écho délivré : m-…
+  pour m-…, jusqu'à …`. L'écho vérifie le jeton hors ligne par
+  `asl_echo::Jeton::verifier` (0.41.0).
 - **Pourquoi pas un champ de plus dans `GET /v1/ou`** : sa réponse est la
   réponse d'annonce, et **son décodeur refuse tout champ inconnu**
   (`asl-proto`, `cadrage.rs`, « Aucun champ inconnu ») — un jeton de plus y
@@ -3307,6 +3322,7 @@ indiqué pour le serveur.
    machine, la décision de `GET /v1/ou/{m}/asl-echo` dans `asl-auth`, un essai
    C9 et un essai C10 ; la signature par la clé d'identité de la racine ; le
    débit et la ligne de journal ; `421` chez un annuaire local.
+   **Fait en 0.42.0** (« Le jeton », ci-dessus).
 3. **La sonde par l'écho et l'état** (mineur ; décisions 90 et 92) : le nom
    `asl-echo` réservé à sa forme ; son candidat réflexif au port observé
    (`asl-annuaire`, `Session::candidats`) ; le point UDP qui se sonde

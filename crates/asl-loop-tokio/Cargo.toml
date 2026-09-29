@@ -13,6 +13,7 @@ asl-api.workspace = true
 asl-apple.workspace = true
 asl-auth.workspace = true
 asl-cle.workspace = true
+asl-echo.workspace = true
 asl-id.workspace = true
 asl-keystore.workspace = true
 asl-proto.workspace = true
@@ -69,6 +70,7 @@ asl-loop-tokio = { path = ".", features = ["porte-d-essai"] }
 # peut éprouver cette boucle de bout en bout.
 ams-quic-client.workspace = true
 asl-cle.workspace = true
+asl-echo.workspace = true
 
 # Pour DÉCODER la réponse plutôt que d'y chercher des octets : `cache-control:
 # no-store` est une entrée de la table statique de QPACK, et ne voyage donc pas
