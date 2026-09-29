@@ -214,6 +214,11 @@ En pratique :
 - **Un point d'écoute UDP n'est jamais `joignable`**, parce qu'il ne se sonde
   pas. Il est `non_sondé`, et les applications le montrent différemment plutôt
   que de laisser croire à un échec.
+  **Une exception est proposée, et une seule** (décision 89, `protocole.md`
+  §3 quater) : le point UDP de l'`asl-echo`, qui répond par une signature de
+  la clé de la machine. Il devient `joignable` quand, et seulement quand, cette
+  signature a été vérifiée — c'est une mesure, et C6 la permet. Tant que la
+  forme n'est pas tranchée, la règle ci-dessus tient telle quelle.
 - **Un appareil qui se tait n'est pas mort.** La règle des orphelins
   (`modele.md` §2.1, 2026-09-18) n'efface un compte que quand tous ses
   appareils sont **révoqués** — un fait constaté —, jamais parce qu'aucun ne

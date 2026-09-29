@@ -812,6 +812,16 @@ ce qu'il a mesuré (C6). Une sonde par les racines vers les locateurs publiés
 viendra **quand une machine hors de la maison devra réellement se servir de
 l'annuaire** ; elle est reportée (§7, question 22).
 
+**L'écho n'y change rien, et il faut le dire** (décision 89 ; `protocole.md`
+§3 quater). L'`asl-echo` prouve une **machine** — sa clé, à son adresse —, pas
+un annuaire : la décision 83 tient. Pour une machine d'un domaine confié,
+c'est **le membre de l'annuaire local qui tient son bail** qui la sonde par
+l'écho, avec la clé que `GET /v1/federation/machines` lui a transmise, et qui
+rapporte le verdict aux racines par sa voie ; il sonde souvent « de
+l'intérieur », et l'état le dit (`echo_depuis`, la règle de `sonde_locale`).
+Que les racines sondent aussi, du dehors, l'écho d'une machine hébergée est
+proposé, borné, et attend Thierry (question E8).
+
 ### La réponse de `GET /v1/ou` — plusieurs (adresse, `n-…`), la forme du `421`
 
 ```
