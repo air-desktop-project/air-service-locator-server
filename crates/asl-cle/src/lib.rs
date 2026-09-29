@@ -781,6 +781,152 @@ impl CleSecrete {
     }
 }
 
+// ── L'écho (`protocole.md` §3 quater, décisions 89 à 91) ─────────────────────
+//
+// # POURQUOI LES DOMAINES VIVENT ICI, ET LES DATAGRAMMES DANS `asl-echo`
+//
+// Tout ce qu'une clé de ce produit signe a son séparateur ICI, en un seul
+// endroit : c'est ce qui permet de vérifier d'un coup d'œil qu'aucun préfixe
+// n'est celui d'un autre. `protocole.md` §3 quater le demande pour l'écho
+// (« Travail à faire », PR 1) : « les quatre séparations de domaine dans
+// `asl-cle` ». La DISPOSITION des datagrammes — quels champs, dans quel
+// ordre, sur combien d'octets — est une grammaire, et elle vit dans
+// `asl-echo`, qui passe à [`CleSecrete::signer_echo`] et
+// [`ClePublique::verifie_echo`] un contenu de longueur FIXE pour chaque
+// domaine. Deux messages de longueurs différentes sous un même domaine sont
+// exactement ce qu'un domaine sert à éviter ; `asl-echo` le tient par ses
+// types, qui sont des tableaux.
+
+/// Le séparateur de la **sonde d'annuaire** (genre `0x01` de l'écho).
+///
+/// Signée par la clé d'identité de l'annuaire qui sonde, sur l'en-tête et tous
+/// les champs qui précèdent la signature.
+pub const DOMAINE_ECHO_SONDE_ANNUAIRE: &[u8] = b"air-service-locator/v1/echo-sonde-annuaire\x00";
+
+/// Le séparateur de la **sonde munie d'un jeton** (genre `0x02` de l'écho).
+///
+/// Signée par la clé de la machine qui sonde, sur le défi et le jeton.
+pub const DOMAINE_ECHO_SONDE: &[u8] = b"air-service-locator/v1/echo-sonde\x00";
+
+/// Le séparateur de la **réponse de l'écho** (genre `0x81`).
+///
+/// Signée par la clé de la machine sondée, sur le défi, son `m-…`, l'adresse
+/// observée du sondeur et l'identité du sondeur. **Il empêche qu'une réponse
+/// d'écho vaille preuve de possession, et l'inverse** : les deux messages ne
+/// peuvent pas se rencontrer, leurs préfixes diffèrent.
+pub const DOMAINE_ECHO_REPONSE: &[u8] = b"air-service-locator/v1/echo-reponse\x00";
+
+/// Le séparateur du **jeton d'écho** que délivre une racine
+/// (`POST /v1/echo/jetons`).
+///
+/// Signé par la clé d'identité de la racine, sur tout ce qui précède la
+/// signature.
+pub const DOMAINE_ECHO_JETON: &[u8] = b"air-service-locator/v1/echo-jeton\x00";
+
+/// Ce qu'un contenu d'écho peut peser, au plus.
+///
+/// **Ce n'est pas une règle de format** — chaque datagramme a sa longueur fixe,
+/// et `asl-echo` la tient. C'est la taille du tampon où le message se compose,
+/// sans allocation : le plus long contenu (`défi ‖ jeton`, 209 octets) y tient,
+/// et un contenu plus long ne compile pas.
+pub const CONTENU_ECHO_MAX_OCTETS: usize = 224;
+
+/// Le tampon d'un message d'écho : le plus long séparateur, et le plus long
+/// contenu.
+const MESSAGE_ECHO_MAX_OCTETS: usize = DOMAINE_ECHO_SONDE_ANNUAIRE.len() + CONTENU_ECHO_MAX_OCTETS;
+
+/// Les quatre messages que l'écho signe, et donc leurs quatre séparateurs.
+///
+/// **Un type fermé plutôt qu'un séparateur en paramètre** : un appelant ne
+/// peut pas signer sous un domaine qui n'est pas celui de l'écho — celui de
+/// l'authentification, par exemple, ce qui ferait de l'écho un oracle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomaineEcho {
+    /// [`DOMAINE_ECHO_SONDE_ANNUAIRE`].
+    SondeAnnuaire,
+    /// [`DOMAINE_ECHO_SONDE`].
+    Sonde,
+    /// [`DOMAINE_ECHO_REPONSE`].
+    Reponse,
+    /// [`DOMAINE_ECHO_JETON`].
+    Jeton,
+}
+
+impl DomaineEcho {
+    /// Le séparateur, en octets.
+    #[must_use]
+    pub const fn octets(self) -> &'static [u8] {
+        match self {
+            Self::SondeAnnuaire => DOMAINE_ECHO_SONDE_ANNUAIRE,
+            Self::Sonde => DOMAINE_ECHO_SONDE,
+            Self::Reponse => DOMAINE_ECHO_REPONSE,
+            Self::Jeton => DOMAINE_ECHO_JETON,
+        }
+    }
+}
+
+/// Compose `séparateur ‖ contenu` dans un tampon, et rend sa longueur.
+///
+/// **Le contenu est un tableau** : sa longueur est fixée à la compilation, et
+/// un contenu qui ne tiendrait pas dans le tampon est refusé par le
+/// compilateur, pas au moment de signer.
+fn message_d_echo<const N: usize>(
+    domaine: DomaineEcho,
+    contenu: &[u8; N],
+) -> ([u8; MESSAGE_ECHO_MAX_OCTETS], usize) {
+    const {
+        assert!(
+            N <= CONTENU_ECHO_MAX_OCTETS,
+            "un contenu d'écho plus long que le tampon"
+        );
+    }
+    let mut message = [0_u8; MESSAGE_ECHO_MAX_OCTETS];
+    let source = domaine.octets().iter().chain(contenu.iter());
+    let longueur = message
+        .iter_mut()
+        .zip(source)
+        .map(|(place, octet)| *place = *octet)
+        .count();
+    (message, longueur)
+}
+
+impl CleSecrete {
+    /// Signe un message de l'écho : `séparateur ‖ contenu`.
+    ///
+    /// **La clé est celle qui signe ce genre de message**, et c'est
+    /// l'appelant qui le sait : celle de la machine pour une réponse ou une
+    /// sonde munie d'un jeton, celle d'identité de l'annuaire pour sa sonde,
+    /// celle d'identité de la racine pour un jeton.
+    #[must_use]
+    pub fn signer_echo<const N: usize>(
+        &self,
+        domaine: DomaineEcho,
+        contenu: &[u8; N],
+    ) -> Signature {
+        let (message, longueur) = message_d_echo(domaine, contenu);
+        Signature(self.0.sign(&message[..longueur]).to_bytes())
+    }
+}
+
+impl ClePublique {
+    /// Cette signature porte-t-elle sur `séparateur ‖ contenu` ?
+    ///
+    /// Comme [`ClePublique::verifie`], elle ne dit rien de la fraîcheur : le
+    /// défi vu deux fois, l'heure hors de la fenêtre, se jugent là où l'on
+    /// garde les défis et où l'on lit l'heure.
+    #[must_use]
+    pub fn verifie_echo<const N: usize>(
+        &self,
+        domaine: DomaineEcho,
+        contenu: &[u8; N],
+        signature: &Signature,
+    ) -> bool {
+        let (message, longueur) = message_d_echo(domaine, contenu);
+        let signature = SignatureDalek::from_bytes(signature.octets());
+        self.0.verify(&message[..longueur], &signature).is_ok()
+    }
+}
+
 // ── Le code d'enrôlement ────────────────────────────────────────────────────
 //
 // # POURQUOI IL VIT ICI, ET NON DANS `asl-auth`
