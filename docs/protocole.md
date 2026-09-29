@@ -3079,8 +3079,7 @@ l'annuaire ») en enregistrant **un agent embarqué dans son paquet**
 (`SMAppService.agent`, macOS 13) — une application en bac à sable n'écrit pas
 dans `~/Library/LaunchAgents`.
 
-**La réserve de E11 est levée — précisé le 2026-09-29, par un essai réel**
-(oxygen, macOS 15.7.9) :
+**Ce qu'un essai réel a montré** (oxygen, macOS 15.7.9, 2026-09-29) :
 
 - **un agent lancé par launchd, NON sandboxé** — signé Developer ID (équipe
   `SB7H9B6TY8`, runtime renforcé) ou ad hoc — **lit** l'identité de machine
@@ -3089,27 +3088,109 @@ dans `~/Library/LaunchAgents`.
 - **un agent en bac à sable** (`app-sandbox`) : lecture **refusée** — le
   processus est enfermé dans son propre conteneur.
 
-**D'où la forme retenue pour la v1, distribuée en Developer ID : l'agent
-`SMAppService` n'est PAS sandboxé.** C'est permis hors App Store ; il lit
-l'identité là où elle est, sans migration, et reçoit l'UDP entrant sans
-restriction. C'est aussi ce que `asl` fait déjà : il lit ce conteneur en
-repli (`crates/asl-cli/src/etat.rs:84-137` du client).
+**Décidé (2026-09-29, Thierry ; décision 93, E11 révisé) : l'application Mac
+ira aussi sur le Mac App Store. L'application ET l'agent `asl-echo` sont donc
+en bac à sable, et partagent un conteneur de groupe.**
 
-**Le constat de sécurité, qu'il faut dire** : n'importe quel processus NON
-sandboxé de l'utilisateur lit la graine de la machine dans le conteneur de
-l'application. C'est la même exposition que `~/.config/asl/identite` sous
-Linux — un fichier 600, lisible par le même utilisateur —, mais **le conteneur
-ne protège pas la clé des autres programmes de l'utilisateur**, et personne ne
-doit le croire. Seul un stockage dans le trousseau, ou le matériel sécurisé,
-changerait cela ; ce n'est pas l'objet de cette décision.
+1. **Les droits, sur les deux** : `com.apple.security.app-sandbox`,
+   `com.apple.security.application-groups` =
+   `SB7H9B6TY8.org.airdesktop.servicelocator`, et
+   `com.apple.security.network.client` **et** `network.server` — l'agent lie
+   une socket et reçoit de l'UDP entrant, ce que le bac à sable range côté
+   « serveur » (c'est déjà ce que l'application a dû déclarer pour QUIC :
+   `Sources/Mac/ServiceLocatorMac.entitlements` du dépôt iOS).
+2. **Le chemin, fixé** :
 
-**Si l'agent devait un jour être sandboxé** (l'App Store) — ouvert, question
-E22 : un conteneur de **groupe d'applications**
-`SB7H9B6TY8.org.airdesktop.servicelocator` (droit
-`com.apple.security.application-groups`), sur l'application et sur l'agent ;
-l'identité y déménage (migration au premier lancement de l'application), et
-`asl` sur macOS doit la chercher aussi dans
-`~/Library/Group Containers/SB7H9B6TY8.org.airdesktop.servicelocator/…`.
+   ```
+   ~/Library/Group Containers/SB7H9B6TY8.org.airdesktop.servicelocator/Library/Application Support/asl/identite
+   ~/Library/Group Containers/SB7H9B6TY8.org.airdesktop.servicelocator/Library/Application Support/asl/racines
+   ```
+
+   **Pourquoi celui-là.** `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)`
+   rend la racine du conteneur de groupe ; l'usage d'Apple y range, comme
+   dans un conteneur d'application, un `Library/` avec ses sous-dossiers
+   ordinaires. `Library/Application Support/asl/` reprend **exactement** ce que
+   l'application écrit aujourd'hui dans son conteneur
+   (`FileManager … .applicationSupportDirectory` puis `asl/` :
+   `Sources/Mac/MachineDeCeMac.swift:152-165` du dépôt iOS) — seul le préfixe
+   change —, et garde un **dossier `asl/`** au format d'`asl` : c'est lui qu'on
+   passe à `--state`, identité et cache des racines ensemble
+   (`crates/asl-cli/src/etat.rs:30` et `:376` du client : `identite`,
+   `racines`). Le cache des racines aurait pu aller dans `Library/Caches/` ;
+   il reste à côté de l'identité parce qu'`asl` tient les deux dans le même
+   répertoire d'état, et qu'un second chemin serait une seconde règle.
+   **Dans le bac à sable, `HOME` désigne le conteneur propre du processus** :
+   l'agent (du code d'`asl`) calcule ce chemin depuis le répertoire de
+   l'utilisateur (`getpwuid`), jamais depuis `HOME` — ou reçoit `--state` en
+   argument de son plist, résolu par l'application.
+3. **La migration, par l'application, au premier lancement** — copier,
+   vérifier, et seulement alors retirer ; **jamais de perte** :
+   1. si `identite` existe dans le conteneur de groupe **et** est identique à
+      l'ancienne : l'étape 5 seulement (une migration interrompue après la
+      copie) ;
+   2. créer `…/asl/` en `0700` ; écrire `identite.nouvelle` en `0600`,
+      `fsync`, renommer en `identite` (le renommage est atomique : on ne voit
+      jamais un fichier à moitié écrit) ; de même pour `racines` ;
+   3. **relire** le nouveau fichier et le **comparer octet à octet** à
+      l'ancien ;
+   4. égal : l'application écrit désormais là, et démarre l'agent ;
+   5. retirer l'ancien `identite` (puis `racines`) du conteneur de
+      l'application.
+
+   **Les échecs partiels** :
+   - *la copie ou la relecture échoue* (disque plein, droit refusé,
+     contenu différent) : le nouveau fichier est retiré s'il existe,
+     **l'ancien reste**, l'application continue de le lire, **l'agent
+     n'est pas démarré** (il ne verrait rien) et la fiche « ce Mac » le dit ;
+     on réessaie au lancement suivant ;
+   - *arrêt entre la copie et le retrait* : deux copies identiques ; le
+     lancement suivant le constate (étape 1) et retire l'ancienne ;
+   - *le retrait échoue* : deux copies identiques, sans danger ; réessayé ;
+   - ***une `identite` DIFFÉRENTE existe déjà dans le conteneur de groupe***
+     (un `asl enroll --state` qui y a écrit, une restauration) : **on ne
+     touche à rien**, ni à l'une ni à l'autre, et l'application le dit — deux
+     clés, deux machines peut-être, que seul l'utilisateur peut départager.
+4. **`asl` sur macOS cherche l'identité dans cet ordre** (modification du
+   client, « Travail à faire ») :
+   1. **`--state <dossier>`, puis `ASL_STATE`** : ce qui est dit est pris tel
+      quel, **sans aucune recherche ni repli** — comme aujourd'hui ;
+   2. **le conteneur de groupe** :
+      `~/Library/Group Containers/SB7H9B6TY8.org.airdesktop.servicelocator/Library/Application Support/asl/`,
+      s'il porte une `identite` ;
+   3. **l'ancien chemin du conteneur de l'application**,
+      `~/Library/Containers/org.airdesktop.servicelocator.mac/Data/Library/Application Support/asl/`,
+      s'il porte une `identite` — le repli de la transition, avec un
+      avertissement (« la migration de l'application n'a pas eu lieu ») ;
+   4. **`$XDG_CONFIG_HOME/asl`, sinon `~/.config/asl`** — et c'est aussi là
+      qu'`asl enroll` écrit quand rien d'autre n'existe.
+
+   **Cela renverse une préséance** : aujourd'hui `~/.config/asl` passe avant
+   le conteneur (`etat.rs:84-137`). Sur un Mac, l'identité de l'application
+   devient celle de la machine. Si `~/.config/asl/identite` existe aussi, et
+   porte une autre machine, `asl` le dit à chaque commande plutôt que d'en
+   ignorer une en silence.
+5. **L'App Review** : sur le Mac App Store, l'agent est embarqué dans le
+   paquet et **passe l'App Review avec l'application** — un agent qui écoute
+   sur un port UDP, et qui demande une redirection à la box (décision 94) :
+   il faudra le dire aux relecteurs.
+
+**Le constat de sécurité, juste** : dans le bac à sable, la graine du
+conteneur de groupe **n'est plus lisible par les processus sandboxés hors du
+groupe** — les autres applications de l'App Store, par exemple. Elle **reste
+lisible par tout processus NON sandboxé de l'utilisateur**, exactement comme
+`~/.config/asl/identite` sous Linux (un fichier 600, même utilisateur) : le
+conteneur ne protège pas la clé d'un programme ordinaire lancé par
+l'utilisateur, et personne ne doit le croire. (macOS 15 aurait ajouté une
+invite pour l'accès d'une application au conteneur de groupe d'une autre
+équipe — **à vérifier sur oxygen**, comme la lecture du conteneur l'a été.)
+
+**Et l'attestation reste « aucune ».** Le Mac crée son compte en `aucune`
+(`docs/attestation/enrolement-macos.md:10` : « App Attest
+(`DCAppAttestService`) n'existe pas sur macOS »). La documentation d'Apple
+déclarerait `DCAppAttestService` disponible sur macOS, `isSupported`
+dépendant du matériel : **à vérifier** — cela ne peut pas se citer sans la
+consulter. Si c'était vrai sur certains Mac, cela changerait ce que le Mac
+peut prouver, et la question E22 en dépend.
 
 **Les applications** :
 
@@ -3171,9 +3252,18 @@ l'identité y déménage (migration au premier lancement de l'application), et
    périodique (E23) ; `--no-upnp` et `ASL_ECHO_UPNP=0` (E15) ; la réannonce
    avec `passerelle` vers un annuaire qui le connaît (E21).
 6. **NAT-PMP et PCP**, si E16 le retient : une PR à part, après UPnP.
+7. **L'identité sur macOS** (décision 93, révisée) : `etat.rs` cherche
+   `--state`/`ASL_STATE` sans repli, puis le conteneur de groupe
+   `SB7H9B6TY8.org.airdesktop.servicelocator`, puis l'ancien conteneur de
+   l'application (avec un avertissement), puis `~/.config/asl` ; il dit quand
+   deux identités différentes coexistent ; le chemin se calcule depuis le
+   répertoire de l'utilisateur, pas depuis `HOME` (bac à sable).
 
-**Applications** : Mac — activer l'écho depuis « ce Mac », par un agent
-`SMAppService` non sandboxé (décision 93, précisée) ; Mac, iOS, Android — afficher l'état d'écho sur la
+**Applications** : Mac — les droits de bac à sable et de groupe sur
+l'application et l'agent, la migration de l'identité vers le conteneur de
+groupe (copier, relire, comparer, puis retirer ; les échecs partiels),
+l'agent `SMAppService` activé depuis « ce Mac », et ce qu'on dit à l'App
+Review (décision 93, révisée) ; Mac, iOS, Android — afficher l'état d'écho sur la
 fiche d'une machine, décodeur tolérant.
 
 ### Les questions E1 à E14 — tranchées
@@ -3275,10 +3365,12 @@ domaine hébergé par un annuaire local ?**
   pour un Mac enrôlé par l'application.
 - (b) Seulement le LaunchAgent d'`asl` : l'application ne fait que montrer
   l'état et dire la commande à taper.
-- **Décidé (2026-09-29, Thierry ; décision 93) : (a).** **Précisé le même jour** : la
-  réserve est levée par un essai réel — un agent non sandboxé lit l'identité
-  dans le conteneur de l'application ; l'agent de la v1 n'est donc pas
-  sandboxé (« L'installation », ci-dessus). Le cas sandboxé est la question E22.
+- **Décidé (2026-09-29, Thierry ; décision 93) : (a)** — **révisé le même jour** :
+  l'application ira aussi sur le Mac App Store ; l'application et l'agent sont
+  en bac à sable, et partagent le conteneur de groupe
+  `SB7H9B6TY8.org.airdesktop.servicelocator`, où l'identité déménage
+  (« L'installation », ci-dessus : le chemin, la migration, l'ordre de
+  recherche d'`asl`).
 
 **E12. Que peut-on donner à `asl ping` ?**
 - (a) Un `m-…` seulement.
@@ -3377,16 +3469,22 @@ une autre box) ?**
   une adresse que le client choisit, c'est-à-dire n'importe laquelle.
 - **Recommandation : (a).**
 
-**E22. Si l'agent de l'application Mac devait un jour être en bac à sable
-(App Store) ?**
-- (a) **Rien pour l'instant** : la v1 est distribuée en Developer ID, l'agent
-  n'est pas sandboxé et lit l'identité là où elle est (décision 93, précisée).
-- (b) Préparer dès maintenant un conteneur de groupe
-  `SB7H9B6TY8.org.airdesktop.servicelocator` sur l'application et l'agent :
-  l'identité y déménage au premier lancement, et `asl` doit aussi la chercher
-  dans `~/Library/Group Containers/SB7H9B6TY8.org.airdesktop.servicelocator/…`.
-  Une migration à écrire et à éprouver, pour un besoin qui n'existe pas encore.
-- **Recommandation : (a)**, et (b) le jour où l'App Store devient une cible.
+**E22. Si les racines finissent par refuser les comptes en attestation
+« aucune », que fait le Mac ?** Aujourd'hui le Mac ouvre son compte en
+« aucune » (App Attest n'y existe pas, selon nos essais ; à vérifier dans la
+documentation d'Apple) ; une racine qui exigerait une attestation l'en
+empêcherait.
+- (a) **Garder « aucune » admis pour les Mac** tant qu'Apple n'offre rien
+  (la posture facultative, ou une exception par plate-forme) : le Mac reste
+  utilisable ; sa clé vit dans l'enclave, sous Touch ID, sans que l'annuaire
+  puisse le prouver.
+- (b) Un Mac ne crée jamais de compte : il **rejoint** un compte ouvert sur un
+  téléphone attesté (`POST /v1/appareils`, signé par un appareil déjà
+  enrôlé). Il reste utilisable, mais on ne peut plus commencer par le Mac.
+- (c) Refuser le Mac tant qu'il ne s'atteste pas : plus de Mac du tout.
+- **Recommandation : (b)**, et (a) seulement si un utilisateur sans téléphone
+  doit pouvoir commencer ; revoir si `DCAppAttestService` s'avère disponible
+  sur des Mac.
 
 **E23. Quand l'écho cherche-t-il la box ?**
 - (a) **Au démarrage, toutes les trente minutes, et quand l'adresse de la
