@@ -30,6 +30,7 @@ fn encoder_un_membre(
     lu: &MembreLu,
     avec_proprietaire: bool,
     paire: Option<asl_api::annuaire::EtatDePaire>,
+    voie: Option<asl_api::annuaire::EtatDeVoie>,
 ) -> Option<Vec<u8>> {
     let locateurs: Vec<&str> = lu
         .locateurs
@@ -46,6 +47,9 @@ fn encoder_un_membre(
         locateurs: &locateurs,
         expire_a: None,
         paire,
+        // **POUR UN MEMBRE ACCEPTÉ SEULEMENT** (décision 86) : une
+        // inscription retirée dont la voie aurait tenu ne se dit pas ouverte.
+        voie: voie.filter(|_| lu.etat == EtatDInscription::Acceptee),
     };
     let mut sortie = alloc_reponse();
     let combien = rendu.encoder(&mut sortie).ok()?;
@@ -64,6 +68,7 @@ fn encoder_une_attente(attendue: &DeclarationAttendue) -> Option<Vec<u8>> {
         locateurs: &[],
         expire_a: Some(attendue.expire_a),
         paire: None,
+        voie: None,
     };
     let mut sortie = alloc_reponse();
     let combien = rendu.encoder(&mut sortie).ok()?;
@@ -72,8 +77,15 @@ fn encoder_une_attente(attendue: &DeclarationAttendue) -> Option<Vec<u8>> {
 }
 
 impl Service<'_> {
+    /// La voie de ce membre vers cette racine, telle qu'elle l'a vue
+    /// (décision 86).
+    fn voie_de(&self, membre: Identifiant) -> Option<asl_api::annuaire::EtatDeVoie> {
+        self.etat_federe
+            .voie_de(membre, maintenant(), self.expiration_federee_us)
+    }
+
     /// Ce compte administre-t-il les racines ?
-    fn administre_les_racines(&self, compte: Identifiant) -> bool {
+    pub(super) fn administre_les_racines(&self, compte: Identifiant) -> bool {
         self.entrepot
             .administrateurs_des_racines()
             .is_ok_and(|(membres, _)| membres.contains(&compte))
@@ -92,7 +104,14 @@ impl Service<'_> {
         };
         let mut elements: Vec<Vec<u8>> = membres
             .iter()
-            .filter_map(|lu| encoder_un_membre(lu, false, self.etat_federe.paire_de(lu.membre)))
+            .filter_map(|lu| {
+                encoder_un_membre(
+                    lu,
+                    false,
+                    self.etat_federe.paire_de(lu.membre),
+                    self.voie_de(lu.membre),
+                )
+            })
             .collect();
         elements.extend(attendues.iter().filter_map(encoder_une_attente));
         Trouvaille::Inscriptions(elements)
@@ -199,7 +218,7 @@ impl Service<'_> {
                     lu.proprietaire.texte().as_str(),
                     lu.etat.mot()
                 ));
-                encoder_un_membre(&lu, false, None)
+                encoder_un_membre(&lu, false, None, None)
                     .map_or(Trouvaille::Rien, Trouvaille::InscriptionLue)
             }
             Ok(PresentationDeCode::Inconnu) => {
@@ -219,7 +238,7 @@ impl Service<'_> {
     pub(super) fn lire_l_etat_d_une_inscription(&self, cle: &ClePublique) -> Trouvaille {
         let membre = asl_cle::identifiant_de_racine(cle);
         match self.entrepot.membre_d_annuaire(membre) {
-            Ok(Some(lu)) if lu.cle == cle.octets() => encoder_un_membre(&lu, false, None)
+            Ok(Some(lu)) if lu.cle == cle.octets() => encoder_un_membre(&lu, false, None, None)
                 .map_or(Trouvaille::Rien, Trouvaille::InscriptionLue),
             _ => Trouvaille::Rien,
         }
@@ -240,7 +259,14 @@ impl Service<'_> {
         Trouvaille::Inscriptions(
             membres
                 .iter()
-                .filter_map(|lu| encoder_un_membre(lu, true, self.etat_federe.paire_de(lu.membre)))
+                .filter_map(|lu| {
+                    encoder_un_membre(
+                        lu,
+                        true,
+                        self.etat_federe.paire_de(lu.membre),
+                        self.voie_de(lu.membre),
+                    )
+                })
                 .collect(),
         )
     }

@@ -24,6 +24,10 @@
 //! 5. **La décision ne dépend PAS de l'ordre des autorisations.**
 //! 6. **Une autorisation révoquée n'ouvre jamais rien**, même si l'appelant a
 //!    mal filtré.
+//! 7. **L'`asl-directory` suit le cercle étroit** (décisions 79, 80, 87),
+//!    recalculé ici : sans `lecture`, rien ; le propriétaire, un
+//!    administrateur des racines ou `localiser`, tout ; `voir` seul, la
+//!    réponse réduite ; sinon, rien.
 
 #![no_main]
 
@@ -31,7 +35,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asl_auth::{
-    Autorisation, Capacites, Cible, Decision, Machine, Portee, decider_annonce, decider_resolution,
+    Autorisation, Capacites, CercleDAnnuaire, Cible, Decision, DecisionDAnnuaire, Machine, Portee,
+    decider_annonce, decider_asl_directory, decider_resolution,
 };
 use asl_id::{Genre, Identifiant};
 
@@ -66,6 +71,12 @@ struct Entree {
     proprietaire_cible: Compte,
     machine_cible: u8,
     service_cible: u8,
+    /// Le cercle d'un annuaire : son propriétaire, et ce que le demandeur y
+    /// tient.
+    proprietaire_annuaire: Compte,
+    administrateur_des_racines: bool,
+    voir: bool,
+    localiser: bool,
     aretes: Vec<AreteBrute>,
 }
 
@@ -182,5 +193,30 @@ fuzz_target!(|entree: Entree| {
         decider_annonce(&demandeur).permet(),
         entree.annonce,
         "la décision d'annonce ne suit pas la capacité"
+    );
+
+    // PROPRIÉTÉ 7 : le cercle de l'`asl-directory`, réécrit ici.
+    let cercle = CercleDAnnuaire {
+        proprietaire: compte(entree.proprietaire_annuaire),
+        administrateur_des_racines: entree.administrateur_des_racines,
+        voir: entree.voir,
+        localiser: entree.localiser,
+    };
+    let attendue = if !entree.lecture {
+        DecisionDAnnuaire::Refuser
+    } else if proprietaire_demandeur == cercle.proprietaire
+        || entree.administrateur_des_racines
+        || entree.localiser
+    {
+        DecisionDAnnuaire::Entiere
+    } else if entree.voir {
+        DecisionDAnnuaire::Reduite
+    } else {
+        DecisionDAnnuaire::Refuser
+    };
+    assert_eq!(
+        decider_asl_directory(&demandeur, &cercle),
+        attendue,
+        "l'asl-directory ne suit pas le cercle : {cercle:?}"
     );
 });

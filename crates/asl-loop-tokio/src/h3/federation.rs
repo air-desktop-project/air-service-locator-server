@@ -34,6 +34,18 @@ impl Service<'_> {
             .filter(|lu| lu.etat == EtatDInscription::Acceptee)
     }
 
+    /// [`Self::membre_accepte`], **et la voie de ce membre notée ouverte**
+    /// (0.38.0, décision 86) : chacun des quatre verbes de sa voie est une
+    /// parole — le fédérateur en dit au moins deux par tour, toutes les dix
+    /// secondes. C'est ce qui fait vivre l'`asl-directory` et que
+    /// `GET /v1/annuaires` dit par `voie`.
+    fn membre_qui_parle(&mut self) -> Option<MembreLu> {
+        let lu = self.membre_accepte()?;
+        self.etat_federe
+            .noter_une_parole(lu.membre, &self.connexion, maintenant());
+        Some(lu)
+    }
+
     /// Les machines rattachées aux domaines que cet annuaire héberge, rangées
     /// par identifiant, sans doublon.
     fn machines_hebergees(&self, lu: &MembreLu) -> Option<Vec<Identifiant>> {
@@ -54,8 +66,8 @@ impl Service<'_> {
 
     /// `GET /v1/federation/machines?apres=<rang>` — une part des machines de
     /// nos domaines, à partir de ce rang.
-    pub(super) fn rassembler_les_machines_federees(&self, apres: u64) -> Trouvaille {
-        let Some(lu) = self.membre_accepte() else {
+    pub(super) fn rassembler_les_machines_federees(&mut self, apres: u64) -> Trouvaille {
+        let Some(lu) = self.membre_qui_parle() else {
             return Trouvaille::Rien;
         };
         let Some(machines) = self.machines_hebergees(&lu) else {
@@ -80,7 +92,7 @@ impl Service<'_> {
 
     /// `POST /v1/federation/etat` — ce que cet annuaire dit de ses services.
     pub(super) fn ranger_un_etat_federe(&mut self, entrees: &[u8]) -> Trouvaille {
-        let Some(lu) = self.membre_accepte() else {
+        let Some(lu) = self.membre_qui_parle() else {
             return Trouvaille::Rien;
         };
         let Some(machines) = self.machines_hebergees(&lu) else {
@@ -146,8 +158,8 @@ impl Service<'_> {
     /// `PUT /v1/federation/locateurs` — où joindre cet annuaire, dit par lui
     /// (décision 57). Le corps a été lu une fois par `asl-session` ; il se
     /// relit ici.
-    pub(super) fn publier_mes_locateurs(&self, corps: &[u8]) -> Trouvaille {
-        let Some(lu) = self.membre_accepte() else {
+    pub(super) fn publier_mes_locateurs(&mut self, corps: &[u8]) -> Trouvaille {
+        let Some(lu) = self.membre_qui_parle() else {
             return Trouvaille::Rien;
         };
         let Ok(publication) = asl_api::annuaire::PublicationDeLocateurs::decoder(corps) else {
@@ -174,7 +186,7 @@ impl Service<'_> {
     /// pour que `GET /v1/annuaires` le montre à l'écran de l'annuaire, et
     /// que le journal de la racine le dise quand cela change.
     pub(super) fn declarer_ma_paire(&mut self, pair: Option<Identifiant>) -> Trouvaille {
-        let Some(lu) = self.membre_accepte() else {
+        let Some(lu) = self.membre_qui_parle() else {
             return Trouvaille::Rien;
         };
         let Ok((membres, _)) = self
@@ -252,5 +264,129 @@ impl Service<'_> {
         .ok()?;
         corps.truncate(combien);
         Some(corps)
+    }
+
+    /// `GET /v1/ou/{n-…}/asl-directory` — ce qu'il faut pour décider
+    /// (0.38.0 ; décisions 73 à 87).
+    ///
+    /// **Synthétisé, rien n'est écrit** : l'annuaire logique est l'inscription
+    /// acceptée de son titulaire ; ses membres vivants sont ceux dont la voie
+    /// vers CETTE racine est ouverte ([`crate::federation::EtatFedere::voie_de`]),
+    /// chacun sous ses locateurs publiés ou, à défaut, son adresse déclarée
+    /// — la source du `421`, filtrée aux vivants (décisions 74, 75, 81).
+    ///
+    /// **Le cercle se lit depuis le DEMANDEUR** (C10) : son compte est-il
+    /// administrateur des racines, et que peut-il sur les domaines que cet
+    /// annuaire héberge ? `asl-auth` décide ; l'étage 2 rend.
+    ///
+    /// **Le même travail, que le demandeur soit dans le cercle ou non** (C9) :
+    /// le cercle et les vivants sont lus avant toute décision. Seul un
+    /// annuaire qui n'existe pas s'arrête plus tôt, comme une résolution de
+    /// machine dont la machine n'existe pas (`rassembler`).
+    pub(super) fn rassembler_un_annuaire(&self, annuaire: Identifiant) -> Trouvaille {
+        let Some(qui) = self.session.machine() else {
+            return Trouvaille::Rien;
+        };
+        let Ok(Some(rangee)) = self.entrepot.machine(qui) else {
+            return Trouvaille::Rien;
+        };
+        let Ok(demandeur) = asl_auth::Machine::nouvelle(
+            qui,
+            rangee.proprietaire,
+            asl_auth::Capacites {
+                annonce: rangee.annonce,
+                lecture: rangee.lecture,
+            },
+        ) else {
+            return Trouvaille::Rien;
+        };
+        let administrateur_des_racines = self.administre_les_racines(rangee.proprietaire);
+
+        // **L'ANNUAIRE LOGIQUE, SOUS SON TITULAIRE** : le `n-…` du second
+        // membre ne nomme pas l'annuaire, et rend ce que rend l'inexistant.
+        let Some(titulaire) = self
+            .entrepot
+            .membre_d_annuaire(annuaire)
+            .ok()
+            .flatten()
+            .filter(MembreLu::titulaire)
+        else {
+            return Trouvaille::Rien;
+        };
+        let proprietaire = titulaire.proprietaire;
+        let Ok((membres, _)) = self
+            .entrepot
+            .annuaires_du_compte(proprietaire, maintenant().saturating_div(1_000))
+        else {
+            return Trouvaille::Rien;
+        };
+        let acceptes: Vec<&MembreLu> = membres
+            .iter()
+            .filter(|lu| lu.annuaire == annuaire && lu.etat == EtatDInscription::Acceptee)
+            .collect();
+        // **IL EXISTE DÈS QUE L'INSCRIPTION EST ACCEPTÉE**, et disparaît avec
+        // elle (décision 74).
+        if acceptes.is_empty() {
+            return Trouvaille::Rien;
+        }
+
+        // **LES DROITS SUR LES DOMAINES HÉBERGÉS, ET SUR EUX SEULS**
+        // (décision 79) : `droits_sur_domaine` réunit les droits reçus et
+        // l'administration ; un droit sur une machine ou un service n'y entre
+        // pas.
+        let mut droits = asl_registre::Droits::AUCUN;
+        for (domaine, _) in self
+            .entrepot
+            .domaines_de_compte(proprietaire)
+            .unwrap_or_default()
+        {
+            if self.entrepot.hebergeur_de_domaine(domaine).ok().flatten() == Some(annuaire) {
+                droits = droits.union(
+                    self.entrepot
+                        .droits_sur_domaine(rangee.proprietaire, domaine)
+                        .unwrap_or(asl_registre::Droits::AUCUN),
+                );
+            }
+        }
+
+        let maintenant = maintenant();
+        let vivants = acceptes
+            .iter()
+            .filter(|lu| {
+                self.etat_federe
+                    .voie_de(lu.membre, maintenant, self.expiration_federee_us)
+                    == Some(asl_api::annuaire::EtatDeVoie::Ouverte)
+            })
+            .flat_map(|lu| {
+                lu.ou_joindre()
+                    .into_iter()
+                    .map(move |adresse| (adresse.texte().to_owned(), lu.membre))
+            })
+            .collect();
+
+        Trouvaille::ResolutionDAnnuaire(asl_session::ResolutionDAnnuaire {
+            demandeur,
+            cercle: asl_auth::CercleDAnnuaire {
+                proprietaire,
+                administrateur_des_racines,
+                voir: droits.permettent_de_voir(),
+                localiser: droits.permettent_de_localiser(),
+            },
+            annuaire,
+            vivants,
+        })
+    }
+
+    /// Cette annonce porte-t-elle le nom réservé (décision 73) ? Rend la
+    /// machine qui l'a tentée — le journal la nomme.
+    ///
+    /// **Avant tout le reste** : une machine d'un domaine confié reçoit ce
+    /// `403` plutôt que le `421`, puisque l'annuaire local la refuserait de
+    /// même. Un corps illisible ne dit rien ici, et suit son chemin d'hier.
+    pub(super) fn annonce_reservee(&self) -> Option<Identifiant> {
+        let qui = self.session.machine()?;
+        let mut tampons = asl_proto::cadrage::Tampons::nouveaux();
+        let annonce = asl_proto::Annonce::decoder(&self.corps, &mut tampons).ok()?;
+        annonce.service.reserve().then_some(qui)
     }
 }

@@ -102,6 +102,26 @@ const _: () = assert!(
     "le nom d'une machine ne se range pas : les deux bornes ont divergé"
 );
 
+/// **LE NOM RÉSERVÉ EST LE NOM DÉRIVÉ** (décision 73) : `asl-proto` le
+/// route et le refuse à l'annonce, `asl-registre` en dérive le `s-…`, et les
+/// deux crates ne se connaissent pas. Celle-ci tient leur égalité.
+const _: () = assert!(
+    {
+        let (a, b) = (
+            asl_proto::NOM_ASL_DIRECTORY.as_bytes(),
+            asl_registre::NOM_ASL_DIRECTORY,
+        );
+        let mut egaux = a.len() == b.len();
+        let mut rang = 0;
+        while egaux && rang < a.len() {
+            egaux = a[rang] == b[rang];
+            rang += 1;
+        }
+        egaux
+    },
+    "le nom réservé et le nom dérivé de l'asl-directory ont divergé"
+);
+
 /// **LE POINT DE POUSSÉE ACCEPTÉ SE RANGE**, pour la même raison : `asl-api`
 /// borne l'URL, la clé et le secret, `asl-registre` borne ce qu'il range.
 const _: () = assert!(
@@ -262,6 +282,16 @@ pub enum Besoin<'a> {
         machine: Identifiant,
         /// Le nom du service.
         service: &'a str,
+    },
+    /// Où joindre l'annuaire local que ce `n-…` titulaire nomme : son
+    /// `asl-directory`, synthétisé (décisions 73 à 87, 0.38.0).
+    ///
+    /// **L'étage 3 rassemble le cercle et les membres vivants** — voir
+    /// [`ResolutionDAnnuaire`] — et c'est ici qu'`asl_auth` décide de ce qui
+    /// se rend.
+    OuAnnuaire {
+        /// Le titulaire.
+        annuaire: Identifiant,
     },
     /// Toutes les instances d'un service portant ce nom.
     ///
@@ -945,6 +975,29 @@ pub struct Resolution {
     pub annonce: Option<alloc::vec::Vec<u8>>,
 }
 
+/// Ce que l'étage 3 rassemble pour `GET /v1/ou/{n-…}/asl-directory`.
+///
+/// # TOUT EST LU AVANT LA DÉCISION, ET RIEN N'EST RÉVÉLÉ SANS ELLE
+///
+/// Le cercle — propriétaire, administrateurs des racines, droits sur les
+/// domaines hébergés — et les membres vivants avec leurs adresses sont lus
+/// ensemble, quel que soit le demandeur : c'est la mémoire de l'annuaire, la
+/// lire ne dit rien à personne. **Ce qui reste une décision est de RENDRE**,
+/// et elle se prend ici, après `asl_auth::decider_asl_directory`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionDAnnuaire {
+    /// La machine qui demande.
+    pub demandeur: asl_auth::Machine,
+    /// Le cercle de l'annuaire, vu de son propriétaire.
+    pub cercle: asl_auth::CercleDAnnuaire,
+    /// Le titulaire, qui nomme l'annuaire logique.
+    pub annuaire: Identifiant,
+    /// Chaque adresse d'un membre VIVANT — ses locateurs publiés, sinon son
+    /// adresse déclarée (décisions 75 et 81) — et son `n-…`. Vide quand
+    /// aucun membre n'est vivant : `404` (décision 82).
+    pub vivants: alloc::vec::Vec<(alloc::string::String, Identifiant)>,
+}
+
 /// Une machine rassemblée pour `GET /v1/utilisateurs/{u}/machines`, telle que
 /// l'étage 3 la remonte : de quoi décider, et de quoi rendre.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1030,6 +1083,8 @@ pub enum Trouvaille {
     ),
     /// De quoi décider d'une résolution.
     Resolution(Resolution),
+    /// De quoi décider de l'`asl-directory` d'un annuaire local.
+    ResolutionDAnnuaire(ResolutionDAnnuaire),
     /// De quoi décider d'une LISTE de résolutions.
     ///
     /// # POURQUOI UNE LISTE DE `Resolution`, ET NON UNE LISTE DE RÉPONSES
@@ -1655,6 +1710,7 @@ pub fn besoin<'a>(session: &Session, tete: &RequestHead<'a>, corps: &'a [u8]) ->
             machine,
             service: service.as_str(),
         },
+        Ressource::OuAnnuaire { annuaire } => Besoin::OuAnnuaire { annuaire },
         Ressource::Poussees => Besoin::EcouterLesPoussees,
         Ressource::Nouvelles => Besoin::EcouterLesNouvelles,
         Ressource::Vu => Besoin::OuSuisJeVu,
@@ -2445,6 +2501,19 @@ pub fn repondre<'o>(
             }
             // Le service, la machine ou le demandeur manquent : `404`, du même
             // `404` qu'un refus. Voir ci-dessus.
+            _ => composer(
+                StatusCode::NOT_FOUND,
+                PROBLEME_MEDIA,
+                probleme(StatusCode::NOT_FOUND),
+                sortie,
+            ),
+        },
+
+        // **L'`asl-directory`** (décisions 73 à 87) : deux réponses, et deux
+        // seulement — `200`, entier ou réduit selon le droit, et `404`, le
+        // même pour l'hors-cercle, l'inexistant et le parti (C9).
+        Besoin::OuAnnuaire { .. } => match trouvaille {
+            Trouvaille::ResolutionDAnnuaire(quoi) => rendre_un_annuaire(quoi, sortie),
             _ => composer(
                 StatusCode::NOT_FOUND,
                 PROBLEME_MEDIA,
@@ -3338,6 +3407,43 @@ fn rendre_la_version<'a>(
     }
     corps.pousser(br#""}"#);
     composer(StatusCode::OK, JSON_MEDIA, corps.rendu(), sortie)
+}
+
+/// Rend l'`asl-directory` d'un annuaire local, ou le `404` de C9.
+///
+/// **Aucun membre vivant, c'est `404`** (décision 82), et le même que le
+/// refus : une racine qui vient de redémarrer ne distingue pas « parti » de
+/// « pas encore revenu », et l'hors-cercle ne doit rien apprendre de plus.
+fn rendre_un_annuaire<'a>(quoi: &ResolutionDAnnuaire, sortie: &'a mut [u8]) -> Reponse<'a> {
+    let decision = asl_auth::decider_asl_directory(&quoi.demandeur, &quoi.cercle);
+    if decision == asl_auth::DecisionDAnnuaire::Refuser || quoi.vivants.is_empty() {
+        return composer(
+            StatusCode::NOT_FOUND,
+            PROBLEME_MEDIA,
+            probleme(StatusCode::NOT_FOUND),
+            sortie,
+        );
+    }
+    let adresses: alloc::vec::Vec<(&str, Identifiant)> = quoi
+        .vivants
+        .iter()
+        .map(|(adresse, membre)| (adresse.as_str(), *membre))
+        .collect();
+    let rendu = asl_api::annuaire::AnnuaireResolu {
+        service: asl_registre::asl_directory_derive(quoi.annuaire),
+        annuaire: quoi.annuaire,
+        adresses: (decision == asl_auth::DecisionDAnnuaire::Entiere).then_some(adresses.as_slice()),
+    };
+    // Chaque adresse tient dans 255 octets et son `n-…` dans 28 : le tampon
+    // ne peut pas manquer de place.
+    let mut corps = alloc::vec![0_u8; 128_usize.saturating_add(adresses.len().saturating_mul(300))];
+    let combien = rendu.encoder(&mut corps).unwrap_or(0);
+    composer(
+        StatusCode::OK,
+        JSON_MEDIA,
+        corps.get(..combien).unwrap_or_default(),
+        sortie,
+    )
 }
 
 /// Ce que le corps de `GET /v1/version` peut faire : une version, une
@@ -5451,6 +5557,181 @@ mod resolution {
             besoin(&sans, &tete(b"/v1/poussees"), b""),
             Besoin::Deja(StatusCode::UNAUTHORIZED)
         );
+    }
+
+    // ── L'`asl-directory` (décisions 73 à 87, 0.38.0) ───────────────────────
+
+    /// Le titulaire de la paire de production : `n-7MSV…`.
+    fn speedy() -> Identifiant {
+        Identifiant::analyser("n-7MSV5RPCXBZH25PQM4ZPE5X87P").expect("bien formé")
+    }
+
+    fn helium() -> Identifiant {
+        Identifiant::analyser("n-4EQRD1VWYQQB1Y9C3T49Z8F8Z9").expect("bien formé")
+    }
+
+    /// Ce que l'étage 3 aurait rassemblé : la machine 1 de `demandeur`, avec
+    /// `lecture`, l'annuaire de `proprietaire`, et ces membres vivants.
+    fn un_annuaire(
+        demandeur: Identifiant,
+        cercle: asl_auth::CercleDAnnuaire,
+        vivants: &[(&str, Identifiant)],
+    ) -> super::ResolutionDAnnuaire {
+        super::ResolutionDAnnuaire {
+            demandeur: asl_auth::Machine::nouvelle(
+                un(Genre::Machine, 1),
+                demandeur,
+                asl_auth::Capacites::LECTURE,
+            )
+            .expect("une machine"),
+            cercle,
+            annuaire: speedy(),
+            vivants: vivants
+                .iter()
+                .map(|(adresse, membre)| (alloc::string::String::from(*adresse), *membre))
+                .collect(),
+        }
+    }
+
+    fn cercle_de(
+        proprietaire: Identifiant,
+        administrateur: bool,
+        voir: bool,
+        localiser: bool,
+    ) -> asl_auth::CercleDAnnuaire {
+        asl_auth::CercleDAnnuaire {
+            proprietaire,
+            administrateur_des_racines: administrateur,
+            voir,
+            localiser,
+        }
+    }
+
+    /// Le statut et le corps de la réponse.
+    fn rendu_d_annuaire(trouvaille: &Trouvaille) -> (StatusCode, alloc::string::String) {
+        let mut session = Session::new(liaison());
+        let mut sortie = [0_u8; 2048];
+        let reponse = repondre(
+            &mut session,
+            &Besoin::OuAnnuaire { annuaire: speedy() },
+            trouvaille,
+            None,
+            &mut sortie,
+        );
+        (
+            reponse.status(),
+            alloc::string::String::from_utf8_lossy(reponse.body()).into_owned(),
+        )
+    }
+
+    const SERVICE: &str = "s-294B4BA9XHXFZ5DQ8Q7T35M7PY";
+
+    #[test]
+    fn l_asl_directory_se_route_sur_la_voie_machine_et_sur_elle_seule() {
+        let chemin = b"/v1/ou/n-7MSV5RPCXBZH25PQM4ZPE5X87P/asl-directory";
+        assert_eq!(
+            besoin(&session_authentifiee(), &tete(chemin), b""),
+            Besoin::OuAnnuaire { annuaire: speedy() }
+        );
+        // **PAS SUR LA VOIE APPAREIL** (décision 86), ni sans preuve.
+        for session in [session_appareil(), Session::new(liaison())] {
+            assert_eq!(
+                besoin(&session, &tete(chemin), b""),
+                Besoin::Deja(StatusCode::UNAUTHORIZED)
+            );
+        }
+    }
+
+    #[test]
+    fn deux_membres_vivants_deux_adresses_et_deux_identites() {
+        let moi = un(Genre::Utilisateur, 1);
+        let (statut, corps) = rendu_d_annuaire(&Trouvaille::ResolutionDAnnuaire(un_annuaire(
+            moi,
+            cercle_de(moi, false, false, false),
+            &[
+                ("[2001:db8::51]:6630", speedy()),
+                ("[2001:db8::52]:6630", helium()),
+            ],
+        )));
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(
+            corps,
+            alloc::format!(
+                "{{\"service\":\"{SERVICE}\",\"annuaire\":\"n-7MSV5RPCXBZH25PQM4ZPE5X87P\",\
+                 \"adresses\":[\"[2001:db8::51]:6630\",\"[2001:db8::52]:6630\"],\
+                 \"identites\":\"n-7MSV5RPCXBZH25PQM4ZPE5X87P n-4EQRD1VWYQQB1Y9C3T49Z8F8Z9\"}}"
+            )
+        );
+        // Un seul vivant : une adresse, son identité.
+        let (statut, corps) = rendu_d_annuaire(&Trouvaille::ResolutionDAnnuaire(un_annuaire(
+            moi,
+            cercle_de(moi, false, false, false),
+            &[("helium.maison:6630", helium())],
+        )));
+        assert_eq!(statut, StatusCode::OK);
+        assert!(
+            corps.ends_with(
+                "\"adresses\":[\"helium.maison:6630\"],\
+                 \"identites\":\"n-4EQRD1VWYQQB1Y9C3T49Z8F8Z9\"}"
+            ),
+            "{corps}"
+        );
+    }
+
+    #[test]
+    fn le_cercle_decide_de_la_forme_et_voir_seul_rend_la_reponse_reduite() {
+        let proprietaire = un(Genre::Utilisateur, 1);
+        let autre = un(Genre::Utilisateur, 2);
+        let vivants = [("[2001:db8::51]:6630", speedy())];
+        let reduite = alloc::format!(
+            "{{\"service\":\"{SERVICE}\",\"annuaire\":\"n-7MSV5RPCXBZH25PQM4ZPE5X87P\"}}"
+        );
+        for (cercle, entiere) in [
+            // Administrateur des racines, `localiser` : tout.
+            (cercle_de(proprietaire, true, false, false), true),
+            (cercle_de(proprietaire, false, true, true), true),
+            // `voir` seul, ou `administrer` seul : réduite.
+            (cercle_de(proprietaire, false, true, false), false),
+        ] {
+            let (statut, corps) = rendu_d_annuaire(&Trouvaille::ResolutionDAnnuaire(un_annuaire(
+                autre, cercle, &vivants,
+            )));
+            assert_eq!(statut, StatusCode::OK);
+            assert_eq!(corps.contains("\"adresses\""), entiere, "{corps}");
+            assert_eq!(corps.contains("\"identites\""), entiere, "{corps}");
+            if !entiere {
+                assert_eq!(corps, reduite);
+            }
+        }
+    }
+
+    #[test]
+    fn hors_cercle_parti_ou_inexistant_c_est_le_meme_404() {
+        // **C9** : trois causes, UNE réponse, octet pour octet.
+        let proprietaire = un(Genre::Utilisateur, 1);
+        let etranger = un(Genre::Utilisateur, 2);
+        let vivants = [("[2001:db8::51]:6630", speedy())];
+        let hors_cercle = rendu_d_annuaire(&Trouvaille::ResolutionDAnnuaire(un_annuaire(
+            etranger,
+            cercle_de(proprietaire, false, false, false),
+            &vivants,
+        )));
+        let parti = rendu_d_annuaire(&Trouvaille::ResolutionDAnnuaire(un_annuaire(
+            proprietaire,
+            cercle_de(proprietaire, false, false, false),
+            &[],
+        )));
+        let inexistant = rendu_d_annuaire(&Trouvaille::Rien);
+        assert_eq!(hors_cercle.0, StatusCode::NOT_FOUND);
+        assert_eq!(hors_cercle, parti);
+        assert_eq!(hors_cercle, inexistant);
+        // Et `voir` ne voit pas un annuaire parti.
+        let parti_pour_voir = rendu_d_annuaire(&Trouvaille::ResolutionDAnnuaire(un_annuaire(
+            etranger,
+            cercle_de(proprietaire, false, true, false),
+            &[],
+        )));
+        assert_eq!(parti_pour_voir, inexistant);
     }
 }
 
@@ -9897,6 +10178,9 @@ mod voie_de_l_annuaire_local {
             (b"GET", b"/v1/nouvelles"),
             (b"GET", b"/v1/moi"),
             (b"GET", b"/v1/federation/machines?apres=0"),
+            // **L'`asl-directory` se résout aux racines** (décisions 62 et
+            // 74) : un annuaire local renvoie, comme pour toute résolution.
+            (b"GET", b"/v1/ou/n-7MSV5RPCXBZH25PQM4ZPE5X87P/asl-directory"),
         ] {
             assert_eq!(
                 besoin_d_un_annuaire_local(&session, &tete(verbe, cible), b""),

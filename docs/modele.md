@@ -656,7 +656,9 @@ synthétisent de l'inscription et des voies de ses membres, et son `s-…` se
 dérive du `n-…` sous une chaîne de séparation propre (`"asl/annuaire/1"`),
 par la même forme : `SHA-256("asl/annuaire/1" ‖ n (16 octets) ‖
 "asl-directory")[0..16]` — la fonction commune, `asl_registre::deriver`,
-existe depuis la 0.37.0 ; l'`asl-directory` lui-même reste à coder.
+existe depuis la 0.37.0 ; l'`asl-directory` est servi depuis la 0.38.0
+(`asl_registre::asl_directory_derive` : `n-7MSV5RPCXBZH25PQM4ZPE5X87P` →
+`s-294B4BA9XHXFZ5DQ8Q7T35M7PY`).
 **Le nom est réservé** : un daemon qui l'annonce est refusé. Il se résout par
 `GET /v1/ou/{n-…}/asl-directory`, en rendant l'adresse et l'identité de chaque
 membre vivant, et seulement à un cercle étroit — son propriétaire, les

@@ -23,16 +23,23 @@
 //! différents, octet pour octet — il n'y a aucune façon de lire un même
 //! message comme deux couples. Préfixer une longueur n'ajouterait rien.
 //!
-//! # UNE FONCTION, DEUX CHAÎNES — LA SECONDE VIENDRA AVEC `asl-directory`
+//! # UNE FONCTION, DEUX CHAÎNES — LA SECONDE EST CELLE D'`asl-directory`
 //!
 //! La décision 73 dérive de même le `s-…` du service `asl-directory` d'un
-//! annuaire local : `SHA-256("asl/annuaire/1" ‖ n (16 octets) ‖
-//! "asl-directory")`, tronqué à 128 bits. [`deriver`] est la forme commune —
-//! une chaîne, seize octets d'identifiant, un nom — et la seconde chaîne
-//! s'ajoutera à côté de [`SEPARATION_SERVICE`]. **Les deux ne se rencontrent
-//! jamais** : elles diffèrent dès leur cinquième octet (`s` et `a`), donc aucun
-//! message de l'une n'est un message de l'autre, même si seize octets d'un
-//! `n-…` et d'un `m-…` coïncidaient.
+//! annuaire local (0.38.0) :
+//!
+//! ```text
+//! s-… = SHA-256( "asl/annuaire/1" ‖ n (16 octets) ‖ "asl-directory" )[0..16]
+//! ```
+//!
+//! — les quatorze octets ASCII de [`SEPARATION_ANNUAIRE`], les seize octets
+//! du `n-…` du TITULAIRE (celui qui nomme l'annuaire logique, jamais celui du
+//! second membre), puis les treize octets du nom. [`deriver`] est la forme
+//! commune — une chaîne, seize octets d'identifiant, un nom. **Les deux
+//! chaînes ne se rencontrent jamais** : elles diffèrent dès leur cinquième
+//! octet (`s` et `a`), donc aucun message de l'une n'est un message de
+//! l'autre, même si seize octets d'un `n-…` et d'un `m-…` coïncidaient.
+//! Vecteur : `n-7MSV5RPCXBZH25PQM4ZPE5X87P` → `s-294B4BA9XHXFZ5DQ8Q7T35M7PY`.
 //!
 //! # CE QUE LA DÉRIVATION COÛTE, ET QUI L'A ACCEPTÉ
 //!
@@ -48,13 +55,22 @@ use crate::poser;
 /// La chaîne de séparation du `s-…` d'un service de machine (décision 66).
 pub const SEPARATION_SERVICE: &[u8] = b"asl/service/1";
 
+/// La chaîne de séparation du `s-…` de l'`asl-directory` d'un annuaire
+/// local (décision 73).
+pub const SEPARATION_ANNUAIRE: &[u8] = b"asl/annuaire/1";
+
+/// Le nom sous lequel ce `s-…` se dérive — `asl_proto::NOM_ASL_DIRECTORY`,
+/// que cette crate ne tire pas ; `asl-session`, qui connaît les deux, tient
+/// leur égalité à la compilation.
+pub const NOM_ASL_DIRECTORY: &[u8] = b"asl-directory";
+
 /// L'identifiant de service dérivé de cette chaîne, de ce titulaire et de ce
 /// nom : les seize premiers octets de `SHA-256(separation ‖ titulaire (16
 /// octets) ‖ nom)`.
 ///
 /// **La forme commune** — voir l'en-tête. Un appelant ne s'en sert qu'à
-/// travers une chaîne nommée ([`service_derive`] aujourd'hui) : c'est la chaîne
-/// qui dit ce qu'on dérive.
+/// travers une chaîne nommée ([`service_derive`], [`asl_directory_derive`]) :
+/// c'est la chaîne qui dit ce qu'on dérive.
 #[must_use]
 pub fn deriver(separation: &[u8], titulaire: Identifiant, nom: &[u8]) -> Identifiant {
     use sha2::Digest as _;
@@ -79,6 +95,16 @@ pub fn service_derive(machine: Identifiant, nom: &[u8]) -> Identifiant {
     deriver(SEPARATION_SERVICE, machine, nom)
 }
 
+/// Le `s-…` de l'`asl-directory` de l'annuaire local que ce `n-…` titulaire
+/// nomme (décision 73).
+///
+/// **Calculé, jamais rangé** : les deux racines le rendent sans se parler,
+/// et le service n'existe qu'autant que l'inscription acceptée (décision 74).
+#[must_use]
+pub fn asl_directory_derive(titulaire: Identifiant) -> Identifiant {
+    deriver(SEPARATION_ANNUAIRE, titulaire, NOM_ASL_DIRECTORY)
+}
+
 #[cfg(test)]
 mod tests {
     //! **Les vecteurs FIGENT la forme** : ils ont été calculés hors de ce code
@@ -88,7 +114,10 @@ mod tests {
 
     use asl_id::{Genre, Identifiant};
 
-    use super::{SEPARATION_SERVICE, deriver, service_derive};
+    use super::{
+        NOM_ASL_DIRECTORY, SEPARATION_ANNUAIRE, SEPARATION_SERVICE, asl_directory_derive, deriver,
+        service_derive,
+    };
 
     /// Relit un identifiant écrit, qu'on sait bien formé.
     fn lu(texte: &str) -> Identifiant {
@@ -142,5 +171,64 @@ mod tests {
         // Une autre chaîne, un autre identifiant — celle de l'`asl-directory`
         // (décision 73) ne rencontre pas celle-ci.
         assert_ne!(deriver(b"asl/annuaire/1", une, b"imap"), derive);
+    }
+
+    #[test]
+    fn les_vecteurs_figes_de_l_asl_directory() {
+        // **La paire de production** (speedy, titulaire ; helium, second) :
+        // c'est ce que `GET /v1/ou/n-7MSV…/asl-directory` rend en `service`.
+        assert_eq!(
+            asl_directory_derive(lu("n-7MSV5RPCXBZH25PQM4ZPE5X87P")),
+            lu("s-294B4BA9XHXFZ5DQ8Q7T35M7PY")
+        );
+        // Le second a son propre `n-…`, qui ne nomme pas l'annuaire : son
+        // dérivé n'est celui d'aucun `asl-directory` servi.
+        assert_eq!(
+            asl_directory_derive(lu("n-4EQRD1VWYQQB1Y9C3T49Z8F8Z9")),
+            lu("s-5GQYJW6MK7JMV67KQDQYSCT1F5")
+        );
+        let zero = Identifiant::depuis_entropie(Genre::Annuaire, [0; 16]);
+        assert_eq!(
+            asl_directory_derive(zero),
+            lu("s-7K8JYNPMFK8J970VEZJK6XC72W")
+        );
+        let suite = Identifiant::depuis_entropie(
+            Genre::Annuaire,
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        );
+        assert_eq!(
+            asl_directory_derive(suite),
+            lu("s-4HVV10FRS8PH73S5XBKJ90VTEN")
+        );
+    }
+
+    #[test]
+    fn la_separation_de_l_asl_directory_n_est_pas_celle_des_services() {
+        assert_eq!(SEPARATION_ANNUAIRE, b"asl/annuaire/1");
+        assert_eq!(NOM_ASL_DIRECTORY, b"asl-directory");
+        // Elles diffèrent dès le cinquième octet.
+        assert_eq!(SEPARATION_ANNUAIRE[..4], SEPARATION_SERVICE[..4]);
+        assert_ne!(SEPARATION_ANNUAIRE[4], SEPARATION_SERVICE[4]);
+        // Les mêmes seize octets et le même nom, sous l'autre chaîne : un
+        // autre identifiant — vecteur calculé hors du code, lui aussi.
+        let speedy = lu("n-7MSV5RPCXBZH25PQM4ZPE5X87P");
+        assert_eq!(
+            service_derive(speedy, NOM_ASL_DIRECTORY),
+            lu("s-3DEC09PVS1NSG89SEF2KY3XMRK")
+        );
+        assert_ne!(
+            service_derive(speedy, NOM_ASL_DIRECTORY),
+            asl_directory_derive(speedy)
+        );
+        // Seuls les seize octets comptent, pas le genre : une machine qui
+        // aurait les octets d'un `n-…` et annoncerait ce nom — ce que la
+        // réservation refuse de toute façon — ne rencontrerait pas le service
+        // de l'annuaire.
+        let machine = Identifiant::depuis_entropie(Genre::Machine, *speedy.octets());
+        assert_ne!(
+            service_derive(machine, NOM_ASL_DIRECTORY),
+            asl_directory_derive(speedy)
+        );
+        assert_eq!(asl_directory_derive(speedy).genre(), Genre::Service);
     }
 }

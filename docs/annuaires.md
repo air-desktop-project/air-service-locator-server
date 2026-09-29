@@ -764,6 +764,12 @@ suites (Thierry ; décisions 79 à 85), et deux points que la spécification ava
 laissés (2026-09-29, Thierry ; décisions 86 et 87)** — la question 21 du §7, où
 chaque sous-question garde sa réponse, et les questions 22 à 28.
 
+**Côté serveur, fait en 0.38.0** : la synthèse aux racines, la route
+`GET /v1/ou/{n-…}/asl-directory` sur la voie machine, le cercle étroit, le nom
+réservé et le champ `voie` (« Travail à faire », ci-dessous). **Restent le
+client** — `asl where n-… asl-directory` ne lit aujourd'hui qu'un `m-…` — **et
+les applications** (la tuile).
+
 **Le motif.** Un port n'est pas une constante : `--port` vaut 6630 par défaut
 (`crates/asl-server/src/reglages.rs`), et rien n'oblige un annuaire à s'y
 tenir. Un client doit pouvoir **trouver un annuaire local, où qu'il écoute, par
@@ -778,10 +784,10 @@ logique :
 | | La règle | Décision |
 |---|---|---|
 | **Son identité** | L'**annuaire logique**, nommé par le `n-…` de son titulaire (§2 ter) — celui que `heberge_par`, `GET /v1/annuaires` et le `421` portent déjà. Pour la paire speedy/helium : `n-7MSV5RPCXBZH25PQM4ZPE5X87P`. **Pas une machine** : l'hôte n'est pas forcément enrôlé, et il peut changer — la clé d'identité, elle, se transporte (§2 ter, « Remplacer une machine »). | 73 |
-| **Son nom** | `asl-directory`, **réservé** : aucun daemon ne peut l'annoncer, ni aux racines ni à un annuaire local. L'annonce est **refusée explicitement** — `403`, le refus d'une annonce (une annonce ne lit rien, C10 ne s'y applique pas : `asl-session`), et une ligne au journal —, jamais prise pour une autre. | 73 |
-| **Son `s-…`** | **Dérivé comme A1** (décision 66), le `n-…` à la place du `m-…`, sous une **chaîne de séparation distincte** : `SHA-256("asl/annuaire/1" ‖ n-… (16 octets) ‖ "asl-directory")`, tronqué à 128 bits. La chaîne distincte garantit qu'il ne rencontre jamais le `s-…` d'un service de machine, même si seize octets d'un `n-…` et d'un `m-…` coïncidaient. La forme exacte est celle que la PR de code arrêtera, comme pour la décision 66. | 73 |
+| **Son nom** | `asl-directory`, **réservé** : aucun daemon ne peut l'annoncer, ni aux racines ni à un annuaire local. L'annonce est **refusée explicitement** — `403`, le refus d'une annonce (une annonce ne lit rien, C10 ne s'y applique pas : `asl-session`), et une ligne au journal (`annonce refusée : m-… annonce « asl-directory », un nom réservé …`) —, jamais prise pour une autre. **Le refus passe avant le `421`** (0.38.0) : une machine d'un domaine confié qui l'annonce aux racines reçoit ce `403`, pas un renvoi vers un annuaire qui la refuserait de même. | 73 |
+| **Son `s-…`** | **Dérivé comme A1** (décision 66), le `n-…` à la place du `m-…`, sous une **chaîne de séparation distincte** : `SHA-256("asl/annuaire/1" ‖ n-… (16 octets) ‖ "asl-directory")`, tronqué à 128 bits. La chaîne distincte garantit qu'il ne rencontre jamais le `s-…` d'un service de machine, même si seize octets d'un `n-…` et d'un `m-…` coïncidaient. **Forme arrêtée en 0.38.0** (`asl_registre::asl_directory_derive`) : les quatorze octets ASCII de `asl/annuaire/1`, les **seize octets** du `n-…` du titulaire (jamais son texte), les treize octets de `asl-directory`, sans longueur ni séparateur ; les seize premiers octets du condensat. Vecteur figé : `n-7MSV5RPCXBZH25PQM4ZPE5X87P` → `s-294B4BA9XHXFZ5DQ8Q7T35M7PY`. | 73 |
 | **Qui le déclare** | **Les racines, de ce qu'elles savent déjà** : il existe dès que l'inscription est **acceptée**, et disparaît avec elle (`DELETE /v1/annuaires/{n}`). Rien ne se range pour lui : l'inscription est déjà répliquée (§3), et le service s'en déduit — sur les deux racines, le même `s-…`. **Aucun ajout de protocole côté membre** : ni verbe, ni champ sur sa voie. | 74 |
-| **Vivant** | Tant qu'**au moins un membre a sa voie de fédération ouverte vers cette racine** — la règle des services fédérés, décision 52 : la voie qui se tait fait tomber ce qu'elle disait au bout de l'expiration d'un rapport, **trente secondes au plus**. Comme tout état vivant, il ne se réplique pas entre racines (§3) : chacune juge avec les voies qu'elle tient, et les deux peuvent différer le temps qu'une voie s'ouvre ou tombe. **Aucun membre vivant : `404`**, la réponse de l'inexistant et de l'hors-cercle (C9). | 74, 82 |
+| **Vivant** | Tant qu'**au moins un membre a sa voie de fédération ouverte vers cette racine** — la règle des services fédérés, décision 52 : la voie qui se tait fait tomber ce qu'elle disait au bout de l'expiration d'un rapport, **trente secondes au plus**. **Ce qui compte comme parole** (0.38.0) : chacun des quatre verbes de la voie d'un membre accepté — `GET /v1/federation/machines`, `POST /v1/federation/etat`, `PUT /v1/federation/locateurs`, `PUT /v1/federation/paire` —, dont le fédérateur dit au moins deux par tour de dix secondes ; **la fermeture de la connexion sur laquelle il a parlé en dernier** la fait tomber aussitôt (celle d'une connexion d'avant une reprise, non). Comme tout état vivant, il ne se réplique pas entre racines (§3) : chacune juge avec les voies qu'elle tient, et les deux peuvent différer le temps qu'une voie s'ouvre ou tombe. **Aucun membre vivant : `404`**, la réponse de l'inexistant et de l'hors-cercle (C9). | 74, 82 |
 | **Ses adresses** | Pour **chaque membre vivant**, les **locateurs qu'il a publiés** (`--locator`, décision 57 ; `--locator auto`, décision 64) — donc le **vrai port**, celui où il écoute —, **sinon son adresse déclarée**, comme le `421` : la même source, la même règle. Un membre dont la voie est tombée n'y est pas. | 74, 75, 81 |
 | **Dans une paire** | **UN SEUL** `asl-directory` par annuaire logique — sous le `n-…` du titulaire —, vivant si l'un des membres l'est (décision 52), qui rend **l'adresse de chaque membre vivant avec SON `n-…`** : le client doit épingler la bonne clé, parce que chaque membre présente **la sienne** (décision 59, la forme du `421`). | 75 |
 | **Les racines** | **Pas d'`asl-directory` pour elles** : `GET /v1/racines` joue ce rôle (ci-dessous). | 76, 85 |
@@ -1045,7 +1051,10 @@ client (ci-dessous) — et, côté serveur, un annuaire local nomme ses racines 
 
 ### Travail à faire
 
-**Serveur** (`air-service-locator-server`) :
+**Serveur** (`air-service-locator-server`) — **fait en 0.38.0**, tel que
+décrit ci-dessous ; `GET /v1/inscriptions` ne rendant que les inscriptions
+**en attente**, `voie` n'y paraît jamais (une inscription non acceptée n'en
+porte pas) — le champ y est câblé, et s'y écrira si la vue s'élargit :
 
 - **La synthèse aux racines** : pour chaque inscription acceptée, un service
   `asl-directory` sous le `n-…` titulaire, son `s-…` dérivé (`"asl/annuaire/1"`),
@@ -1715,7 +1724,8 @@ Rassemblé, plutôt que dispersé.
       (`asl where n-7MSV5RPCXBZH25PQM4ZPE5X87P asl-directory`) ; son `s-…` est
       dérivé comme A1, le `n-…` à la place du `m-…`, sous une chaîne de
       séparation distincte (`"asl/annuaire/1"`), pour ne jamais rencontrer
-      celui d'un service de machine. **Le nom `asl-directory` est réservé** :
+      celui d'un service de machine (`s-294B4BA9XHXFZ5DQ8Q7T35M7PY` pour
+      speedy ; fait en 0.38.0). **Le nom `asl-directory` est réservé** :
       aucun daemon ne peut l'annoncer, et l'annonce est refusée explicitement.
     - **(b) Les racines aussi ?** Si la seconde racine peut quitter 6630, la
       liste embarquée (`asl-racines`) ment pour elle. Comment un client

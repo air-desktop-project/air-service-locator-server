@@ -167,6 +167,7 @@ fuzz_target!(|octets: &[u8]| {
                 locateurs: &[],
                 expire_a: Some(u64::MAX),
                 paire: None,
+                voie: None,
             };
             let mut sortie = [0_u8; 512];
             let combien = rendue.encoder(&mut sortie).expect("elle tient");

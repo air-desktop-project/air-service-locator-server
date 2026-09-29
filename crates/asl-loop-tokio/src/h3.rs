@@ -753,16 +753,29 @@ impl Service<'_> {
             // `421`, avec l'annuaire local et où le joindre. Sa machine est
             // rangée ici — c'est ici qu'elle s'enrôle —, mais ses services
             // vivent chez lui.
-            Besoin::Annoncer => match self
-                .session
-                .machine()
-                .and_then(|qui| self.annonce_mal_adressee(qui))
-            {
-                Some(ailleurs) => Trouvaille::Ailleurs(ailleurs),
-                None => self
-                    .annoncer()
-                    .map_or(Trouvaille::Rien, Trouvaille::Annoncee),
-            },
+            // **LE NOM RÉSERVÉ D'ABORD** (0.38.0, décision 73) : personne
+            // n'annonce `asl-directory`, ni ici ni chez un annuaire local.
+            // `403`, le refus d'une annonce, et une ligne au journal.
+            Besoin::Annoncer => {
+                if let Some(qui) = self.annonce_reservee() {
+                    (self.voie.journal)(&format!(
+                        "annonce refusée : {qui} annonce « {} », un nom réservé — les racines \
+                         le synthétisent pour chaque annuaire local (décision 73)",
+                        asl_proto::NOM_ASL_DIRECTORY
+                    ));
+                    return Trouvaille::Refus;
+                }
+                match self
+                    .session
+                    .machine()
+                    .and_then(|qui| self.annonce_mal_adressee(qui))
+                {
+                    Some(ailleurs) => Trouvaille::Ailleurs(ailleurs),
+                    None => self
+                        .annoncer()
+                        .map_or(Trouvaille::Rien, Trouvaille::Annoncee),
+                }
+            }
             // ── LA VOIE DE L'ANNUAIRE LOCAL (0.28.0) ─────────────────────
             Besoin::MachinesFederees { apres } => self.rassembler_les_machines_federees(*apres),
             Besoin::EtatFedere { entrees } => self.ranger_un_etat_federe(entrees),
@@ -861,6 +874,9 @@ impl Service<'_> {
             Besoin::Ou { machine, service } => self
                 .rassembler(*machine, service)
                 .map_or(Trouvaille::Rien, Trouvaille::Resolution),
+            // **L'`asl-directory`** (0.38.0) : synthétisé de l'inscription,
+            // des voies ouvertes et du cercle — voir `rassembler_un_annuaire`.
+            Besoin::OuAnnuaire { annuaire } => self.rassembler_un_annuaire(*annuaire),
 
             // ── LES VERBES DE LISTE ─────────────────────────────────────
             //
@@ -4039,7 +4055,15 @@ impl Application for Annuaire<'_> {
             asl_annuaire::MotifDeDepart::Volontaire,
         );
         let _ = partis;
-        if let Some(etat) = self.connexions.remove(connexion.local_id().as_bytes())
+        let etat = self.connexions.remove(connexion.local_id().as_bytes());
+        // **LA VOIE D'UN MEMBRE TOMBE AVEC SA CONNEXION** (0.38.0, décision
+        // 86) : l'`asl-directory` cesse d'être vivant tout de suite, sans
+        // attendre les trente secondes.
+        if let Some(membre) = etat.as_ref().and_then(|etat| etat.session.annuaire_local()) {
+            self.etat_federe
+                .noter_une_fermeture(membre, connexion.local_id().as_bytes());
+        }
+        if let Some(etat) = etat
             && let Some(racine) = etat.session.racine()
         {
             // Le sens entrant se ferme avec la connexion de l'autre racine,

@@ -7,8 +7,8 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use asl_id::{Genre, Identifiant};
 use asl_proto::{
-    ADRESSES_MAX, Annonce, Candidat, Erreur, NOM_MAX, NomService, Origine, POINTS_MAX, PointEcoute,
-    Port, Protocole, ordonner,
+    ADRESSES_MAX, Annonce, Candidat, Erreur, NOM_ASL_DIRECTORY, NOM_MAX, NomService, Origine,
+    POINTS_MAX, PointEcoute, Port, Protocole, ordonner,
 };
 
 /// Une machine, pour les essais qui en veulent une.
@@ -136,6 +136,19 @@ fn un_nom_ordinaire_passe() {
         let nom = NomService::analyser(texte).unwrap_or_else(|e| panic!("{texte:?} : {e}"));
         assert_eq!(nom.as_str(), texte);
         assert_eq!(format!("{nom}"), texte);
+    }
+}
+
+#[test]
+fn asl_directory_est_un_nom_bien_forme_et_le_seul_reserve() {
+    // **BIEN FORMÉ** : il se lit comme tout nom, sinon le chemin
+    // `/v1/ou/{n-…}/asl-directory` ne se routerait pas. **RÉSERVÉ** : un
+    // daemon qui l'annonce est refusé (décision 73).
+    assert_eq!(NOM_ASL_DIRECTORY, "asl-directory");
+    let reserve = NomService::analyser(NOM_ASL_DIRECTORY).expect("un nom bien formé");
+    assert!(reserve.reserve());
+    for autre in ["asl-directory2", "asl-director", "asl.directory", "depot"] {
+        assert!(!NomService::analyser(autre).expect("bien formé").reserve());
     }
 }
 
