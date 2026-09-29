@@ -2465,6 +2465,11 @@ son bail en IPv4 (« Quand la box ne perce pas son pare-feu IPv6 », plus bas).
 **Décision 107** (2026-09-29, Thierry, « option (i) ») : quand ce bail va à
 un annuaire local, les racines voient l'adresse IPv4 de la box du membre, et
 l'écho la confirme (« Chez un annuaire local », plus bas).
+**Décision 108** (2026-09-30, Thierry) : la socket de l'écho se lie à
+l'adresse IPv6 **stable** de la machine, pour qu'une règle posée à la main
+dans une box qui refuse UPnP ne meure pas avec une adresse temporaire — le
+revers, la traçabilité de la machine, est assumé (« L'écho se lie à l'adresse
+IPv6 STABLE », plus bas).
 **Aucune question ne reste ouverte dans cette section.**
 
 ### Ce que l'écho est, et ce qu'il n'est pas
@@ -2582,21 +2587,164 @@ simple côté client — rien ne change dans `asl-client-tokio` —, mais derri�
 un NAT IPv4 le candidat réflexif n'y vaut que si l'on a redirigé le port à la
 main, et le mapping n'est tenu par rien.
 
-**IPv6 d'abord, IPv4 en repli.** La socket est liée à `[::]:<port de la
-plage>` en double pile (`IPV6_V6ONLY` à zéro), `0.0.0.0:<port>` si la machine
-n'a pas d'IPv6 ; le bail
+**IPv6 d'abord, IPv4 en repli.** La socket est liée à **l'adresse IPv6 stable
+et globale de l'interface qui sert le bail** (décision 108, plus bas), et à
+`[::]:<port de la plage>` en double pile (`IPV6_V6ONLY` à zéro) quand il n'y en
+a pas — ou que le système ne dit pas laquelle l'est ; `0.0.0.0:<port>` si la
+machine n'a pas d'IPv6 ; le bail
 part en IPv6 d'abord (§0). L'annonce porte, dans `adresses_locales`, **toutes**
 les adresses non locales de la machine — IPv6 globales d'abord, puis IPv4 —,
 au plus `ADRESSES_MAX`, et non plus la seule qui a servi à joindre l'annuaire
 (`asl announce` d'aujourd'hui : `crates/asl-cli/src/commandes.rs:469-478` du client) : un
 sondeur du même réseau essaie les annoncées, un sondeur du dehors la
-réflexive. **Le candidat réflexif est d'une seule famille**, celle du bail :
+réflexive. **L'adresse IPv6 annoncée est celle à laquelle la socket est
+liée** (décision 108) : une socket liée ne reçoit rien d'autre, et le verdict
+de NAT se prend sur cette comparaison. **Le candidat réflexif est d'une seule famille**, celle du bail :
 une machine joignable en IPv6 et en IPv4 ne le verra dit que dans la
 première. Tenir deux baux pour avoir les deux est écarté en v1. **Sauf
 quand la box ne laisse entrer qu'en IPv4** : le bail passe alors en IPv4,
 sur la même socket (décision 106, « Quand la box ne perce pas son pare-feu
 IPv6 », plus bas) — c'est pourquoi la double pile est posée
 explicitement, et non laissée au réglage du système.
+
+#### L'écho se lie à l'adresse IPv6 STABLE de la machine
+
+**Décidé (2026-09-30, Thierry ; décision 108).** La socket de l'écho est liée
+à **l'adresse IPv6 stable et globale** de l'interface qui sert le bail, quand
+la machine en a une — et non plus à `[::]`, qui laisse le système choisir
+l'adresse SOURCE, c'est-à-dire, là où les adresses temporaires tournent
+(macOS par défaut, Linux souvent), **une adresse qui aura disparu demain**.
+
+**Pourquoi — le constat d'oxygen (30/09).** La Livebox ne laisse ouvrir son
+pare-feu IPv6 que vers un équipement **choisi dans une liste fermée**, et
+l'adresse qu'elle propose pour un équipement donné est une **ancienne adresse
+temporaire, déjà dépréciée**. Une règle posée à la main dans l'interface de la
+box meurt donc avec l'adresse qu'elle nomme : le lendemain, l'écho écoute
+ailleurs. Le trou UPnP y échappe — l'écho le redemande à chaque tour, pour
+l'adresse du moment (`AddPinhole`, « IPv6 : un trou dans le pare-feu ») —
+**mais une règle manuelle n'a personne pour la redemander.** Liée à l'adresse
+stable, l'écho ne bouge plus, et une règle manuelle devient tenable. Oxygen
+porte huit adresses sur `en5` ; la stable est
+`2a01:cb19:d27:2f00:144b:b441:5901:6706`, la temporaire du moment
+`2a01:cb19:d27:2f00:157e:db0b:296a:f355`.
+
+**Le revers, et il est assumé.** Une adresse IPv6 stable **suit la machine sur
+l'Internet** : elle est la même pour tout correspondant, et permet de
+reconnaître cette machine d'un site à l'autre — c'est précisément ce que les
+adresses temporaires de RFC 8981 servent à empêcher. **Thierry l'a tranché en
+connaissance de ce revers** (2026-09-30) : la joignabilité durable de l'écho
+passe devant. **Et la portée est bornée** : c'est la socket de `asl echo` —
+donc le bail de l'écho et ses réponses de sonde — qui est liée ainsi, **rien
+d'autre sur la machine** ; `asl announce`, un navigateur, un courrielleur
+gardent le choix du système et ses adresses temporaires. L'écho, de toute
+façon, publie déjà une adresse : c'est son métier que d'être joignable.
+
+##### Ce qui compte comme stable
+
+Une adresse candidate est **globale et stable** :
+
+- **globale** : ni lien-local (`fe80::/10`), ni boucle, ni multicast, ni
+  indéterminée, ni IPv4 enfouie (`::ffff:a.b.c.d`) ;
+- **et pas une ULA** (`fc00::/7`) : une ULA est stable, mais **elle ne sort
+  pas de la maison** — l'annuaire ne la verrait pas, aucune sonde du dehors
+  ne l'atteindrait, et le pare-feu de la box n'a rien à y ouvrir. Ce qu'on
+  cherche ici est une adresse **que le dehors peut joindre** ;
+- **ni temporaire** (RFC 8981 ; sous Linux, `IFA_F_TEMPORARY`) : c'est celle
+  qui tourne, et c'est tout le problème ;
+- **ni dépréciée** (`IFA_F_DEPRECATED`) : elle ne sert plus qu'aux
+  connexions en cours, et disparaîtra ;
+- **ni provisoire** (`IFA_F_TENTATIVE`), **ni en échec de DAD**
+  (`IFA_F_DADFAILED`) : on ne se lie pas à une adresse dont le réseau n'a pas
+  encore dit qu'elle est à nous.
+
+Une adresse stabilisée par RFC 7217 (« autoconf secured ») et une adresse
+posée à la main entrent toutes deux dans cette définition : ce qui est demandé
+est qu'elle ne tourne pas, non la façon dont elle a été formée.
+
+**L'interface est celle qui sert le bail**, et elle se connaît sans rien
+appeler de nouveau : le système dit déjà quelle adresse source il prendrait
+pour joindre l'annuaire (c'est ce que l'écho lit pour `adresses_locales`) ;
+l'interface de CETTE adresse est celle qu'on retient, et l'on choisit parmi
+ses adresses. Se lier à l'adresse stable d'une autre interface serait se
+lier là où la route ne passe pas.
+
+**Si plusieurs restent, le choix est déterministe** : **la plus petite dans
+l'ordre de ses seize octets**. Un redémarrage reprend donc la même, tant que
+le préfixe tient — et deux exploitants qui regardent la même machine y
+trouvent la même réponse. (Ni « la première rendue par le système », qui ne
+promet aucun ordre, ni « la plus récente », qui rendrait l'adresse mouvante
+que l'on fuit.)
+
+##### Quand il n'y en a pas, ou plus
+
+- **Aucune adresse stable** sur l'interface du bail — une machine qui n'a que
+  des adresses temporaires, ou dont la seule globale est dépréciée : **l'écho
+  garde le choix du système** (`[::]`, comme avant), et **le dit une fois** :
+  « pas d'adresse IPv6 stable sur l'interface du bail : le système choisit —
+  une règle posée à la main dans la box ne tiendra pas ».
+- **Le système ne dit pas les drapeaux** (§ suivant : macOS) : même repli,
+  même ligne, et la raison est dite.
+- **La stable disparaît en service** (le préfixe change, l'opérateur
+  renumérote) : le bail tombe avec elle, et l'écho le rouvre — il relit alors
+  les adresses et se lie à celle du moment. Rien de particulier n'est prévu :
+  un préfixe qui change est déjà ce qui fait tomber un bail.
+- **Elle devient dépréciée** sans disparaître : on ne s'y relie pas au tour
+  suivant ; le bail en cours, lui, n'est pas coupé pour cela — une adresse
+  dépréciée fonctionne encore.
+
+##### Comment on la connaît, sans une ligne de C (C4)
+
+- **Linux** : `/proc/net/if_inet6`, que le client lit déjà pour les index
+  d'interface (« La passerelle », le M-SEARCH). Chaque ligne y porte
+  l'adresse en hexadécimal, l'index de l'interface, la longueur du préfixe, la
+  portée, **les drapeaux** et le nom du périphérique ; `IFA_F_TEMPORARY` vaut
+  `0x01`, `IFA_F_DEPRECATED` `0x20`, `IFA_F_TENTATIVE` `0x40`,
+  `IFA_F_DADFAILED` `0x08`.
+- **macOS : il n'y a pas de moyen sans C, et on ne l'invente pas.** Les
+  drapeaux d'une adresse IPv6 s'y lisent par `getifaddrs` puis l'ioctl
+  `SIOCGIFAFLAG_IN6` (`IN6_IFF_TEMPORARY`, `IN6_IFF_DEPRECATED`) — du C, donc
+  de l'`unsafe`, que C4 refuse et qu'aucune crate du graphe n'enveloppe.
+  Lire la sortie d'`ifconfig` serait un programme tiers dont on analyserait le
+  texte : la même voie que celle qui a déjà été écartée pour la table de
+  routage. **Donc : sous macOS, l'écho garde le choix du système**, et le dit
+  (la ligne ci-dessus). Le jour où une crate sans C expose ces drapeaux, ou
+  qu'une frontière `unsafe` existe pour cela dans ce dépôt, la règle
+  s'appliquera là aussi sans rien changer d'autre.
+
+##### Ce que cela change à l'annonce, et à la bascule en IPv4
+
+**L'annonce doit porter l'adresse liée** — et c'est la seule chose qui change
+ailleurs. Une socket liée à une adresse précise **ne reçoit que ce qui est
+destiné à cette adresse**, et n'en émet pas d'autre : si l'annonce portait
+l'adresse temporaire que le système aurait choisie, un sondeur du même réseau
+parlerait à une adresse où l'écho n'écoute pas, et surtout **le verdict de NAT
+dirait « oui »** — l'annuaire compare l'adresse observée aux adresses
+annoncées (`modele.md` §4.3), et `echo_via` dirait `nat` là où il doit dire
+`direct`. L'adresse à laquelle la socket est liée est donc celle que
+`adresses_locales` annonce pour l'IPv6.
+
+**La bascule en IPv4 rouvre la socket** (décision 106). Une socket liée à une
+adresse IPv6 ne peut pas parler IPv4 : la double pile n'est possible que liée
+à `[::]`. Quand la passerelle demande le passage en IPv4, l'écho **ferme sa
+socket et la relie au MÊME port**, en `[::]` double pile (ou `0.0.0.0`), puis
+rouvre le bail ; au retour en IPv6, il se relie à l'adresse stable. **Le port
+ne change jamais** : c'est lui que la box redirige, et lui que le pare-feu de
+la machine laisse entrer (décision 105). Le mapping NAT de l'ancienne socket
+tombe avec elle, ce qui est sans effet : une bascule rouvre de toute façon le
+bail, et l'annuaire réobserve tout (« La bascule », plus haut).
+
+##### Côté serveur, rien ne change — vérifié
+
+L'annuaire voit une adresse globale, comme avant ; elle ne tourne plus, voilà
+tout. Le candidat réflexif, la sonde par l'écho, le verdict de NAT, l'état
+`echo*`, le rapport d'un membre aux racines, la sonde du dehors : aucun ne
+regarde **comment** une adresse a été formée, ni si elle est temporaire —
+`asl_annuaire::adresse_globale` juge la portée, et une adresse stable globale
+la passe comme n'importe quelle autre. **C'est une décision du client seul**,
+comme la 106. Un bénéfice s'ensuit toutefois, et il vaut d'être dit : une
+adresse qui ne tourne plus rend `sonder_du_dehors` moins bavard (la cible ne
+change plus à chaque renouvellement d'adresse) et « constaté à » plus
+comparable d'un quart d'heure à l'autre.
 
 ### La passerelle : UPnP, pour mettre toutes les chances de son côté
 
@@ -2701,8 +2849,10 @@ box —, c'est la décision 107 qui prend le relais (« Chez un annuaire local �
 plus bas) : le bail reste en IPv6, et l'écho confirme l'adresse externe.
 
 **La bascule.** L'écho ferme le bail IPv6 — la connexion, donc l'annonce —,
-puis rouvre **sur la même socket**, vers les seules adresses IPv4 des
-annuaires (racines, ou l'annuaire local d'un renvoi), et réannonce : sans
+puis rouvre **sur la même socket** (ou sur une socket reliée au même port,
+quand elle était liée à l'adresse IPv6 stable : décision 108, « Ce que cela
+change à l'annonce, et à la bascule en IPv4 »), vers les seules adresses IPv4
+des annuaires (racines, ou l'annuaire local d'un renvoi), et réannonce : sans
 `passerelle` d'abord, pour apprendre `vu_depuis`, puis avec, comme partout
 (« Comment l'annuaire l'apprend »). **La même socket** : le port local ne
 change pas, la redirection que la box tient vise toujours le bon port, et le
@@ -3863,6 +4013,14 @@ serveur :
    trou IPv6, avec une redirection IPv4 et une adresse externe publique,
    `passerelle` porte `externe` (`GetExternalIPAddress`, déjà lue pour le
    double NAT) — vers un annuaire local en 0.45.0 au moins.
+9. **La socket liée à l'adresse IPv6 stable** (décision 108) : lire les
+   drapeaux dans `/proc/net/if_inet6` sous Linux (`IFA_F_TEMPORARY`,
+   `IFA_F_DEPRECATED`, `IFA_F_TENTATIVE`, `IFA_F_DADFAILED`) ; retenir
+   l'interface de l'adresse source que le système prendrait pour l'annuaire,
+   et la plus petite de ses adresses stables et globales, ULA exclues ;
+   annoncer CETTE adresse ; relier la socket au même port, en `[::]` double
+   pile, pour une bascule en IPv4, et s'y relier au retour ; garder le choix
+   du système ailleurs (macOS) et le dire une fois. Rien côté serveur.
 
 **Applications**, après la PR 3 du serveur (et la PR 4 pour `echo_via`) :
 
