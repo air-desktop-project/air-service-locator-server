@@ -107,6 +107,10 @@ fuzz_asl_apple_verifier apple
 fuzz_asl_keystore keystore
 fuzz_asl_reveil reveil
 fuzz_asl_racines racines
+fuzz_asl_echo_sonde_annuaire echo
+fuzz_asl_echo_sonde_jeton echo
+fuzz_asl_echo_reponse echo
+fuzz_asl_echo_jeton echo
 TABLE
 )
 

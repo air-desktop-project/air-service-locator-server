@@ -97,7 +97,7 @@ compte. Le raisonnement complet est en tête de [`Cargo.toml`](Cargo.toml).
 
 | Étage | Crates | Ce qu'elles n'ont pas le droit de faire |
 |---|---|---|
-| 1. Grammaires | `asl-id`, `asl-proto`, `asl-api` | Ouvrir une socket, lire un fichier, regarder l'heure. |
+| 1. Grammaires | `asl-id`, `asl-proto`, `asl-api`, `asl-echo` | Ouvrir une socket, lire un fichier, regarder l'heure. |
 | 2. Décisions | `asl-annuaire`, `asl-auth` | Attendre. Elles reçoivent l'heure, elles ne la demandent pas. |
 | 3. Exécution | `asl-store`, `asl-loop-tokio` | Décider quoi que ce soit. |
 | Binaire | `asl-server` | Avoir une logique à lui. |

@@ -28,7 +28,15 @@
 #   3. EXÉCUTION  — les seules crates qui lisent, écrivent et attendent. Elles
 #      ne décident de rien, et sont donc HORS des deux contrôles.
 
-etage1=(asl-id asl-proto asl-api asl-registre asl-attest)
+# `asl-echo` EST À L'ÉTAGE 1 BIEN QU'ELLE TIRE `asl-cle`, CLASSÉE À L'ÉTAGE 2.
+#
+# C'est un codec — trois datagrammes et un jeton, des octets vers des messages
+# (`protocole.md` §3 quater, « Le codec est un codec ») — et elle signe et
+# vérifie par `asl-cle`, qui ne fait aucune entrée-sortie non plus : les
+# séparateurs de domaine vivent tous là-bas, `ed25519-dalek` n'est appelée que
+# là. Ce que l'étage 1 interdit, c'est d'attendre ; les deux étages sont sous
+# les mêmes contrôles, et le client tire déjà `asl-cle`.
+etage1=(asl-id asl-proto asl-api asl-registre asl-attest asl-echo)
 
 # `asl-session` EST À L'ÉTAGE 2 BIEN QU'ELLE DÉPENDE DE LA PILE HTTP/3, et c'est
 # le classement qui demande le plus d'explication.

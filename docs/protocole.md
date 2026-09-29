@@ -2456,6 +2456,26 @@ couverte à 100 % (C2), fuzzée (C3), sans une ligne de C (C4) — sous le
 nom `asl-echo`, dans ce dépôt, tirée par le client comme `asl-proto` l'est
 (`Cargo.toml` du client, `rev` épinglée).
 
+**Fait en 0.41.0.** `crates/asl-echo` lit et écrit les trois datagrammes et
+le jeton (`SondeAnnuaire`, `SondeJeton`, `Reponse`, `Jeton`, ce dernier aussi
+en 386 chiffres hexadécimaux), et décide hors ligne : `asl_echo::accepter`
+prend un datagramme reçu et rend la sonde acceptée — défi, sondeur — ou la
+raison du silence ; `SondeAcceptee::repondre` signe la réponse pour la source
+observée ; `Reponse::verifier` dit au sondeur si la preuve tient, et sinon
+pourquoi (autre défi, autre sondeur, autre machine, autre clé) ;
+`Jeton::verifier` est la vérification du jeton par l'écho. Les clés crues —
+l'annuaire du bail, les racines embarquées — sont passées par l'appelant, qui
+tient aussi le débit et la mémoire des défis vus. Les quatre séparateurs sont
+dans `asl-cle` (`DomaineEcho`, `CleSecrete::signer_echo`,
+`ClePublique::verifie_echo`). Des vecteurs figés
+(`crates/asl-echo/tests/vecteurs.rs`) sont calculés hors du code, par
+`tests/fixtures/vecteurs.py` sur une autre bibliothèque Ed25519 ; quatre
+cibles de fuzz, une par décodeur (`fuzz_asl_echo_*`). **Deux précisions**
+que le format impliquait sans les écrire : une adresse au **port nul** est
+refusée à la lecture ; l'écho refuse un jeton dont la validité n'est pas
+comprise entre zéro (exclu) et soixante secondes — une racine n'en délivre
+pas d'autre.
+
 **TCP** : pas en v1 (décision 90 ; E1). Si un réseau de sondeur bloque l'UDP
 sortant, le même format voyagerait sur TCP, préfixé de sa longueur — une
 extension, pas un second protocole. Rien aujourd'hui ne dit qu'il le faut.
@@ -3282,6 +3302,7 @@ indiqué pour le serveur.
    les quatre séparations de domaine dans `asl-cle` ; des vecteurs figés ;
    100 % de couverture (C2), une cible de fuzz par décodeur (C3). Le client
    la lit : elle précède tout ce que le client fait de l'écho.
+   **Fait en 0.41.0** (« Le transport », ci-dessus).
 2. **Le jeton** (mineur ; décision 91) : `POST /v1/echo/jetons` sur la voie
    machine, la décision de `GET /v1/ou/{m}/asl-echo` dans `asl-auth`, un essai
    C9 et un essai C10 ; la signature par la clé d'identité de la racine ; le

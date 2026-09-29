@@ -1,0 +1,19 @@
+[package]
+name = "asl-echo"
+description = "Le codec de l'écho (`asl-echo`) : les sondes, la réponse et le jeton, en octets de longueur fixe, et leur vérification hors ligne — sans entrée-sortie, partagé par le serveur et le client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `asl-cle` POUR SIGNER ET VÉRIFIER, et rien d'autre : les quatre séparateurs
+# de l'écho y vivent avec tous les autres (`protocole.md` §3 quater, « Travail
+# à faire »), et `ed25519-dalek` n'est appelée que là. Aucune dépendance
+# nouvelle n'entre dans le graphe.
+asl-cle.workspace = true
+asl-id.workspace = true
+
+[lints]
+workspace = true
