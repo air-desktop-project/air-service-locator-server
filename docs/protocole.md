@@ -71,6 +71,10 @@ ne sonde que l'adresse qu'il a vue, et ce n'est qu'en IPv4 qu'il verra une
 adresse où la box laisse entrer. Ce n'est pas un repli sur échec — le bail
 IPv6 tenait —, c'est le choix de la seule famille où l'écho est joignable du
 dehors. Toute autre connexion, `asl announce` compris, garde la règle.
+**La visite IPv4 d'un annuaire local n'en est pas une seconde** (décision
+107, §3 quater) : une connexion courte, à côté de sa voie qui reste en IPv6,
+qui ne porte rien — elle ne sert qu'à ce que les racines **voient**
+l'adresse IPv4 de la box du membre.
 
 ### Qui l'on croit : une identité, pas un nom
 
@@ -2260,7 +2264,10 @@ GET  /v1/federation/machines?apres=<rang>
              plus ; pleine, on redemande depuis le rang suivant
 POST /v1/federation/etat         des EntreeDEtat à la suite, huit kibioctets au plus :
              s-… (17) ‖ m-… (17) ‖ longueur du nom (1) ‖ nom ‖ vivant (1)
-             [‖ longueur (2, gros-boutiste) ‖ réponse d'annonce, 4 096 au plus]
+             [‖ longueur (2, gros-boutiste) ‖ réponse d'annonce, 4 096 au plus
+              [‖ port (2) ‖ via (1)          — drapeau 2, un écho (0.44.0)
+               [‖ adresse externe (4)]]]     — drapeau 3, un écho (0.45.0,
+                                               décision 107)
         204  rangé ; 403 une entrée hors de ses domaines (C11), rien n'est rangé ;
         404  l'inscription n'est plus acceptée
 PUT  /v1/federation/locateurs    {"locateurs":["[IPv6]:port","IPv4:port",…]} — de
@@ -2372,6 +2379,16 @@ le corps est la liste des racines (la forme de `GET /v1/racines`) : c'est là
 qu'on crée un compte, qu'on administre un domaine, qu'on accorde un droit et
 qu'on résout un service.
 
+**La visite IPv4** (décision 107, 0.45.0 ; §3 quater, « Chez un annuaire
+local ») : à côté de la voie, **à chaque ouverture puis tous les quarts
+d'heure**, le membre ouvre une connexion courte vers l'adresse IPv4
+littérale de chaque racine (la liste embarquée), y prouve sa clé
+(`POST /v1/defi`, genre `n`), lit `GET /v1/vu`, et ferme. La racine retient,
+par membre et en mémoire, l'adresse IPv4 observée sur toute connexion où un
+membre accepté a prouvé sa clé — trente minutes. Sans adresse IPv4 de la
+racine, ou sans IPv4 sortante, pas de visite : c'est dit au journal, et les
+racines ne sondent pas en IPv4.
+
 ## 3 quater. L'écho — `asl-echo` et `asl ping`
 
 **Décidé (2026-09-29, Thierry ; décision 89)** — et c'est tout ce qui l'est :
@@ -2445,6 +2462,9 @@ NAT, trou IPv6, `passerelle` et `echo_via` (E19, E20, E21) ; 98 : le Mac et
 l'attestation (E22). **Décision 106** (2026-09-29, Thierry, « option
 (b) ») : quand la box refuse le trou IPv6 mais redirige en IPv4, l'écho tient
 son bail en IPv4 (« Quand la box ne perce pas son pare-feu IPv6 », plus bas).
+**Décision 107** (2026-09-29, Thierry, « option (i) ») : quand ce bail va à
+un annuaire local, les racines voient l'adresse IPv4 de la box du membre, et
+l'écho la confirme (« Chez un annuaire local », plus bas).
 **Aucune question ne reste ouverte dans cette section.**
 
 ### Ce que l'écho est, et ce qu'il n'est pas
@@ -2675,7 +2695,10 @@ redirection.
 Il faut encore, côté machine, **que la socket de l'écho sache l'IPv4** — une
 double pile, ou une socket IPv4 seule, auquel cas le bail y était déjà — et
 **qu'un annuaire ait une adresse IPv4** dans la liste. À défaut, l'écho le
-dit et reste en IPv6.
+dit et reste en IPv6. **Chez un annuaire local** — le bail va au membre, sur
+le réseau de la maison, et aucun annuaire n'a d'adresse IPv4 qui verrait la
+box —, c'est la décision 107 qui prend le relais (« Chez un annuaire local »,
+plus bas) : le bail reste en IPv6, et l'écho confirme l'adresse externe.
 
 **La bascule.** L'écho ferme le bail IPv6 — la connexion, donc l'annonce —,
 puis rouvre **sur la même socket**, vers les seules adresses IPv4 des
@@ -2743,6 +2766,195 @@ passe `parti` le temps de la reconnexion, puis `annonce`. Le décodeur
 d'annonce, la sonde, le rapport d'un membre d'annuaire local aux racines
 n'ont rien à apprendre. **C'est une décision du client seul.**
 
+#### Chez un annuaire local : les racines voient l'adresse de la box, l'écho la confirme
+
+**Décidé (2026-09-29, Thierry ; décision 107, « option (i) »).** La décision
+106 ne sert pas une machine d'un domaine **hébergé** : son bail va au membre
+de l'annuaire local, sur le réseau de la maison, et aucun annuaire n'a
+d'adresse IPv4 qui verrait celle de la box — le membre voit l'IPv6 globale de
+la machine, ou son adresse privée. Constaté sur speedy, helium et oxygen,
+dans air-dictator-house, dont l'annuaire local est la paire speedy + helium :
+la Livebox refuse le trou (`606`), accorde la redirection, et **personne
+dehors ne connaît son adresse IPv4 publique**. Les racines sondent alors
+l'IPv6 que le membre a vue (décision 92), que le pare-feu de la box ferme :
+`injoignable`, alors que la box a ouvert de quoi joindre l'écho.
+
+**Le principe** : **l'annuaire local fait OBSERVER l'adresse IPv4 publique de
+sa box par les racines**, en leur parlant en IPv4 ; l'écho dit l'adresse
+externe que la box lui a donnée, **à titre de confirmation seulement** ; et
+une racine ne sonde `adresse:port` du dehors que si **l'adresse que l'écho
+confirme est celle qu'elle a elle-même observée** chez ce membre. L'adresse
+sondée est toujours une adresse **qui a parlé à la racine** ; elle n'est
+jamais choisie par un client (E21, décision 97, la règle de `modele.md` §4.3).
+
+##### 1. La visite IPv4 — comment les racines voient la box du membre
+
+**Une connexion courte, en IPv4, vers chaque racine, à côté de la voie** —
+et non une seconde voie, ni la voie passée en IPv4 :
+
+```
+(IPv4, vers l'adresse IPv4 de la racine, la même identité attendue qu'à la voie)
+POST /v1/defi    genre `n` ‖ n-… ‖ signature — la même preuve que la voie
+GET  /v1/vu      {"adresse":"193.250.159.198","port":…,"famille":4}
+(fermée)
+```
+
+- **Pourquoi pas une seconde voie IPv4** : les rapports d'état partiraient
+  deux fois, la racine tiendrait deux voies par membre (`voie` de
+  `GET /v1/annuaires`, décision 86, suit UNE connexion), et tout l'état
+  vivant doublerait pour apprendre une adresse.
+- **Pourquoi pas la voie passée en IPv4** : elle tient l'IPv6 d'abord (§0),
+  et le membre y perdrait ce que l'IPv6 lui donne ; ce serait une seconde
+  exception à §0 pour un besoin qu'une visite remplit.
+- **Pourquoi pas un verbe nouveau** : `GET /v1/vu` existe, n'exige rien, et
+  dit exactement ce qu'il faut ; la preuve de clé qui le précède est celle de
+  la voie. **Rien de nouveau sur le fil de la visite** : c'est la racine qui
+  retient, pas un verbe qui publie.
+- **Le membre n'a pas à rapporter l'adresse** : la racine la tient de sa
+  propre observation ; la lui faire répéter ne lui apprendrait rien qu'elle
+  ne vérifierait de toute façon contre ce qu'elle a vu. Le membre la lit
+  (`GET /v1/vu`) pour son journal, et c'est tout.
+
+**Ce que la racine retient.** Sur **toute connexion où un membre accepté a
+prouvé sa clé** — la visite, ou la voie elle-même si elle est en IPv4 —, la
+racine note l'adresse observée **si elle est IPv4** (une IPv4 vue par une
+socket double pile, `::ffff:a.b.c.d`, est déshabillée) et l'instant, **par
+membre, en mémoire** (C13 : comme l'état vivant, jamais dans l'entrepôt, pas
+répliquée entre racines). Elle l'oublie **trente minutes** après la dernière
+observation — deux visites manquées. Une connexion en IPv6 n'efface rien. La
+visite ne touche pas à la voie : ce n'est pas sur elle que la voie vit ou
+tombe (décision 86).
+
+**Vers quelle adresse.** L'adresse IPv4 **littérale** de la racine, lue dans
+la liste embarquée pour l'identité que la voie attend (`asl-racines` :
+`178.32.16.250:6630` pour nitrogen, `178.32.16.249:6630` pour argon) ; aucun
+nom n'est résolu (C20). **Si la voie est déjà en IPv4** — `--federation` a
+donné une adresse IPv4 —, il n'y a pas de visite : la voie est observée.
+
+**Quand.** À chaque ouverture de la voie, puis **tous les quarts d'heure**
+tant qu'elle tient — la cadence de la décision 92, celle des sondes qu'elle
+sert. Elle ne fait jamais tomber la voie : un échec se dit, et la visite
+suivante réessaie.
+
+**Quand elle ne peut pas se faire — et c'est dit, pas contourné** :
+
+- **la racine n'a pas d'adresse IPv4 connue** (une racine hors de la liste
+  embarquée, désignée par `<locateur IPv6>=<n-…>`) : pas de visite, une ligne
+  au journal par session (« pas d'adresse IPv4 connue pour cette racine :
+  elle ne verra pas l'adresse IPv4 de la box ») ;
+- **le membre n'a pas d'IPv4 sortante**, ou la racine ne répond pas en IPv4
+  dans la patience de la voie : une ligne au journal au changement (« visite
+  IPv4 vers … impossible : … »), et la visite suivante réessaie ;
+- **dans les deux cas**, la racine n'a rien observé, et **ne sonde pas en
+  IPv4** (ci-dessous) : l'écho reste ce qu'il était — la sonde de
+  l'intérieur du membre, la sonde du dehors vers l'IPv6 du bail.
+
+Le journal du membre dit l'adresse vue, **au changement** :
+« fédération vers … : vue en IPv4 depuis 193.250.159.198 (visite) ».
+
+##### 2. Ce que l'écho annonce : l'adresse externe, en confirmation
+
+**Un membre de plus dans `passerelle`, facultatif** :
+
+```jsonc
+"passerelle": {"port": 51377, "via": "upnp", "externe": "193.250.159.198"}
+```
+
+- **Une chaîne IPv4 en notation pointée**, rien d'autre : une IPv6, un nom,
+  une chaîne de travers — `400`. Le décodeur ne juge pas si elle est publique
+  ; c'est l'usage qui le juge (ci-dessous).
+- **Elle n'est jamais une cible** : elle **confirme** — elle dit « la box qui
+  m'a accordé ce port a cette adresse » —, et une adresse n'est sondée que si
+  une racine l'a observée elle-même chez le membre.
+- **Quand `asl echo` l'écrit — toutes à la fois** : le bail va à un
+  **annuaire local** (un renvoi, `421`) ; **aucun trou IPv6** n'a été obtenu
+  (les conditions 1 à 3 de la décision 106 : pas de trou, une redirection
+  IPv4 accordée, une adresse externe publique, lue par
+  `GetExternalIPAddress` — celle que le double NAT lit déjà) ; et
+  **l'annuaire local est en 0.45.0 au moins** (`GET /v1/version` : un membre
+  d'avant refuserait le champ, et l'annonce entière avec lui). Sinon, rien ne
+  change : `passerelle` part sans `externe`, ou ne part pas.
+- **Ce que l'annuaire du bail en fait** : **rien de plus que ne pas se
+  tromper**. Le candidat de la passerelle est `vu_depuis` au port accordé
+  (décision 97) **seulement si `externe` est absente ou égale à l'adresse
+  observée** ; sinon — le cas d'ici : un bail IPv6, un port IPv4 —, il n'y a
+  pas de candidat de passerelle chez lui, et le membre ne sonde que le bail,
+  comme avant. Il n'essaie jamais `externe` lui-même : ce serait une adresse
+  choisie par un client, et, vue du réseau de la box, une boucle par la box.
+
+##### 3. Ce que le membre rapporte
+
+**Un drapeau de plus dans l'entrée d'état** (`POST /v1/federation/etat`,
+§3 ter) :
+
+| Drapeau | Ce qui suit la réponse d'annonce |
+|---|---|
+| `1` vivant | rien |
+| `2` vivant, avec passerelle (0.44.0) | port (2, gros-boutiste) ‖ `via` (1) |
+| **`3` vivant, avec passerelle et adresse externe (0.45.0)** | port (2) ‖ `via` (1) ‖ **l'adresse externe (4, octets de réseau)** |
+
+Le membre écrit `3` quand l'annonce de l'écho porte `externe`, `2` sinon.
+**Une racine d'avant la 0.45.0 refuse ce drapeau**, et le rapport entier avec
+lui : **les racines se déploient d'abord**, comme en 0.44.0. Le membre
+rapporte ce que l'écho a dit, sans le juger : c'est la racine qui compare.
+
+##### 4. Quand la racine sonde, et quand elle se tait
+
+Pour un écho fédéré dont le rapport porte une adresse externe `E` et un port
+`P`, rapporté par le membre `M` :
+
+1. **`O`, l'adresse IPv4 que cette racine a observée chez `M`**, depuis
+   moins de trente minutes (la visite, § 1) ;
+2. **si `O` existe, `O == E`, et `E` est globale**
+   (`asl_annuaire::adresse_globale` : ni privée, ni partagée, ni bouclage,
+   ni lien-local, ni nulle), la racine place **`E:P` en tête** de ses
+   candidats du dehors, avec le `via` de la passerelle, puis celui d'avant
+   (l'adresse que le membre a vue, au port observé, **si elle est
+   globale**) ; les bornes de la décision 92 tiennent — **une sonde par
+   changement de cible et au plus tous les quarts d'heure**, dans les
+   soixante-quatre en vol ; la cible, pour ce calcul, est la première de la
+   liste ;
+3. **sinon, aucune sonde vers `E`** : la racine sonde ce qu'elle sondait
+   avant (l'adresse du bail, si globale), et **le dit** au journal, au
+   changement seulement, par machine :
+   - `O` absente : « écho de m-… : la box dit E, mais l'annuaire local n-…
+     ne nous a pas parlé en IPv4 depuis trente minutes — pas de sonde en
+     IPv4 » ;
+   - `O ≠ E` : « écho de m-… : la box dit E, l'annuaire local n-… nous parle
+     depuis O — autre box, ou double NAT — pas de sonde en IPv4 » ;
+   - `E` non globale (un écho qui aurait écrit une adresse privée malgré la
+     règle) : « écho de m-… : adresse externe E non globale — pas de sonde
+     en IPv4 ».
+
+**Ce qui prouve se dit comme partout** : `echo: verifie`, `echo_par` à la
+racine, **`echo_depuis: exterieur`**, **`echo_via: upnp`** (le `via` de la
+passerelle) quand la preuve vient de `E:P`. Aucun champ nouveau dans l'état
+de la machine : les discordances se disent au journal de la racine, pas aux
+applications.
+
+##### Ce que cela ouvre, et ce que cela borne
+
+- **L'adresse sondée a parlé à la racine** — sur une connexion où la clé
+  d'un annuaire local accepté a été prouvée. Le client ne choisit que le
+  port, comme avant (décision 97) ; son adresse ne fait que confirmer.
+- **Le pire qu'une machine d'un domaine hébergé obtienne** en mentant sur
+  `externe` : rien, si ce n'est pas `O` ; si c'est `O`, qu'une racine
+  envoie **un datagramme de 384 octets, signé, par quart d'heure**, vers
+  l'adresse publique de la maison de l'annuaire local — au port de son
+  choix. Borné, et l'annuaire local est l'autorité de ses domaines (C11).
+- **Une machine hors de la maison** (un portable d'un domaine hébergé,
+  derrière une autre box) : `E ≠ O`, pas de sonde en IPv4 — c'est exact :
+  sa box n'est pas celle que la racine a vue.
+- **Une paire** : chaque membre fait sa propre visite ; chaque racine compare
+  à ce qu'elle a vu du membre qui rapporte l'écho, et de lui seul.
+- **`asl ping` d'ailleurs ne l'apprend pas** : `GET /v1/ou/{m}/asl-echo`
+  rend l'objet du membre, sans `E:P`. **Nommé et repoussé** : le jour où il
+  le faut, la racine ajoutera `E:P` aux candidats qu'elle rend, une fois
+  prouvé par elle.
+- **Rien ne change pour une machine dont le bail est aux racines** : la
+  décision 106 la sert déjà, et `externe`, si elle l'écrivait, ne ferait
+  que ne pas contredire `vu_depuis`.
+
 #### La durée : un bail court, renouvelé, retiré au propre
 
 - **Une heure, renouvelée à mi-course** (toutes les trente minutes), tant que
@@ -2774,7 +2986,10 @@ n'ont rien à apprendre. **C'est une décision du client seul.**
 "passerelle": {"port": 51377, "via": "upnp"}
 ```
 
-**Le port seul, jamais l'adresse.** L'annuaire en fait un candidat avec
+**Le port, et jamais une adresse à viser.** (Depuis la décision 107, le
+champ peut porter `externe`, l'adresse que la box a dite : elle **confirme**
+ce qu'une racine a observé, elle n'est jamais une cible — « Chez un annuaire
+local », plus haut.) L'annuaire en fait un candidat avec
 **l'adresse qu'il a observée** (`vu_depuis`) et ce port ; il le place en tête,
 avant le candidat du bail (adresse observée, port observé), et les sonde dans
 cet ordre. C'est la règle de `modele.md` §4.3 qui tient : **il ne parle qu'à
@@ -2798,7 +3013,11 @@ la même connexion (§1.2), qui relance la sonde.
 **Les racines, pour une machine d'un domaine hébergé** (décision 92) : le
 membre de l'annuaire local rapporte le candidat de la passerelle avec les
 autres, et la racine le sonde du dehors sous les mêmes bornes — une adresse
-globale, qui est celle que le membre a vue.
+globale, qui est celle que le membre a vue. **Derrière une box qui ne perce
+pas son pare-feu IPv6** (décision 107), le membre rapporte aussi l'adresse
+externe que l'écho confirme, et la racine sonde **l'adresse IPv4 qu'elle a
+elle-même observée chez ce membre**, au port accordé, si les deux
+concordent.
 
 **Ce que l'état d'écho dit en plus** — **décidé** (décision 97 ; E21) :
 **par où la preuve est arrivée**, une chaîne de plus sur la machine :
@@ -3246,6 +3465,14 @@ de 384 octets, signé, qui nomme sa cible, sans réponse amplifiée — et
 l'annuaire local est l'autorité de son domaine (C11). L'état porte alors le
 `n-…` de la racine dans `echo_par`, et `echo_depuis: exterieur`.
 
+**Et en IPv4, quand la box du membre et celle de l'écho sont la même**
+(décision 107) : le membre fait voir aux racines l'adresse IPv4 de sa box par
+une visite, l'écho confirme l'adresse externe que sa box lui a dite, et une
+racine sonde `adresse observée:port accordé` du dehors **si, et seulement
+si, les deux concordent** ; sinon elle se tait, et le dit à son journal
+(« Chez un annuaire local : les racines voient l'adresse de la box, l'écho
+la confirme », plus haut).
+
 **Ce n'est pas la sonde de l'`asl-directory`** (décision 83, qui ne change
 pas) : l'écho prouve une MACHINE. Une machine qui héberge un annuaire local et
 qui est enrôlée peut faire tourner `asl echo` ; sa preuve dit que la machine
@@ -3554,6 +3781,18 @@ indiqué pour le serveur.
    se déduit du candidat qui a répondu : au port observé, `nat` ou `direct`
    selon le verdict de NAT ; à un autre port, la passerelle que le membre
    rapporte.
+5. **L'adresse de la box chez un annuaire local** (mineur, 0.45.0 ;
+   décision 107) : `externe` dans la `passerelle` d'`asl-proto` (une IPv4
+   pointée, `400` sinon ; fuzzé) ; le candidat de la passerelle chez
+   l'annuaire du bail seulement si `externe` est absente ou égale à
+   `vu_depuis` ; le drapeau `3` de l'entrée d'état (`asl-registre`) ; côté
+   membre, la visite IPv4 vers chaque racine (à l'ouverture, puis tous les
+   quarts d'heure ; le journal au changement) ; côté racine, l'adresse IPv4
+   observée par membre (trente minutes), la comparaison avec `externe`, la
+   sonde `E:P` en tête quand elles concordent, le journal quand elles ne
+   concordent pas. Les essais : la concordance sonde en IPv4 et rend
+   `verifie`, `upnp`, `exterieur` ; la discordance ne sonde pas en IPv4, et
+   le dit.
 
 **Client** (`air-service-locator-client`), six PR, après les PR 1 et 2 du
 serveur :
@@ -3601,6 +3840,11 @@ serveur :
    même socket — double pile posée explicitement —, vérifie `vu_depuis`
    contre l'adresse externe de la box, et ne revient en IPv6 que sur un trou
    obtenu, une redirection perdue ou un double NAT révélé. Rien côté serveur.
+8. **L'adresse externe confirmée chez un annuaire local** (décision 107 ;
+   après la PR 5 du serveur) : quand le bail va à un annuaire local, sans
+   trou IPv6, avec une redirection IPv4 et une adresse externe publique,
+   `passerelle` porte `externe` (`GetExternalIPAddress`, déjà lue pour le
+   double NAT) — vers un annuaire local en 0.45.0 au moins.
 
 **Applications**, après la PR 3 du serveur (et la PR 4 pour `echo_via`) :
 

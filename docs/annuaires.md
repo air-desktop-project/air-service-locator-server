@@ -1450,6 +1450,11 @@ connexion**, comme un daemon, et un NAT laisse sortir.
   globale de la machine, joignable. **Sur IPv4 derrière un NAT, c'est une
   adresse privée**, qui ne dit rien à qui est dehors : le problème de la
   traversée reste celui de `modele.md` §6.3, et il n'est pas résolu ici (§7).
+  **Pour l'écho seul, une porte** (décision 107, `protocole.md` §3 quater,
+  « Chez un annuaire local ») : le membre fait voir aux racines l'IPv4
+  publique de sa box par une visite courte en IPv4, l'écho confirme
+  l'adresse externe que sa box lui a dite, et une racine sonde la
+  redirection du dehors quand les deux concordent.
 
 **Une ligne rangée aux racines ne l'emporte pas sur ce que l'annuaire local
 rapporte** (décidé le 2026-09-29, Thierry ; décision 99, 0.39.2). Un service
