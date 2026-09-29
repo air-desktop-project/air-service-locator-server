@@ -803,7 +803,7 @@ l'empêcherait de comprendre.
 | `DELETE /v1/alias` | Le retire. |
 | `GET /v1/alias/{alias}` | Rend l'identifiant, **et rien d'autre**. Public — c'est l'emploi de l'alias, et son coût (`modele.md` §2.1). Le chemin porte un alias ASCII — lettres des deux casses, chiffres, `-`, `_`, `.` —, la forme des applications d'avant 0.26.0. |
 | `GET /v1/alias?alias=…` | **La même résolution pour un alias UTF-8** (0.26.0) : pourcent-encodé comme `GET /v1/domaines?alias=…`, rangé en NFC avant d'être cherché, **la casse comptant**. Public, comme la forme du chemin. `400` pour un alias qu'on n'aurait pas pu poser. |
-| `GET /v1/machines/{m}/services` | Les services, leurs candidats, leur état et la date de la dernière sonde. |
+| `GET /v1/machines/{m}/services` | Les services, leurs candidats, leur état et la date de la dernière sonde. **Le propriétaire de la machine, et lui seul** ; pour tout autre, `[]`. Servi aussi sur la voie machine (0.39.0, §3), à une machine qui porte `lecture`, pour son propriétaire. |
 | `GET /v1/vu` | **D'où l'annuaire voit cette connexion**, sans rien annoncer ni prouver. Voir ci-dessous. |
 | `GET /v1/version` | **La version de l'annuaire qui répond, et sa posture d'attestation**, `{"version": "0.2.0", "posture": "optional"}`, sans rien prouver. Voir ci-dessous. |
 | `GET /v1/racines` | **Les racines, leur identité et leurs locateurs** (décision 56, 0.30.0), sans rien prouver : `[{"annuaire":"n-…","cle":"<64 chiffres hexadécimaux>","locateurs":["[IPv6]:port","IPv4:port","nom:port"]},…]` — la liste embarquée dans le binaire. **Aucune signature à part** : la connexion, vérifiée par la clé de la racine jointe (§0), est la signature. Le client vérifie que chaque clé se déduit en le `n-…` écrit à côté, et refuse la liste entière sinon ; puis met à jour ses locateurs. **Au moins une racine écoute sur 6630** — celle que la liste embarquée garantit ; les autres peuvent écouter ailleurs, et c'est par cette liste, **relue et gardée en cache**, que le client l'apprend (décision 76 ; pas d'`asl-directory` pour les racines). **Elle ne change que les locateurs des racines déjà embarquées**, par leur `n-…` : elle n'en ajoute ni n'en retire aucune — une racine nouvelle exige une nouvelle version du client —, et le client essaie d'abord les locateurs appris, puis les embarqués (décision 85). Le client d'aujourd'hui ne la lit que pour `asl roots` : à coder (`annuaires.md` §2 quinquies). |
@@ -816,13 +816,13 @@ l'empêcherait de comprendre.
 | `GET /v1/expositions` | **Ce qui est exposé de MOI**, relation par relation. Tout utilisateur, pas seulement l'administrateur. |
 | `DELETE /v1/expositions/{relation}` | **Retire mes enregistrements** de cette exposition. Portée : tout mon compte, ou telle machine. |
 | `POST /v1/domaines` | **Crée un domaine** à MON compte (2026-09-26, `modele.md` §2.11), alias facultatif : `{"alias":"Maison"}`. `201`, `{"domaine":"d-…"}`. Le premier est créé par `POST /v1/comptes`, dans sa transaction. |
-| `GET /v1/domaines` | **Les domaines que je possède et ceux où l'un de mes groupes tient un droit** (0.25.0 ; le propriétaire tient les quatre, le groupe d'administrateurs `["administrer","rattacher","voir"]`, le domaine racine `["administrer"]` à ses administrateurs) : `[{"domaine":"d-…","proprietaire":"u-…","alias":"Maison","heberge_par":"racines"\|"n-…","droits":["administrer","voir",…]}]` — `droits` est l'union de ce que je peux sur ce domaine (`modele.md` §2.13). Le domaine racine n'y figure que pour ses administrateurs. |
+| `GET /v1/domaines` | **Les domaines que je possède et ceux où l'un de mes groupes tient un droit** (0.25.0 ; le propriétaire tient les quatre, le groupe d'administrateurs `["administrer","rattacher","voir"]`, ~~le domaine racine `["administrer"]` à ses administrateurs~~ **le domaine racine les quatre à ses administrateurs** — 0.39.0, décision 88) : `[{"domaine":"d-…","proprietaire":"u-…","alias":"Maison","heberge_par":"racines"\|"n-…","droits":["administrer","voir",…]}]` — `droits` est l'union de ce que je peux sur ce domaine (`modele.md` §2.13). Le domaine racine n'y figure que pour ses administrateurs, **et son objet seul porte, en dernier, `"sorte":"racine"`** (0.39.0) : une chaîne, absente pour tout autre domaine — ni `null`, ni booléen, qu'un décodeur déployé pourrait refuser. Elle dit aux applications ce que le domaine racine n'accepte pas : un hébergeur, une suppression. Elle ne se confond pas avec la `sorte` d'un groupe (`administrateurs`, `domaine`, `personnel`) : un autre objet, et d'autres valeurs. **Servi aussi sur la voie machine** (0.39.0, §3). |
 | `GET /v1/domaines?alias=…` | **La recherche par alias** : correspondance exacte après NFC, **sensible à la casse** (0.26.0) ; `[{"domaine":"d-…","autorite":"racines"\|"n-…"}]`, **tous** ceux qui portent l'alias, et `[]` si aucun. Ni propriétaire, ni machine. Servie sur la voie appareil **et** sur la voie machine — tout compte authentifié —, jamais sans preuve. Voir ci-dessous. |
-| `GET /v1/domaines/{d}` | Le domaine, ses groupes, et les machines qui y sont rattachées — `m-…` et propriétaire ; le nom, pour mes machines **et** pour qui a `voir` sur le domaine. Qui tient un droit sur le domaine ; les autres, `404`. Les champs de `GET /v1/domaines` suivis de `"groupes":[{"groupe","domaine","etiquette"?,"sorte"}]` — **pour qui l'administre**, vide sinon — et `"machines":[…]` — **pour qui le voit** (`voir`, `localiser` ou `administrer`), vide sinon. Une machine n'y figure que si son propriétaire peut encore y ranger — il l'administre, ou tient `rattacher` (`modele.md` §2.11). Un domaine supprimé rend `404`. |
+| `GET /v1/domaines/{d}` | Le domaine, ses groupes, et les machines qui y sont rattachées — `m-…` et propriétaire ; le nom, pour mes machines **et** pour qui a `voir` sur le domaine. Qui tient un droit sur le domaine ; les autres, `404`. Les champs de `GET /v1/domaines` suivis de `"groupes":[{"groupe","domaine","etiquette"?,"sorte"}]` — **pour qui l'administre**, vide sinon — et `"machines":[…]` — **pour qui le voit** (`voir`, `localiser` ou `administrer`), vide sinon. Une machine n'y figure que si son propriétaire peut encore y ranger — il l'administre, ou tient `rattacher` (`modele.md` §2.11). Un domaine supprimé rend `404`. **Le domaine racine** (0.39.0, décision 88) : à ses administrateurs, `"sorte":"racine"` après `droits`, son groupe d'administrateurs, et les machines qu'ils y ont rangées ; aux autres, `404`. **Servi aussi sur la voie machine** (§3). |
 | `PUT /v1/domaines/{d}/alias` | Pose ou change l'alias : `{"alias":"Maison"}`. `administrer`. **Jamais `409`** : l'alias de domaine n'est pas unique. `400` s'il n'est pas de l'UTF-8 admis (`modele.md` §2.11). |
 | `DELETE /v1/domaines/{d}/alias` | Le retire. |
 | ~~`PUT`/`DELETE /v1/domaines/{d}/delegues/{u}`~~ | **Retirés le 2026-09-26** : déléguer, c'est ajouter au groupe d'administrateurs (`POST /v1/groupes/{e}/membres`). |
-| `PUT /v1/machines/{m}/domaine` | **Rattache** MA machine : `{"domaine":"d-…"}` — un domaine où je tiens `rattacher` — reçu, ou emporté par `administrer` : propriétaire, groupe d'administrateurs, ou droit reçu. Une machine déjà rattachée est **déplacée**. `403` sans le droit ; `404` si la machine n'est pas à moi, ou si le domaine n'existe pas ou plus. |
+| `PUT /v1/machines/{m}/domaine` | **Rattache** MA machine : `{"domaine":"d-…"}` — un domaine où je tiens `rattacher` — reçu, ou emporté par `administrer` : propriétaire, groupe d'administrateurs, ou droit reçu. Une machine déjà rattachée est **déplacée**. `403` sans le droit ; `404` si la machine n'est pas à moi, ou si le domaine n'existe pas ou plus. **Le domaine racine** (0.39.0, décision 88) : ses administrateurs y rangent leurs machines, par ce verbe, comme ailleurs ; pour tout autre compte, `403` — il existe toujours, calculé, et n'est jamais « absent ». |
 | `DELETE /v1/machines/{m}/domaine` | La détache : elle n'a plus de domaine. |
 | `PUT /v1/machines/{m}/alias` | **Pose l'alias** de MA machine (0.26.0) : `{"alias":"Le Grenier — NAS.maison"}` — UTF-8, sensible à la casse, rangé en NFC, 1 à 253 octets (`modele.md` §2.3). `204` ; `400` pour un alias qu'on ne peut pas ranger ; `404` si la machine n'est pas à moi. **Le propriétaire seul** : ranger une machine dans un domaine confie à ses administrateurs le droit de la partager (décision 40), pas de la renommer. |
 | `DELETE /v1/machines/{m}/alias` | Le retire. |
@@ -832,7 +832,7 @@ l'empêcherait de comprendre.
 | `DELETE /v1/annuaires/{n}` | Retire l'inscription de mon annuaire local — son second avec lui ; ses domaines reviennent aux racines. **Un administrateur des racines le peut aussi** : c'est révoquer une inscription acceptée (0.27.0). |
 | `POST /v1/annuaires/{n}/membres` | **Déclare le second membre** de mon annuaire local accepté — sa paire de secours (2026-09-27, décision 49) : `{"adresse":"hôte:port"}` ; `201`, un code d'inscription, que la seconde machine présente avec **sa** clé. `409` si l'annuaire a déjà deux membres ; `404` s'il n'est pas à moi ou pas accepté. |
 | `DELETE /v1/annuaires/{n}/membres/{n2}` | Retire le second membre. Nommer ici le titulaire, c'est retirer l'annuaire entier, comme `DELETE /v1/annuaires/{n}`. `404` pour un membre d'un autre annuaire. |
-| `PUT /v1/domaines/{d}/hebergeur` | **Confie** mon domaine à mon annuaire local accepté : `{"annuaire":"n-…"}` ; `DELETE` le rend aux racines. Propriétaire seulement, et **vers un annuaire de son propre compte** : `404` pour l'annuaire d'un autre, même si j'administre le domaine (décision 48). |
+| `PUT /v1/domaines/{d}/hebergeur` | **Confie** mon domaine à mon annuaire local accepté : `{"annuaire":"n-…"}` ; `DELETE` le rend aux racines. Propriétaire seulement, et **vers un annuaire de son propre compte** : `404` pour l'annuaire d'un autre, même si j'administre le domaine (décision 48). **Le domaine racine ne se confie pas** : `404`, pour ses administrateurs comme pour les autres (décision 88). |
 | `GET /v1/inscriptions` | **Les inscriptions en attente**, pour un administrateur des racines (`modele.md` §2.12) : `membre`, `annuaire`, `proprietaire`, `etat`, `adresse` — et `paire`, comme `GET /v1/annuaires` (décision 70). **Pas `voie`** (décision 86, précisée le 2026-09-29 ; retiré en 0.38.1) : elle n'est dite que d'un membre accepté, et cette vue ne rend que ce qui attend. Aux autres, `404`. |
 | `POST /v1/inscriptions/{n}/decision` | **Accepte ou refuse** : `{"accepte":true}`. Un administrateur suffit ; **le refus l'emporte**, même arrivé après une acceptation, même d'une autre racine (`replication.md` décision 51). Accepter une inscription retirée ou refusée, `409` ; redemander, c'est une inscription neuve. |
 | `POST /v1/annuaires/inscription` | **L'annuaire local présente son code** (0.27.0), **sans session** : corps binaire `code (10) ‖ clé d'identité (32) ‖ preuve de possession (64)`, la forme d'un enrôlement, la preuve signant le défi de la connexion (`POST /v1/defi` d'abord). `200` et l'inscription (`membre` — `asl_cle::identifiant_de_racine` de la clé —, `annuaire`, `etat`, `adresse`) ; la même clé qui représente le même code, `200` encore ; une autre clé, ou une clé déjà membre d'un annuaire, `409` ; un code inconnu, `404` ; expiré, `403` ; une preuve fausse ou sans défi, `401` ; trop d'échecs d'une adresse, `429` — le frein des invitations. |
@@ -1877,6 +1877,33 @@ nom que le propriétaire a le droit de voir — et `GET /v1/utilisateurs/{u}/mac
 machine qui demande. C'est ce qui permet à un programme de B de partir d'un
 `u-…` que A lui a donné et d'arriver à un port, sans qu'un humain ait à
 recopier des `m-…`.
+
+**Depuis la 0.39.0, la voie machine LIT aussi les domaines** — pour
+`asl domain <d-…|alias>`, qui liste ce qui est rangé dans un domaine :
+
+| Route | Sur la voie machine | Ce qui décide |
+|---|---|---|
+| `GET /v1/domaines?alias=…` | Déjà (0.24.0) — toute machine qui a prouvé sa clé | `[{"domaine","autorite"}]`, rien de plus. |
+| `GET /v1/domaines` | **0.39.0**, une machine qui porte `lecture` | Les domaines du propriétaire de la machine, et ceux où l'un de ses groupes tient un droit — la même liste que sur la voie appareil. Sans `lecture` : `[]`. |
+| `GET /v1/domaines/{d}` | **0.39.0**, une machine qui porte `lecture` | Le même objet que sur la voie appareil : `machines` pour qui a `voir` (ou `localiser`, ou `administrer`) sur le domaine, `groupes` pour qui l'administre ; `404` pour qui n'y tient rien, et pour une machine sans `lecture` (C10). |
+| `GET /v1/machines/{m}/services` | **0.39.0**, une machine qui porte `lecture` | **Le propriétaire de `m`, et lui seul** (`asl_auth::decider_services_de_machine`) ; `[]` sinon. |
+| `GET /v1/ou/{m}/{s}`, `GET /v1/ou?service=…` | Déjà | `localiser` (§3 ci-dessus). |
+
+**Seules ces lectures s'ouvrent** : créer, supprimer, nommer, confier un
+domaine, y ranger une machine, ses groupes, ses droits restent à un appareil
+(`401` sur la voie machine) — la raison de l'exigence d'un appareil ne change
+pas. La capacité `lecture` se juge à l'étage 3, comme pour
+`GET /v1/utilisateurs/{u}/machines`.
+
+**Ce qui n'est PAS servi, et c'est à trancher** : les services d'une machine
+d'un AUTRE compte, que le demandeur voit par `voir` sur son domaine.
+`modele.md` §2.13 dit que `voir` permet de « lister les machines et les
+services — identifiants, noms, état » ; aucune route ne les rend aujourd'hui,
+sur aucune voie : `GET /v1/machines/{m}/services` est l'écran du propriétaire
+(il rend les candidats, donc les adresses), et `asl-auth` refuse délibérément
+d'y faire entrer un droit de lecture. Un client qui tient `localiser` sur le
+domaine atteint un service par son nom (`GET /v1/ou/{m}/{s}`,
+`GET /v1/ou?service=…`), pas par une liste.
 
 ```
 GET /v1/moi/appareils

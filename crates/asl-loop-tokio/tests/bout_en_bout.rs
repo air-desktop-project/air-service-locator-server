@@ -7075,12 +7075,19 @@ async fn un_annuaire_local_renvoie_aux_racines(
     let (statut, corps) = lire_json(&mut egare, 8, b"/v1/version").await;
     assert_eq!(statut, b"200", "{corps}");
     // Une racine ne renvoie rien de tout cela : une machine n'a pas droit aux
-    // domaines, c'est `401` — pas `421`.
-    let (statut, corps) = lire_json(a_la_racine, *flux, b"/v1/domaines").await;
+    // groupes, c'est `401` — pas `421`. (Les domaines, eux, se LISENT sur la
+    // voie machine depuis la 0.39.0 : la même racine les sert, `200`.)
+    let (statut, corps) = lire_json(a_la_racine, *flux, b"/v1/groupes").await;
     *flux = flux.saturating_add(4);
     assert_eq!(
         statut, b"401",
-        "une racine sert les domaines, elle ne renvoie pas : {corps}"
+        "une racine sert les groupes, elle ne renvoie pas : {corps}"
+    );
+    let (statut, corps) = lire_json(a_la_racine, *flux, b"/v1/domaines").await;
+    *flux = flux.saturating_add(4);
+    assert_eq!(
+        statut, b"200",
+        "une racine sert les domaines à une machine qui lit : {corps}"
     );
 }
 
@@ -8819,5 +8826,266 @@ async fn le_cercle_de_l_asl_directory_et_le_nom_reserve() {
     assert!(refusees >= 2, "les deux refus se journalisent");
 
     speedy_local.arreter().await;
+    scene.arreter().await;
+}
+
+// ── Des machines dans le domaine racine (décision 88, 0.39.0) ──────────────
+
+#[tokio::test]
+async fn un_administrateur_des_racines_range_ses_machines_dans_le_domaine_racine() {
+    let mut scene = monter_une_scene_d_annuaire("machines-dans-r").await;
+    let racine_d = asl_registre::domaine_racine();
+    let dans_r = format!("{{\"domaine\":\"{}\"}}", t(racine_d));
+    let detail_r = format!("/v1/domaines/{}", t(racine_d));
+
+    // Bob administre les racines ; nitrogen est à lui, et lit.
+    let mut bob = std::mem::replace(
+        &mut scene.bob,
+        connecter(&scene.racine, scene.adresse).await,
+    );
+    let mut flux_bob = scene.flux_bob;
+    let (nitrogen, mut nitrogen_lit, mut flux_n, cle_n) = une_machine_prouvee(
+        &scene,
+        &mut bob,
+        &mut flux_bob,
+        br#"{"nom":"nitrogen","capacites":["annonce","lecture"]}"#,
+        0xE1,
+    )
+    .await;
+    // Alice n'administre pas les racines ; grenier est à elle.
+    let mut alice = std::mem::replace(
+        &mut scene.alice,
+        connecter(&scene.racine, scene.adresse).await,
+    );
+    let mut flux_alice = scene.flux_alice;
+    let (grenier, mut grenier_lit, mut flux_g, _) = une_machine_prouvee(
+        &scene,
+        &mut alice,
+        &mut flux_alice,
+        br#"{"nom":"grenier","capacites":["lecture"]}"#,
+        0xE2,
+    )
+    .await;
+
+    // ── Les droits rendus : les quatre, à ses administrateurs ───────────────
+    let (statut, liste) = lire_json(&mut bob, suivant(&mut flux_bob), b"/v1/domaines").await;
+    assert_eq!(statut, b"200", "{liste}");
+    assert!(
+        liste.contains(&format!(
+            "\"domaine\":\"{}\",\"proprietaire\":\"{}\",\"heberge_par\":\"racines\",\"droits\":[\"administrer\",\"rattacher\",\"voir\",\"localiser\"]",
+            t(racine_d),
+            t(scene.compte_b)
+        )),
+        "{liste}"
+    );
+    // **`"sorte":"racine"`, sur R et sur lui seul** : les applications n'y
+    // proposent ni hébergeur ni suppression.
+    assert!(
+        liste.contains("\"localiser\"],\"sorte\":\"racine\"}"),
+        "{liste}"
+    );
+    assert_eq!(liste.matches("\"sorte\"").count(), 1, "{liste}");
+    let (_, liste) = lire_json(&mut alice, suivant(&mut flux_alice), b"/v1/domaines").await;
+    assert!(!liste.contains(&t(racine_d)), "{liste}");
+    assert!(!liste.contains("\"sorte\""), "{liste}");
+
+    // ── Ranger dans R ───────────────────────────────────────────────────────
+    let cible = format!("/v1/machines/{}/domaine", t(nitrogen));
+    assert_eq!(
+        poser_json(
+            &mut bob,
+            suivant(&mut flux_bob),
+            cible.as_bytes(),
+            dans_r.as_bytes()
+        )
+        .await,
+        b"204"
+    );
+    let (statut, detail) = lire_json(&mut bob, suivant(&mut flux_bob), detail_r.as_bytes()).await;
+    assert_eq!(statut, b"200", "{detail}");
+    assert!(
+        detail.contains(&format!(
+            "\"machines\":[{{\"machine\":\"{}\",\"proprietaire\":\"{}\",\"nom\":\"nitrogen\"}}]",
+            t(nitrogen),
+            t(scene.compte_b)
+        )),
+        "le détail de R liste ce qui y est rangé : {detail}"
+    );
+    assert!(
+        detail.contains("\"sorte\":\"racine\",\"groupes\":["),
+        "le détail dit la sorte, avant les groupes : {detail}"
+    );
+    // Et il ne se supprime pas.
+    assert_eq!(
+        retirer(&mut bob, suivant(&mut flux_bob), detail_r.as_bytes()).await,
+        b"404"
+    );
+    // Qui n'administre pas les racines : `403`, comme pour tout domaine où
+    // l'on ne peut pas ranger — le domaine racine existe toujours.
+    let cible_g = format!("/v1/machines/{}/domaine", t(grenier));
+    assert_eq!(
+        poser_json(
+            &mut alice,
+            suivant(&mut flux_alice),
+            cible_g.as_bytes(),
+            dans_r.as_bytes()
+        )
+        .await,
+        b"403"
+    );
+    let (statut, _) = lire_json(&mut alice, suivant(&mut flux_alice), detail_r.as_bytes()).await;
+    assert_eq!(statut, b"404", "qui n'y tient rien ne le voit pas (C10)");
+    // Ni l'administrateur des racines ne range la machine d'un autre.
+    assert_eq!(
+        poser_json(
+            &mut bob,
+            suivant(&mut flux_bob),
+            cible_g.as_bytes(),
+            dans_r.as_bytes()
+        )
+        .await,
+        b"404"
+    );
+
+    // ── R n'est pas un ancêtre, ne se confie pas, ne reçoit aucun droit ─────
+    let (statut, _) = lire_json(
+        &mut bob,
+        suivant(&mut flux_bob),
+        format!("/v1/domaines/{}", t(scene.domaine_a)).as_bytes(),
+    )
+    .await;
+    assert_eq!(
+        statut, b"404",
+        "rien ne descend dans un domaine du niveau 1"
+    );
+    assert_eq!(
+        poser_json(
+            &mut bob,
+            suivant(&mut flux_bob),
+            format!("/v1/machines/{}/domaine", t(nitrogen)).as_bytes(),
+            format!("{{\"domaine\":\"{}\"}}", t(scene.domaine_a)).as_bytes(),
+        )
+        .await,
+        b"403",
+        "ni ranger chez alice"
+    );
+    assert_eq!(
+        poser_json(
+            &mut bob,
+            suivant(&mut flux_bob),
+            format!("/v1/domaines/{}/hebergeur", t(racine_d)).as_bytes(),
+            format!("{{\"annuaire\":\"{}\"}}", t(scene.n_speedy)).as_bytes(),
+        )
+        .await,
+        b"404",
+        "le domaine racine reste aux racines"
+    );
+    let demande = format!(
+        r#"{{"groupe":"{}","element":"{}","droits":["voir"],"etiquette":"essai"}}"#,
+        t(asl_registre::groupe_personnel(scene.compte_b)),
+        t(racine_d)
+    );
+    let (statut, _) = poster(
+        &mut bob,
+        suivant(&mut flux_bob),
+        b"/v1/droits",
+        demande.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_eq!(
+        statut, b"403",
+        "aucun droit ne s'écrit sur le domaine racine"
+    );
+
+    // ── La voie machine lit le domaine et les services ──────────────────────
+    let mut annonceur = connecter(&scene.racine, scene.adresse).await;
+    let (statut, corps) = annoncer_depot(&mut annonceur, nitrogen, &cle_n).await;
+    assert_eq!(statut, b"200", "{corps}");
+    let (statut, liste) = lire_json(&mut nitrogen_lit, suivant(&mut flux_n), b"/v1/domaines").await;
+    assert_eq!(statut, b"200", "{liste}");
+    assert!(liste.contains(&t(racine_d)), "{liste}");
+    let (statut, detail) =
+        lire_json(&mut nitrogen_lit, suivant(&mut flux_n), detail_r.as_bytes()).await;
+    assert_eq!(statut, b"200", "{detail}");
+    assert!(detail.contains(&t(nitrogen)), "{detail}");
+    let services = format!("/v1/machines/{}/services", t(nitrogen));
+    let (statut, corps) =
+        lire_json(&mut nitrogen_lit, suivant(&mut flux_n), services.as_bytes()).await;
+    assert_eq!(statut, b"200", "{corps}");
+    assert!(corps.contains("\"nom\":\"depot\""), "{corps}");
+    // La même règle que sur la voie appareil : le propriétaire, et lui seul.
+    let (statut, corps) =
+        lire_json(&mut grenier_lit, suivant(&mut flux_g), services.as_bytes()).await;
+    assert_eq!((statut.as_slice(), corps.as_str()), (&b"200"[..], "[]"));
+    let (statut, _) = lire_json(&mut grenier_lit, suivant(&mut flux_g), detail_r.as_bytes()).await;
+    assert_eq!(statut, b"404");
+    // Une écriture reste à un appareil.
+    let (statut, _) = poster(
+        &mut nitrogen_lit,
+        suivant(&mut flux_n),
+        b"/v1/domaines",
+        b"{}",
+        b"application/json",
+    )
+    .await;
+    assert_eq!(statut, b"401");
+    // Une machine sans `lecture` ne lit rien.
+    let (_, mut muette, mut flux_m, _) = une_machine_prouvee(
+        &scene,
+        &mut bob,
+        &mut flux_bob,
+        br#"{"nom":"muette","capacites":["annonce"]}"#,
+        0xE3,
+    )
+    .await;
+    let (statut, liste) = lire_json(&mut muette, suivant(&mut flux_m), b"/v1/domaines").await;
+    assert_eq!((statut.as_slice(), liste.as_str()), (&b"200"[..], "[]"));
+    let (statut, _) = lire_json(&mut muette, suivant(&mut flux_m), detail_r.as_bytes()).await;
+    assert_eq!(statut, b"404");
+
+    // ── Retirer de R, puis y revenir ────────────────────────────────────────
+    assert_eq!(
+        retirer(&mut bob, suivant(&mut flux_bob), cible.as_bytes()).await,
+        b"204"
+    );
+    let (_, detail) = lire_json(&mut bob, suivant(&mut flux_bob), detail_r.as_bytes()).await;
+    assert!(detail.contains("\"machines\":[]"), "{detail}");
+    let chez_bob = asl_registre::premier_domaine(scene.compte_b);
+    assert_eq!(
+        poser_json(
+            &mut bob,
+            suivant(&mut flux_bob),
+            cible.as_bytes(),
+            format!("{{\"domaine\":\"{}\"}}", t(chez_bob)).as_bytes(),
+        )
+        .await,
+        b"204"
+    );
+    assert_eq!(
+        poser_json(
+            &mut bob,
+            suivant(&mut flux_bob),
+            cible.as_bytes(),
+            dans_r.as_bytes()
+        )
+        .await,
+        b"204",
+        "d'un domaine à R"
+    );
+    assert_eq!(
+        poser_json(
+            &mut bob,
+            suivant(&mut flux_bob),
+            cible.as_bytes(),
+            format!("{{\"domaine\":\"{}\"}}", t(chez_bob)).as_bytes(),
+        )
+        .await,
+        b"204",
+        "de R à un domaine"
+    );
+    let (_, detail) = lire_json(&mut bob, suivant(&mut flux_bob), detail_r.as_bytes()).await;
+    assert!(detail.contains("\"machines\":[]"), "{detail}");
+
     scene.arreter().await;
 }

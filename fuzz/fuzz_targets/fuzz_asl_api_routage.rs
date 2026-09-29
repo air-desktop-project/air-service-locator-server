@@ -213,6 +213,13 @@ fuzz_target!(|entree: Entree| {
         );
     }
 
+    // Le seul effet du verbe : RESSERRER une écriture à un appareil (0.39.0),
+    // jamais ouvrir. Il ne touche qu'aux ressources qu'une machine peut lire.
+    if ressource.ecriture_reservee_a_un_appareil(methode) {
+        assert!(methode.modifie(), "une lecture resserrée : {ressource:?}");
+        assert_eq!(resolu.exigence, Exigence::AppareilOuMachineLecture);
+    }
+
     // ── PROPRIÉTÉS 2 et 3 : ce qui a été accepté ────────────────────────────
     assert!(
         !chemin.contains(&b'%'),

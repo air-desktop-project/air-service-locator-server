@@ -3008,6 +3008,7 @@ mod domaines {
             heberge_par: None,
             alias: Some("Maison"),
             droits: &DROITS_DU_PROPRIETAIRE,
+            sorte: None,
         };
         let combien = rendu.encoder(&mut sortie).unwrap();
         assert_eq!(
@@ -3030,7 +3031,20 @@ mod domaines {
         .unwrap();
         let texte = core::str::from_utf8(&sortie[..combien]).unwrap();
         assert!(!texte.contains("alias"), "{texte}");
+        assert!(!texte.contains("sorte"), "{texte}");
         assert!(texte.ends_with("\"droits\":[]}"), "{texte}");
+        // Le domaine racine dit sa sorte, en dernier (0.39.0, décision 88).
+        let combien = DomaineRendu {
+            sorte: Some(asl_api::domaine::SORTE_DU_DOMAINE_RACINE),
+            ..rendu
+        }
+        .encoder(&mut sortie)
+        .unwrap();
+        let texte = core::str::from_utf8(&sortie[..combien]).unwrap();
+        assert!(
+            texte.ends_with("\"voir\",\"localiser\"],\"sorte\":\"racine\"}"),
+            "{texte}"
+        );
         // Hébergé par un annuaire local : son `n-…` (0.27.0).
         let n = un(Genre::Annuaire, 4);
         let combien = DomaineRendu {

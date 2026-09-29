@@ -280,7 +280,6 @@ fn trois_ressources_seulement_n_exigent_rien() {
         "/v1/autorisations".to_owned(),
         "/v1/alias".to_owned(),
         "/v1/expositions".to_owned(),
-        format!("/v1/machines/{m}/services"),
     ] {
         assert_eq!(
             resoudre_get(&cible).unwrap().exigence(),
@@ -1000,13 +999,68 @@ fn attester_est_un_post_sur_v1_attestation_sans_exigence() {
 // ── Les domaines (2026-09-26) ───────────────────────────────────────────────
 
 #[test]
+fn trois_lectures_s_ouvrent_a_la_voie_machine_et_leurs_ecritures_non() {
+    // **0.39.0** : le client en ligne de commande lit un domaine et les
+    // services de ses machines avec la clé de sa machine. L'exigence ne
+    // dépend pas du verbe ; les écritures sur les mêmes ressources restent à
+    // un appareil, par un prédicat qui ne fait que resserrer.
+    let d = ident(Genre::Domaine);
+    let m = ident(Genre::Machine);
+    for cible in [
+        "/v1/domaines".to_owned(),
+        format!("/v1/domaines/{d}"),
+        format!("/v1/machines/{m}/services"),
+    ] {
+        for methode in [
+            Methode::Get,
+            Methode::Post,
+            Methode::Put,
+            Methode::Patch,
+            Methode::Delete,
+        ] {
+            let resolu = resoudre(methode, cible.as_bytes()).expect("elle se route");
+            assert_eq!(
+                resolu.exigence,
+                Exigence::AppareilOuMachineLecture,
+                "{cible}"
+            );
+            assert_eq!(
+                resolu.ressource.ecriture_reservee_a_un_appareil(methode),
+                methode.modifie(),
+                "{methode:?} {cible}"
+            );
+        }
+    }
+    // Rien d'autre n'est resserré, et le reste des domaines reste à un appareil.
+    for (methode, cible) in [
+        (Methode::Put, format!("/v1/domaines/{d}/alias")),
+        (Methode::Get, format!("/v1/domaines/{d}/groupes")),
+        (Methode::Put, format!("/v1/machines/{m}/domaine")),
+    ] {
+        let resolu = resoudre(methode, cible.as_bytes()).expect("elle se route");
+        assert_eq!(resolu.exigence, Exigence::Appareil, "{methode:?} {cible}");
+        assert!(!resolu.ressource.ecriture_reservee_a_un_appareil(methode));
+    }
+    let u = ident(Genre::Utilisateur);
+    assert!(
+        !resoudre(
+            Methode::Get,
+            format!("/v1/utilisateurs/{u}/machines").as_bytes()
+        )
+        .unwrap()
+        .ressource
+        .ecriture_reservee_a_un_appareil(Methode::Post)
+    );
+}
+
+#[test]
 fn les_chemins_des_domaines_designent_leurs_ressources() {
     let d = ident(Genre::Domaine);
     let m = ident(Genre::Machine);
 
     let domaines = resoudre(Methode::Get, b"/v1/domaines").unwrap();
     assert_eq!(domaines.ressource, Ressource::Domaines);
-    assert_eq!(domaines.exigence, Exigence::Appareil);
+    assert_eq!(domaines.exigence, Exigence::AppareilOuMachineLecture);
     assert!(domaines.sert);
     assert!(
         resoudre(Methode::Post, b"/v1/domaines").unwrap().sert,

@@ -48,9 +48,12 @@ pub const DROITS_DU_PROPRIETAIRE: [&str; 4] = ["administrer", "rattacher", "voir
 /// droits, que l'étage 3 calcule ; ce tableau n'en est que le cas ordinaire.
 pub const DROITS_D_UN_ADMINISTRATEUR: [&str; 3] = ["administrer", "rattacher", "voir"];
 
-/// Ce qu'un administrateur des racines peut sur le domaine racine : juger des
-/// inscriptions, et rien d'autre (`modele.md` §2.12).
-pub const DROITS_SUR_LE_DOMAINE_RACINE: [&str; 1] = ["administrer"];
+/// Ce qu'un administrateur des racines peut sur le domaine racine : les
+/// quatre, comme le propriétaire d'un domaine ordinaire (0.39.0,
+/// `replication.md` décision 88) — juger des inscriptions (`modele.md`
+/// §2.12), y ranger SES machines, voir ce qui y est rangé, localiser. Rien de
+/// cela ne descend dans les domaines du niveau 1.
+pub const DROITS_SUR_LE_DOMAINE_RACINE: [&str; 4] = DROITS_DU_PROPRIETAIRE;
 
 /// Lit un alias de domaine brut : une chaîne libre, non vide, au plus
 /// [`ALIAS_BRUT_MAX`] octets.
@@ -233,7 +236,21 @@ pub struct DomaineRendu<'a> {
     /// Ce que le demandeur peut sur lui — l'union de ses droits
     /// (`modele.md` §2.13).
     pub droits: &'a [&'a str],
+    /// Sa sorte, **pour le seul domaine racine** : [`SORTE_DU_DOMAINE_RACINE`]
+    /// (0.39.0, décision 88). Absente pour un domaine ordinaire. Avec les
+    /// quatre droits, le domaine racine ne se distingue plus d'un domaine
+    /// qu'on possède ; ce champ dit aux applications ce qu'il n'accepte pas —
+    /// être confié à un annuaire local, être supprimé.
+    pub sorte: Option<&'a str>,
 }
+
+/// La sorte du domaine racine, dans `GET /v1/domaines` et
+/// `GET /v1/domaines/{d}` : `"sorte":"racine"`. **Une chaîne, et non un
+/// booléen** : un décodeur déployé qui lit par clés l'ignore, là où un type
+/// nouveau pourrait le faire échouer. Elle ne se confond pas avec la `sorte`
+/// d'un groupe (`administrateurs`, `domaine`, `personnel`) : un autre objet,
+/// et des valeurs disjointes.
+pub const SORTE_DU_DOMAINE_RACINE: &str = "racine";
 
 impl DomaineRendu<'_> {
     /// Encode un domaine rendu.
@@ -244,7 +261,8 @@ impl DomaineRendu<'_> {
     /// ```
     ///
     /// `alias` est **absent**, pas `null`, quand il n'y en a pas : c'est la
-    /// convention des objets de ce dépôt.
+    /// convention des objets de ce dépôt. `sorte` de même, et elle vient en
+    /// dernier : `…,"droits":[…],"sorte":"racine"}` pour le seul domaine racine.
     ///
     /// # Erreurs
     ///
@@ -284,6 +302,11 @@ impl DomaineRendu<'_> {
             ecrivain.pousser(b"\"");
         }
         ecrivain.pousser(b"]");
+        if let Some(sorte) = self.sorte {
+            ecrivain.pousser(b",\"sorte\":\"");
+            ecrivain.pousser(sorte.as_bytes());
+            ecrivain.pousser(b"\"");
+        }
     }
 }
 

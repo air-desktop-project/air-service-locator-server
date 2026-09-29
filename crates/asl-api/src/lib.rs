@@ -808,7 +808,13 @@ impl Ressource<'_> {
                 Exigence::MachineLecture
             }
             Self::Moi | Self::AppareilsDuProprietaire | Self::Replication => Exigence::Machine,
-            Self::MachinesUtilisateur { .. } => Exigence::AppareilOuMachineLecture,
+            // **Les lectures de domaine, sur les deux voies** (0.39.0) ; leurs
+            // écritures, à un appareil : voir
+            // [`Ressource::ecriture_reservee_a_un_appareil`].
+            Self::MachinesUtilisateur { .. }
+            | Self::Domaines
+            | Self::Domaine { .. }
+            | Self::ServicesMachine { .. } => Exigence::AppareilOuMachineLecture,
             Self::RechercheDomaines { .. } => Exigence::AppareilOuMachine,
             Self::PairPreuve | Self::PairOperations { .. } | Self::PairInstantane => {
                 Exigence::Racine
@@ -819,6 +825,26 @@ impl Ressource<'_> {
             | Self::FederationPaire => Exigence::AnnuaireLocal,
             _ => Exigence::Appareil,
         }
+    }
+
+    /// **Une écriture sur cette ressource exige-t-elle un APPAREIL, en plus de
+    /// son exigence ?** Trois ressources se LISENT sur la voie machine depuis
+    /// la 0.39.0 — `/v1/domaines`, `/v1/domaines/{d}` et
+    /// `/v1/machines/{m}/services`, pour le client en ligne de commande, qui
+    /// parle avec la clé de sa machine (`protocole.md` §3). Leur exigence est
+    /// donc [`Exigence::AppareilOuMachineLecture`], **quel que soit le verbe**
+    /// — l'exigence ne dépend jamais du verbe, sans quoi un `GET` ouvrirait ce
+    /// qu'un `POST` ferme. Mais créer ou supprimer un domaine reste à un
+    /// appareil, pour la raison de [`Exigence::Appareil`] : c'est ce que dit
+    /// ce prédicat, que la session tient AVANT toute lecture (`401`). Il ne
+    /// fait que RESSERRER : aucun verbe n'y gagne rien.
+    #[must_use]
+    pub const fn ecriture_reservee_a_un_appareil(&self, methode: Methode) -> bool {
+        methode.modifie()
+            && matches!(
+                self,
+                Self::Domaines | Self::Domaine { .. } | Self::ServicesMachine { .. }
+            )
     }
 }
 

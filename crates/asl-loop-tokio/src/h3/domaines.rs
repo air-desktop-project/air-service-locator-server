@@ -13,8 +13,13 @@
 //! `localiser` et `administrer` emportent.
 //!
 //! Le **domaine racine** n'a pas d'enregistrement : il se déduit, et son
-//! propriétaire est le premier administrateur des racines nommé. Il n'a ni
-//! alias, ni machine, et ne se supprime pas.
+//! propriétaire est le premier administrateur des racines nommé. Il ne se
+//! supprime pas, ne se confie pas à un annuaire local, et ne reçoit aucun
+//! droit. Son alias est écrit comme un autre (0.31.1). **Ses administrateurs
+//! y tiennent les quatre droits et y rangent leurs machines** (0.39.0,
+//! `replication.md` décision 88), comme dans un domaine qu'on possède — sans
+//! rien gagner sur les domaines du niveau 1, ni sur les machines d'un autre
+//! qui ne sont pas rangées dans le domaine racine.
 
 use asl_id::{Genre, Identifiant};
 use asl_registre::{AliasDeDomaine, AliasDeMachine};
@@ -22,6 +27,12 @@ use asl_session::Trouvaille;
 use asl_store::SuppressionDeDomaine;
 
 use super::{Service, alloc_reponse};
+
+/// La sorte qu'on rend d'un domaine : `racine` pour le domaine racine, rien
+/// pour les autres (décision 88).
+fn sorte_de(domaine: Identifiant) -> Option<&'static str> {
+    (domaine == asl_registre::domaine_racine()).then_some(asl_api::domaine::SORTE_DU_DOMAINE_RACINE)
+}
 
 impl Service<'_> {
     /// Le compte au nom duquel cette connexion agit, sur l'une OU l'autre voie :
@@ -39,12 +50,30 @@ impl Service<'_> {
             .map(|rangee| rangee.proprietaire)
     }
 
+    /// Le compte au nom duquel cette connexion LIT, sur l'une ou l'autre voie
+    /// (0.39.0) : l'appareil vivant, ou la machine qui a prouvé sa clé **et
+    /// porte `lecture`** — pour son propriétaire. L'exigence de la ressource
+    /// (`AppareilOuMachineLecture`) a vérifié la preuve ; la capacité se lit
+    /// ici, comme pour `GET /v1/utilisateurs/{u}/machines`.
+    pub(super) fn compte_qui_lit(&self) -> Option<Identifiant> {
+        if let Some(compte) = self.compte_de_la_connexion() {
+            return Some(compte);
+        }
+        let machine = self.session.machine()?;
+        self.entrepot
+            .machine(machine)
+            .ok()
+            .flatten()
+            .filter(|rangee| rangee.lecture)
+            .map(|rangee| rangee.proprietaire)
+    }
+
     /// `GET /v1/domaines` — les domaines vivants que je possède, **puis ceux
     /// où l'un de mes groupes tient un droit** sans les posséder — administrés
     /// compris —, le domaine racine compris si je suis l'un des
     /// administrateurs des racines.
     pub(super) fn rassembler_mes_domaines(&self) -> Trouvaille {
-        let Some(compte) = self.compte_de_la_connexion() else {
+        let Some(compte) = self.compte_qui_lit() else {
             return Trouvaille::Rien;
         };
         let Ok(domaines) = self.entrepot.domaines_de_compte(compte) else {
@@ -107,6 +136,7 @@ impl Service<'_> {
             heberge_par: self.entrepot.hebergeur_de_domaine(domaine).ok().flatten(),
             alias: alias.as_ref().map(AliasDeDomaine::texte),
             droits,
+            sorte: sorte_de(domaine),
         };
         let mut sortie = alloc_reponse();
         let combien = rendu.encoder(&mut sortie).ok()?;
@@ -177,7 +207,7 @@ impl Service<'_> {
     /// `GET /v1/domaines/{d}` — le domaine, ce qui y est rangé pour qui a
     /// `voir`, et ses groupes pour qui l'administre.
     pub(super) fn lire_un_domaine(&self, domaine: Identifiant) -> Trouvaille {
-        let Some(compte) = self.compte_de_la_connexion() else {
+        let Some(compte) = self.compte_qui_lit() else {
             return Trouvaille::Rien;
         };
         let Some((proprietaire, alias, droits)) = self.rendu_d_un_domaine(compte, domaine) else {
@@ -244,6 +274,7 @@ impl Service<'_> {
                 heberge_par: self.entrepot.hebergeur_de_domaine(domaine).ok().flatten(),
                 alias: alias.as_ref().map(AliasDeDomaine::texte),
                 droits,
+                sorte: sorte_de(domaine),
             },
             groupes: &groupes_rendus,
             machines: &vues,
@@ -330,7 +361,13 @@ impl Service<'_> {
             return Trouvaille::Rien;
         }
         if let Some(quel) = domaine {
-            if self.entrepot.domaine(quel).ok().flatten().is_none() {
+            // **LE DOMAINE RACINE EXISTE TOUJOURS** (décision 88) : calculé, il
+            // n'a pas de rangée, et n'est donc jamais « absent » — qui n'est
+            // pas l'un de ses administrateurs reçoit le `403` d'un domaine où
+            // il ne peut pas ranger.
+            if quel != asl_registre::domaine_racine()
+                && self.entrepot.domaine(quel).ok().flatten().is_none()
+            {
                 return Trouvaille::Rien;
             }
             // **RANGER DEMANDE `rattacher`** — qu'`administrer` emporte : le

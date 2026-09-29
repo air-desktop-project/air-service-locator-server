@@ -651,6 +651,54 @@ exige un `m-…` et lit une réponse d'annonce — c'est la PR client. D'ici là
 l'état se lit dans `GET /v1/annuaires` (l'écran « Mon annuaire local » quand
 les applications liront `voie`).
 
+### Déployer la 0.39.0 — des machines dans le domaine racine
+
+**Ce qui change** (`docs/replication.md` décision 88 ; `docs/modele.md` §2.11) :
+les administrateurs des racines tiennent sur le domaine racine R
+(`d-7X3ZTW7HP1ZCHZK3D91JR9J35W`) les quatre droits, et **y rangent leurs
+machines** — nitrogen (`m-0Z971MJ6TZRWXE8C5CE8VBD2AY`) et argon
+(`m-5N5A5Z42DJRZSB6G3HF9PH99AD`), au compte de Thierry. `GET /v1/domaines`
+rend pour R `"droits":["administrer","rattacher","voir","localiser"]` et
+`"sorte":"racine"` ; les applications (qui proposent au rangement tout domaine
+dont `droits` contient `rattacher`) le proposeront d'elles-mêmes. La voie
+machine lit `GET /v1/domaines`, `GET /v1/domaines/{d}` et
+`GET /v1/machines/{m}/services`. **Aucune migration, aucun format qui
+change** : un `dpkg -i` et un redémarrage ; la 0.38.1 et la 0.39.0 se
+répliquent l'une avec l'autre.
+
+**L'ordre : les deux racines à la suite, et rien de rangé dans R entre les
+deux.** Un rattachement vers R est une opération `machine-domaine` ordinaire,
+que la 0.38.1 range sans regarder le domaine visé — **mais qu'elle lit « sans
+domaine »** : pour elle, personne ne peut ranger dans R. Tant qu'une racine
+est en 0.38.1, une machine rangée dans R depuis l'autre y paraît détachée
+(et une application qui lui parle la verrait hors de tout domaine) ; ranger
+dans R depuis elle rend `404`, comme aujourd'hui. **Rien ne se perd** :
+l'enregistrement est gardé tel quel, et se lit dans R dès qu'elle passe en
+0.39.0, sans rien réécrire (vérifié sur la 0.38.1 : l'opération appliquée
+est rangée, portée par l'instantané, et la machine lue sans domaine).
+
+```sh
+# nitrogen, puis argon, l'un après l'autre
+sudo dpkg -i asl-server_0.39.0_amd64.deb
+sudo systemctl restart asl-server
+asl-server --version            # 0.39.0
+```
+
+- **Les annuaires locaux** n'ont rien à faire : R n'est jamais confié à un
+  annuaire local (`PUT /v1/domaines/{R}/hebergeur` : `404`), et les lectures de
+  domaine qu'un annuaire local reçoit partent aux racines (`421`), comme avant.
+- **Les applications d'aujourd'hui** proposeront R au rangement ; elles ne
+  lisent pas encore `sorte`, et pourraient proposer de « changer »
+  l'hébergeur de R — la racine répond `404`, rien ne change.
+
+**Vérifier en production**, depuis l'application de Thierry, les deux racines
+à jour : ranger nitrogen et argon dans R, puis relire le détail de R — les
+deux y figurent, sur l'une et l'autre racine.
+
+**Le retour arrière est un `dpkg -i` de la 0.38.1** : aucun format n'a
+changé. Les machines rangées dans R y paraîtront détachées tant que la 0.38.1
+tourne, et y reviendront à la 0.39.0.
+
 ### Frapper la clé d'exploitation, et émettre (depuis 0.15.0)
 
 Les deux gestes sont dans le même binaire, et **aucun ne tourne sur un banc** :
