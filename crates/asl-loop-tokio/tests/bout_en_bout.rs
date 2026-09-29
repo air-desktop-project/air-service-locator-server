@@ -7518,6 +7518,7 @@ async fn la_federation_de_bout_en_bout() {
         machine: machine_c,
         nom: asl_registre::NomRange::nouveau("depot").expect("un nom"),
         reponse: None,
+        passerelle: None,
     };
     let n = etrangere.ecrire(&mut entree).expect("une entrée");
     let (statut, _) = poster(
@@ -10125,6 +10126,10 @@ async fn l_annuaire_sonde_l_echo_et_dit_son_etat_au_proprietaire_et_a_qui_voit()
     );
     assert!(objet.contains("\"echo_depuis\":\"interieur\""), "{objet}");
     assert!(
+        objet.contains("\"echo_via\":\"nat\""),
+        "le bail, sans adresse locale annoncée : nat — jamais « direct » sans l'avoir constaté : {objet}"
+    );
+    assert!(
         !objet.contains("127.0.0.1"),
         "pas d'adresse dans l'état : {objet}"
     );
@@ -10193,6 +10198,67 @@ async fn l_annuaire_sonde_l_echo_et_dit_son_etat_au_proprietaire_et_a_qui_voit()
         corps.contains("\"verdict\":\"injoignable\""),
         "sur le fil, une autre clé est injoignable : {corps}"
     );
+    assert!(
+        !attendre_l_echo(
+            &mut scene.alice,
+            &mut scene.flux_alice,
+            grenier,
+            "autre_cle"
+        )
+        .await
+        .contains("echo_via"),
+        "echo_via ne vient qu'avec verifie"
+    );
+
+    // ── 5. PAR OÙ (décision 97, 0.44.0) ─────────────────────────────────────
+    //
+    // La box a accordé un port : l'écho le dit dans `passerelle`, l'annuaire
+    // le sonde en tête, à l'adresse observée — `upnp`. Puis sans passerelle,
+    // mais avec l'adresse observée parmi les siennes : `direct`.
+    *reglage.lock().expect("le réglage") = Some((grenier, [0xE7; 32]));
+    for (flux, corps_d_annonce, via) in [
+        (
+            8,
+            r#"[{"protocole":"udp","port":6632}],"passerelle":{"port":51377,"via":"upnp"}"#,
+            "upnp",
+        ),
+        (
+            12,
+            r#"[{"protocole":"udp","port":6633}],"adresses_locales":["127.0.0.1"]"#,
+            "direct",
+        ),
+    ] {
+        let mut encore = connecter(&scene.racine, scene.adresse).await;
+        authentifier(&mut encore, grenier, &cle_g, 0, 4).await;
+        let (statut, rendu) = annoncer_l_echo(&mut encore, flux, grenier, corps_d_annonce).await;
+        assert_eq!(statut, b"200", "{rendu}");
+        let objet =
+            attendre_l_echo(&mut scene.alice, &mut scene.flux_alice, grenier, "verifie").await;
+        assert!(
+            objet.contains(&format!("\"echo_via\":\"{via}\"")),
+            "{via} : {objet}"
+        );
+    }
+    // Une passerelle sur un autre service ne s'annonce pas : le décodeur la
+    // refuse.
+    let mut autre_service = connecter(&scene.racine, scene.adresse).await;
+    authentifier(&mut autre_service, grenier, &cle_g, 0, 4).await;
+    let annonce = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"tcp","port":49152}}],"passerelle":{{"port":51377,"via":"upnp"}}}}"#,
+        grenier.texte()
+    );
+    let (statut, _) = poster(
+        &mut autre_service,
+        8,
+        b"/v1/annonce",
+        annonce.as_bytes(),
+        b"application/json",
+    )
+    .await;
+    assert_ne!(
+        statut, b"200",
+        "une passerelle hors de l'écho ne s'annonce pas"
+    );
 
     scene.arreter().await;
 }
@@ -10255,6 +10321,10 @@ async fn l_echo_d_une_machine_hebergee_se_sonde_chez_l_annuaire_local_et_se_dit_
         "c'est speedy qui a sondé : {objet}"
     );
     assert!(objet.contains("\"echo_depuis\":"), "{objet}");
+    assert!(
+        objet.contains("\"echo_via\":\"nat\""),
+        "au port du bail, sans adresse locale : nat : {objet}"
+    );
 
     drop(chez_speedy);
     speedy_local.arreter().await;

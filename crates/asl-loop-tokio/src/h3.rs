@@ -2736,6 +2736,7 @@ impl Service<'_> {
                     a: Some(constat.a),
                     par: ici,
                     depuis: Some(DepuisDEcho::Exterieur),
+                    via: constat.via,
                 });
             }
             let mut tampons = asl_proto::cadrage::TamponsReponse::nouveaux();
@@ -2745,9 +2746,21 @@ impl Service<'_> {
                 .iter()
                 .find(|entree| entree.point.protocole == asl_proto::Protocole::Udp)?
                 .verdict;
-            let (mot, a) = match verdict {
-                asl_proto::Verdict::Joignable { a, .. } => (MotDEcho::Verifie, a),
-                asl_proto::Verdict::Injoignable { a } => (MotDEcho::Injoignable, a),
+            // **PAR OÙ, D'APRÈS LE CANDIDAT QUI A RÉPONDU** : au port du bail,
+            // `nat` ou `direct` selon le verdict de NAT ; à un autre port,
+            // celui de la passerelle que le membre rapporte.
+            let (mot, a, via) = match verdict {
+                asl_proto::Verdict::Joignable { a, candidat } => {
+                    let via = if candidat.port == lu.vu_depuis.port {
+                        via_du_bail(lu.derriere_nat)
+                    } else {
+                        lue.passerelle
+                            .and_then(passerelle_lue)
+                            .map_or(asl_api::corps::ViaDEcho::Upnp, |p| via_de_passerelle(p.via))
+                    };
+                    (MotDEcho::Verifie, a, Some(via))
+                }
+                asl_proto::Verdict::Injoignable { a } => (MotDEcho::Injoignable, a, None),
                 _ => return Some(EtatDEcho::EN_COURS),
             };
             let depuis = if self.sonde_de_l_interieur(lue.membre, reponse) {
@@ -2760,6 +2773,7 @@ impl Service<'_> {
                 a: Some(a.millisecondes()),
                 par: Some(lue.membre),
                 depuis: Some(depuis),
+                via,
             });
         }
         let service = self
@@ -2783,6 +2797,7 @@ impl Service<'_> {
                         DepuisDEcho::Interieur
                     },
                 ),
+                via: constat.via,
             },
             None => EtatDEcho::EN_COURS,
         })
@@ -3077,7 +3092,7 @@ impl Service<'_> {
                 adresse: core::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED),
                 port: point.port,
                 origine: asl_proto::Origine::Reflexif,
-            }; asl_proto::ADRESSES_MAX + 1];
+            }; asl_annuaire::CANDIDATS_MAX];
             let combien = vivante.candidats(point, &mut candidats);
 
             let Some(ou) = candidats
@@ -3112,6 +3127,7 @@ impl Service<'_> {
                     ),
                     maintenant: instant(),
                     echo: None,
+                    via: None,
                     dehors: None,
                 });
                 // **Déposé AVANT de réveiller** : sans ce signal, le verdict
@@ -3323,17 +3339,64 @@ struct SondeDEcho {
     machine: Identifiant,
     /// Le point UDP de l'écho.
     point: asl_proto::PointEcoute,
-    /// Le candidat sondé, que le verdict `joignable` porte.
-    candidat: asl_proto::Candidat,
+    /// **Les candidats, dans l'ordre où ils se sondent** — celui de la
+    /// passerelle d'abord, puis celui du bail (décision 97) —, et par où
+    /// passerait la preuve venue de chacun (`echo_via`).
+    cibles: Vec<(asl_proto::Candidat, asl_api::corps::ViaDEcho)>,
     /// La clé de la machine, contre laquelle la réponse se vérifie.
     cle: ClePublique,
     /// Côté racine, pour une sonde du dehors : la machine.
     dehors: Option<Identifiant>,
 }
 
+/// Par où passe une preuve venue du candidat du bail : `direct` si
+/// l'adresse observée est une adresse de la machine (pas de NAT), `nat`
+/// sinon — l'annuaire ne dit « direct » que ce qu'il a constaté (C6).
+const fn via_du_bail(derriere_nat: asl_proto::VerdictNat) -> asl_api::corps::ViaDEcho {
+    match derriere_nat {
+        asl_proto::VerdictNat::Non => asl_api::corps::ViaDEcho::Direct,
+        _ => asl_api::corps::ViaDEcho::Nat,
+    }
+}
+
+/// Le mot d'`echo_via` pour ce que la passerelle a accordé.
+const fn via_de_passerelle(via: asl_proto::ViaPasserelle) -> asl_api::corps::ViaDEcho {
+    match via {
+        asl_proto::ViaPasserelle::Upnp => asl_api::corps::ViaDEcho::Upnp,
+        asl_proto::ViaPasserelle::Pcp => asl_api::corps::ViaDEcho::Pcp,
+        asl_proto::ViaPasserelle::Natpmp => asl_api::corps::ViaDEcho::Natpmp,
+    }
+}
+
+/// La passerelle, telle qu'un annuaire local la rapporte aux racines
+/// (`asl_registre::PasserelleRapportee` : `1` UPnP, `2` PCP, `3` NAT-PMP).
+fn passerelle_rapportee(passerelle: asl_proto::Passerelle) -> asl_registre::PasserelleRapportee {
+    asl_registre::PasserelleRapportee {
+        port: passerelle.port.valeur(),
+        via: match passerelle.via {
+            asl_proto::ViaPasserelle::Upnp => 1,
+            asl_proto::ViaPasserelle::Pcp => 2,
+            asl_proto::ViaPasserelle::Natpmp => 3,
+        },
+    }
+}
+
+/// Et dans l'autre sens, côté racine.
+fn passerelle_lue(rapportee: asl_registre::PasserelleRapportee) -> Option<asl_proto::Passerelle> {
+    Some(asl_proto::Passerelle {
+        port: asl_proto::Port::depuis_u16(rapportee.port).ok()?,
+        via: match rapportee.via {
+            1 => asl_proto::ViaPasserelle::Upnp,
+            2 => asl_proto::ViaPasserelle::Pcp,
+            _ => asl_proto::ViaPasserelle::Natpmp,
+        },
+    })
+}
+
 impl SondeDEcho {
-    /// La sonde d'un écho dont on tient le bail : **vers le seul candidat
-    /// réflexif**, adresse et port observés.
+    /// La sonde d'un écho dont on tient le bail : **vers les seuls candidats
+    /// réflexifs** — la passerelle, à l'adresse observée, puis le bail,
+    /// adresse et port observés.
     fn du_bail(
         vivante: &asl_annuaire::Session,
         machine: Identifiant,
@@ -3345,19 +3408,32 @@ impl SondeDEcho {
             adresse: core::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED),
             port: point.port,
             origine: asl_proto::Origine::Reflexif,
-        }; asl_proto::ADRESSES_MAX + 1];
+        }; asl_annuaire::CANDIDATS_MAX];
         let combien = vivante.candidats(point, &mut candidats);
-        let candidat = candidats
+        let cibles: Vec<_> = candidats
             .get(..combien)
             .unwrap_or_default()
             .iter()
             .copied()
-            .find(|candidat| sonde::sondable_par_l_echo(*candidat).is_some())?;
+            .filter(|candidat| sonde::sondable_par_l_echo(*candidat).is_some())
+            .map(|candidat| {
+                let via = match vivante.passerelle() {
+                    Some(passerelle) if passerelle.port == candidat.port => {
+                        via_de_passerelle(passerelle.via)
+                    }
+                    _ => via_du_bail(vivante.derriere_nat()),
+                };
+                (candidat, via)
+            })
+            .collect();
+        if cibles.is_empty() {
+            return None;
+        }
         Some(Self {
             service: vivante.service(),
             machine,
             point,
-            candidat,
+            cibles,
             cle,
             dehors: None,
         })
@@ -3365,8 +3441,9 @@ impl SondeDEcho {
 }
 
 /// Lance une sonde par l'écho : le datagramme signé par la clé d'identité de
-/// cet annuaire, trois envois depuis une socket éphémère, et le verdict par
-/// le canal des rapports.
+/// cet annuaire, et, **candidat par candidat dans l'ordre**, trois envois
+/// depuis une socket éphémère — le premier qui prouve arrête ; le verdict
+/// part par le canal des rapports.
 fn lancer_une_sonde_d_echo(
     sonde: SondeDEcho,
     identite: &CleSecrete,
@@ -3388,10 +3465,6 @@ fn lancer_une_sonde_d_echo(
         return;
     };
     let octets = datagramme.octets();
-    let Some(cible) = sonde::sondable_par_l_echo(sonde.candidat) else {
-        return;
-    };
-    let cible = detour.unwrap_or(cible);
     let rapports = rapports.clone();
     let reveil = Arc::clone(reveil);
     *en_vol = en_vol.saturating_add(1);
@@ -3402,14 +3475,30 @@ fn lancer_une_sonde_d_echo(
             sondeur: annuaire,
             cle: sonde.cle,
         };
-        let resultat = sonde::prouver(cible, &octets, &attendu).await;
+        let mut resultat = sonde::ResultatEcho::Injoignable;
+        let mut prouve = None;
+        for (candidat, via) in &sonde.cibles {
+            let Some(cible) = sonde::sondable_par_l_echo(*candidat) else {
+                continue;
+            };
+            match sonde::prouver(detour.unwrap_or(cible), &octets, &attendu).await {
+                sonde::ResultatEcho::Verifie => {
+                    resultat = sonde::ResultatEcho::Verifie;
+                    prouve = Some((*candidat, *via));
+                    break;
+                }
+                sonde::ResultatEcho::AutreCle => resultat = sonde::ResultatEcho::AutreCle,
+                sonde::ResultatEcho::Injoignable => {}
+            }
+        }
         let _ = rapports.send(Verdict {
             service: sonde.service,
             point: sonde.point,
-            aboutie: (resultat == sonde::ResultatEcho::Verifie).then_some(sonde.candidat),
+            aboutie: prouve.map(|(candidat, _)| candidat),
             quand: asl_proto::Horodatage::depuis_millisecondes(maintenant().saturating_div(1_000)),
             maintenant: instant(),
             echo: Some(resultat),
+            via: prouve.map(|(_, via)| via),
             dehors: sonde.dehors,
         });
         reveil.notify_one();
@@ -3804,11 +3893,17 @@ impl<'a> Annuaire<'a> {
                     sortie.truncate(combien);
                     Some(sortie)
                 });
+                let passerelle = self
+                    .vivier
+                    .annonce(service)
+                    .and_then(asl_annuaire::Session::passerelle)
+                    .map(passerelle_rapportee);
                 liste.push(crate::federation::ServicePublie {
                     service,
                     machine,
                     nom: rangee.nom,
                     reponse,
+                    passerelle,
                 });
             }
         }
@@ -4388,17 +4483,36 @@ impl Annuaire<'_> {
                     constat,
                 },
             );
+            // La passerelle que le membre rapporte d'abord — l'adresse, elle,
+            // reste celle qu'il a vue —, puis le bail.
+            let passerelle = lue.passerelle.and_then(passerelle_lue);
+            let mut cibles = Vec::new();
+            if let Some(passerelle) = passerelle.filter(|p| p.port != lu.vu_depuis.port) {
+                cibles.push((
+                    asl_proto::Candidat {
+                        protocole: asl_proto::Protocole::Udp,
+                        adresse: lu.vu_depuis.adresse,
+                        port: passerelle.port,
+                        origine: asl_proto::Origine::Reflexif,
+                    },
+                    via_de_passerelle(passerelle.via),
+                ));
+            }
+            cibles.push((
+                asl_proto::Candidat {
+                    protocole: asl_proto::Protocole::Udp,
+                    adresse: lu.vu_depuis.adresse,
+                    port: lu.vu_depuis.port,
+                    origine: asl_proto::Origine::Reflexif,
+                },
+                via_du_bail(lu.derriere_nat),
+            ));
             lancer_une_sonde_d_echo(
                 SondeDEcho {
                     service: lue.service,
                     machine,
                     point,
-                    candidat: asl_proto::Candidat {
-                        protocole: asl_proto::Protocole::Udp,
-                        adresse: lu.vu_depuis.adresse,
-                        port: lu.vu_depuis.port,
-                        origine: asl_proto::Origine::Reflexif,
-                    },
+                    cibles,
                     cle,
                     dehors: Some(machine),
                 },
@@ -4432,6 +4546,7 @@ impl Application for Annuaire<'_> {
                     dehors.constat = Some(crate::sonde::ConstatDEcho {
                         resultat,
                         a: verdict.quand.millisecondes(),
+                        via: verdict.via,
                     });
                 }
                 continue;
@@ -4446,6 +4561,7 @@ impl Application for Annuaire<'_> {
                     crate::sonde::ConstatDEcho {
                         resultat,
                         a: verdict.quand.millisecondes(),
+                        via: verdict.via,
                     },
                 );
             }

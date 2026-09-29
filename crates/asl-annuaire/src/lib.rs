@@ -50,14 +50,15 @@ use core::net::IpAddr;
 use asl_id::{Genre, Identifiant};
 use asl_proto::{
     ADRESSES_MAX, Annonce, Bail, Candidat, Horodatage, Joignabilite, Origine, POINTS_MAX,
-    PointEcoute, Port, Poussee, Protocole, RaisonNonSonde, Reponse, Verdict, VerdictNat, VuDepuis,
-    ordonner,
+    Passerelle, PointEcoute, Port, Poussee, Protocole, RaisonNonSonde, Reponse, Verdict,
+    VerdictNat, VuDepuis, ordonner,
 };
 
 /// Le nombre maximal de candidats pour un point d'écoute.
 ///
-/// Le réflexif, plus une par adresse annoncée.
-pub const CANDIDATS_MAX: usize = 1 + ADRESSES_MAX;
+/// Le réflexif, plus une par adresse annoncée — et, pour l'écho, celui de sa
+/// passerelle (décision 97).
+pub const CANDIDATS_MAX: usize = 2 + ADRESSES_MAX;
 
 // ── L'horloge monotone ──────────────────────────────────────────────────────
 
@@ -221,6 +222,10 @@ pub struct Session {
     /// signature —, et son candidat réflexif porte le port OBSERVÉ : l'écho
     /// tient son bail sur la socket où il écoute.
     echo: bool,
+    /// **Le port que la box a accordé à l'écho** (décision 97 ; E21) — son
+    /// candidat passe en tête, avec l'adresse OBSERVÉE : l'annuaire ne parle
+    /// qu'à l'adresse qui lui a parlé.
+    passerelle: Option<Passerelle>,
 }
 
 /// Ce que l'annuaire doit FAIRE après avoir décidé.
@@ -302,6 +307,7 @@ impl Session {
             nombre_points: 0,
             depart: None,
             echo: annonce.service.as_str() == asl_proto::NOM_ASL_ECHO,
+            passerelle: annonce.passerelle,
         };
 
         let ordres = session.poser_points(annonce.points);
@@ -370,8 +376,12 @@ impl Session {
     ) -> Result<Ordres, Faute> {
         self.avancer(maintenant)?;
 
-        let migration = vu_depuis != self.vu_depuis;
+        // **UNE PASSERELLE NOUVELLE SE SONDE** : c'est la réannonce qu'`asl
+        // echo` fait une fois la box interrogée (décision 97), et c'est le
+        // candidat qu'elle ajoute qu'il faut mesurer.
+        let migration = vu_depuis != self.vu_depuis || annonce.passerelle != self.passerelle;
         self.echo = annonce.service.as_str() == asl_proto::NOM_ASL_ECHO;
+        self.passerelle = annonce.passerelle;
         self.vu_depuis = vu_depuis;
 
         let nombre_adresses = annonce.adresses_locales.len().min(ADRESSES_MAX);
@@ -589,6 +599,22 @@ impl Session {
             },
             &mut compte,
         );
+        // **LA PASSERELLE EN TÊTE** (décision 97) : l'adresse observée, le
+        // port accordé — s'il n'est pas déjà celui du bail.
+        let passerelle = self
+            .passerelle
+            .filter(|passerelle| self.echo && passerelle.port != self.vu_depuis.port);
+        if let Some(passerelle) = passerelle {
+            poser(
+                Candidat {
+                    protocole: point.protocole,
+                    adresse: self.vu_depuis.adresse,
+                    port: passerelle.port,
+                    origine: Origine::Reflexif,
+                },
+                &mut compte,
+            );
+        }
         for adresse in self.adresses.get(..self.nombre_adresses).unwrap_or(&[]) {
             poser(
                 Candidat {
@@ -605,8 +631,30 @@ impl Session {
         // lorsque l'écriture a réussi. Un `if let` aurait posé une branche
         // inatteignable, donc du code qu'aucun essai ne peut atteindre et que
         // tout le monde croirait éprouvé.
-        ordonner(sortie.get_mut(..compte).unwrap_or(&mut []));
+        let ordonnes = sortie.get_mut(..compte).unwrap_or(&mut []);
+        ordonner(ordonnes);
+        // L'ordre ordinaire trie par port ; la passerelle, elle, se sonde la
+        // première, et on la remet en tête.
+        if let Some(passerelle) = passerelle {
+            let rang = ordonnes
+                .iter()
+                .position(|candidat| {
+                    candidat.origine == Origine::Reflexif && candidat.port == passerelle.port
+                })
+                .unwrap_or(0);
+            // `..=rang` est toujours valide : la passerelle a été posée, donc
+            // la tranche n'est pas vide et `rang` y est.
+            let tete = ordonnes.get_mut(..=rang).unwrap_or_default();
+            let pas = tete.len().min(1);
+            tete.rotate_right(pas);
+        }
         compte
+    }
+
+    /// Le port que la box a accordé à l'écho, s'il en a un.
+    #[must_use]
+    pub const fn passerelle(&self) -> Option<Passerelle> {
+        self.passerelle
     }
 
     // ── L'intérieur ─────────────────────────────────────────────────────────

@@ -765,6 +765,44 @@ journalctl -u asl-server --since -2min | grep 'nom rangé sous'
 restent, et la 0.39.2 les lit comme des services nés aux racines — ce
 qu'elle sait faire depuis la décision 99.
 
+### Déployer la 0.44.0 — la passerelle de l'écho, et `echo_via`
+
+**Ce qui change** (`docs/protocole.md` §3 quater, décisions 97 et 105) :
+l'annonce `asl-echo` peut porter `"passerelle":{"port":…,"via":"upnp"}` — le
+port que la box a accordé —, sondé en tête à l'adresse observée ; l'état d'écho
+d'une machine dit `echo_via` (`upnp` | `nat` | `direct`) avec `verifie`.
+
+**L'ordre : les deux racines D'ABORD, puis la paire — et c'est impératif.**
+Un annuaire local en 0.44.0 rapporte la passerelle d'un écho dans son entrée
+d'état, sous un drapeau qu'une racine d'avant ne connaît pas : elle refuserait
+le rapport entier. Racines à jour, les membres peuvent suivre.
+
+```sh
+# nitrogen, puis argon ; ENSUITE speedy et helium
+sudo dpkg -i asl-server_0.44.0_amd64.deb
+sudo systemctl restart asl-server
+asl-server --version            # 0.44.0
+```
+
+**Le pare-feu de chaque machine qui fait tourner `asl echo`** (décision 105) :
+l'écho tire son port dans la plage **UDP 6631–6639**, à ouvrir une fois pour
+toutes — sur les racines et les annuaires locaux aussi, s'ils sont des machines
+enrôlées qui font tourner l'écho :
+
+```sh
+# nitrogen, argon — la table `inet asl`, politique drop : la ligne est dans
+# `/usr/share/doc/asl-server/nftables-asl.conf` depuis 0.44.0 ; à chaud :
+sudo nft add rule inet asl entree udp dport 6631-6639 accept
+# et dans /etc/nftables.conf, si c'est la copie qu'on y a installée :
+sudo install -m 0644 /usr/share/doc/asl-server/nftables-asl.conf /etc/nftables.conf
+
+# helium, speedy — ufw
+sudo ufw allow proto udp from any to any port 6631:6639 comment 'asl-echo'
+```
+
+UPnP n'ouvre que la box ; ce pare-feu-là reste à l'exploitant. Le retour
+arrière est un `dpkg -i` de la 0.43.0, **membres d'abord**.
+
 ### Déployer la 0.43.0 — la sonde par l'écho, et l'état d'écho
 
 **Ce qui change** (`docs/protocole.md` §3 quater, décisions 90 et 92) :

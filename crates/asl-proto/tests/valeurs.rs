@@ -467,6 +467,8 @@ fn chaque_erreur_se_dit_a_un_humain() {
         Erreur::AucuneJoignabilite,
         Erreur::TropDeJoignabilites { obtenu: 99 },
         Erreur::VerdictImpossible,
+        Erreur::ViaInconnu,
+        Erreur::PasserelleHorsEcho,
         Erreur::ChampHorsPropos { position: 42 },
         Erreur::CandidatInvalide { position: 42 },
         // Celles des listes.
@@ -493,4 +495,86 @@ fn l_echo_porte_un_seul_point_en_udp() {
     assert!(!forme_d_echo(&[tcp]));
     assert!(!forme_d_echo(&[udp, autre]));
     assert!(!forme_d_echo(&[]));
+}
+
+#[test]
+fn la_passerelle_de_l_echo_s_ecrit_se_relit_et_ne_va_qu_a_l_echo() {
+    use asl_proto::cadrage::Tampons;
+    use asl_proto::{Annonce, NomService, Passerelle, PointEcoute, Port, Protocole, ViaPasserelle};
+    for (via, texte) in [
+        (ViaPasserelle::Upnp, "upnp"),
+        (ViaPasserelle::Pcp, "pcp"),
+        (ViaPasserelle::Natpmp, "natpmp"),
+    ] {
+        assert_eq!(via.texte(), texte);
+        assert_eq!(ViaPasserelle::analyser(texte), Ok(via));
+    }
+    assert_eq!(ViaPasserelle::analyser("UPNP"), Err(Erreur::ViaInconnu));
+
+    let m = Identifiant::depuis_entropie(Genre::Machine, [0x11; 16]);
+    let points = [PointEcoute::nouveau(
+        Protocole::Udp,
+        Port::depuis_u16(6631).unwrap(),
+    )];
+    let passerelle = Passerelle {
+        port: Port::depuis_u16(51377).unwrap(),
+        via: ViaPasserelle::Upnp,
+    };
+    let echo = Annonce::nouvelle(m, NomService::analyser("asl-echo").unwrap(), &points, &[])
+        .unwrap()
+        .avec_passerelle(passerelle)
+        .expect("l'écho porte une passerelle");
+    let mut sortie = [0_u8; 512];
+    let n = echo.encoder(&mut sortie).unwrap();
+    let texte = core::str::from_utf8(&sortie[..n]).unwrap();
+    assert!(
+        texte.ends_with(r#","passerelle":{"port":51377,"via":"upnp"}}"#),
+        "{texte}"
+    );
+    let mut tampons = Tampons::nouveaux();
+    assert_eq!(Annonce::decoder(&sortie[..n], &mut tampons), Ok(echo));
+
+    // Sur un autre service : refusée, à la construction comme à la lecture.
+    let depot = Annonce::nouvelle(m, NomService::analyser("depot").unwrap(), &points, &[]).unwrap();
+    assert_eq!(
+        depot.avec_passerelle(passerelle),
+        Err(Erreur::PasserelleHorsEcho)
+    );
+    let debut = format!(
+        r#"{{"machine":"{}","service":"depot","points":[{{"protocole":"udp","port":6631}}],"passerelle":"#,
+        m.texte()
+    );
+    let mut tampons = Tampons::nouveaux();
+    assert!(matches!(
+        Annonce::decoder(
+            format!(r#"{debut}{{"port":1,"via":"upnp"}}}}"#).as_bytes(),
+            &mut tampons
+        ),
+        Err(Erreur::ChampHorsPropos { .. })
+    ));
+
+    // Ce que l'objet doit être.
+    let echo_debut = debut.replace("depot", "asl-echo");
+    for (objet, attendu) in [
+        (r#"{"via":"pcp","port":2}"#, "ok"),
+        (r#"{"port":1,"via":"upnp","port":2}"#, "double"),
+        (r#"{"port":1,"via":"upnp","via":"pcp"}"#, "double"),
+        (r#"{"port":1,"via":"upnp","x":1}"#, "inconnu"),
+        (r#"{"port":1}"#, "manquant"),
+        (r#"{"via":"upnp"}"#, "manquant"),
+        (r#"{"port":0,"via":"upnp"}"#, "port nul"),
+        (r#"{"port":70000,"via":"upnp"}"#, "hors bornes"),
+        (r#"{"port":1,"via":"bonjour"}"#, "via"),
+        (r#"{"port":1 "via":"upnp"}"#, "virgule"),
+        (r#"7"#, "objet"),
+        (r#"{7:1}"#, "clé"),
+        (r#"{"port" 1}"#, "deux-points"),
+        (r#"{"port":"x","via":"upnp"}"#, "entier"),
+        (r#"{"port":1,"via":1}"#, "chaîne"),
+    ] {
+        let mut tampons = Tampons::nouveaux();
+        let octets = format!("{echo_debut}{objet}}}");
+        let lu = Annonce::decoder(octets.as_bytes(), &mut tampons);
+        assert_eq!(lu.is_ok(), attendu == "ok", "{attendu} : {objet} → {lu:?}");
+    }
 }

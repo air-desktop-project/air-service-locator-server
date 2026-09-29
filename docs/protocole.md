@@ -2368,11 +2368,37 @@ qu'on résout un service.
 **Décidé (2026-09-29, Thierry ; décision 89)** — et c'est tout ce qui l'est :
 
 1. **Un service `asl-echo` sur chaque machine enrôlée, sur un port
-   aléatoire.** `asl echo` — une sous-commande d'`asl`, pas un nouveau
-   binaire — écoute sur un port choisi au hasard (UDP/QUIC ; TCP s'il le faut) et
+   aléatoire** — **tiré dans la plage réservée UDP 6631–6639** depuis la
+   décision 105 (ci-dessous). `asl echo` — une sous-commande d'`asl`, pas un
+   nouveau binaire — écoute sur un port choisi au hasard dans cette plage et
    **le publie par son annonce** `asl-echo`, dont le bail est tenu par la
    connexion comme celui d'`asl announce`. On le retrouve par l'annuaire
-   (`asl where <m-…> asl-echo`). **Aucun port fixe.**
+   (`asl where <m-…> asl-echo`). **Aucun port fixe** : l'aléa demeure, à
+   l'intérieur de la plage.
+
+**Décidé (2026-09-29, Thierry ; décision 105) : l'écho tire son port au hasard
+dans une plage réservée, UDP 6631–6639.** L'essai réel l'a montré : un port
+tiré dans tout l'espace éphémère se heurte au pare-feu **de la machine** —
+nitrogen et argon ont une table nft `inet asl` en politique `drop`, helium et
+speedy ont ufw —, et UPnP n'ouvre que la box, jamais ce pare-feu-là. Chaque
+exploitant ouvre donc **une fois pour toutes** cette plage dans le pare-feu de
+la machine :
+
+```sh
+# nft, dans la table de la machine (ici `inet asl`, chaîne d'entrée `entree`)
+nft add rule inet asl entree udp dport 6631-6639 accept
+
+# ufw
+sudo ufw allow proto udp from any to any port 6631:6639 comment 'asl-echo'
+```
+
+**Neuf ports, et c'est assez** : un écho par machine, et le tirage n'a qu'à
+éviter un port déjà pris sur la même machine — un redémarrage en tire un
+autre. La plage suit celle de l'annuaire (6630, `--listen`), et ne la
+recouvre pas. **Côté serveur, rien ne change** : la sonde va au port observé
+(ou accordé par la box), quel qu'il soit, et l'annuaire n'exige pas la
+plage — une machine qui l'aurait ouverte autrement n'est pas refusée. Le
+client la code de son côté (`asl echo`).
 2. **Deux sondes, et deux seulement, sont autorisées** : celle de
    **l'annuaire**, qui constate la joignabilité, et **`asl ping <m-…|alias>`**,
    lancé par un compte qui en a le droit.
@@ -2483,7 +2509,8 @@ extension, pas un second protocole. Rien aujourd'hui ne dit qu'il le faut.
 ### La socket : celle du bail, et c'est ce qui rend l'UDP joignable derrière un NAT
 
 **Décidé (décision 90 ; E2) : `asl echo` tient son bail SUR la socket où il
-écoute.** Une seule socket UDP, liée à un port éphémère ; la connexion QUIC
+écoute.** Une seule socket UDP, liée à un port de la plage 6631–6639
+(décision 105) ; la connexion QUIC
 vers l'annuaire en part, et les datagrammes de l'écho y arrivent.
 
 C'est ce que `modele.md` §3 disait déjà du seul candidat réflexif UDP utile —
@@ -2524,8 +2551,9 @@ simple côté client — rien ne change dans `asl-client-tokio` —, mais derri�
 un NAT IPv4 le candidat réflexif n'y vaut que si l'on a redirigé le port à la
 main, et le mapping n'est tenu par rien.
 
-**IPv6 d'abord, IPv4 en repli.** La socket est liée à `[::]:0` en double pile
-(`IPV6_V6ONLY` à zéro), `0.0.0.0:0` si la machine n'a pas d'IPv6 ; le bail
+**IPv6 d'abord, IPv4 en repli.** La socket est liée à `[::]:<port de la
+plage>` en double pile (`IPV6_V6ONLY` à zéro), `0.0.0.0:<port>` si la machine
+n'a pas d'IPv6 ; le bail
 part en IPv6 d'abord (§0). L'annonce porte, dans `adresses_locales`, **toutes**
 les adresses non locales de la machine — IPv6 globales d'abord, puis IPv4 —,
 au plus `ADRESSES_MAX`, et non plus la seule qui a servi à joindre l'annuaire
@@ -3387,6 +3415,28 @@ indiqué pour le serveur.
    racines sous les bornes de la décision 92 ; `echo_via` (`upnp` | `nat` |
    `direct`) sur la machine. La version qui le porte est celle qu'`asl echo`
    lira dans `GET /v1/version` avant d'envoyer le champ.
+   **Fait en 0.44.0 — la version qu'`asl echo` lit avant d'envoyer
+   `passerelle`.** `asl_proto::Annonce` porte `passerelle: Option<Passerelle>`
+   (`{"port","via"}`, `via` ∈ `upnp` | `pcp` | `natpmp` : les deux derniers
+   sont décidés, décision 96, et ce lecteur les connaît déjà) ; le décodeur la
+   refuse sur toute autre annonce (`ChampHorsPropos`), et
+   `Annonce::avec_passerelle` aussi (`PasserelleHorsEcho`). La session place
+   son candidat en tête — l'adresse observée, le port accordé —, avant celui
+   du bail, et une passerelle nouvelle dans une réannonce relance la sonde.
+   L'annuaire sonde les candidats dans cet ordre, et le premier qui prouve
+   arrête. **`echo_via`**, avec `verifie` seulement : `upnp` (ou `pcp`,
+   `natpmp`) par la passerelle ; au port du bail, `direct` quand l'adresse
+   observée est l'une de celles que la machine annonce (le verdict de NAT
+   `non`), `nat` sinon — y compris sans adresse annoncée : l'annuaire ne dit
+   pas « direct » sans l'avoir constaté (C6). Un membre d'annuaire local
+   rapporte la passerelle aux racines dans son entrée d'état (un drapeau de
+   plus, `asl_registre::PasserelleRapportee`) ; **une racine d'avant 0.44.0
+   refuserait ce drapeau** — les racines se déploient donc d'abord. Les
+   racines sondent du dehors la passerelle rapportée, puis le bail, sous les
+   bornes de la décision 92. Pour un écho qu'un membre a vérifié, `echo_via`
+   se déduit du candidat qui a répondu : au port observé, `nat` ou `direct`
+   selon le verdict de NAT ; à un autre port, la passerelle que le membre
+   rapporte.
 
 **Client** (`air-service-locator-client`), six PR, après les PR 1 et 2 du
 serveur :
