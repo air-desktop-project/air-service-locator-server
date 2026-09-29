@@ -1451,6 +1451,21 @@ connexion**, comme un daemon, et un NAT laisse sortir.
   adresse privée**, qui ne dit rien à qui est dehors : le problème de la
   traversée reste celui de `modele.md` §6.3, et il n'est pas résolu ici (§7).
 
+**Une ligne rangée aux racines ne l'emporte pas sur ce que l'annuaire local
+rapporte** (décidé le 2026-09-29, Thierry ; décision 99, 0.39.2). Un service
+né aux racines — sa ligne `service` y est rangée, sous son `s-…` dérivé —
+peut ensuite vivre chez un annuaire local : sa machine est rangée dans un
+domaine qu'on confie, ou le domaine qui la tient est confié. Le daemon y est
+alors renvoyé (`421`), et le vivier des racines ne tient plus rien de lui.
+Jusqu'à la 0.39.1, la ligne l'emportait : `GET /v1/ou` rendait `404` et
+`GET /v1/machines/{m}/services` le disait `parti` pendant que l'annuaire local
+le voyait vivant. **La règle : pour une machine rangée dans un domaine
+qu'un annuaire local héberge effectivement, l'état vivant et les adresses
+viennent de l'état fédéré ; la ligne rangée ne donne que l'identité** — le
+`s-…` que visent les droits. Rien de rapporté, et le service est parti (ou
+introuvable, pour `GET /v1/ou`), comme s'il n'avait pas de ligne. Pour une
+machine qui n'est dans aucun domaine confié, rien ne change.
+
 **Comment ça circule** (décidé le 2026-09-26, Thierry, `protocole.md` §3 ter) : la
 connexion de l'annuaire local vers **chaque** racine, authentifiée par sa clé
 d'identité comme entre racines ; dans un sens, les machines de ses domaines et
@@ -1671,6 +1686,12 @@ Rassemblé, plutôt que dispersé.
     `s-…` = dérivé(`m-…`, nom) sans rien ranger — ce que la décision 66 rend
     possible, mais qui demande le nom au moment d'accorder. Dans les deux cas,
     le `s-…` stable (décisions 65 et 66) est ce qui rend un tel droit durable.
+    **Décidé d'abord (2026-09-29, Thierry ; décision 99)** : avant le
+    mécanisme, **corriger le défaut de priorité** qu'il aurait aggravé — une
+    ligne de service rangée aux racines l'emportait sur l'état fédéré, et un
+    service né aux racines dont le domaine est ensuite confié était rendu
+    `parti` alors que l'annuaire local le disait vivant. **Fait (0.39.2)** :
+    §5.4, « Une ligne rangée aux racines ne l'emporte pas ».
 19. **L'opération perdue sans bruit.** Entre deux membres, une opération
     `service` dont la machine n'est pas encore connue est ignorée ET le curseur
     avance (`appliquer_service`) : elle ne revient jamais. Ce n'est pas ce qui a

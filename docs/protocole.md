@@ -1765,9 +1765,13 @@ rangé chez les racines (C13) ; `GET /v1/machines/{m}/services` y ajoute donc ce
 que les membres de l'annuaire local rapportent, **sous la même règle que la
 résolution** : vivant si un membre le dit, `parti` (`volontaire: null`) si tous
 ceux qui en parlent encore le disent parti, **absent** si plus personne ne le
-confirme depuis l'expiration (30 s). Un nom que la racine tient elle-même
-l'emporte. Ces objets portent deux champs de plus, que ne portent pas les
-services tenus ici :
+confirme depuis l'expiration (30 s). **Un nom dont la racine tient la
+ligne** — un service né aux racines avant que son domaine soit confié — **ne
+se rend qu'une fois, et son état vient lui aussi de l'état fédéré** : la ligne
+ne donne que l'identité (`service`), le rapport l'état et la réponse ; rien de
+rapporté, `parti` (`volontaire: null`). La même règle vaut pour `GET /v1/ou`
+(décision 99, 0.39.2). Ces objets portent deux champs de plus, que ne portent
+pas les services tenus ici :
 
 ```jsonc
 {"service":"s-…","nom":"depot","etat":"annonce","annonce":{…},

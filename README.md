@@ -699,6 +699,31 @@ deux y figurent, sur l'une et l'autre racine.
 changé. Les machines rangées dans R y paraîtront détachées tant que la 0.38.1
 tourne, et y reviendront à la 0.39.0.
 
+### Déployer la 0.39.2 — l'état fédéré l'emporte sur une ligne rangée
+
+**Ce qui change** (`docs/replication.md` décision 99 ; `docs/annuaires.md`
+§5.4) : pour une machine rangée dans un domaine confié à un annuaire local,
+les racines prennent l'état vivant et les adresses de ce que l'annuaire local
+rapporte, **même quand elles tiennent la ligne du service** — un service né
+aux racines avant que son domaine soit confié. Jusqu'ici, un tel service était
+rendu `parti` (et `GET /v1/ou` : `404`) alors que l'annuaire local le voyait
+vivant. **Aucune migration, aucun format qui change, rien de répliqué en
+plus** : un `dpkg -i` et un redémarrage, dans n'importe quel ordre ; chaque
+racine se corrige seule, et les annuaires locaux n'ont rien à faire.
+
+```sh
+# nitrogen, puis argon
+sudo dpkg -i asl-server_0.39.2_amd64.deb
+sudo systemctl restart asl-server
+asl-server --version            # 0.39.2
+```
+
+**Vérifier en production** : un service qu'on savait né aux racines, sur une
+machine d'un domaine confié à speedy/helium, se voit vivant dans l'application
+et se résout par `asl where` — dix secondes après le redémarrage au plus, le
+temps d'un tour du fédérateur. **Le retour arrière est un `dpkg -i` de la
+0.39.0.**
+
 ### Frapper la clé d'exploitation, et émettre (depuis 0.15.0)
 
 Les deux gestes sont dans le même binaire, et **aucun ne tourne sur un banc** :
