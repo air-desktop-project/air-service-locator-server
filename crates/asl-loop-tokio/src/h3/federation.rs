@@ -113,14 +113,31 @@ impl Service<'_> {
             .iter()
             .filter(|entree| entree.reponse.is_some())
             .count();
+        // **UN MEMBRE D'AVANT LA 0.37.0 SE VOIT ICI** (décision 72) : ses
+        // `s-…` ne sont pas les dérivés. La racine rend ce qu'il dit — c'est
+        // lui qui tient le daemon —, et le journal dit l'écart.
+        let non_derives = lues
+            .iter()
+            .filter(|entree| {
+                entree.service != asl_registre::service_derive(entree.machine, entree.nom.octets())
+            })
+            .count();
         if self
             .etat_federe
-            .noter_un_rapport(lu.membre, lues.len(), vivantes)
+            .noter_un_rapport(lu.membre, lues.len(), vivantes, non_derives)
         {
             (self.voie.journal)(&format!(
-                "fédération : {} rapporte {} service(s), dont {vivantes} vivant(s) — accepté",
+                "fédération : {} rapporte {} service(s), dont {vivantes} vivant(s) — accepté{}",
                 lu.membre,
-                lues.len()
+                lues.len(),
+                if non_derives == 0 {
+                    String::new()
+                } else {
+                    format!(
+                        " ; {non_derives} sous un identifiant qui n'est pas le dérivé : ce \
+                         membre n'est pas encore en 0.37.0 (décision 72)"
+                    )
+                }
             ));
         }
         Trouvaille::Fait

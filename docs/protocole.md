@@ -161,6 +161,16 @@ La réponse :
 }
 ```
 
+**Le `service` rendu est DÉRIVÉ** (0.37.0 ; `modele.md` §2.4, décisions 66 et
+72) : `SHA-256("asl/service/1" ‖ m (16 octets) ‖ nom)` tronqué à seize octets.
+La première annonce d'un nom crée le service sous cet identifiant ; toute
+annonce suivante — au même annuaire, à l'autre membre de la paire, à une racine
+après un changement d'hébergeur — rend **le même**. Le message et la réponse ne
+changent pas de forme : seul le choix de la valeur change, et un client qui la
+calculerait de son côté tomberait juste. Jusqu'à la 0.36.0, c'était un aléa de
+l'annuaire qui recevait l'annonce ; un daemon ré-annoncé après la mise à jour
+lit donc, une fois, un `s-…` nouveau.
+
 ### Trois écarts avec la première rédaction de ce document
 
 Ils ont été trouvés **en écrivant les types**, et corrigés ici plutôt que laissés
@@ -2207,7 +2217,7 @@ chaque membre qui le leur a dit depuis qu'elles tournent — c'est ce que l'écr
 de l'annuaire affiche. Une racine d'avant la 0.36.0 répond `404` : le membre le
 dit une fois par session, et continue.
 
-**Le `s-…` d'une `EntreeDEtat` est celui du membre qui rapporte** (constaté le 2026-09-28) : chaque membre d'une paire frappe le sien pour le même `(machine, nom)`, la racine les range par membre, et `GET /v1/ou` rend celui du rapport retenu. Une paire qui se réplique (`--peer`) converge vers un seul au premier rattrapage ; une paire qui ne se parle pas en garde deux, et le `s-…` rendu change à chaque bascule. Défaut, pistes et questions : `annuaires.md` §2 ter, « L'identifiant d'un service dans une paire ». **Décidé (2026-09-28, Thierry ; décisions 65 et 66)** : un seul `s-…` par service, dérivé de la machine et du nom — à coder ; le format de l'entrée ne change pas.
+**Le `s-…` d'une `EntreeDEtat` est celui du membre qui rapporte** (constaté le 2026-09-28) : chaque membre d'une paire frappe le sien pour le même `(machine, nom)`, la racine les range par membre, et `GET /v1/ou` rend celui du rapport retenu. Une paire qui se réplique (`--peer`) converge vers un seul au premier rattrapage ; une paire qui ne se parle pas en garde deux, et le `s-…` rendu change à chaque bascule. Défaut, pistes et questions : `annuaires.md` §2 ter, « L'identifiant d'un service dans une paire ». **Décidé (2026-09-28, Thierry ; décisions 65 et 66)** : un seul `s-…` par service, dérivé de la machine et du nom — **fait en 0.37.0** ; le format de l'entrée ne change pas. Un membre en 0.37.0 rapporte le dérivé ; un membre encore en 0.36.0 rapporte son aléa, que la racine rend tel quel (c'est lui qui tient le daemon) **et qu'elle signale** : la ligne « fédération : n-… rapporte N service(s) … » de son journal ajoute « K sous un identifiant qui n'est pas le dérivé : ce membre n'est pas encore en 0.37.0 ». Une fois les deux membres à jour, les deux rapports portent le même `s-…`, et la racine ne rend plus qu'un identifiant.
 
 **Où le joindre, dit par lui** (décision 57, 0.30.0) : l'annuaire local publie
 ses locateurs à **chaque ouverture** de sa voie — `--locator <hôte:port>`,

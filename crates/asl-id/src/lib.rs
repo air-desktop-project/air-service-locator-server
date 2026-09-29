@@ -27,7 +27,15 @@
 //! la faute** : `I` et `L` valent `1`, `O` vaut `0`. C'est la raison d'être de
 //! cet alphabet, et non un détail d'encodage.
 //!
-//! **128 bits ne se devinent pas**, ce qui ferme l'énumération.
+//! **128 bits ne se devinent pas**, ce qui ferme l'énumération — **pour tous
+//! les genres sauf `s-`**. Depuis la 0.37.0 (`docs/replication.md` décisions
+//! 66 et 67), un identifiant de service ne se tire plus : il se CALCULE, les
+//! seize premiers octets de `SHA-256("asl/service/1" ‖ m (16 octets) ‖ nom)`
+//! (`asl_registre::service_derive`). Qui connaît le `m-…` peut donc essayer
+//! des noms jusqu'à retomber sur un `s-…` qu'il a vu, et apprendre ainsi un
+//! nom qu'on ne lui avait montré que sous forme d'identifiant. C'est accepté :
+//! aucun verbe ne s'ouvre pour autant (la résolution se fait par `(machine,
+//! nom)`, et répond pareil à l'inexistant et à l'interdit — C9).
 //!
 //! # La conséquence du rattrapage, et la règle qui en découle
 //!
