@@ -519,6 +519,7 @@ fn la_passerelle_de_l_echo_s_ecrit_se_relit_et_ne_va_qu_a_l_echo() {
     let passerelle = Passerelle {
         port: Port::depuis_u16(51377).unwrap(),
         via: ViaPasserelle::Upnp,
+        externe: None,
     };
     let echo = Annonce::nouvelle(m, NomService::analyser("asl-echo").unwrap(), &points, &[])
         .unwrap()
@@ -571,10 +572,50 @@ fn la_passerelle_de_l_echo_s_ecrit_se_relit_et_ne_va_qu_a_l_echo() {
         (r#"{"port" 1}"#, "deux-points"),
         (r#"{"port":"x","via":"upnp"}"#, "entier"),
         (r#"{"port":1,"via":1}"#, "chaîne"),
+        (
+            r#"{"port":1,"via":"upnp","externe":"193.250.159.198"}"#,
+            "ok",
+        ),
+        (r#"{"externe":"10.0.0.1","port":1,"via":"upnp"}"#, "ok"),
+        (r#"{"port":1,"via":"upnp","externe":"2001:db8::1"}"#, "IPv6"),
+        (r#"{"port":1,"via":"upnp","externe":"box.lan"}"#, "nom"),
+        (r#"{"port":1,"via":"upnp","externe":7}"#, "chaîne"),
+        (
+            r#"{"port":1,"via":"upnp","externe":"1.2.3.4","externe":"1.2.3.4"}"#,
+            "double",
+        ),
     ] {
         let mut tampons = Tampons::nouveaux();
         let octets = format!("{echo_debut}{objet}}}");
         let lu = Annonce::decoder(octets.as_bytes(), &mut tampons);
         assert_eq!(lu.is_ok(), attendu == "ok", "{attendu} : {objet} → {lu:?}");
     }
+}
+
+#[test]
+fn l_adresse_externe_de_la_box_s_ecrit_apres_via_et_se_relit() {
+    use asl_proto::cadrage::Tampons;
+    use asl_proto::{Annonce, NomService, Passerelle, PointEcoute, Port, Protocole, ViaPasserelle};
+    let m = Identifiant::depuis_entropie(Genre::Machine, [0x12; 16]);
+    let points = [PointEcoute::nouveau(
+        Protocole::Udp,
+        Port::depuis_u16(6632).unwrap(),
+    )];
+    let echo = Annonce::nouvelle(m, NomService::analyser("asl-echo").unwrap(), &points, &[])
+        .unwrap()
+        .avec_passerelle(Passerelle {
+            port: Port::depuis_u16(6632).unwrap(),
+            via: ViaPasserelle::Upnp,
+            externe: Some(core::net::Ipv4Addr::new(193, 250, 159, 198)),
+        })
+        .unwrap();
+    let mut sortie = [0_u8; 512];
+    let n = echo.encoder(&mut sortie).unwrap();
+    let texte = core::str::from_utf8(&sortie[..n]).unwrap();
+    assert!(
+        texte.ends_with(r#","passerelle":{"port":6632,"via":"upnp","externe":"193.250.159.198"}}"#),
+        "{texte}"
+    );
+    let mut tampons = Tampons::nouveaux();
+    assert_eq!(Annonce::decoder(&sortie[..n], &mut tampons), Ok(echo));
 }

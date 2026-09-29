@@ -117,7 +117,20 @@ pub struct EtatFedere {
     /// que `GET /v1/annuaires` dit par `voie`. **En mémoire, jamais oubliée
     /// tant que la racine tourne** : `tombee` dit qu'elle a tenu.
     voies: HashMap<Identifiant, VoieDeMembre>,
+    /// **L'adresse IPv4 d'où chaque membre nous a parlé**, sa clé prouvée,
+    /// et quand (0.45.0, décision 107) — sa visite, ou sa voie si elle est
+    /// en IPv4. C'est l'adresse publique de sa box, OBSERVÉE ici : la seule
+    /// qu'on sonde en IPv4 pour un écho qu'il rapporte. En mémoire (C13).
+    ipv4_vues: HashMap<Identifiant, (std::net::Ipv4Addr, u64)>,
 }
+
+/// Combien de temps une racine croit l'adresse IPv4 qu'elle a observée chez
+/// un membre : **trente minutes**, deux visites manquées (décision 107).
+pub const IPV4_VUE_US: u64 = 30 * 60 * 1_000_000;
+
+/// La cadence de la visite IPv4 d'un membre à chaque racine : **un quart
+/// d'heure**, celle des sondes du dehors qu'elle sert (décision 92).
+pub const VISITE_IPV4_US: u64 = 15 * 60 * 1_000_000;
 
 /// Ce qu'une racine a vu de la voie d'un membre.
 #[derive(Debug, Clone)]
@@ -343,6 +356,40 @@ impl EtatFedere {
                 fermee: false,
             },
         );
+    }
+
+    /// Ce membre, sa clé prouvée, nous parle depuis `adresse` (décision
+    /// 107) : si c'est une IPv4 — une IPv4 vue au travers d'une socket double
+    /// pile arrive habillée en IPv6, on la déshabille —, on la retient. Une
+    /// IPv6 n'efface rien. Rend `true` si l'adresse retenue a changé — ce
+    /// que le journal doit dire.
+    pub fn noter_une_ipv4(
+        &mut self,
+        membre: Identifiant,
+        adresse: std::net::IpAddr,
+        maintenant: u64,
+    ) -> bool {
+        let std::net::IpAddr::V4(ipv4) = adresse.to_canonical() else {
+            return false;
+        };
+        self.ipv4_vues
+            .insert(membre, (ipv4, maintenant))
+            .is_none_or(|(avant, _)| avant != ipv4)
+    }
+
+    /// L'adresse IPv4 d'où ce membre nous a parlé, si c'était il y a moins
+    /// de `validite` microsecondes.
+    #[must_use]
+    pub fn ipv4_de(
+        &self,
+        membre: Identifiant,
+        maintenant: u64,
+        validite: u64,
+    ) -> Option<std::net::Ipv4Addr> {
+        self.ipv4_vues
+            .get(&membre)
+            .filter(|(_, a)| a.saturating_add(validite) >= maintenant)
+            .map(|(ipv4, _)| *ipv4)
     }
 
     /// Cette connexion de ce membre s'est fermée. **Seule celle sur laquelle
@@ -706,6 +753,11 @@ pub struct Federateur {
     pub pair: Option<Identifiant>,
     /// Ce qu'il en conclut, partagé avec les autres fédérateurs et la boucle.
     pub paire: Arc<PaireJugee>,
+    /// **Où visiter la racine en IPv4** (0.45.0, décision 107) : son adresse
+    /// IPv4 littérale, lue dans la liste embarquée
+    /// ([`crate::racines::visite_ipv4_pour`]). `None` : la voie est déjà en
+    /// IPv4, ou la racine n'a pas d'adresse IPv4 connue.
+    pub visite_ipv4: Option<std::net::SocketAddr>,
 }
 
 /// Où l'on joint cet annuaire, tel que les fédérateurs le publient aux
@@ -776,6 +828,19 @@ impl LocateursPublies {
     }
 }
 
+/// L'adresse que rend `GET /v1/vu` — `{"adresse":"…","port":…,"famille":…}`
+/// —, déshabillée si c'est une IPv4 vue au travers d'une socket double pile.
+#[must_use]
+pub fn adresse_de_vu(corps: &[u8]) -> Option<std::net::IpAddr> {
+    let texte = core::str::from_utf8(corps).ok()?;
+    let (_, apres) = texte.split_once("\"adresse\":\"")?;
+    let (adresse, _) = apres.split_once('"')?;
+    adresse
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| ip.to_canonical())
+}
+
 /// Le corps de `PUT /v1/federation/locateurs` : `{"locateurs":[…]}`.
 #[must_use]
 pub fn corps_de_locateurs(locateurs: &[String]) -> Vec<u8> {
@@ -792,9 +857,22 @@ impl Federateur {
     /// **CETTE FONCTION NE REND JAMAIS** tant que la tâche vit : à chaque
     /// rupture, on recule et l'on rappelle (`replication.md` §2.3).
     pub async fn federer_sans_fin(self) {
+        let moi = Arc::new(self);
+        // **LA VISITE IPv4, À CÔTÉ DE LA VOIE** (décision 107) : sa propre
+        // tâche, pour qu'une racine muette en IPv4 ne retienne jamais la
+        // voie. Chaque ouverture de la voie la réveille ; le quart d'heure
+        // aussi.
+        let visite = Arc::new(tokio::sync::Notify::new());
+        let visiteur = tokio::spawn(Arc::clone(&moi).visiter_sans_fin(Arc::clone(&visite)));
+        moi.voie_sans_fin(&visite).await;
+        visiteur.abort();
+    }
+
+    /// La voie, sans fin : à chaque rupture, on recule et l'on rappelle.
+    async fn voie_sans_fin(&self, visite: &tokio::sync::Notify) {
         let mut reprise = Reprise::nouvelle(self.plafond_recul_ms.max(1));
         loop {
-            match self.une_session().await {
+            match self.une_session(visite).await {
                 Ok(()) => {
                     (self.journal)(format!(
                         "fédération vers {} fermée : la connexion s'est terminée",
@@ -815,7 +893,7 @@ impl Federateur {
 
     /// Une session : ouvrir, prouver, puis rafraîchir à la cadence et à
     /// chaque changement, jusqu'à ce que la connexion tombe.
-    async fn une_session(&self) -> Result<(), Faute> {
+    async fn une_session(&self, visite: &tokio::sync::Notify) -> Result<(), Faute> {
         let cible = resoudre(&self.adresse).await?;
         let mut connexion =
             Connexion::ouvrir(cible, &self.adresse, &self.confiance, self.idle_us).await?;
@@ -829,6 +907,17 @@ impl Federateur {
             self.adresse,
         ));
         let mut locateurs_publies = self.publier_les_locateurs(&mut connexion, None).await?;
+        // **LA VISITE IPv4 À CHAQUE OUVERTURE** (décision 107) — ou le dire,
+        // une fois par session, quand elle ne peut pas se faire.
+        if self.visite_ipv4.is_some() {
+            visite.notify_one();
+        } else if !cible.is_ipv4() {
+            (self.journal)(format!(
+                "fédération vers {} : pas d'adresse IPv4 connue pour cette racine — elle ne \
+                 verra pas l'adresse IPv4 de notre box, et ne sondera pas les échos en IPv4",
+                self.adresse
+            ));
+        }
 
         let cadence_us = self.cadence_ms.saturating_mul(1_000);
         let mut prochaine = 0_u64;
@@ -880,6 +969,53 @@ impl Federateur {
             if !connexion.vivante() {
                 return Ok(());
             }
+        }
+    }
+
+    /// **Les visites IPv4, sans fin** (décision 107) : à chaque ouverture de
+    /// la voie, et tous les quarts d'heure. Le journal dit ce qu'elles
+    /// rendent, au changement seulement.
+    async fn visiter_sans_fin(self: Arc<Self>, reveil: Arc<tokio::sync::Notify>) {
+        let Some(vers) = self.visite_ipv4 else {
+            return;
+        };
+        let mut dit: Option<String> = None;
+        loop {
+            let _ = tokio::time::timeout(
+                core::time::Duration::from_micros(VISITE_IPV4_US),
+                reveil.notified(),
+            )
+            .await;
+            let ligne = match self.visiter(vers).await {
+                Ok(adresse) => format!(
+                    "fédération vers {} : vue en IPv4 depuis {adresse} (visite)",
+                    self.adresse
+                ),
+                Err(quoi) => format!(
+                    "fédération vers {} : visite IPv4 vers {vers} impossible : {quoi} — les \
+                     racines ne verront pas l'adresse IPv4 de notre box",
+                    self.adresse
+                ),
+            };
+            if dit.as_ref() != Some(&ligne) {
+                (self.journal)(ligne.clone());
+                dit = Some(ligne);
+            }
+        }
+    }
+
+    /// **Une visite** : une connexion courte en IPv4, la même identité
+    /// attendue et la même preuve que la voie, puis `GET /v1/vu` — ce que la
+    /// racine voit de nous. Rien n'est publié : c'est la racine qui retient.
+    async fn visiter(&self, vers: std::net::SocketAddr) -> Result<std::net::IpAddr, Faute> {
+        let mut connexion =
+            Connexion::ouvrir(vers, &vers.to_string(), &self.confiance, self.idle_us).await?;
+        connexion.prouver_notre_racine(&self.identite).await?;
+        let reponse = connexion.requete(b"GET", b"/v1/vu", &[], b"").await?;
+        connexion.fermer().await;
+        match reponse.statut.value() {
+            200 => adresse_de_vu(&reponse.corps).ok_or(Faute::Illisible),
+            autre => Err(Faute::Statut(autre)),
         }
     }
 
@@ -1196,6 +1332,50 @@ mod essais {
         assert!(etat.noter_une_paire(speedy, EtatDePaire::Reglee));
         assert_eq!(etat.paire_de(speedy), Some(EtatDePaire::Reglee));
         assert_eq!(etat.paire_de(helium), None);
+    }
+
+    #[test]
+    fn l_adresse_de_vu_se_lit_et_se_deshabille() {
+        use std::net::{IpAddr, Ipv4Addr};
+        assert_eq!(
+            adresse_de_vu(br#"{"adresse":"193.250.159.198","port":6630,"famille":4}"#),
+            Some(IpAddr::V4(Ipv4Addr::new(193, 250, 159, 198)))
+        );
+        assert_eq!(
+            adresse_de_vu(br#"{"adresse":"::ffff:203.0.113.7","port":1,"famille":6}"#),
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)))
+        );
+        assert_eq!(adresse_de_vu(br#"{"adresse":"pas une adresse"}"#), None);
+        assert_eq!(adresse_de_vu(br#"{"adresse":"1.2.3.4"#), None);
+        assert_eq!(adresse_de_vu(b"{}"), None);
+        assert_eq!(adresse_de_vu(&[0xFF, 0xFE]), None);
+    }
+
+    #[test]
+    fn une_racine_retient_l_ipv4_d_ou_chaque_membre_lui_parle_trente_minutes() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        let mut etat = EtatFedere::nouveau();
+        let (speedy, helium) = (id(Genre::Annuaire, 1), id(Genre::Annuaire, 2));
+        let livebox = Ipv4Addr::new(193, 250, 159, 198);
+        assert_eq!(etat.ipv4_de(speedy, 0, IPV4_VUE_US), None);
+        // Habillée en IPv6 par la socket double pile : déshabillée.
+        assert!(etat.noter_une_ipv4(speedy, IpAddr::V6(livebox.to_ipv6_mapped()), 10));
+        assert!(
+            !etat.noter_une_ipv4(speedy, IpAddr::V4(livebox), 20),
+            "la même"
+        );
+        // Une IPv6 n'efface rien, et ne se retient pas.
+        assert!(!etat.noter_une_ipv4(speedy, IpAddr::V6(Ipv6Addr::LOCALHOST), 30));
+        assert_eq!(etat.ipv4_de(speedy, 30, IPV4_VUE_US), Some(livebox));
+        assert_eq!(etat.ipv4_de(helium, 30, IPV4_VUE_US), None);
+        // Trente minutes après la dernière observation, oubliée.
+        assert_eq!(
+            etat.ipv4_de(speedy, 20 + IPV4_VUE_US, IPV4_VUE_US),
+            Some(livebox)
+        );
+        assert_eq!(etat.ipv4_de(speedy, 21 + IPV4_VUE_US, IPV4_VUE_US), None);
+        // Une autre box : le changement se dit.
+        assert!(etat.noter_une_ipv4(speedy, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 40));
     }
 
     #[test]

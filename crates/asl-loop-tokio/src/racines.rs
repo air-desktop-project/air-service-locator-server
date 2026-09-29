@@ -35,6 +35,36 @@ pub fn identites_du_locateur(locateur: &str) -> Vec<ClePublique> {
         .collect()
 }
 
+/// **Où visiter cette racine en IPv4** (décision 107) : l'adresse IPv4
+/// littérale que la liste embarquée donne à la racine qu'on attend au bout
+/// de ce locateur — une seule identité attendue, sinon on ne sait pas
+/// laquelle visiter. `None` si le locateur est lui-même une adresse IPv4 (la
+/// voie est déjà en IPv4 : elle est observée) ou si la racine n'a pas
+/// d'adresse IPv4 connue. Aucun nom n'est résolu (C20).
+#[must_use]
+pub fn visite_ipv4_pour(locateur: &str, identites: &[Identifiant]) -> Option<std::net::SocketAddr> {
+    if locateur
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|adresse| adresse.is_ipv4())
+    {
+        return None;
+    }
+    let [seule] = identites else {
+        return None;
+    };
+    RACINES
+        .iter()
+        .find(|racine| racine.identifiant == seule.texte().as_str())?
+        .locateurs
+        .iter()
+        .find_map(|locateur| {
+            locateur
+                .parse::<std::net::SocketAddr>()
+                .ok()
+                .filter(std::net::SocketAddr::is_ipv4)
+        })
+}
+
 /// Les racines embarquées, chacune encodée comme `GET /v1/racines` la rend
 /// (décision 56) : `{"annuaire":"n-…","cle":"<hex>","locateurs":[…]}`.
 #[must_use]
@@ -127,7 +157,40 @@ pub async fn apprendre_les_racines(
 mod tests {
     use super::{
         ALIAS_DES_RACINES, RACINES, identites_du_locateur, racines_encodees, verifier_la_liste,
+        visite_ipv4_pour,
     };
+
+    #[test]
+    fn la_visite_ipv4_va_a_l_adresse_embarquee_de_la_seule_racine_attendue() {
+        let nitrogen = asl_id::Identifiant::analyser_genre(
+            asl_id::Genre::Annuaire,
+            "n-0PWT8HZD80QMSPPDZ5CQXXYHQC",
+        )
+        .expect("un n-…");
+        let argon = asl_id::Identifiant::analyser_genre(
+            asl_id::Genre::Annuaire,
+            "n-3K3P6H252W8K9370QG1YYTWBWB",
+        )
+        .expect("un n-…");
+        assert_eq!(
+            visite_ipv4_pour("[2001:41d0:20a:900::1dd4]:6630", &[nitrogen]),
+            Some("178.32.16.250:6630".parse().expect("une adresse"))
+        );
+        assert_eq!(
+            visite_ipv4_pour("argon.air-desktop.org:6630", &[argon]),
+            Some("178.32.16.249:6630".parse().expect("une adresse"))
+        );
+        // La voie est déjà en IPv4 : elle est observée.
+        assert_eq!(visite_ipv4_pour("178.32.16.250:6630", &[nitrogen]), None);
+        // L'alias commun : deux identités, on ne sait laquelle visiter.
+        assert_eq!(
+            visite_ipv4_pour(ALIAS_DES_RACINES, &[nitrogen, argon]),
+            None
+        );
+        // Une racine hors de la liste embarquée : pas d'adresse IPv4 connue.
+        let autre = asl_id::Identifiant::depuis_entropie(asl_id::Genre::Annuaire, [7; 16]);
+        assert_eq!(visite_ipv4_pour("[2001:db8::1]:6630", &[autre]), None);
+    }
 
     #[test]
     fn chaque_cle_embarquee_se_deduit_en_son_identifiant() {

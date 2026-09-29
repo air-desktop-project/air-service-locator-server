@@ -600,10 +600,18 @@ impl Session {
             &mut compte,
         );
         // **LA PASSERELLE EN TÊTE** (décision 97) : l'adresse observée, le
-        // port accordé — s'il n'est pas déjà celui du bail.
-        let passerelle = self
-            .passerelle
-            .filter(|passerelle| self.echo && passerelle.port != self.vu_depuis.port);
+        // port accordé — s'il n'est pas déjà celui du bail. **Et seulement
+        // si la box parle de cette adresse-là** (décision 107) : un écho qui
+        // confirme une adresse externe AUTRE que celle d'où il nous parle —
+        // un bail IPv6 chez un annuaire local, un port redirigé en IPv4 —
+        // n'a pas de passerelle ici ; ce sont les racines qui la sondent.
+        let passerelle = self.passerelle.filter(|passerelle| {
+            self.echo
+                && passerelle.port != self.vu_depuis.port
+                && passerelle.externe.is_none_or(|externe| {
+                    IpAddr::V4(externe) == self.vu_depuis.adresse.to_canonical()
+                })
+        });
         if let Some(passerelle) = passerelle {
             poser(
                 Candidat {
@@ -817,6 +825,45 @@ pub fn sonder_du_dehors(
     match derniere {
         None => true,
         Some((avant, quand)) => avant != cible || maintenant.depuis(quand) >= CADENCE_D_ECHO_MS,
+    }
+}
+
+/// Ce qu'une racine décide de l'adresse externe qu'un écho confirme, pour
+/// une machine d'un domaine hébergé (décision 107).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SondeIpv4 {
+    /// Sonder cette adresse — celle que la racine a observée chez le membre,
+    /// et que la box de l'écho confirme.
+    Sonder(core::net::Ipv4Addr),
+    /// Le membre ne nous a pas parlé en IPv4 récemment : rien d'observé.
+    PasVue,
+    /// Le membre nous parle depuis une autre adresse : une autre box, ou un
+    /// double NAT.
+    Discordante {
+        /// L'adresse que la racine a observée chez le membre.
+        observee: core::net::Ipv4Addr,
+    },
+    /// L'adresse confirmée n'est pas globale.
+    NonGlobale,
+}
+
+/// **Une racine doit-elle sonder, en IPv4, l'adresse externe qu'un écho
+/// confirme ?** (Décision 107.) Seulement si elle est globale ET égale à
+/// l'adresse IPv4 que la racine a elle-même observée chez le membre qui
+/// rapporte l'écho : l'adresse sondée a parlé à la racine ; l'écho ne fait
+/// que la confirmer.
+#[must_use]
+pub fn sonder_l_ipv4(
+    externe: core::net::Ipv4Addr,
+    observee: Option<core::net::Ipv4Addr>,
+) -> SondeIpv4 {
+    if !adresse_globale(IpAddr::V4(externe)) {
+        return SondeIpv4::NonGlobale;
+    }
+    match observee {
+        None => SondeIpv4::PasVue,
+        Some(observee) if observee == externe => SondeIpv4::Sonder(externe),
+        Some(observee) => SondeIpv4::Discordante { observee },
     }
 }
 

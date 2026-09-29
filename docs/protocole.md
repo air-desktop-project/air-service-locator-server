@@ -3793,6 +3793,24 @@ indiqué pour le serveur.
    concordent pas. Les essais : la concordance sonde en IPv4 et rend
    `verifie`, `upnp`, `exterieur` ; la discordance ne sonde pas en IPv4, et
    le dit.
+   **Fait en 0.45.0 — la version qu'`asl echo` lit avant d'écrire
+   `externe`.** `asl_proto::Passerelle` porte `externe:
+   Option<Ipv4Addr>` ; `asl_annuaire::Session::candidats` ne pose le
+   candidat de la passerelle que si `externe` est absente ou égale à
+   `vu_depuis` ; `asl_registre::PasserelleRapportee` porte l'adresse, et
+   l'entrée d'état le drapeau `3`. Côté membre, le fédérateur tient la
+   visite dans **sa propre tâche** — une racine muette en IPv4 ne retient
+   jamais la voie —, réveillée à chaque ouverture de la voie et tous les
+   quarts d'heure ; l'adresse visitée est celle de la liste embarquée
+   (`racines::visite_ipv4_pour`), aucune si `--federation` est déjà une
+   IPv4 ou désigne plusieurs identités (l'alias commun). Côté racine,
+   `EtatFedere::noter_une_ipv4` retient l'adresse de toute requête d'un
+   membre accepté (trente minutes, `IPV4_VUE_US`), et
+   `asl_annuaire::sonder_l_ipv4` décide : sonder, pas vue, discordante, non
+   globale — le journal le dit au changement, par machine. **Une
+   précision** : un écho dont l'adresse externe est celle que le membre a
+   vue (`vu_depuis`) garde la règle de la décision 97 — la passerelle à
+   l'adresse vue —, sans passer par la comparaison.
 
 **Client** (`air-service-locator-client`), six PR, après les PR 1 et 2 du
 serveur :
