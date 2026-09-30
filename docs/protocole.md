@@ -2469,7 +2469,10 @@ l'écho la confirme (« Chez un annuaire local », plus bas).
 l'adresse IPv6 **stable** de la machine, pour qu'une règle posée à la main
 dans une box qui refuse UPnP ne meure pas avec une adresse temporaire — le
 revers, la traçabilité de la machine, est assumé (« L'écho se lie à l'adresse
-IPv6 STABLE », plus bas).
+IPv6 STABLE », plus bas). **Amendée le même jour** (options (1) et (2)) : les
+drapeaux d'une adresse se lisent aussi sous macOS, dans une crate isolée où
+`unsafe` est permis et C4 tenue, et **`--bind <adresse>`** laisse l'exploitant
+nommer l'adresse — ce qui fige la famille du bail.
 **Aucune question ne reste ouverte dans cette section.**
 
 ### Ce que l'écho est, et ce qu'il n'est pas
@@ -2682,8 +2685,11 @@ que l'on fuit.)
   garde le choix du système** (`[::]`, comme avant), et **le dit une fois** :
   « pas d'adresse IPv6 stable sur l'interface du bail : le système choisit —
   une règle posée à la main dans la box ne tiendra pas ».
-- **Le système ne dit pas les drapeaux** (§ suivant : macOS) : même repli,
-  même ligne, et la raison est dite.
+- **La lecture des drapeaux échoue** — un système qui ne les dit pas, un
+  `/proc` absent, un `ioctl` refusé (un bac à sable, un noyau qui ne connaît
+  pas la demande) : **même repli, même ligne**, et la raison est dite. C'est le
+  repli résiduel, et il ne disparaît pas avec l'amendement ci-dessous : ce
+  qu'on ne sait pas, on ne le devine pas.
 - **La stable disparaît en service** (le préfixe change, l'opérateur
   renumérote) : le bail tombe avec elle, et l'écho le rouvre — il relit alors
   les adresses et se lie à celle du moment. Rien de particulier n'est prévu :
@@ -2694,22 +2700,83 @@ que l'on fuit.)
 
 ##### Comment on la connaît, sans une ligne de C (C4)
 
+**Amendé le 2026-09-30 (Thierry ; décision 108, options (1) et (2)).** La
+première rédaction disait « sous macOS, il n'y a pas de moyen sans C » et s'en
+tenait au choix du système. **C'était confondre deux choses** : C4 interdit
+qu'une ligne de C soit **compilée** dans le produit — un `*-sys`, un `cc`, un
+`bindgen`, un script de construction —, elle n'interdit pas de **déclarer** une
+fonction que la libc du système expose déjà à tout programme Rust ; le dépôt le
+dit lui-même de `libc`, que `check-sans-c.sh` admet nommément et pour cette
+raison. Le seul obstacle était `#![forbid(unsafe_code)]`, et **Thierry accepte
+de le lever dans un module isolé, à cette fin et à aucune autre**.
+
 - **Linux** : `/proc/net/if_inet6`, que le client lit déjà pour les index
   d'interface (« La passerelle », le M-SEARCH). Chaque ligne y porte
   l'adresse en hexadécimal, l'index de l'interface, la longueur du préfixe, la
   portée, **les drapeaux** et le nom du périphérique ; `IFA_F_TEMPORARY` vaut
   `0x01`, `IFA_F_DEPRECATED` `0x20`, `IFA_F_TENTATIVE` `0x40`,
-  `IFA_F_DADFAILED` `0x08`.
-- **macOS : il n'y a pas de moyen sans C, et on ne l'invente pas.** Les
-  drapeaux d'une adresse IPv6 s'y lisent par `getifaddrs` puis l'ioctl
-  `SIOCGIFAFLAG_IN6` (`IN6_IFF_TEMPORARY`, `IN6_IFF_DEPRECATED`) — du C, donc
-  de l'`unsafe`, que C4 refuse et qu'aucune crate du graphe n'enveloppe.
-  Lire la sortie d'`ifconfig` serait un programme tiers dont on analyserait le
-  texte : la même voie que celle qui a déjà été écartée pour la table de
-  routage. **Donc : sous macOS, l'écho garde le choix du système**, et le dit
-  (la ligne ci-dessus). Le jour où une crate sans C expose ces drapeaux, ou
-  qu'une frontière `unsafe` existe pour cela dans ce dépôt, la règle
-  s'appliquera là aussi sans rien changer d'autre.
+  `IFA_F_DADFAILED` `0x08`. **Sans un `unsafe`.**
+- **macOS** : `getifaddrs`, puis **un `ioctl(SIOCGIFAFLAG_IN6)` par adresse**
+  sur une socket `AF_INET6` — `IN6_IFF_TEMPORARY` (`0x80`),
+  `IN6_IFF_DEPRECATED` (`0x10`), `IN6_IFF_TENTATIVE` (`0x02`),
+  `IN6_IFF_DUPLICATED` (`0x04`), `IN6_IFF_DETACHED` (`0x08`). C'est la seule
+  façon d'y apprendre qu'une adresse tourne ; `libc` ne déclare pas
+  `SIOCGIFAFLAG_IN6` ni `struct in6_ifreq`, que le client écrit donc lui-même.
+
+**Où cela vit, et sous quelles conditions.** Dans **une crate à part du dépôt
+client**, dont c'est le seul rôle : rendre, pour une interface, les adresses
+IPv6 avec leurs drapeaux. Elle est **le seul endroit du client où `unsafe` est
+permis** ; partout ailleurs — l'utilitaire, le codec de la passerelle, la
+bibliothèque que des tiers chargent, son étage tokio —
+`#![forbid(unsafe_code)]` tient, et les deux façades d'ABI (C, JNI) restent ce
+qu'elles sont, des frontières. La crate porte
+`#![deny(unsafe_op_in_unsafe_fn)]`, **chaque bloc dit ce qu'il suppose et
+pourquoi c'est vrai**, et il y en a le moins possible. **Ce qui DÉCIDE reste
+pur** — la lecture d'une table, le choix de l'adresse, le jugement de portée —
+et s'éprouve sur des tables figées, dont celle d'oxygen ; un essai lit en plus
+le système réel, sans rien conclure d'une machine sans IPv6.
+
+**C4 reste tenue, et c'est vérifiable** : des déclarations, aucun objet compilé
+— `check-sans-c.sh` du client lit le graphe résolu et ne trouve ni C compilé ni
+C lié. **Lire la sortie d'`ifconfig`** resterait écarté : ce serait un
+programme tiers dont on analyserait le texte, la voie déjà refusée pour la
+table de routage.
+
+##### `--bind <adresse>` — quand l'exploitant nomme l'adresse
+
+**Décidé le 2026-09-30 (Thierry ; décision 108, option (2)).** Une option
+d'`asl echo` **nomme** l'adresse à lier, et **l'emporte sur le choix
+automatique** : sur un Mac comme sous Linux, elle sert à choisir une interface,
+ou à se poser précisément sur l'adresse qu'on a écrite à la main dans le
+pare-feu de sa box.
+
+**Ce qu'elle accepte, et ce qu'elle refuse** :
+
+- **une adresse IPv6, qui doit être globale** au sens de cette décision — ni
+  lien-local, ni ULA, ni boucle, ni multicast, ni indéterminée : s'y lier
+  serait se rendre injoignable exprès, puisque l'annuaire ne la verrait pas et
+  qu'aucune sonde du dehors ne l'atteindrait. Une IPv4 enfouie dans l'IPv6
+  (`::ffff:a.b.c.d`) est refusée en demandant de l'écrire en IPv4 ;
+- **une adresse IPv4**, et là **une adresse privée est le cas ORDINAIRE** :
+  derrière une box, la machine n'en a pas d'autre, et c'est la redirection qui
+  la rend joignable. On ne refuse donc que ce qui ne peut rien recevoir — la
+  boucle, l'indéterminée, le multicast, la diffusion ;
+- **une adresse de cette machine** : c'est le noyau qui en juge, à la liaison
+  (une adresse absente y est refusée), et l'écho le dit tel quel. On ne la
+  cherche pas d'avance dans la liste du système : là où il ne dit pas tout,
+  une liste incomplète refuserait une adresse bonne.
+
+**Elle FIGE LA FAMILLE DU BAIL, et c'est sa conséquence la plus lourde.** Une
+socket liée à une adresse nommée ne se relie pas d'elle-même : **la bascule en
+IPv4 de la décision 106 est donc refusée** tant que `--bind` est donnée, et
+l'écho le dit une fois quand la passerelle la demande (« la socket est liée à
+l'adresse que `--bind` a nommée : on ne l'en délie pas »). Ce qui suit de là,
+et qu'il faut savoir avant de s'en servir : derrière une box qui refuse le trou
+IPv6, un `--bind` sur une adresse IPv6 **empêche** ce que la décision 106
+faisait pour rendre l'écho joignable du dehors — l'exploitant choisit alors
+lui-même, soit en nommant l'adresse IPv4 de la machine, soit en ouvrant le
+pare-feu IPv6 de sa box pour l'adresse qu'il a nommée. **C'est le but de
+l'option** : ce que l'exploitant a nommé ne se défait pas dans son dos.
 
 ##### Ce que cela change à l'annonce, et à la bascule en IPv4
 
@@ -4015,12 +4082,16 @@ serveur :
    double NAT) — vers un annuaire local en 0.45.0 au moins.
 9. **La socket liée à l'adresse IPv6 stable** (décision 108) : lire les
    drapeaux dans `/proc/net/if_inet6` sous Linux (`IFA_F_TEMPORARY`,
-   `IFA_F_DEPRECATED`, `IFA_F_TENTATIVE`, `IFA_F_DADFAILED`) ; retenir
+   `IFA_F_DEPRECATED`, `IFA_F_TENTATIVE`, `IFA_F_DADFAILED`) **et par
+   `getifaddrs` + `ioctl(SIOCGIFAFLAG_IN6)` sous macOS, dans une crate à part,
+   la seule où `unsafe` est permis** (options (1) et (2)) ; retenir
    l'interface de l'adresse source que le système prendrait pour l'annuaire,
    et la plus petite de ses adresses stables et globales, ULA exclues ;
    annoncer CETTE adresse ; relier la socket au même port, en `[::]` double
-   pile, pour une bascule en IPv4, et s'y relier au retour ; garder le choix
-   du système ailleurs (macOS) et le dire une fois. Rien côté serveur.
+   pile, pour une bascule en IPv4, et s'y relier au retour ; **`--bind
+   <adresse>`**, qui l'emporte et fige la famille du bail ; garder le choix du
+   système quand les drapeaux ne se lisent pas, et le dire une fois. Rien côté
+   serveur.
 
 **Applications**, après la PR 3 du serveur (et la PR 4 pour `echo_via`) :
 
