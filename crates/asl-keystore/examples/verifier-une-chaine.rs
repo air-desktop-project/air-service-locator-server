@@ -174,12 +174,13 @@ fn main() {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |ecoule| ecoule.as_secs());
     let racines = [racine.as_slice()];
+    let empreintes = [empreinte];
     let attendu = Attendu {
         racines: &racines,
         defi: &defi,
         cle: &cle,
         paquet: &paquet,
-        empreinte: &empreinte,
+        empreintes: &empreintes,
         maintenant,
     };
 

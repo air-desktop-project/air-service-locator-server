@@ -51,7 +51,7 @@ fn depuis_hexadecimal(texte: &str) -> [u8; 32] {
 struct Capture {
     certificats: [Vec<u8>; 4],
     defi: Vec<u8>,
-    empreinte: [u8; 32],
+    empreintes: [[u8; 32]; 1],
 }
 
 impl Capture {
@@ -64,7 +64,7 @@ impl Capture {
                 piece("cert3.der"),
             ],
             defi: piece("defi.bin"),
-            empreinte: depuis_hexadecimal(SIGNATURE),
+            empreintes: [depuis_hexadecimal(SIGNATURE)],
         }
     }
 
@@ -88,7 +88,7 @@ impl Capture {
             defi: &self.defi,
             cle,
             paquet: PAQUET,
-            empreinte: &self.empreinte,
+            empreintes: &self.empreintes,
             maintenant: AU_JOUR_DE_LA_CAPTURE,
         }
     }
@@ -235,10 +235,22 @@ fn la_chaine_reelle_est_refusee_sous_une_autre_racine_ou_avec_une_autre_attente(
     let mut autre = capture.attendu(&racines, &cle);
     autre.paquet = "org.airdesktop.autre";
     assert_eq!(verifier(&case, &autre), Err(Refus::AutrePaquet));
-    let empreinte = [0x5A; 32];
+    let inconnue = [[0x5A; 32]];
     let mut autre = capture.attendu(&racines, &cle);
-    autre.empreinte = &empreinte;
+    autre.empreintes = &inconnue;
     assert_eq!(verifier(&case, &autre), Err(Refus::AutreSignataire));
+    // Aucune empreinte épinglée : rien ne correspond, et le refus est sûr.
+    let mut aucune = capture.attendu(&racines, &cle);
+    aucune.empreintes = &[];
+    assert_eq!(verifier(&case, &aucune), Err(Refus::AutreSignataire));
+    // **DEUX EMPREINTES ÉPINGLÉES, ET LA SECONDE SUFFIT** (décision 109) :
+    // c'est exactement le cas d'une app resignée par Play App Signing, là où
+    // la première est celle de nos propres builds. La capture réelle est signée
+    // par la seconde, et elle passe.
+    let deux = [[0x5A; 32], depuis_hexadecimal(SIGNATURE)];
+    let mut avec_play = capture.attendu(&racines, &cle);
+    avec_play.empreintes = &deux;
+    verifier(&case, &avec_play).expect("la seconde empreinte épinglée suffit");
     // Après l'expiration des intermédiaires (2034), la chaîne ne remonte plus.
     let mut plus_tard = capture.attendu(&racines, &cle);
     plus_tard.maintenant = 2_050_000_000;

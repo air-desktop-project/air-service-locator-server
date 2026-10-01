@@ -28,8 +28,9 @@
 //!      verrouillé ;
 //!   9. `origin`, côté matériel : `GENERATED` — la clé est née là, personne ne
 //!      l'a importée ;
-//!  10. `attestationApplicationId` porte NOTRE paquet ET NOTRE empreinte de
-//!      signature.
+//!  10. `attestationApplicationId` porte NOTRE paquet ET **l'une** de NOS
+//!      empreintes de signature — plusieurs peuvent être épinglées, parce que
+//!      Play App Signing resigne l'app avec la clé de Google (décision 109).
 //!
 //! **La chaîne d'abord**, contrairement à `asl-apple` : ici tout ce qu'on lit
 //! est DANS la feuille, et lire une feuille que personne n'a signée ne dirait
@@ -96,8 +97,26 @@ pub struct Attendu<'a> {
     pub cle: &'a [u8; CLE_OCTETS],
     /// Le nom de notre paquet Android, `org.airdesktop.servicelocator`.
     pub paquet: &'a str,
-    /// L'empreinte SHA-256 du certificat qui signe notre build.
-    pub empreinte: &'a [u8; CONDENSAT_OCTETS],
+    /// Les empreintes SHA-256 des certificats qui signent NOS builds — une au
+    /// moins, et **n'importe laquelle suffit**.
+    ///
+    /// # POURQUOI PLUSIEURS, ET POURQUOI CE N'EST PAS UN AFFAIBLISSEMENT
+    ///
+    /// Une app publiée sur le Play Store n'est plus signée par la clé qui a
+    /// fait le paquet : **Google la resigne** (« Play App Signing »), et c'est
+    /// SA clé que l'`attestationApplicationId` porte alors. Une seule empreinte
+    /// épinglée laissait donc le choix entre nos propres builds et celles du
+    /// magasin, jamais les deux (`protocole.md` §2.1, décision 109).
+    ///
+    /// Chaque empreinte de cette liste est **épinglée** par l'exploitant,
+    /// exactement comme l'unique empreinte de la version précédente : aucune
+    /// n'est devinée, aucune n'est acceptée parce qu'elle remonte à une
+    /// autorité. Ce qui s'élargit est l'ensemble des builds reconnues, pas le
+    /// pouvoir d'en fabriquer une.
+    ///
+    /// Vide, rien ne correspond, et toute attestation est refusée
+    /// [`Refus::AutreSignataire`] : c'est le refus sûr.
+    pub empreintes: &'a [[u8; CONDENSAT_OCTETS]],
     /// L'instant, en secondes depuis l'époque — la validité des certificats
     /// s'apprécie à cet instant, et à aucun autre.
     pub maintenant: u64,
@@ -174,8 +193,8 @@ pub enum Refus {
     ApplicationAbsente,
     /// Aucun des paquets n'est le nôtre.
     AutrePaquet,
-    /// Aucune des empreintes de signature n'est la nôtre — une autre build,
-    /// ou une app qui se fait passer pour la nôtre.
+    /// Aucune des empreintes de signature n'est l'une des nôtres — une autre
+    /// build, ou une app qui se fait passer pour la nôtre.
     AutreSignataire,
 }
 
@@ -296,10 +315,13 @@ pub fn verifier(case: &[u8], attendu: &Attendu<'_>) -> Result<Verdict, Refus> {
         .iter()
         .find(|paquet| paquet.nom == attendu.paquet.as_bytes())
         .ok_or(Refus::AutrePaquet)?;
+    // **N'IMPORTE LAQUELLE DES NÔTRES SUFFIT** (décision 109) : l'app signée
+    // par nous et la même app resignée par Play App Signing ne portent pas la
+    // même empreinte, et les deux sont la nôtre. Chacune est épinglée.
     if !application
         .empreintes
         .iter()
-        .any(|empreinte| *empreinte == attendu.empreinte)
+        .any(|empreinte| attendu.empreintes.iter().any(|notre| *empreinte == notre))
     {
         return Err(Refus::AutreSignataire);
     }
