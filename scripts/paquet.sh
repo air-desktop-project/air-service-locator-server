@@ -183,10 +183,22 @@ cat > "$arbre/usr/share/doc/asl-server/android.conf.exemple" <<'EXEMPLE'
 # Les trois réglages se donnent ensemble, ou pas du tout :
 #   --android-roots  <PEM>         la ou les racines épinglées
 #   --android-app    <paquet>      org.airdesktop.servicelocator
-#   --android-signer <SHA-256 hex> l'empreinte du certificat qui signe la build
-#                                  (apksigner verify --print-certs) — celle de
-#                                  la build de DÉBOGAGE ci-dessous ; la build de
-#                                  release en a une AUTRE.
+#   --android-signer <SHA-256 hex> l'empreinte d'un certificat qui signe une de
+#                                  nos builds (apksigner verify --print-certs) —
+#                                  celle de la build de DÉBOGAGE ci-dessous ; la
+#                                  build de release en a une AUTRE.
+#
+# **`--android-signer` SE RÉPÈTE, ET N'IMPORTE LAQUELLE SUFFIT** (décision 109,
+# 0.46.0). Il en faut au moins une. Le jour où l'app est publiée sur le Play
+# Store, il en faut DEUX : le magasin **resigne l'APK avec la clé de Google**
+# (« Play App Signing »), et l'attestation d'une app installée depuis le magasin
+# porte l'empreinte de Google, pas la nôtre. La seconde se lit dans la Google
+# Play Console, *Test and release → Setup → App signing*, comme empreinte
+# SHA-256 du **certificat de signature de l'app** — et non du certificat de la
+# clé de téléversement. Chacune reste épinglée : rien n'est deviné, et une
+# troisième est refusée. Un `--android-signer <empreinte>` de plus s'ajoute
+# alors à la fin de la ligne ci-dessous, sur la MÊME ligne : `Environment=` ne
+# connaît pas la continuation.
 #
 # L'affectation ENTIÈRE entre guillemets, comme pour la réplication :
 # `Environment=` découpe sa ligne sur les espaces avant d'y lire des

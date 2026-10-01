@@ -179,6 +179,17 @@ journal d'exploitation dit pourquoi. `paquet/racines-android/google.pem` est la
 racine de Google, telle que la capture réelle l'a rendue ; aucune n'est
 épinglée par défaut.
 
+**`--android-signer` se répète, et n'importe laquelle passe** (0.46.0, décision
+109) : le Play Store **resigne l'APK avec la clé de Google** (« Play App
+Signing »), donc une app installée depuis le magasin présente l'empreinte de
+Google, et nos propres builds la nôtre. Épinglez les deux — la seconde se lit
+dans la Google Play Console, *Test and release → Setup → App signing*, comme
+empreinte SHA-256 du **certificat de signature de l'app** (et non de la clé de
+téléversement). Il en faut toujours **au moins une**, et **ce n'est pas un
+affaiblissement** : chacune est épinglée une par une, aucune n'est devinée, et
+une troisième est refusée. Le démarrage les liste toutes
+(`docs/attestation/capture-keystore.md`).
+
 **Les notifications** (`docs/protocole.md` §2.2, **servies depuis 0.19.0**) :
 une autorisation accordée sur CETTE racine réveille les appareils vivants du
 bénéficiaire d'un `POST` **vide** vers le point UnifiedPush que chacun a
@@ -477,6 +488,10 @@ systemctl edit asl-server
 # [Service]
 # Environment="ASL_ANDROID=--android-roots /etc/asl-server/racines-android/google.pem --android-app org.airdesktop.servicelocator --android-signer <SHA-256 de la signature de la build>"
 ```
+
+`--android-signer` **se répète** : le jour où l'app est publiée, un second
+`--android-signer <empreinte de la Play Console>` s'ajoute à la fin de la même
+ligne — le Play Store resigne l'APK, et les deux empreintes sont la nôtre.
 
 L'affectation est **citée en entier**, comme celle de la réplication, et pour
 la même raison. Vide, `$ASL_ANDROID` laisse la racine refuser les attestations
