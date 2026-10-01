@@ -642,8 +642,14 @@ pub struct ConfigAndroid<'a> {
     pub racines: &'a [Vec<u8>],
     /// Le nom de notre paquet, `org.airdesktop.servicelocator`.
     pub paquet: &'a str,
-    /// L'empreinte SHA-256 du certificat qui signe notre build.
-    pub signataire: [u8; 32],
+    /// Les empreintes SHA-256 des certificats qui signent nos builds — une au
+    /// moins, et **n'importe laquelle suffit** (décision 109).
+    ///
+    /// Plusieurs, parce qu'une app publiée sur le Play Store est **resignée
+    /// par Google** (« Play App Signing ») : la clé de nos builds et celle du
+    /// magasin sont deux clés, et les deux sont la nôtre. Chacune reste
+    /// épinglée par l'exploitant (`--android-signer`, répétable).
+    pub signataires: &'a [[u8; 32]],
 }
 
 /// De quoi vérifier les attestations, plate-forme par plate-forme — chacune
@@ -1429,7 +1435,7 @@ impl Service<'_> {
                     defi: &defi,
                     cle: &cle.octets(),
                     paquet: config.paquet,
-                    empreinte: &config.signataire,
+                    empreintes: config.signataires,
                     maintenant: maintenant().saturating_div(1_000_000),
                 };
                 match asl_keystore::verifier(attestation, &attendu) {

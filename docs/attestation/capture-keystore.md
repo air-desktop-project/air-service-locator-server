@@ -68,3 +68,42 @@ elle qui fixe la politique d'`asl-keystore`.
 - La chaîne d'un appareil certifié remonte à la racine de Google, celle d'un
   GrapheneOS à la racine de GrapheneOS : les deux sont des fichiers, et
   l'exploitant choisit lesquels il épingle (`--android-roots`).
+
+## Deux empreintes de signataire, parce que le Play Store resigne
+
+**Depuis 0.46.0 (décision 109), `--android-signer` se répète**, et une
+attestation passe dès qu'elle porte **n'importe laquelle** des empreintes
+épinglées. La raison n'est pas de confort : l'app sera publiée **gratuitement
+sur le Play Store**, et le Play Store **resigne l'APK avec sa propre clé** —
+« Play App Signing ». Google garde la clé de publication ; la clé de nos builds
+n'est plus que la **clé de téléversement**, celle qui prouve à la console que le
+paquet vient de nous. Un appareil qui a installé l'app depuis le magasin
+présente donc, dans son `attestationApplicationId`, l'empreinte de **Google**.
+
+Il en faut donc deux, et elles se lisent à deux endroits différents :
+
+| L'empreinte | Où on la lit |
+|---|---|
+| **Nos builds** — débogage, release installée à la main, la capture ci-dessus | `apksigner verify --print-certs <apk>`, champ `Signer #1 certificate SHA-256 digest` |
+| **Celle du magasin** — l'app telle que le Play Store la sert | Google Play Console, *Test and release → Setup → App signing*, empreinte **SHA-256 du certificat de signature de l'app** |
+
+**Attention à la ligne qu'on recopie** : la page *App signing* de la console
+montre DEUX certificats, celui de la **clé de signature de l'app** (« App
+signing key certificate ») et celui de la **clé de téléversement** (« Upload key
+certificate »). C'est le **premier** qu'il faut épingler — c'est lui qui signe
+ce que les appareils installent. L'empreinte s'y lit en hexadécimal avec des
+deux-points, forme que `--android-signer` accepte telle quelle, majuscules
+comprises.
+
+**Ce n'est pas un affaiblissement.** Chaque empreinte est épinglée une par une,
+comme l'unique empreinte d'avant : aucune n'est devinée, aucune n'est admise
+parce qu'elle remonte à une autorité, aucune n'est négociée par l'appareil. Une
+troisième empreinte — une build que personne n'a autorisée — reste refusée
+(« app signée par un autre certificat »). Ce qui s'élargit est l'ensemble des
+builds reconnues, jamais le pouvoir d'en fabriquer une.
+
+Le démarrage les relit toutes, et les nomme :
+
+```text
+asl-server : attestation Android — 1 racine(s) épinglée(s), paquet org.airdesktop.servicelocator, signataire(s) 5ea316f1…, 0123abcd….
+```

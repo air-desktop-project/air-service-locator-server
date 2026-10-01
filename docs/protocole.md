@@ -605,8 +605,9 @@ un fichier.
   égale à celle qu'on enrôle, `attestationSecurityLevel` et
   `keymintSecurityLevel` à `TrustedEnvironment` ou `StrongBox`,
   `verifiedBootState` à `Verified`, et `attestationApplicationId` portant NOTRE
-  paquet et NOTRE empreinte de signature (`--android-app <paquet>` et
-  `--android-signer <empreinte SHA-256>`, les pendants de `--apple-app`). La
+  paquet et **l'une** de NOS empreintes de signature (`--android-app <paquet>`
+  et `--android-signer <empreinte SHA-256>`, **répétable**, les pendants de
+  `--apple-app`). La
   politique sur le niveau de correctif et la liste de révocation de Google
   (`attestation/status`) restent à trancher après la capture — et cette liste
   serait un tiers appelé : si elle sert, c'est un fichier rafraîchi par
@@ -632,8 +633,8 @@ la chaîne jusqu'à une racine de `--android-roots`, la clé de la feuille égal
 la clé enrôlée (comparée sous sa forme compressée, celle du fil),
 `attestationChallenge` égal à `SHA-256(message_d_attestation_de_cle)`, les deux
 niveaux de sécurité matériels, `rootOfTrust` côté matériel — `Verified` et
-verrouillé —, `origin` `GENERATED` côté matériel, et NOTRE paquet sous NOTRE
-empreinte dans `attestationApplicationId`. Ce qui est rendu sans être jugé :
+verrouillé —, `origin` `GENERATED` côté matériel, et NOTRE paquet sous l'une de NOS
+empreintes dans `attestationApplicationId` (une seule jusqu'en 0.45.1). Ce qui est rendu sans être jugé :
 `osVersion`, `osPatchLevel`, `vendorPatchLevel`, `bootPatchLevel` — la
 politique de correctif reste à écrire. Les balises que le lecteur ne connaît
 pas sont sautées, jamais refusées : le schéma change à chaque Android. Chaque
@@ -664,6 +665,56 @@ l'app. Et **les notifications** (§2.6 de `modele.md`) n'appellent plus ni
 Apple ni Google : un point de poussée UnifiedPush choisi par l'utilisateur sur
 Android, la connexion tenue sur le Mac, et sur un iPhone la relecture à
 l'ouverture — tranché le 2026-09-25, §2.2, « Les notifications ».
+
+#### Décidé le 2026-09-30 : plusieurs signataires Android peuvent être épinglés
+
+**Le Play Store resigne l'APK avec sa propre clé.** C'est « Play App Signing »,
+et ce n'est pas une option : Google garde la clé de publication, l'app est
+signée par elle au téléchargement, et la clé de nos builds n'est plus que la
+**clé de téléversement** — celle qui prouve à la console que le paquet vient de
+nous, et qui ne quitte jamais la console. Une attestation de clé produite sur un
+appareil qui a installé l'app **depuis le magasin** porte donc l'empreinte de
+Google dans son `attestationApplicationId`, et non la nôtre.
+
+Or les applications Android et iOS seront publiées **gratuitement sur le Play
+Store et l'App Store** (Thierry, 2026-09-30), et l'app Mac sur le Mac App Store.
+Avec une seule empreinte épinglée, il fallait choisir : soit nos propres builds
+— celle du Fairphone 5, celles qu'on installe à la main —, soit celles du
+magasin. **L'autre moitié voyait son attestation refusée à l'ouverture de
+compte**, et le journal disait « app signée par un autre certificat » sans que
+rien n'ait mal tourné.
+
+**La règle**, donc : `--android-signer` **se répète**, une fois par empreinte, et
+une attestation est acceptée dès que son `attestationApplicationId` porte
+**n'importe laquelle** de la liste — avec notre paquet, et sous tout le reste de
+la vérification, inchangé. Il en faut toujours **au moins une** : les trois
+réglages Android continuent d'aller ensemble, et le refus le dit dans les mêmes
+termes qu'avant.
+
+**Où l'exploitant trouve celle de Google.** Dans la Google Play Console, *Test
+and release → Setup → App signing* (anciennement *Release → Setup → App
+integrity*) : la page donne l'empreinte SHA-256 du **certificat de signature de
+l'app** (« App signing key certificate »), celle que Google appose, à côté de
+celle du **certificat de la clé de téléversement** (« Upload key certificate »).
+**C'est la première** qu'il faut épingler — l'empreinte de signature de l'app,
+pas celle de téléversement —, et elle s'y lit déjà en hexadécimal avec des
+deux-points, forme que `--android-signer` accepte telle quelle. Nos propres
+builds se lisent comme avant : `apksigner verify --print-certs <apk>`.
+
+**Ce n'est pas un affaiblissement, et la raison est de forme.** Chaque empreinte
+de la liste est **épinglée** par l'exploitant, une par une, exactement comme
+l'unique empreinte de la version précédente : aucune n'est devinée, aucune n'est
+admise parce qu'elle remonterait à une autorité, aucune n'est négociée par
+l'appareil. Ce qui s'élargit est l'**ensemble des builds reconnues**, jamais le
+pouvoir d'en fabriquer une : une troisième empreinte, celle d'une build que
+personne n'a autorisée, reste refusée. Le seul secret en jeu est celui qui l'a
+toujours été — la clé de signature —, et il y en a désormais deux : la nôtre, et
+celle que Google garde pour nous.
+
+**Le journal le dit en entier** : « attestation Android — N racine(s)
+épinglée(s), paquet …, signataire(s) … », les empreintes listées. Un exploitant
+qui relit son démarrage doit voir **laquelle** manque, pas seulement combien il
+en a.
 
 ### 2.1 bis Ce que porte chaque corps, et pourquoi ce n'est pas toujours du JSON
 

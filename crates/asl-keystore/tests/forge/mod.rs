@@ -38,6 +38,18 @@ pub const PENDANT: u64 = 1_780_272_000;
 pub const PAQUET: &str = "org.airdesktop.servicelocator";
 pub const EMPREINTE: [u8; 32] = [0xA5; 32];
 
+/// L'empreinte de l'AUTRE certificat épinglé : celle que Play App Signing
+/// donne à la même app, une fois Google l'avoir resignée (décision 109).
+pub const EMPREINTE_PLAY: [u8; 32] = [0x5A; 32];
+
+/// Une empreinte que personne n'a épinglée : une troisième build, ou une app
+/// qui se fait passer pour la nôtre.
+pub const EMPREINTE_INCONNUE: [u8; 32] = [0x11; 32];
+
+/// Les DEUX empreintes que le banc épingle — l'ordre est celui des
+/// `--android-signer` de l'exploitant, et il ne compte pas.
+pub const EMPREINTES: [[u8; 32]; 2] = [EMPREINTE, EMPREINTE_PLAY];
+
 /// Le scalaire de l'intermédiaire P-256 signé par la racine RSA du banc —
 /// `fabriquer.py` l'a donné à `openssl`, et la forge signe avec.
 pub const SCALAIRE_SOUS_RSA: [u8; 32] = [
@@ -583,7 +595,7 @@ impl Banc {
             defi: &self.defi,
             cle,
             paquet: PAQUET,
-            empreinte: &EMPREINTE,
+            empreintes: &EMPREINTES,
             maintenant: PENDANT,
         }
     }
