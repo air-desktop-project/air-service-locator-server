@@ -117,9 +117,22 @@ commencer
 # `systemd-analyze verify` se plaint que `/usr/bin/asl-server` n'est pas là :
 # c'est vrai, il n'est pas INSTALLÉ sur cette machine. Toute autre plainte
 # compte.
+#
+# **ET IL PARLE AUSSI DES UNITÉS DE LA MACHINE, PAS SEULEMENT DE LA NÔTRE.**
+# `verify` charge le graphe, donc les unités installées, et commente les leurs.
+# Sur l'image Ubuntu 26 des runners, trois d'entre elles portent encore un
+# `CPUAccounting=` que systemd a retiré — `walinuxagent.service`,
+# `xfs_scrub_all.service`, `system-xfs_scrub.slice`. Les retenir, c'est attribuer
+# à NOTRE unité un défaut de l'image : le contrôle échouait sur quelque chose que
+# ce dépôt ne peut ni causer ni corriger (constaté le 2026-10-08).
+#
+# On écarte donc ce qui porte un chemin de répertoire d'unités SYSTÈME, et rien
+# d'autre : une plainte sur `paquet/asl-server.service` reste fatale, et un
+# message sans chemin aussi.
 if command -v systemd-analyze > /dev/null 2>&1; then
     systemd-analyze verify paquet/asl-server.service 2>&1 \
-        | grep -v 'is not executable' > "$essai/unite" || true
+        | grep -v 'is not executable' \
+        | grep -vE '^/(usr/)?(local/)?(lib|etc|run)/systemd/' > "$essai/unite" || true
     if [ -s "$essai/unite" ]; then
         rate "systemd se plaint de l'unité :
 $(cat "$essai/unite")"
