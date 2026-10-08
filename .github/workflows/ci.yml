@@ -272,7 +272,7 @@ jobs:
   #
   # **DEUX ARCHITECTURES, CHACUNE SUR SA MACHINE** (`annuaires.md` §7, question
   # 13) : un membre d'annuaire local peut être un PC ou un Raspberry Pi. Le
-  # paquet `arm64` se construit sur le runner `ubuntu-24.04-arm` de GitHub —
+  # paquet `arm64` se construit sur le runner `ubuntu-26.04-arm` de GitHub —
   # gratuit pour un dépôt public, comme les autres — et NON par compilation
   # croisée : `paquet.sh` prend l'architecture de `dpkg --print-architecture`,
   # `dpkg-shlibdeps` lit le binaire avec les outils de la machine, et l'étape 10
@@ -294,7 +294,7 @@ jobs:
           - architecture: amd64
             runner: ubuntu-latest
           - architecture: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@v5
 
