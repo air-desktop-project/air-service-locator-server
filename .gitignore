@@ -59,3 +59,12 @@ __pycache__/
 # elle porte sur le répertoire entier plutôt que sur `*.key` : une extension
 # oubliée un jour ferait passer un secret.
 local/
+
+# Vidages d'ICE de rustc — `rustc-ice-<horodatage>-<pid>.txt`, déposés À LA RACINE par
+# `install_ice_hook` quand le compilateur plante. Ce sont des traces de diagnostic, pas des
+# sources : elles n'ont rien à faire dans un dépôt, moins encore dans un dépôt PUBLIC.
+#
+# Quatre d'entre elles ont été commitées le 2026-10-08 avec l'alignement sur le
+# nightly-2026-08-15 — l'ICE que le pin précédent provoquait — et ont atteint `main` à la
+# fusion de la PR #85, parce que RIEN ne les retenait. Cette ligne est ce qui manquait.
+rustc-ice-*.txt
