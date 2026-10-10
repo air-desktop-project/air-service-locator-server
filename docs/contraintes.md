@@ -652,7 +652,7 @@ celle du dépôt client vers celui-ci.
 
 ## C16 — Une seule toolchain, celle d'Air, datée
 
-`nightly-2026-07-11`, égale à `~/Code/air/rust-toolchain.toml`.
+`nightly-2026-08-15`, égale à `~/Code/air/rust-toolchain.toml`.
 
 **Ce dépôt n'a besoin de rien de ce que nightly apporte**, et c'est justement ce
 qui rend la contrainte facile à violer par inadvertance — quelqu'un remarquera

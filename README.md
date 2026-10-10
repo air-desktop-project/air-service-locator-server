@@ -36,7 +36,7 @@ tout le reste :
 - **La pile QUIC et HTTP/3 est celle d'`air-mail-server`**, réutilisée et jamais
   réécrite — elle est transplantable parce qu'elle a été écrite comme un codec
   sans entrée-sortie. Elle migrera dans `air`.
-- **Une seule toolchain, celle d'Air** : `nightly-2026-07-11`. Ce dépôt n'a
+- **Une seule toolchain, celle d'Air** : `nightly-2026-08-15`. Ce dépôt n'a
   besoin de rien de ce que nightly apporte — et c'est justement pour cela que la
   contrainte se violerait par inadvertance.
 - **L'annuaire n'affirme jamais ce qu'il n'a pas mesuré.** Le mot « en ligne »

@@ -161,7 +161,7 @@ panne.
    interpréteurs Python et Ruby.
 
 2. **La toolchain diverge de celle de l'amont.** `air-mail-server` est épinglé
-   sur **stable 1.98.0** ; ce dépôt est sur **`nightly-2026-07-11`**, celle
+   sur **stable 1.98.0** ; ce dépôt est sur **`nightly-2026-08-15`**, celle
    d'Air, et C16 l'exige. La pile est donc compilée ici par une toolchain sous
    laquelle son propre dépôt ne la vérifie jamais. Elle passe — c'est mesuré —
    mais une régression d'amont ne serait pas vue par la CI d'amont.
