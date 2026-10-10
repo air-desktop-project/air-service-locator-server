@@ -401,23 +401,32 @@ fn demarrer() -> Result<(), Box<dyn std::error::Error>> {
                 environnement: reglage.environnement,
             });
         // **LES RACINES ANDROID SE DISENT AU DÉMARRAGE**, par leur nombre :
-        // c'est là qu'on relit ce qu'on croyait avoir épinglé.
+        // c'est là qu'on relit ce qu'on croyait avoir épinglé. **Les
+        // signataires se disent EN ENTIER** (décision 109) : il y en a
+        // plusieurs dès qu'une app est publiée — le Play Store la resigne —,
+        // et un exploitant qui relit son journal doit voir laquelle manque, pas
+        // seulement combien il y en a.
         let android = reglages
             .android
             .as_ref()
             .zip(racines_android.as_deref())
             .map(|(reglage, racines)| {
+                let signataires: Vec<String> = reglage
+                    .signataires
+                    .iter()
+                    .map(|empreinte| identite::en_hexadecimal(empreinte))
+                    .collect();
                 eprintln!(
                     "asl-server : attestation Android — {} racine(s) épinglée(s), \
-                     paquet {}, signataire {}.",
+                     paquet {}, signataire(s) {}.",
                     racines.len(),
                     reglage.paquet,
-                    identite::en_hexadecimal(&reglage.signataire),
+                    signataires.join(", "),
                 );
                 asl_loop_tokio::h3::ConfigAndroid {
                     racines,
                     paquet: reglage.paquet.as_str(),
-                    signataire: reglage.signataire,
+                    signataires: &reglage.signataires,
                 }
             });
         // Le journal d'exploitation de la voie entre racines

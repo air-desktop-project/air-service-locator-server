@@ -1481,19 +1481,11 @@ async fn une_attestation_que_l_annuaire_ne_peut_pas_prouver_est_refusee() {
     });
     let (case_reelle, google) = capture_android();
     let racines: &'static [Vec<u8>] = Box::leak(vec![google].into_boxed_slice());
-    let mut signataire = [0_u8; 32];
-    for (place, paire) in signataire.iter_mut().zip(
-        "5ea316f1b50f2ce54b8225aba85ff5cc8238a710b8fae44b4f3a195aadeb5f68"
-            .as_bytes()
-            .chunks(2),
-    ) {
-        *place = u8::from_str_radix(std::str::from_utf8(paire).expect("ascii"), 16)
-            .expect("hexadécimal");
-    }
+    let signataires: &'static [[u8; 32]] = signataires_android();
     let android = Some(ConfigAndroid {
         racines,
         paquet: "org.airdesktop.servicelocator",
-        signataire,
+        signataires,
     });
     let (adresse, dire_stop, tache) = lever_complet(
         identite,
@@ -3478,14 +3470,16 @@ async fn un_compte_orphelin_est_efface_au_passage_et_pas_un_compte_vivant() {
 
 // ── Attester un appareil qui rejoint ────────────────────────────────────────
 
-/// Les réglages Android du Fairphone 5 : la racine de Google, notre paquet,
-/// l'empreinte de la build de débogage — de quoi que l'annuaire ESSAIE de
-/// vérifier une chaîne, et la refuse quand elle ne remonte pas.
-fn reglages_android_du_fp5() -> (Vec<u8>, Attestations<'static>) {
-    let (case_reelle, google) = capture_android();
-    let racines: &'static [Vec<u8>] = Box::leak(vec![google].into_boxed_slice());
-    let mut signataire = [0_u8; 32];
-    for (place, paire) in signataire.iter_mut().zip(
+/// **DEUX EMPREINTES ÉPINGLÉES, ET LE FAIRPHONE EST LA SECONDE** (décision
+/// 109) : la première est une empreinte que personne n'a — celle qu'une build
+/// publiée sur le Play Store, resignée par Google, présenterait —, la seconde
+/// est celle de la build de débogage du Fairphone 5, dont la capture réelle est
+/// signée. L'annuaire accepte n'importe laquelle de la liste, et cet essai
+/// vérifie que la SECONDE suffit : avec une seule empreinte, la première aurait
+/// tout refusé.
+fn signataires_android() -> &'static [[u8; 32]] {
+    let mut fairphone = [0_u8; 32];
+    for (place, paire) in fairphone.iter_mut().zip(
         "5ea316f1b50f2ce54b8225aba85ff5cc8238a710b8fae44b4f3a195aadeb5f68"
             .as_bytes()
             .chunks(2),
@@ -3493,10 +3487,20 @@ fn reglages_android_du_fp5() -> (Vec<u8>, Attestations<'static>) {
         *place = u8::from_str_radix(std::str::from_utf8(paire).expect("ascii"), 16)
             .expect("hexadécimal");
     }
+    Box::leak(vec![[0x5A_u8; 32], fairphone].into_boxed_slice())
+}
+
+/// Les réglages Android du Fairphone 5 : la racine de Google, notre paquet,
+/// l'empreinte de la build de débogage — de quoi que l'annuaire ESSAIE de
+/// vérifier une chaîne, et la refuse quand elle ne remonte pas.
+fn reglages_android_du_fp5() -> (Vec<u8>, Attestations<'static>) {
+    let (case_reelle, google) = capture_android();
+    let racines: &'static [Vec<u8>] = Box::leak(vec![google].into_boxed_slice());
+    let signataires: &'static [[u8; 32]] = signataires_android();
     let android = Some(ConfigAndroid {
         racines,
         paquet: "org.airdesktop.servicelocator",
-        signataire,
+        signataires,
     });
     (
         case_reelle,

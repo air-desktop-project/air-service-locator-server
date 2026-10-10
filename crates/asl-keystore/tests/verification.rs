@@ -5,8 +5,9 @@ mod forge;
 
 use asl_keystore::{Demarrage, Niveau, Origine, Refus, case, description, verifier, x509};
 use forge::{
-    Banc, Cle, Condensat, EMPREINTE, PAQUET, Portrait, application, certificat, champ, entier,
-    extensions_de_feuille, nul, racine_de_confiance,
+    Banc, Cle, Condensat, EMPREINTE, EMPREINTE_INCONNUE, EMPREINTE_PLAY, EMPREINTES, PAQUET,
+    Portrait, application, certificat, champ, entier, extensions_de_feuille, nul,
+    racine_de_confiance,
 };
 
 /// Vérifie ce portrait sur la chaîne du banc.
@@ -322,6 +323,50 @@ fn une_autre_app_est_refusee() {
     let portrait =
         Portrait::coherent(&banc.defi).avec_logiciel(709, &application(&[(PAQUET, 6)], &[]));
     assert_eq!(verdict_de(&banc, &portrait), Err(Refus::AutreSignataire));
+}
+
+/// **PLUSIEURS EMPREINTES ÉPINGLÉES, ET N'IMPORTE LAQUELLE SUFFIT** (décision
+/// 109). Le Play Store resigne l'APK avec SA clé (« Play App Signing ») :
+/// l'app que nous signons et la même app installée depuis le magasin ne portent
+/// pas la même empreinte, et les deux sont la nôtre.
+///
+/// Ce n'est pas un affaiblissement : chaque empreinte de la liste est épinglée
+/// par l'exploitant, et une troisième — celle d'une build que personne n'a
+/// autorisée — reste refusée. La liste vide refuse tout, y compris la nôtre.
+#[test]
+fn n_importe_laquelle_des_empreintes_epinglees_suffit() {
+    let banc = Banc::nouveau();
+    let cle = banc.appareil.compresse();
+    let racines = [banc.racine_der.as_slice()];
+    // La PREMIÈRE de la liste : nos propres builds.
+    let notre = Portrait::coherent(&banc.defi);
+    verdict_de(&banc, &notre).expect("la première empreinte épinglée passe");
+    // La SECONDE : la même app, resignée par Google.
+    let du_magasin = Portrait::coherent(&banc.defi)
+        .avec_logiciel(709, &application(&[(PAQUET, 6)], &[&EMPREINTE_PLAY]));
+    verdict_de(&banc, &du_magasin).expect("la seconde empreinte épinglée passe aussi");
+    // Une TROISIÈME, que personne n'a épinglée.
+    let inconnue = Portrait::coherent(&banc.defi)
+        .avec_logiciel(709, &application(&[(PAQUET, 6)], &[&EMPREINTE_INCONNUE]));
+    assert_eq!(verdict_de(&banc, &inconnue), Err(Refus::AutreSignataire));
+    // Et l'inverse, sur la liste épinglée : réduite à celle du magasin, elle
+    // refuse nos propres builds — la liste est un ensemble fermé, pas un
+    // assouplissement.
+    let case = banc.case(&notre);
+    let seule_play = [EMPREINTE_PLAY];
+    let mut attendu = banc.attendu(&racines, &cle);
+    attendu.empreintes = &seule_play;
+    assert_eq!(verifier(&case, &attendu), Err(Refus::AutreSignataire));
+    // Aucune empreinte épinglée : rien ne correspond, et c'est le refus sûr.
+    let mut sans = banc.attendu(&racines, &cle);
+    sans.empreintes = &[];
+    assert_eq!(verifier(&case, &sans), Err(Refus::AutreSignataire));
+    // L'ordre ne compte pas : les deux mêmes empreintes, renversées.
+    let renversees = [EMPREINTE_PLAY, EMPREINTE];
+    let mut autre_ordre = banc.attendu(&racines, &cle);
+    autre_ordre.empreintes = &renversees;
+    verifier(&case, &autre_ordre).expect("l'ordre des empreintes ne décide de rien");
+    assert_eq!(EMPREINTES, [EMPREINTE, EMPREINTE_PLAY]);
 }
 
 #[test]

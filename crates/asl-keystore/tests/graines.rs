@@ -157,12 +157,13 @@ fn chaque_graine_rend_le_verdict_de_son_nom() {
         .try_into()
         .expect("32 octets");
     let racines = [google.as_slice()];
+    let empreintes = [empreinte];
     let reel = Attendu {
         racines: &racines,
         defi: &defi,
         cle: &cle_reelle,
         paquet: "org.airdesktop.servicelocator",
-        empreinte: &empreinte,
+        empreintes: &empreintes,
         maintenant: 1_789_560_000,
     };
     for nom in ["reelle-entiere", "reelle-sans-racine"] {

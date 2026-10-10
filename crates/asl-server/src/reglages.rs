@@ -82,7 +82,9 @@ pub struct Reglages {
     /// Android certifiés, celle de GrapheneOS, la sienne. Le dépôt en expédie
     /// en exemple sous `paquet/racines-android/`, et n'en impose aucune. Avec
     /// elle, le paquet de notre app (`--android-app`) et l'empreinte SHA-256
-    /// du certificat qui signe la build (`--android-signer`).
+    /// du certificat qui signe la build (`--android-signer`, **répétable** :
+    /// plusieurs empreintes peuvent être épinglées, et n'importe laquelle
+    /// suffit — décision 109).
     ///
     /// **Sans ces trois réglages, aucune attestation Android ne peut être
     /// vérifiée** : un compte qui en déclare une est alors refusé, comme pour
@@ -300,9 +302,19 @@ pub struct ReglageAndroid {
     pub racines: Vec<PathBuf>,
     /// Le nom du paquet de notre app (`--android-app`).
     pub paquet: String,
-    /// L'empreinte SHA-256 du certificat de signature de la build
-    /// (`--android-signer`), décodée.
-    pub signataire: [u8; 32],
+    /// Les empreintes SHA-256 des certificats de signature de nos builds
+    /// (`--android-signer`, répétable), décodées — une au moins, dans l'ordre
+    /// où l'exploitant les a données.
+    ///
+    /// # POURQUOI PLUSIEURS (décision 109)
+    ///
+    /// Le Play Store **resigne l'APK avec sa propre clé** (« Play App
+    /// Signing ») : l'attestation d'une app installée depuis le magasin porte
+    /// l'empreinte de Google, pas celle de nos builds. Une seule empreinte
+    /// obligeait à choisir entre les deux. **Chacune est épinglée** — aucune
+    /// n'est devinée, aucune n'est admise parce qu'elle remonte à une
+    /// autorité —, et il en faut toujours au moins une.
+    pub signataires: Vec<[u8; 32]>,
 }
 
 /// Ce qui empêche de lire les réglages.
@@ -338,7 +350,8 @@ pub enum Faute {
     /// `--android-roots`, `--android-app` et `--android-signer` ne vont pas
     /// les uns sans les autres.
     AndroidIncomplet,
-    /// `--android-signer` n'est pas une empreinte SHA-256 en hexadécimal.
+    /// Une valeur de `--android-signer` n'est pas une empreinte SHA-256 en
+    /// hexadécimal.
     SignataireInvalide(String),
     /// `--peer` et `--peer-key` ne vont pas l'un sans l'autre.
     PairIncomplet,
@@ -495,7 +508,12 @@ asl-server — an air-service-locator service directory.
   --android-roots <path>    a PEM file of pinned Android attestation roots;
                             repeatable, one file may hold several certificates
   --android-app  <package>  the Android package name             (with the roots)
-  --android-signer <sha256> the hex SHA-256 of the APK signing certificate
+  --android-signer <sha256> the hex SHA-256 of an APK signing certificate;
+                            REPEATABLE, and ANY of them is accepted — a build
+                            published through the Play Store is RE-SIGNED by
+                            Google (Play App Signing), so pin both our own
+                            signing certificate and the one the Play Console
+                            shows under App signing (at least one required)
   --peer         <host:port> the other root                      (with --peer-key)
   --peer-key     <path>     the other root's public identity key, 32 raw bytes;
                             the peer is trusted by it, and by nothing else
@@ -650,7 +668,7 @@ impl Reglages {
         let mut apple_env: Option<asl_apple::Environnement> = None;
         let mut android_racines: Vec<PathBuf> = Vec::new();
         let mut android_paquet: Option<String> = None;
-        let mut android_signataire: Option<[u8; 32]> = None;
+        let mut android_signataires: Vec<[u8; 32]> = Vec::new();
         let mut identite = None;
         // Trente jours : `docs/modele.md` §2.1. Zéro pour jamais.
         let mut orphelins_jours = 30_u64;
@@ -700,7 +718,7 @@ impl Reglages {
                 }
                 "--android-roots" => android_racines.push(PathBuf::from(valeur()?.as_ref())),
                 "--android-app" => android_paquet = Some(valeur()?.as_ref().to_owned()),
-                "--android-signer" => android_signataire = Some(empreinte(valeur()?.as_ref())?),
+                "--android-signer" => android_signataires.push(empreinte(valeur()?.as_ref())?),
                 "--identity-key" => identite = Some(PathBuf::from(valeur()?.as_ref())),
                 "--orphans" => orphelins_jours = nombre(drapeau, valeur()?.as_ref())?,
                 "--peer" => pair_adresse = Some(adresse_de_pair(valeur()?.as_ref())?),
@@ -749,19 +767,24 @@ impl Reglages {
             },
             // **LES TROIS VONT ENSEMBLE, OU PAS DU TOUT.** Une racine sans app
             // ne dit pas quelle app doit tenir la clé ; une app sans racine
-            // ne remonte à rien ; et sans l'empreinte, n'importe quelle build
+            // ne remonte à rien ; et sans empreinte, n'importe quelle build
             // du même nom de paquet passerait.
+            //
+            // **`--android-signer` SE RÉPÈTE** (décision 109) : il en faut
+            // toujours au moins une — une liste vide ferait un réglage qui
+            // refuse tout —, et plusieurs sont l'ordinaire dès qu'une app est
+            // publiée, puisque le Play Store la resigne.
             android: match (
                 android_racines.is_empty(),
                 android_paquet,
-                android_signataire,
+                android_signataires.is_empty(),
             ) {
-                (false, Some(paquet), Some(signataire)) => Some(ReglageAndroid {
+                (false, Some(paquet), false) => Some(ReglageAndroid {
                     racines: android_racines,
                     paquet,
-                    signataire,
+                    signataires: android_signataires,
                 }),
-                (true, None, None) => None,
+                (true, None, true) => None,
                 _ => return Err(Faute::AndroidIncomplet),
             },
             // **ILS VONT ENSEMBLE** (`replication.md` §8) : une adresse seule
@@ -1358,8 +1381,9 @@ mod tests {
             ]
         );
         assert_eq!(android.paquet, "org.airdesktop.servicelocator");
-        assert_eq!(android.signataire[..2], signataire[..2]);
-        assert_eq!(android.signataire[31], signataire[31]);
+        assert_eq!(android.signataires.len(), 1);
+        assert_eq!(android.signataires[0][..2], signataire[..2]);
+        assert_eq!(android.signataires[0][31], signataire[31]);
         // L'empreinte s'accepte aussi comme `apksigner` l'imprime, avec des
         // deux-points, et en majuscules.
         let deux_points = Reglages::depuis(avec(&[
@@ -1372,16 +1396,50 @@ mod tests {
         ]))
         .expect("les deux-points sont ignorés");
         assert_eq!(
-            deux_points.android.map(|a| a.signataire),
-            Some(android.signataire)
+            deux_points.android.map(|a| a.signataires),
+            Some(android.signataires.clone())
         );
         assert_eq!(
             android,
             ReglageAndroid {
                 racines: android.racines.clone(),
                 paquet: android.paquet.clone(),
-                signataire: android.signataire,
+                signataires: android.signataires.clone(),
             }
+        );
+    }
+
+    /// **`--android-signer` SE RÉPÈTE, ET L'ORDRE EST CELUI DONNÉ** (décision
+    /// 109). Le Play Store resigne l'APK avec sa propre clé : une app publiée
+    /// présente l'empreinte de Google, nos propres builds la nôtre, et
+    /// l'exploitant épingle les deux.
+    #[test]
+    fn plusieurs_signataires_android_s_epinglent() {
+        let notre = "5ea316f1b50f2ce54b8225aba85ff5cc8238a710b8fae44b4f3a195aadeb5f68";
+        let play = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let lus = Reglages::depuis(avec(&[
+            "--android-roots",
+            "/racines/google.pem",
+            "--android-app",
+            "org.airdesktop.servicelocator",
+            "--android-signer",
+            notre,
+            "--android-signer",
+            play,
+        ]))
+        .expect("deux signataires valent une configuration");
+        let android = lus.android.expect("Android est réglé");
+        assert_eq!(android.signataires.len(), 2);
+        assert_eq!(
+            android
+                .signataires
+                .iter()
+                .map(|empreinte| empreinte
+                    .iter()
+                    .map(|octet| format!("{octet:02x}"))
+                    .collect::<String>())
+                .collect::<Vec<_>>(),
+            vec![notre.to_owned(), play.to_owned()]
         );
     }
 
